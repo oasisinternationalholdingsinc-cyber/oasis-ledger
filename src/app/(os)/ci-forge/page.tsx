@@ -117,7 +117,8 @@ export default function CIForgePage() {
           )
           .eq("entity_slug", entitySlug)
           .eq("ledger_status", "APPROVED")
-          .order("created_at", { ascending: false });
+          .order("created_at", { ascending: false })
+          .returns<ForgeQueueItem[]>();
 
         console.log("Forge queue latest result", { data, error });
 
@@ -128,7 +129,7 @@ export default function CIForgePage() {
           return;
         }
 
-        const rows = (data ?? []) as ForgeQueueItem[];
+        const rows = ((data ?? []) as unknown) as ForgeQueueItem[];
         setQueue(rows);
 
         if (rows.length > 0) {
@@ -434,9 +435,7 @@ export default function CIForgePage() {
       if (data.already_archived) {
         setSuccess("Signed resolution is already archived in the minute book.");
       } else {
-        setSuccess(
-          "Signed PDF archived to the minute book for this envelope.",
-        );
+        setSuccess("Signed PDF archived to the minute book for this envelope.");
       }
     } catch (err: any) {
       console.error("Failed to archive signed PDF", err);
@@ -469,10 +468,7 @@ export default function CIForgePage() {
       );
     }
 
-    if (
-      item.envelope_status === "pending" ||
-      item.envelope_status === "draft"
-    ) {
+    if (item.envelope_status === "pending" || item.envelope_status === "draft") {
       return (
         <span className="inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold border-amber-400/70 bg-amber-500/10 text-amber-200">
           ENVELOPE PENDING
@@ -480,10 +476,7 @@ export default function CIForgePage() {
       );
     }
 
-    if (
-      item.envelope_status === "cancelled" ||
-      item.envelope_status === "expired"
-    ) {
+    if (item.envelope_status === "cancelled" || item.envelope_status === "expired") {
       return (
         <span className="inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold border-slate-500/70 bg-slate-500/10 text-slate-300">
           ENVELOPE {item.envelope_status.toUpperCase()}
@@ -526,14 +519,11 @@ export default function CIForgePage() {
             <span className="mt-1 text-[11px] text-slate-400 flex items-center gap-2">
               <span>{item.entity_name}</span>
               <span className="w-1 h-1 rounded-full bg-slate-600" />
-              <span className="text-slate-500">
-                {formattedCreatedAt(item.created_at)}
-              </span>
+              <span className="text-slate-500">{formattedCreatedAt(item.created_at)}</span>
             </span>
             {item.last_signed_at && (
               <span className="mt-0.5 text-[10px] text-slate-500">
-                Last signed: {formattedLastSigned(item.last_signed_at)} •{" "}
-                {item.days_since_last_signature} day(s) ago
+                Last signed: {formattedLastSigned(item.last_signed_at)} • {item.days_since_last_signature} day(s) ago
               </span>
             )}
           </div>
@@ -561,14 +551,10 @@ export default function CIForgePage() {
     <div className="h-full flex flex-col px-8 pt-6 pb-6">
       {/* Header under OS bar – mirrors CI-Council */}
       <div className="mb-4 shrink-0">
-        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">
-          CI-FORGE
-        </div>
+        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI-FORGE</div>
         <p className="mt-1 text-[11px] text-slate-400">
           Execution &amp; Signature Forge •{" "}
-          <span className="font-semibold text-slate-200">
-            ODP.AI – Governance Firmware
-          </span>
+          <span className="font-semibold text-slate-200">ODP.AI – Governance Firmware</span>
         </p>
       </div>
 
@@ -584,8 +570,7 @@ export default function CIForgePage() {
               <p className="mt-1 text-xs text-slate-400">
                 <span className="font-semibold text-emerald-400">Left:</span>{" "}
                 council-approved ledger records ready for execution.{" "}
-                <span className="font-semibold text-sky-400">Right:</span> launch
-                and manage signature envelopes for each record.
+                <span className="font-semibold text-sky-400">Right:</span> launch and manage signature envelopes for each record.
               </p>
             </div>
             <div className="hidden md:flex items-center text-[10px] uppercase tracking-[0.3em] text-slate-500">
@@ -598,9 +583,7 @@ export default function CIForgePage() {
             {/* LEFT – Execution queue & selected summary */}
             <section className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex flex-col min-h-0">
               <div className="flex items-center justify-between mb-3">
-                <div className="text-sm font-semibold text-slate-200">
-                  Execution Queue
-                </div>
+                <div className="text-sm font-semibold text-slate-200">Execution Queue</div>
                 <div className="text-[10px] uppercase tracking-[0.25em] text-slate-500">
                   {queue.length} items
                 </div>
@@ -617,14 +600,11 @@ export default function CIForgePage() {
 
                   {!loadingQueue && queue.length === 0 && !error && (
                     <div className="p-3 text-[11px] text-slate-400">
-                      No council-approved records ready for execution for this
-                      entity.
+                      No council-approved records ready for execution for this entity.
                     </div>
                   )}
 
-                  {!loadingQueue && queue.length > 0 && (
-                    <>{queue.map(renderQueueRow)}</>
-                  )}
+                  {!loadingQueue && queue.length > 0 && <>{queue.map(renderQueueRow)}</>}
                 </div>
 
                 {/* Selected record summary */}
@@ -653,47 +633,35 @@ export default function CIForgePage() {
                       <div className="text-[11px] text-slate-400 mb-3 space-y-1">
                         <div>
                           Entity:{" "}
-                          <span className="text-slate-200">
-                            {selectedItem.entity_name}
-                          </span>
+                          <span className="text-slate-200">{selectedItem.entity_name}</span>
                         </div>
                         <div>
                           Created:{" "}
-                          <span className="text-slate-300">
-                            {formattedCreatedAt(selectedItem.created_at)}
-                          </span>
+                          <span className="text-slate-300">{formattedCreatedAt(selectedItem.created_at)}</span>
                         </div>
                         <div>
                           Envelope ID:{" "}
-                          <span className="text-slate-300">
-                            {selectedItem.envelope_id ?? "Not created yet"}
-                          </span>
+                          <span className="text-slate-300">{selectedItem.envelope_id ?? "Not created yet"}</span>
                         </div>
                         <div>
                           Last signed:{" "}
-                          <span className="text-slate-300">
-                            {formattedLastSigned(selectedItem.last_signed_at)}
-                          </span>
+                          <span className="text-slate-300">{formattedLastSigned(selectedItem.last_signed_at)}</span>
                         </div>
                         <div>
                           Parties:{" "}
                           <span className="text-slate-300">
-                            {selectedItem.parties_signed ?? 0}/
-                            {selectedItem.parties_total ?? 0}
+                            {selectedItem.parties_signed ?? 0}/{selectedItem.parties_total ?? 0}
                           </span>
                         </div>
                       </div>
 
                       <p className="mt-1 text-[11px] text-emerald-400/90">
-                        Over time, this pane will surface the executed record,
-                        certificate status, and direct links to signed PDFs for
-                        board-ready packs.
+                        Over time, this pane will surface the executed record, certificate status, and direct links to signed PDFs for board-ready packs.
                       </p>
                     </>
                   ) : (
                     <div className="text-[11px] text-slate-400">
-                      Select a ledger record from the queue to prepare its
-                      signature envelope.
+                      Select a ledger record from the queue to prepare its signature envelope.
                     </div>
                   )}
                 </div>
@@ -704,20 +672,12 @@ export default function CIForgePage() {
             <section className="border border-slate-800 rounded-2xl bg-slate-950/40 p-4 flex flex-col min-h-0">
               <div className="flex items-center justify-between mb-3">
                 <div>
-                  <h2 className="text-sm font-semibold text-slate-200">
-                    Signature Envelope
-                  </h2>
+                  <h2 className="text-sm font-semibold text-slate-200">Signature Envelope</h2>
                   <p className="mt-1 text-[11px] text-slate-400 max-w-lg">
                     Configure the{" "}
-                    <span className="font-semibold text-emerald-400">
-                      primary signer
-                    </span>{" "}
+                    <span className="font-semibold text-emerald-400">primary signer</span>{" "}
                     and optional{" "}
-                    <span className="font-semibold text-sky-400">
-                      CC observers
-                    </span>
-                    , then start or reuse an envelope linked to this ledger
-                    record.
+                    <span className="font-semibold text-sky-400">CC observers</span>, then start or reuse an envelope linked to this ledger record.
                   </p>
                 </div>
                 {selectedItem && (
@@ -741,14 +701,10 @@ export default function CIForgePage() {
 
               {!selectedItem ? (
                 <div className="flex flex-1 items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-950/60 text-[11px] text-slate-500">
-                  Select a council-approved record from the left to prepare its
-                  signature envelope.
+                  Select a council-approved record from the left to prepare its signature envelope.
                 </div>
               ) : (
-                <form
-                  onSubmit={handleStartSignature}
-                  className="flex flex-1 flex-col gap-4"
-                >
+                <form onSubmit={handleStartSignature} className="flex flex-1 flex-col gap-4">
                   <div className="grid gap-4 md:grid-cols-2">
                     <div className="space-y-2">
                       <label
@@ -846,9 +802,7 @@ export default function CIForgePage() {
                   <div className="mt-3 text-[10px] text-slate-500 flex items-center justify-between">
                     <span>
                       CI-Forge · Linked to{" "}
-                      <span className="font-semibold text-slate-300">
-                        governance_ledger
-                      </span>
+                      <span className="font-semibold text-slate-300">governance_ledger</span>
                     </span>
                     <span>ODP.AI · Execution Session</span>
                   </div>
