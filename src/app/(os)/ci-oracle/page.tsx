@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useEntity } from "@/components/OsEntityContext";
-import { OasisOrb, OrbMode } from "@/components/oracle/OasisOrb"; // ✅ named export + type
+import { OasisOrb, OrbMode } from "@/components/oracle/OasisOrb";
 
 // Read from NEXT_PUBLIC_* so it's safe on the client
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -167,7 +167,8 @@ export default function CiOraclePage() {
 
     try {
       const tags: string[] = [];
-      if (activeEntity?.slug) tags.push(activeEntity.slug);
+      // ✅ activeEntity is an EntityKey (string), not an object with .slug
+      if (activeEntity) tags.push(activeEntity);
       tags.push("oracle-ui");
 
       const data = await callEdgeFunction<OracleInvokeResponse>(
@@ -296,7 +297,7 @@ export default function CiOraclePage() {
               ACTIVE ENTITY
             </div>
             <div className="mt-1 text-sm text-zinc-200">
-              {activeEntity?.label ?? "No entity selected"}
+              {activeEntity ?? "No entity selected"}
             </div>
           </div>
           <div className="text-[11px] text-zinc-500">
@@ -349,9 +350,7 @@ export default function CiOraclePage() {
               />
             </div>
             <div className="pointer-events-none absolute -bottom-3 left-1/2 w-[140%] -translate-x-1/2 rounded-full border border-emerald-500/20 bg-black/50 px-4 py-1.5 text-center text-[10px] text-zinc-300 shadow-[0_0_40px_rgba(34,197,94,0.35)]">
-              <span className="font-medium text-emerald-300">
-                {orbModeLabel}
-              </span>
+              <span className="font-medium text-emerald-300">{orbModeLabel}</span>
               <span className="mx-1 text-zinc-500">·</span>
               <span className="text-[10px] text-zinc-300">
                 {orbState?.activity ??
@@ -385,16 +384,14 @@ export default function CiOraclePage() {
               <div className="text-[11px] text-zinc-500">
                 Entity:{" "}
                 <span className="text-zinc-300">
-                  {activeEntity?.label ?? "No entity selected"}
+                  {activeEntity ?? "No entity selected"}
                 </span>
               </div>
 
               <div className="flex items-center gap-2">
                 <button
                   onClick={handleSendSignal}
-                  disabled={
-                    status === "sending-signal" || status === "invoking"
-                  }
+                  disabled={status === "sending-signal" || status === "invoking"}
                   className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-[11px] text-zinc-200 hover:bg-zinc-800 disabled:opacity-60 disabled:cursor-not-allowed transition"
                 >
                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
@@ -440,9 +437,7 @@ export default function CiOraclePage() {
 
           {lastInsight && (
             <>
-              <div className="mt-1 text-sm text-zinc-200">
-                {lastInsight.summary}
-              </div>
+              <div className="mt-1 text-sm text-zinc-200">{lastInsight.summary}</div>
               <div className="mt-1 text-[11px] text-zinc-500 flex flex-wrap gap-1">
                 {lastInsight.tags?.map((tag) => (
                   <span
@@ -455,9 +450,7 @@ export default function CiOraclePage() {
               </div>
               <div className="mt-2 text-[10px] text-zinc-500">
                 Insight ID:{" "}
-                <span className="text-zinc-300">
-                  {lastAnalysisId ?? lastInsight.id}
-                </span>
+                <span className="text-zinc-300">{lastAnalysisId ?? lastInsight.id}</span>
               </div>
             </>
           )}
@@ -476,16 +469,15 @@ export default function CiOraclePage() {
                 reasoning JSON
               </li>
               <li>
-                <span className="text-zinc-200">ci_oracle_summary</span> —
-                rolling insights + counters
+                <span className="text-zinc-200">ci_oracle_summary</span> — rolling
+                insights + counters
               </li>
               <li>
                 <span className="text-zinc-200">ci_orb_state</span> — NŪR/RŪḤ +
                 activity line
               </li>
               <li>
-                <span className="text-zinc-200">ci_orb_events</span> — event
-                trail
+                <span className="text-zinc-200">ci_orb_events</span> — event trail
               </li>
             </ul>
           </div>
