@@ -1,5 +1,6 @@
 // src/app/(os)/ci-alchemy/page.tsx
 "use client";
+export const dynamic = "force-dynamic";
 
 import { useEffect, useMemo, useState } from "react";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
