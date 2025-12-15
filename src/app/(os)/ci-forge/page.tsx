@@ -1,7 +1,7 @@
 // src/app/(os)/ci-forge/page.tsx
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 
@@ -46,7 +46,22 @@ type ArchiveSignedResolutionResponse = {
 
 type RiskLevel = "GREEN" | "AMBER" | "RED" | "IDLE";
 
+// ✅ OUTER WRAPPER: provides Suspense boundary for useSearchParams()
 export default function CIForgePage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="h-full flex items-center justify-center text-[12px] text-slate-400">
+          Loading CI-Forge…
+        </div>
+      }
+    >
+      <CIForgeInner />
+    </Suspense>
+  );
+}
+
+function CIForgeInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -164,8 +179,7 @@ export default function CIForgePage() {
   const formattedLastSigned = (iso: string | null | undefined) => {
     if (!iso) return "—";
     try {
-      const d = new Date(iso);
-      return d.toLocaleString();
+      return new Date(iso).toLocaleString();
     } catch {
       return iso;
     }
@@ -211,7 +225,6 @@ export default function CIForgePage() {
         return "bg-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.9)]";
       case "RED":
         return "bg-rose-500 shadow-[0_0_10px_rgba(248,113,113,0.9)]";
-      case "IDLE":
       default:
         return "bg-slate-500 shadow-[0_0_8px_rgba(148,163,184,0.9)]";
     }
@@ -222,15 +235,9 @@ export default function CIForgePage() {
     const labelDays =
       days == null ? "No signatures yet" : `${days} day(s) since last signature`;
 
-    if (risk === "RED") {
-      return `Dormant execution risk – ${labelDays}`;
-    }
-    if (risk === "AMBER") {
-      return `Unsigned for several days – ${labelDays}`;
-    }
-    if (risk === "GREEN") {
-      return `Healthy execution – ${labelDays}`;
-    }
+    if (risk === "RED") return `Dormant execution risk – ${labelDays}`;
+    if (risk === "AMBER") return `Unsigned for several days – ${labelDays}`;
+    if (risk === "GREEN") return `Healthy execution – ${labelDays}`;
     return labelDays;
   };
 
@@ -284,6 +291,7 @@ export default function CIForgePage() {
         entity_slug: selectedItem.entity_slug,
         record_title: selectedItem.title,
         parties,
+        // ccEmails currently UI-only; wire later if your edge fn supports it
       };
 
       const { data, error } =
@@ -294,18 +302,14 @@ export default function CIForgePage() {
 
       console.log("start-signature result", { data, error });
 
-      if (error) {
-        throw new Error(error.message ?? "Edge function error");
-      }
+      if (error) throw new Error(error.message ?? "Edge function error");
+      if (!data?.ok) throw new Error(data?.error ?? "Edge returned ok: false");
 
-      if (!data?.ok) {
-        throw new Error(data?.error ?? "Edge function returned ok: false");
-      }
-
-      const msg = data.reused
-        ? "Existing signature envelope reused."
-        : "Signature envelope created successfully.";
-      setSuccess(msg);
+      setSuccess(
+        data.reused
+          ? "Existing signature envelope reused."
+          : "Signature envelope created successfully.",
+      );
 
       if (data.envelope_id) {
         setQueue((prev) =>
@@ -342,7 +346,7 @@ export default function CIForgePage() {
   };
 
   // ---------------------------------------------------------------------------
-  // Manual "send invite now" using worker
+  // Manual "send invite now"
   // ---------------------------------------------------------------------------
   const handleSendInviteNow = async () => {
     setIsSendingInvite(true);
@@ -358,37 +362,26 @@ export default function CIForgePage() {
 
       console.log("send-signature-invite result", { data, error });
 
-      if (error) {
-        throw new Error(error.message ?? "Edge function error");
-      }
+      if (error) throw new Error(error.message ?? "Edge function error");
+      if (!data?.ok) throw new Error(data?.error ?? data?.message ?? "Invite failed");
 
-      if (!data?.ok) {
-        throw new Error(data?.error ?? data?.message ?? "Invite failed");
-      }
-
-      setSuccess(
-        data.message ?? "Signature invitation email sent (or no jobs pending).",
-      );
+      setSuccess(data.message ?? "Signature invitation email sent (or no jobs pending).");
     } catch (err: any) {
       console.error("Failed to send invite", err);
-      setError(
-        err?.message ??
-          "Failed to trigger signature invite. Please try again.",
-      );
+      setError(err?.message ?? "Failed to trigger signature invite. Please try again.");
     } finally {
       setIsSendingInvite(false);
     }
   };
 
   // ---------------------------------------------------------------------------
-  // "Archive signed PDF" → archive-signed-resolution -> minute_book_entries
+  // Archive signed PDF
   // ---------------------------------------------------------------------------
   const handleArchiveSignedPdf = async () => {
     if (!selectedItem?.envelope_id) {
       setError("No envelope ID found for this record.");
       return;
     }
-
     if (!envelopeSigned) {
       setError("Envelope is not completed yet. Wait for signature first.");
       return;
@@ -403,46 +396,33 @@ export default function CIForgePage() {
       const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
       if (!baseUrl || !anonKey) {
-        throw new Error(
-          "Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY.",
-        );
+        throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY.");
       }
 
-      const res = await fetch(
-        `${baseUrl}/functions/v1/archive-signed-resolution`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${anonKey}`,
-          },
-          body: JSON.stringify({
-            envelope_id: selectedItem.envelope_id,
-          }),
+      const res = await fetch(`${baseUrl}/functions/v1/archive-signed-resolution`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${anonKey}`,
         },
-      );
+        body: JSON.stringify({ envelope_id: selectedItem.envelope_id }),
+      });
 
       const data: ArchiveSignedResolutionResponse = await res.json();
       console.log("archive-signed-resolution response", data);
 
       if (!res.ok || !data.ok) {
-        throw new Error(
-          data?.error ??
-            "Failed to archive signed PDF into the minute book.",
-        );
+        throw new Error(data?.error ?? "Failed to archive signed PDF into the minute book.");
       }
 
-      if (data.already_archived) {
-        setSuccess("Signed resolution is already archived in the minute book.");
-      } else {
-        setSuccess("Signed PDF archived to the minute book for this envelope.");
-      }
+      setSuccess(
+        data.already_archived
+          ? "Signed resolution is already archived in the minute book."
+          : "Signed PDF archived to the minute book for this envelope.",
+      );
     } catch (err: any) {
       console.error("Failed to archive signed PDF", err);
-      setError(
-        err?.message ??
-          "Failed to archive the signed PDF to the minute book. Please try again.",
-      );
+      setError(err?.message ?? "Failed to archive the signed PDF. Please try again.");
     } finally {
       setIsArchiving(false);
     }
@@ -488,7 +468,7 @@ export default function CIForgePage() {
   };
 
   // ---------------------------------------------------------------------------
-  // Queue row – keep same “webmail” scroll feel as CI-Council
+  // Queue row
   // ---------------------------------------------------------------------------
   const renderQueueRow = (item: ForgeQueueItem) => {
     const active = item.ledger_id === selectedId;
@@ -523,7 +503,8 @@ export default function CIForgePage() {
             </span>
             {item.last_signed_at && (
               <span className="mt-0.5 text-[10px] text-slate-500">
-                Last signed: {formattedLastSigned(item.last_signed_at)} • {item.days_since_last_signature} day(s) ago
+                Last signed: {formattedLastSigned(item.last_signed_at)} •{" "}
+                {item.days_since_last_signature} day(s) ago
               </span>
             )}
           </div>
@@ -545,11 +526,10 @@ export default function CIForgePage() {
   };
 
   // ---------------------------------------------------------------------------
-  // Page layout – mirrored to CI-Council
+  // Page layout
   // ---------------------------------------------------------------------------
   return (
     <div className="h-full flex flex-col px-8 pt-6 pb-6">
-      {/* Header under OS bar – mirrors CI-Council */}
       <div className="mb-4 shrink-0">
         <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI-FORGE</div>
         <p className="mt-1 text-[11px] text-slate-400">
@@ -558,19 +538,18 @@ export default function CIForgePage() {
         </p>
       </div>
 
-      {/* Main window frame – same proportions as Council */}
       <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
         <div className="w-full max-w-[1400px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-6 py-5 flex flex-col overflow-hidden">
-          {/* Window title */}
           <div className="flex items-start justify-between mb-4 shrink-0">
             <div>
               <h1 className="text-lg font-semibold text-slate-50">
                 CI-Forge – Execution &amp; Signature Console
               </h1>
               <p className="mt-1 text-xs text-slate-400">
-                <span className="font-semibold text-emerald-400">Left:</span>{" "}
-                council-approved ledger records ready for execution.{" "}
-                <span className="font-semibold text-sky-400">Right:</span> launch and manage signature envelopes for each record.
+                <span className="font-semibold text-emerald-400">Left:</span> council-approved
+                ledger records ready for execution.{" "}
+                <span className="font-semibold text-sky-400">Right:</span> launch and manage
+                signature envelopes for each record.
               </p>
             </div>
             <div className="hidden md:flex items-center text-[10px] uppercase tracking-[0.3em] text-slate-500">
@@ -578,9 +557,8 @@ export default function CIForgePage() {
             </div>
           </div>
 
-          {/* TWO-COLUMN LAYOUT */}
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 flex-1 min-h-0">
-            {/* LEFT – Execution queue & selected summary */}
+            {/* LEFT */}
             <section className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex flex-col min-h-0">
               <div className="flex items-center justify-between mb-3">
                 <div className="text-sm font-semibold text-slate-200">Execution Queue</div>
@@ -590,7 +568,6 @@ export default function CIForgePage() {
               </div>
 
               <div className="flex-1 min-h-0 grid grid-cols-[260px,minmax(0,1fr)] gap-4">
-                {/* Queue list – scroll like CI-Council */}
                 <div className="queue-scroll flex-1 min-h-0 overflow-y-auto rounded-xl border border-slate-800/80 bg-slate-950/60">
                   {loadingQueue && (
                     <div className="p-3 text-[11px] text-slate-400">
@@ -607,7 +584,6 @@ export default function CIForgePage() {
                   {!loadingQueue && queue.length > 0 && <>{queue.map(renderQueueRow)}</>}
                 </div>
 
-                {/* Selected record summary */}
                 <div className="flex flex-col rounded-xl border border-slate-800/80 bg-slate-950/60 px-4 py-3">
                   {selectedItem ? (
                     <>
@@ -637,15 +613,21 @@ export default function CIForgePage() {
                         </div>
                         <div>
                           Created:{" "}
-                          <span className="text-slate-300">{formattedCreatedAt(selectedItem.created_at)}</span>
+                          <span className="text-slate-300">
+                            {formattedCreatedAt(selectedItem.created_at)}
+                          </span>
                         </div>
                         <div>
                           Envelope ID:{" "}
-                          <span className="text-slate-300">{selectedItem.envelope_id ?? "Not created yet"}</span>
+                          <span className="text-slate-300">
+                            {selectedItem.envelope_id ?? "Not created yet"}
+                          </span>
                         </div>
                         <div>
                           Last signed:{" "}
-                          <span className="text-slate-300">{formattedLastSigned(selectedItem.last_signed_at)}</span>
+                          <span className="text-slate-300">
+                            {formattedLastSigned(selectedItem.last_signed_at)}
+                          </span>
                         </div>
                         <div>
                           Parties:{" "}
@@ -656,7 +638,8 @@ export default function CIForgePage() {
                       </div>
 
                       <p className="mt-1 text-[11px] text-emerald-400/90">
-                        Over time, this pane will surface the executed record, certificate status, and direct links to signed PDFs for board-ready packs.
+                        Over time, this pane will surface the executed record, certificate status,
+                        and direct links to signed PDFs for board-ready packs.
                       </p>
                     </>
                   ) : (
@@ -668,16 +651,15 @@ export default function CIForgePage() {
               </div>
             </section>
 
-            {/* RIGHT – Signature envelope panel */}
+            {/* RIGHT */}
             <section className="border border-slate-800 rounded-2xl bg-slate-950/40 p-4 flex flex-col min-h-0">
               <div className="flex items-center justify-between mb-3">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-200">Signature Envelope</h2>
                   <p className="mt-1 text-[11px] text-slate-400 max-w-lg">
-                    Configure the{" "}
-                    <span className="font-semibold text-emerald-400">primary signer</span>{" "}
-                    and optional{" "}
-                    <span className="font-semibold text-sky-400">CC observers</span>, then start or reuse an envelope linked to this ledger record.
+                    Configure the <span className="font-semibold text-emerald-400">primary signer</span>{" "}
+                    and optional <span className="font-semibold text-sky-400">CC observers</span>, then
+                    start or reuse an envelope linked to this ledger record.
                   </p>
                 </div>
                 {selectedItem && (
@@ -715,7 +697,6 @@ export default function CIForgePage() {
                       </label>
                       <input
                         id="primary-signer-name"
-                        name="primary-signer-name"
                         type="text"
                         className="w-full rounded-2xl border border-slate-700 bg-slate-900/70 px-3 py-2 text-sm text-slate-100 outline-none ring-0 focus:border-emerald-400"
                         value={primarySignerName}
@@ -734,7 +715,6 @@ export default function CIForgePage() {
                       </label>
                       <input
                         id="primary-signer-email"
-                        name="primary-signer-email"
                         type="email"
                         className="w-full rounded-2xl border border-slate-700 bg-slate-900/70 px-3 py-2 text-sm text-slate-100 outline-none ring-0 focus:border-emerald-400"
                         value={primarySignerEmail}
@@ -754,7 +734,6 @@ export default function CIForgePage() {
                     </label>
                     <input
                       id="cc-emails"
-                      name="cc-emails"
                       type="text"
                       placeholder="Comma-separated for directors / observers"
                       className="w-full rounded-2xl border border-slate-700 bg-slate-900/70 px-3 py-2 text-sm text-slate-100 outline-none ring-0 placeholder:text-slate-500 focus:border-emerald-400"
