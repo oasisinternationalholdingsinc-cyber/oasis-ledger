@@ -1,0 +1,371 @@
+/* =========================================================
+   OASIS DIGITAL PARLIAMENT • ODP.AI
+   Governance-Operated Ledger OS – Global Styles
+   ========================================================= */
+
+@import "../components/oracle/OasisOrb.css";
+@import "tailwindcss";
+
+/* ===== Base theming (Next starter) ===== */
+
+:root {
+  --background: #020617;
+  --foreground: #e5e7eb;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #020617;
+    --foreground: #e5e7eb;
+  }
+}
+
+/* ✅ app-like behavior: OS shell controls scrolling */
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Segoe UI", sans-serif;
+  overflow: hidden; /* stop full-page scroll */
+}
+
+/* =========================================================
+   OASIS OS SHELL – STABLE, NO ANIMATIONS
+   ========================================================= */
+
+/* ===== OS ROOT ===== */
+.os-root {
+  height: 100vh;
+  max-height: 100vh;
+  background: radial-gradient(circle at top, #020c24 0%, #020617 45%, #000 100%);
+  color: #e5e7eb;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ===== GLOBAL BAR ===== */
+.os-global-bar {
+  height: 64px;
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  border-bottom: 1px solid rgba(250, 204, 21, 0.35);
+  font-size: 12px;
+  position: relative;
+}
+
+/* left – brand */
+.os-brand {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.os-brand-title {
+  color: #facc15;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.os-brand-sub {
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  opacity: 0.7;
+  text-transform: uppercase;
+}
+
+/* center – clock */
+.os-global-center {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.os-clock-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  text-align: center;
+}
+
+.os-clock-label {
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+
+.os-clock-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+  opacity: 0.9;
+}
+
+/* right – entity + role + email + signout */
+.os-global-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: 18px;
+}
+
+.os-entity {
+  background: #020617;
+  border: 1px solid #1f2937;
+  color: #e5e7eb;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.os-role-pill {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.7);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  opacity: 0.85;
+}
+
+.os-email {
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+.os-signout {
+  background: transparent;
+  border: none;
+  color: #facc15;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+/* ===== SHELL ===== */
+.os-shell {
+  flex: 1;
+  display: flex;
+  min-height: 0; /* important so workspace can scroll */
+}
+
+/* ===== DOCK ===== */
+.os-dock {
+  width: 80px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 14px;
+  gap: 10px;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+
+  /* ✅ dock scrolls on its own when zoomed */
+  height: 100%;
+  max-height: 100%;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.os-dock::-webkit-scrollbar {
+  display: none;
+}
+
+/* wrapper for icon + label */
+.dock-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+/* icon bubble */
+.dock-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle, #0f172a, #020617);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.18),
+    0 14px 28px rgba(0, 0, 0, 0.6);
+  font-size: 24px;
+  transition:
+    box-shadow 0.18s ease,
+    background 0.18s ease,
+    transform 0.18s ease;
+}
+
+/* keep icon size same, just slightly emphasize glyph */
+.dock-icon span {
+  transform: scale(1.25);
+}
+
+/* HOVER: glow + slightly brighter bg, NO size change */
+.dock-item:hover .dock-icon {
+  box-shadow:
+    0 0 0 2px #facc15,
+    0 0 42px rgba(250, 204, 21, 0.9),
+    0 0 80px rgba(56, 189, 248, 0.5);
+  background: radial-gradient(circle, #1e293b, #020617);
+}
+
+/* active route glow (even without hover) */
+.dock-icon.active {
+  box-shadow:
+    0 0 0 2px #facc15,
+    0 0 40px rgba(250, 204, 21, 0.85);
+}
+
+/* label under the icon */
+.dock-label {
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(226, 232, 240, 0.8);
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateY(2px);
+  transition:
+    opacity 0.16s ease,
+    transform 0.16s ease;
+  pointer-events: none;
+}
+
+/* show label on hover */
+.dock-item:hover .dock-label {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* divider between core + future */
+.dock-divider {
+  width: 36px;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.18);
+  margin: 6px 0;
+}
+
+/* ===== WORKSPACE (ONLY AREA THAT SCROLLS) ===== */
+.os-workspace {
+  flex: 1;
+  min-height: 0;
+  padding: 24px;
+  overflow-y: auto; /* ChatGPT-style scroll */
+}
+
+/* ===== FOOTER ===== */
+.os-footer {
+  height: 28px;
+  font-size: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  opacity: 0.75;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.os-footer span {
+  color: #22c7b8;
+}
+
+/* =========================================================
+   MODULE IDENTITY AURAS – PER-MODULE ACTIVE GLOW
+   (optional; uses data-module from OsDock.tsx)
+   ========================================================= */
+
+.dock-item[data-module="orbit"] .dock-icon.active {
+  box-shadow:
+    0 0 0 2px #facc15,
+    0 0 45px rgba(56, 189, 248, 0.6);
+}
+
+.dock-item[data-module="alchemy"] .dock-icon.active {
+  box-shadow:
+    0 0 0 2px #38bdf8,
+    0 0 45px rgba(56, 189, 248, 0.7);
+}
+
+.dock-item[data-module="council"] .dock-icon.active {
+  box-shadow:
+    0 0 0 2px #f8fafc,
+    0 0 40px rgba(248, 250, 252, 0.5);
+}
+
+.dock-item[data-module="forge"] .dock-icon.active {
+  box-shadow:
+    0 0 0 2px #fb923c,
+    0 0 50px rgba(251, 146, 60, 0.85);
+}
+
+.dock-item[data-module="sentinel"] .dock-icon.active {
+  box-shadow:
+    0 0 0 2px #f87171,
+    0 0 44px rgba(248, 113, 113, 0.75);
+}
+
+.dock-item[data-module="oracle"] .dock-icon.active {
+  box-shadow:
+    0 0 0 2px #c084fc,
+    0 0 45px rgba(192, 132, 252, 0.8);
+}
+
+.dock-item[data-module="archive"] .dock-icon.active {
+  box-shadow:
+    0 0 0 2px #64748b,
+    0 0 40px rgba(100, 116, 139, 0.7);
+}
+
+.dock-item[data-module="kernel"] .dock-icon.active {
+  box-shadow:
+    0 0 0 2px #22c55e,
+    0 0 48px rgba(34, 197, 94, 0.85);
+}
+
+.dock-item[data-module="genesis"] .dock-icon.active {
+  box-shadow:
+    0 0 0 2px #a3e635,
+    0 0 46px rgba(163, 230, 53, 0.9);
+}
+
+/* ===== ORB SLOT (STATIC) ===== */
+.os-orb-slot {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  width: 80px;
+  height: 80px;
+  border-radius: 999px;
+  background: radial-gradient(circle at 30% 20%, #fef9c3 0, #facc15 40%, #b45309 85%);
+  box-shadow:
+    0 0 50px rgba(250, 204, 21, 0.8),
+    0 0 120px rgba(56, 189, 248, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #111827;
+}
