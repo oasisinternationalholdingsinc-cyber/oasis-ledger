@@ -1,19 +1,31 @@
 // src/lib/supabaseClient.ts
 import { createClient } from "@supabase/supabase-js";
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
 if (!supabaseUrl) {
   throw new Error(
-    "Missing NEXT_PUBLIC_SUPABASE_URL – check .env.sandbox / .env.os and make sure you're using `npm run dev` or `npm run dev:os`."
+    "Missing NEXT_PUBLIC_SUPABASE_URL. Ensure it is set in the Vercel environment or your local .env file."
   );
 }
 
 if (!supabaseAnonKey) {
   throw new Error(
-    "Missing NEXT_PUBLIC_SUPABASE_ANON_KEY – check .env.sandbox / .env.os."
+    "Missing NEXT_PUBLIC_SUPABASE_ANON_KEY. Ensure it is set in the Vercel environment or your local .env file."
   );
 }
 
-export const supabaseBrowser = createClient(supabaseUrl, supabaseAnonKey);
+/**
+ * Browser-safe Supabase client
+ * - Uses anon key
+ * - Session is persisted automatically (localStorage)
+ * - Auth state changes are handled by Supabase internally
+ */
+export const supabaseBrowser = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true,
+  },
+});

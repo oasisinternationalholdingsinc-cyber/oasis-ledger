@@ -1,3 +1,4 @@
+// middleware.ts
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
@@ -21,25 +22,35 @@ export async function middleware(req: NextRequest) {
     }
   );
 
-  const { data } = await supabase.auth.getUser();
-  const user = data?.user ?? null;
-
   const path = req.nextUrl.pathname;
 
-  // ✅ public pages
+  // ✅ Public routes (no auth required)
   const isPublic =
     path === "/" ||
-    path.startsWith("/login") ||
+    path === "/login" ||
+    path.startsWith("/login/") ||
     path.startsWith("/auth") ||
     path.startsWith("/public") ||
+    path.startsWith("/api") || // keep APIs reachable unless you explicitly want them locked
     path === "/favicon.ico" ||
     path === "/robots.txt" ||
     path === "/sitemap.xml";
 
-  if (isPublic) return res;
+  // ✅ Always allow Next static assets
+  // (matcher already excludes most, but this is extra-safe)
+  const isAsset =
+    path.startsWith("/_next") ||
+    path.startsWith("/images") ||
+    path.startsWith("/fonts");
 
-  // 🔒 everything else requires login
-  if (!user) {
+  if (isPublic || isAsset) return res;
+
+  // 🔒 Everything else requires an authenticated session (cookie-based)
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  if (!session) {
     const url = req.nextUrl.clone();
     url.pathname = "/login";
     url.searchParams.set("next", path);
