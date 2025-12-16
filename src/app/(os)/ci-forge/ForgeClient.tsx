@@ -20,6 +20,9 @@ type ForgeQueueItem = {
   parties_signed: number | null;
   last_signed_at: string | null;
   days_since_last_signature: number | null;
+
+  // optional if view includes it later
+  body?: string | null;
 };
 
 type StartSignatureResponse = {
@@ -54,7 +57,8 @@ export default function ForgeClient({ entitySlug }: Props) {
   const [loadingQueue, setLoadingQueue] = useState(false);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [selectedItem, setSelectedItem] = useState<ForgeQueueItem | null>(null);
+  const selected =
+    queue.find((q) => q.ledger_id === selectedId) ?? queue[0] ?? null;
 
   const [primarySignerName, setPrimarySignerName] = useState("");
   const [primarySignerEmail, setPrimarySignerEmail] = useState("");
@@ -64,8 +68,8 @@ export default function ForgeClient({ entitySlug }: Props) {
   const [isSendingInvite, setIsSendingInvite] = useState(false);
   const [isArchiving, setIsArchiving] = useState(false);
 
-  const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
 
   // ---------------------------------------------------------------------------
   // Auth guard
@@ -87,8 +91,8 @@ export default function ForgeClient({ entitySlug }: Props) {
   useEffect(() => {
     const fetchQueue = async () => {
       setLoadingQueue(true);
-      setError("");
-      setSuccess("");
+      setError(null);
+      setInfo(null);
 
       try {
         const { data, error } = await supabase
@@ -108,6 +112,7 @@ export default function ForgeClient({ entitySlug }: Props) {
               "parties_signed",
               "last_signed_at",
               "days_since_last_signature",
+              // "body", // enable if the view ever adds it
             ].join(", "),
           )
           .eq("entity_slug", entitySlug)
@@ -116,27 +121,20 @@ export default function ForgeClient({ entitySlug }: Props) {
           .returns<ForgeQueueItem[]>();
 
         if (error) {
+          console.error("CI-Forge queue error:", error);
           setQueue([]);
           setSelectedId(null);
-          setSelectedItem(null);
           setError("Unable to load Forge queue for this entity.");
           return;
         }
 
-        const rows = ((data ?? []) as unknown) as ForgeQueueItem[];
+        const rows = (data ?? []) as ForgeQueueItem[];
         setQueue(rows);
-
-        if (rows.length > 0) {
-          setSelectedId(rows[0].ledger_id);
-          setSelectedItem(rows[0]);
-        } else {
-          setSelectedId(null);
-          setSelectedItem(null);
-        }
-      } catch {
+        setSelectedId(rows[0]?.ledger_id ?? null);
+      } catch (err) {
+        console.error("CI-Forge queue exception:", err);
         setQueue([]);
         setSelectedId(null);
-        setSelectedItem(null);
         setError("Unable to load Forge queue for this entity.");
       } finally {
         setLoadingQueue(false);
@@ -145,13 +143,6 @@ export default function ForgeClient({ entitySlug }: Props) {
 
     fetchQueue();
   }, [entitySlug]);
-
-  // Keep selectedItem in sync if queue refreshes
-  useEffect(() => {
-    if (!selectedId) return;
-    const next = queue.find((q) => q.ledger_id === selectedId) ?? null;
-    if (next) setSelectedItem(next);
-  }, [queue, selectedId]);
 
   // ---------------------------------------------------------------------------
   // Helpers
@@ -175,14 +166,14 @@ export default function ForgeClient({ entitySlug }: Props) {
   };
 
   const envelopeLocked =
-    !!selectedItem?.envelope_status &&
-    selectedItem.envelope_status !== "cancelled" &&
-    selectedItem.envelope_status !== "expired";
+    !!selected?.envelope_status &&
+    selected.envelope_status !== "cancelled" &&
+    selected.envelope_status !== "expired";
 
-  const envelopeSigned = selectedItem?.envelope_status === "completed";
+  const envelopeSigned = selected?.envelope_status === "completed";
 
   // ---------------------------------------------------------------------------
-  // Risk engine
+  // Risk engine (kept, Council-style UI consumes it)
   // ---------------------------------------------------------------------------
   const computeRiskLevel = (item: ForgeQueueItem): RiskLevel => {
     const days = item.days_since_last_signature ?? null;
@@ -217,7 +208,14 @@ export default function ForgeClient({ entitySlug }: Props) {
     }
   };
 
-  const riskLightTitle = (risk: RiskLevel, item: ForgeQueueItem) => {
+  const riskLabel = (risk: RiskLevel) => {
+    if (risk === "RED") return "Dormant";
+    if (risk === "AMBER") return "Delayed";
+    if (risk === "GREEN") return "Healthy";
+    return "Idle";
+  };
+
+  const riskTitle = (risk: RiskLevel, item: ForgeQueueItem) => {
     const days = item.days_since_last_signature;
     const labelDays =
       days == null ? "No signatures yet" : `${days} day(s) since last signature`;
@@ -237,177 +235,13 @@ export default function ForgeClient({ entitySlug }: Props) {
           "group-hover:scale-110",
           riskLightClasses(risk),
         ].join(" ")}
-        title={riskLightTitle(risk, item)}
+        title={riskTitle(risk, item)}
       />
     );
   };
 
-  const riskSummary = useMemo(() => {
-    if (!selectedItem) return null;
-    const risk = computeRiskLevel(selectedItem);
-    const days = selectedItem.days_since_last_signature;
-    const labelDays = days == null ? "No signatures yet" : `${days} day(s) since last signature`;
-
-    if (risk === "RED") return { risk, label: "Dormant execution risk", detail: labelDays };
-    if (risk === "AMBER") return { risk, label: "Unsigned for several days", detail: labelDays };
-    if (risk === "GREEN") return { risk, label: "Healthy execution", detail: labelDays };
-    return { risk, label: "Idle", detail: labelDays };
-  }, [selectedItem]);
-
   // ---------------------------------------------------------------------------
-  // start-signature
-  // ---------------------------------------------------------------------------
-  const handleStartSignature = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!selectedItem) return;
-
-    setIsSending(true);
-    setError("");
-    setSuccess("");
-
-    try {
-      if (!primarySignerName.trim() || !primarySignerEmail.trim()) {
-        throw new Error("Primary signer name and email are required.");
-      }
-
-      const parties = [
-        {
-          signer_email: primarySignerEmail.trim(),
-          signer_name: primarySignerName.trim(),
-          role: "primary_signer",
-          signing_order: 1,
-        },
-      ];
-
-      const payload = {
-        document_id: selectedItem.ledger_id,
-        entity_slug: selectedItem.entity_slug,
-        record_title: selectedItem.title,
-        parties,
-        // ccEmails is UI-only for now (wire when edge fn supports it)
-      };
-
-      const { data, error } = await supabase.functions.invoke<StartSignatureResponse>(
-        "start-signature",
-        { body: payload },
-      );
-
-      if (error) throw new Error(error.message ?? "Edge function error");
-      if (!data?.ok) throw new Error(data?.error ?? "Edge returned ok: false");
-
-      setSuccess(
-        data.reused
-          ? "Existing signature envelope reused."
-          : "Signature envelope created successfully.",
-      );
-
-      if (data.envelope_id) {
-        setQueue((prev) =>
-          prev.map((item) =>
-            item.ledger_id === selectedItem.ledger_id
-              ? {
-                  ...item,
-                  envelope_id: data.envelope_id ?? item.envelope_id,
-                  envelope_status: "pending",
-                }
-              : item,
-          ),
-        );
-
-        setSelectedItem((prev) =>
-          prev
-            ? {
-                ...prev,
-                envelope_id: data.envelope_id ?? prev.envelope_id,
-                envelope_status: "pending",
-              }
-            : prev,
-        );
-      }
-    } catch (err: any) {
-      setError(err?.message ?? "Failed to start signature envelope.");
-    } finally {
-      setIsSending(false);
-    }
-  };
-
-  // ---------------------------------------------------------------------------
-  // send-signature-invite
-  // ---------------------------------------------------------------------------
-  const handleSendInviteNow = async () => {
-    setIsSendingInvite(true);
-    setError("");
-    setSuccess("");
-
-    try {
-      const { data, error } = await supabase.functions.invoke<SendInviteResponse>(
-        "send-signature-invite",
-        { body: {} },
-      );
-
-      if (error) throw new Error(error.message ?? "Edge function error");
-      if (!data?.ok) throw new Error(data?.error ?? data?.message ?? "Invite failed");
-
-      setSuccess(data.message ?? "Signature invitation email sent (or no jobs pending).");
-    } catch (err: any) {
-      setError(err?.message ?? "Failed to trigger signature invite.");
-    } finally {
-      setIsSendingInvite(false);
-    }
-  };
-
-  // ---------------------------------------------------------------------------
-  // archive-signed-resolution
-  // ---------------------------------------------------------------------------
-  const handleArchiveSignedPdf = async () => {
-    if (!selectedItem?.envelope_id) {
-      setError("No envelope ID found for this record.");
-      return;
-    }
-    if (!envelopeSigned) {
-      setError("Envelope is not completed yet. Wait for signature first.");
-      return;
-    }
-
-    setIsArchiving(true);
-    setError("");
-    setSuccess("");
-
-    try {
-      const baseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-      const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-      if (!baseUrl || !anonKey)
-        throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY.");
-
-      const res = await fetch(`${baseUrl}/functions/v1/archive-signed-resolution`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${anonKey}`,
-        },
-        body: JSON.stringify({ envelope_id: selectedItem.envelope_id }),
-      });
-
-      const data: ArchiveSignedResolutionResponse = await res.json();
-
-      if (!res.ok || !data.ok) {
-        throw new Error(data?.error ?? "Failed to archive signed PDF into the minute book.");
-      }
-
-      setSuccess(
-        data.already_archived
-          ? "Signed resolution is already archived in the minute book."
-          : "Signed PDF archived to the minute book for this envelope.",
-      );
-    } catch (err: any) {
-      setError(err?.message ?? "Failed to archive the signed PDF.");
-    } finally {
-      setIsArchiving(false);
-    }
-  };
-
-  // ---------------------------------------------------------------------------
-  // UI bits
+  // Badges
   // ---------------------------------------------------------------------------
   const renderEnvelopeBadge = (item: ForgeQueueItem) => {
     if (!item.envelope_status) {
@@ -441,8 +275,150 @@ export default function ForgeClient({ entitySlug }: Props) {
     return null;
   };
 
+  // ---------------------------------------------------------------------------
+  // start-signature
+  // ---------------------------------------------------------------------------
+  const handleStartSignature = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!selected) return;
+
+    setIsSending(true);
+    setError(null);
+    setInfo(null);
+
+    try {
+      if (!primarySignerName.trim() || !primarySignerEmail.trim()) {
+        throw new Error("Primary signer name and email are required.");
+      }
+
+      const parties = [
+        {
+          signer_email: primarySignerEmail.trim(),
+          signer_name: primarySignerName.trim(),
+          role: "primary_signer",
+          signing_order: 1,
+        },
+      ];
+
+      const payload = {
+        document_id: selected.ledger_id,
+        entity_slug: selected.entity_slug,
+        record_title: selected.title,
+        parties,
+      };
+
+      const { data, error } =
+        await supabase.functions.invoke<StartSignatureResponse>("start-signature", {
+          body: payload,
+        });
+
+      if (error) throw new Error(error.message ?? "Edge function error");
+      if (!data?.ok) throw new Error(data?.error ?? "Edge returned ok: false");
+
+      setInfo(
+        data.reused
+          ? "Existing signature envelope reused."
+          : "Signature envelope created successfully.",
+      );
+
+      // reflect envelope state in UI (optimistic)
+      if (data.envelope_id) {
+        setQueue((prev) =>
+          prev.map((item) =>
+            item.ledger_id === selected.ledger_id
+              ? { ...item, envelope_id: data.envelope_id!, envelope_status: "pending" }
+              : item,
+          ),
+        );
+      }
+    } catch (err: any) {
+      setError(err?.message ?? "Failed to start signature envelope.");
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // send-signature-invite
+  // ---------------------------------------------------------------------------
+  const handleSendInviteNow = async () => {
+    setIsSendingInvite(true);
+    setError(null);
+    setInfo(null);
+
+    try {
+      const { data, error } =
+        await supabase.functions.invoke<SendInviteResponse>("send-signature-invite", {
+          body: {},
+        });
+
+      if (error) throw new Error(error.message ?? "Edge function error");
+      if (!data?.ok) throw new Error(data?.error ?? data?.message ?? "Invite failed");
+
+      setInfo(data.message ?? "Signature invitation email sent (or no jobs pending).");
+    } catch (err: any) {
+      setError(err?.message ?? "Failed to trigger signature invite.");
+    } finally {
+      setIsSendingInvite(false);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // archive-signed-resolution
+  // ---------------------------------------------------------------------------
+  const handleArchiveSignedPdf = async () => {
+    if (!selected?.envelope_id) {
+      setError("No envelope ID found for this record.");
+      return;
+    }
+    if (!envelopeSigned) {
+      setError("Envelope is not completed yet. Wait for signature first.");
+      return;
+    }
+
+    setIsArchiving(true);
+    setError(null);
+    setInfo(null);
+
+    try {
+      const baseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+      const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+      if (!baseUrl || !anonKey)
+        throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY.");
+
+      const res = await fetch(`${baseUrl}/functions/v1/archive-signed-resolution`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${anonKey}`,
+        },
+        body: JSON.stringify({ envelope_id: selected.envelope_id }),
+      });
+
+      const data: ArchiveSignedResolutionResponse = await res.json();
+
+      if (!res.ok || !data.ok) {
+        throw new Error(data?.error ?? "Failed to archive signed PDF into the minute book.");
+      }
+
+      setInfo(
+        data.already_archived
+          ? "Signed resolution is already archived in the minute book."
+          : "Signed PDF archived to the minute book for this envelope.",
+      );
+    } catch (err: any) {
+      setError(err?.message ?? "Failed to archive the signed PDF.");
+    } finally {
+      setIsArchiving(false);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // LEFT list row renderer (Council-style)
+  // ---------------------------------------------------------------------------
   const renderQueueRow = (item: ForgeQueueItem) => {
-    const active = item.ledger_id === selectedId;
+    const active = item.ledger_id === selected?.ledger_id;
+    const risk = computeRiskLevel(item);
 
     return (
       <button
@@ -450,67 +426,75 @@ export default function ForgeClient({ entitySlug }: Props) {
         type="button"
         onClick={() => {
           setSelectedId(item.ledger_id);
-          setSelectedItem(item);
-          setSuccess("");
-          setError("");
+          setError(null);
+          setInfo(null);
         }}
         className={[
           "group w-full text-left px-3 py-3 border-b border-slate-800 last:border-b-0",
           "transition",
           active
-            ? "bg-slate-900/90 shadow-[0_0_0_1px_rgba(52,211,153,0.45)]"
+            ? "bg-slate-900/90 shadow-[0_0_0_1px_rgba(56,189,248,0.4)]"
             : "hover:bg-slate-900/60",
         ].join(" ")}
       >
         <div className="flex items-start justify-between gap-3">
-          <div className="flex flex-col min-w-0">
-            <span className="text-xs font-semibold text-slate-100 line-clamp-2">
+          <div className="min-w-0">
+            <div className="text-xs font-semibold text-slate-100 line-clamp-2">
               {item.title || "Untitled resolution"}
-            </span>
-            <span className="mt-1 text-[11px] text-slate-400 flex items-center gap-2">
+            </div>
+
+            <div className="mt-1 text-[11px] text-slate-400 flex items-center gap-2">
               <span className="truncate">{item.entity_name}</span>
               <span className="w-1 h-1 rounded-full bg-slate-600 shrink-0" />
               <span className="text-slate-500 shrink-0">
                 {formattedCreatedAt(item.created_at)}
               </span>
-            </span>
+            </div>
+
             {item.last_signed_at && (
-              <span className="mt-0.5 text-[10px] text-slate-500">
+              <div className="mt-1 text-[10px] text-slate-500">
                 Last signed: {formattedLastSigned(item.last_signed_at)} •{" "}
-                {item.days_since_last_signature} day(s) ago
-              </span>
+                {item.days_since_last_signature ?? "—"} day(s) ago
+              </div>
             )}
           </div>
 
-          <div className="flex flex-col items-end gap-1 shrink-0">
+          <div className="shrink-0 flex flex-col items-end gap-1">
             <div className="flex items-center gap-2">
-              {renderRiskLight(item)}
+              <span
+                className={[
+                  "inline-flex h-2 w-2 rounded-full",
+                  riskLightClasses(risk),
+                ].join(" ")}
+                title={riskTitle(risk, item)}
+              />
               {renderEnvelopeBadge(item)}
             </div>
-            <span className="text-[10px] text-slate-500">
+            <div className="text-[10px] text-slate-500">
               {item.ledger_status || "APPROVED"}
-            </span>
-            <span className="text-[9px] text-slate-500">
+            </div>
+            <div className="text-[9px] text-slate-500">
               Parties: {item.parties_signed ?? 0}/{item.parties_total ?? 0}
-            </span>
+            </div>
           </div>
         </div>
       </button>
     );
   };
 
-  const entityLabel =
-    selectedItem?.entity_name ||
-    (entitySlug === "holdings"
-      ? "Oasis International Holdings Inc."
-      : entitySlug === "lounge"
-        ? "Oasis International Lounge Inc."
-        : entitySlug === "real-estate"
-          ? "Oasis International Real Estate Inc."
-          : entitySlug);
+  // ---------------------------------------------------------------------------
+  // Small summary label for selected
+  // ---------------------------------------------------------------------------
+  const selectedRisk = useMemo(() => {
+    if (!selected) return null;
+    const risk = computeRiskLevel(selected);
+    const days = selected.days_since_last_signature;
+    const labelDays = days == null ? "No signatures yet" : `${days} day(s) since last signature`;
+    return { risk, label: riskLabel(risk), detail: labelDays };
+  }, [selected]);
 
   // ---------------------------------------------------------------------------
-  // ✅ FINAL OS LAYOUT (3-column, locked frame, column scroll only)
+  // UI (Council-exact grammar)
   // ---------------------------------------------------------------------------
   return (
     <div className="h-full flex flex-col px-8 pt-6 pb-6">
@@ -529,36 +513,30 @@ export default function ForgeClient({ entitySlug }: Props) {
 
       {/* Main Window – fixed frame inside workspace */}
       <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
-        <div className="w-full max-w-[1500px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-6 py-5 flex flex-col overflow-hidden">
-          {/* Window title */}
+        <div className="w-full max-w-[1400px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-6 py-5 flex flex-col overflow-hidden">
+          {/* Window Title */}
           <div className="flex items-start justify-between mb-4 shrink-0">
-            <div className="min-w-0">
+            <div>
               <h1 className="text-lg font-semibold text-slate-50">
-                Forge – Execution & Signature Orchestration
+                Forge – Execution & Signature Console
               </h1>
-              <p className="mt-1 text-xs text-slate-400 max-w-3xl">
+              <p className="mt-1 text-xs text-slate-400">
                 <span className="font-semibold text-emerald-400">Left:</span>{" "}
-                execution queue (APPROVED records).{" "}
-                <span className="font-semibold text-sky-400">Middle:</span>{" "}
-                selected record execution briefing.{" "}
-                <span className="font-semibold text-amber-300">Right:</span>{" "}
-                signature + invite + archive controls.
+                select an approved record and inspect its execution state.{" "}
+                <span className="font-semibold text-sky-400">Right:</span>{" "}
+                start signature, trigger invites, and archive completed PDFs into the minute book.
               </p>
             </div>
-
-            <div className="hidden md:flex items-center gap-2 text-[10px] uppercase tracking-[0.3em] text-slate-500 shrink-0">
-              <span className="px-2 py-0.5 rounded-full border border-slate-800 bg-slate-950/40">
-                {entitySlug.toUpperCase()}
-              </span>
-              <span>CI-FORGE • LIVE</span>
+            <div className="hidden md:flex items-center text-[10px] uppercase tracking-[0.3em] text-slate-500">
+              CI-FORGE • LIVE
             </div>
           </div>
 
-          {/* 3-column layout */}
-          <div className="grid grid-cols-[340px,minmax(0,1fr),420px] gap-6 flex-1 min-h-0">
-            {/* LEFT – Execution Queue */}
+          {/* TWO-COLUMN LAYOUT (Council-style) */}
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 flex-1 min-h-0">
+            {/* LEFT – Queue & brief */}
             <section className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex flex-col min-h-0">
-              <div className="flex items-center justify-between mb-3 shrink-0">
+              <div className="flex items-center justify-between mb-3">
                 <div className="text-sm font-semibold text-slate-200">
                   Execution Queue
                 </div>
@@ -567,254 +545,212 @@ export default function ForgeClient({ entitySlug }: Props) {
                 </div>
               </div>
 
-              <div className="text-[11px] text-slate-400 mb-3 shrink-0">
-                Entity:{" "}
-                <span className="text-slate-200 font-semibold">{entityLabel}</span>
-              </div>
+              <div className="flex-1 min-h-0 grid grid-cols-[260px,minmax(0,1fr)] gap-4">
+                {/* Queue list – only this scrolls */}
+                <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-slate-800/80 bg-slate-950/60">
+                  {loadingQueue && (
+                    <div className="p-3 text-[11px] text-slate-400">
+                      Loading queue…
+                    </div>
+                  )}
 
-              <div className="flex items-center gap-2 mb-3 shrink-0 text-[10px] text-slate-500">
-                <span className="inline-flex h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.65)]" />
-                <span>Healthy</span>
-                <span className="inline-flex h-2 w-2 rounded-full bg-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.65)] ml-3" />
-                <span>Delayed</span>
-                <span className="inline-flex h-2 w-2 rounded-full bg-rose-500 shadow-[0_0_10px_rgba(248,113,113,0.65)] ml-3" />
-                <span>Dormant</span>
-              </div>
+                  {!loadingQueue && queue.length === 0 && !error && (
+                    <div className="p-3 text-[11px] text-slate-400">
+                      No approved records are waiting in Forge for this entity.
+                    </div>
+                  )}
 
-              <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-slate-800/80 bg-slate-950/60">
-                {loadingQueue && (
-                  <div className="p-3 text-[11px] text-slate-400">Loading…</div>
-                )}
+                  {!loadingQueue && queue.length > 0 && <>{queue.map(renderQueueRow)}</>}
+                </div>
 
-                {!loadingQueue && !!error && (
-                  <div className="p-3 text-[11px] text-rose-200">
-                    {error}
-                  </div>
-                )}
+                {/* Selected summary + viewer */}
+                <div className="flex flex-col rounded-xl border border-slate-800/80 bg-slate-950/60 px-4 py-3 min-h-0">
+                  {selected ? (
+                    <>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">
+                          Selected Record
+                        </div>
+                        <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/40 text-[10px] uppercase tracking-[0.18em] text-emerald-300">
+                          {selected.ledger_status?.toUpperCase() || "APPROVED"}
+                        </span>
+                      </div>
 
-                {!loadingQueue && !error && queue.length === 0 && (
-                  <div className="p-3 text-[11px] text-slate-400">
-                    No approved records are waiting in Forge for this entity.
-                  </div>
-                )}
+                      <div className="text-sm font-semibold text-slate-100 mb-1">
+                        {selected.title || "Untitled resolution"}
+                      </div>
 
-                {!loadingQueue && queue.length > 0 && <>{queue.map(renderQueueRow)}</>}
+                      <div className="text-[11px] text-slate-400 mb-3 space-y-1">
+                        <div>
+                          Entity:{" "}
+                          <span className="text-slate-200">
+                            {selected.entity_name}
+                          </span>
+                        </div>
+                        <div>
+                          Created:{" "}
+                          <span className="text-slate-300">
+                            {formattedCreatedAt(selected.created_at)}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2">
+                            <span className="text-slate-500">Envelope:</span>
+                            {renderEnvelopeBadge(selected)}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={[
+                                "inline-flex h-2 w-2 rounded-full",
+                                riskLightClasses(selectedRisk?.risk ?? "IDLE"),
+                              ].join(" ")}
+                              title={riskTitle(selectedRisk?.risk ?? "IDLE", selected)}
+                            />
+                            <span className="text-slate-300">
+                              {selectedRisk?.label ?? "Idle"}
+                            </span>
+                          </div>
+                        </div>
+                        <div>
+                          Parties:{" "}
+                          <span className="text-slate-200">
+                            {selected.parties_signed ?? 0}/{selected.parties_total ?? 0}
+                          </span>
+                        </div>
+                        <div>
+                          Last signed:{" "}
+                          <span className="text-slate-200">
+                            {formattedLastSigned(selected.last_signed_at)}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Execution viewer */}
+                      <div className="flex-1 min-h-0 flex flex-col">
+                        <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500 mb-1">
+                          Execution Monitor
+                        </div>
+                        <div className="flex-1 min-h-0 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950/80 px-3 py-2 text-[11px] leading-relaxed">
+                          <div className="text-slate-200 space-y-2">
+                            <div>
+                              <span className="text-slate-500">Envelope ID:</span>{" "}
+                              <span className="font-mono text-[10px]">
+                                {selected.envelope_id ?? "—"}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-slate-500">Envelope Status:</span>{" "}
+                              <span className="text-slate-200 font-semibold">
+                                {selected.envelope_status ?? "READY (not started)"}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-slate-500">Risk Detail:</span>{" "}
+                              <span className="text-slate-300">
+                                {selectedRisk?.detail ?? "—"}
+                              </span>
+                            </div>
+
+                            <div className="mt-3 rounded-xl border border-slate-800 bg-black/30 p-3">
+                              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500 mb-2">
+                                Operator Notes
+                              </div>
+                              <div className="text-slate-400">
+                                (Optional) Add body preview once the queue view includes it.
+                              </div>
+                            </div>
+
+                            {/* If your view later includes body */}
+                            {typeof selected.body !== "undefined" && (
+                              <div className="mt-3">
+                                <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500 mb-2">
+                                  Record Body
+                                </div>
+                                <pre className="whitespace-pre-wrap font-sans text-slate-200">
+                                  {selected.body || "—"}
+                                </pre>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-[11px] text-slate-400">
+                      Select a record from the queue to see its execution details here.
+                    </div>
+                  )}
+                </div>
               </div>
             </section>
 
-            {/* MIDDLE – Selected Execution Brief */}
-            <section className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex flex-col min-h-0">
-              <div className="flex items-center justify-between mb-3 shrink-0">
-                <div className="text-sm font-semibold text-slate-200">
-                  Execution Brief
-                </div>
-
-                {selectedItem ? (
-                  <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/40 text-[10px] uppercase tracking-[0.18em] text-emerald-300">
-                    {selectedItem.ledger_status || "APPROVED"}
-                  </span>
-                ) : (
-                  <span className="px-2 py-0.5 rounded-full bg-slate-500/10 border border-slate-500/40 text-[10px] uppercase tracking-[0.18em] text-slate-300">
-                    No selection
-                  </span>
-                )}
-              </div>
-
-              {!selectedItem ? (
-                <div className="text-[11px] text-slate-400">
-                  Select a record from the queue to view execution details here.
-                </div>
-              ) : (
-                <>
-                  <div className="rounded-xl border border-slate-800/80 bg-slate-950/60 px-4 py-3 shrink-0">
-                    <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 mb-2">
-                      Selected Record
-                    </div>
-
-                    <div className="text-base font-semibold text-slate-50 leading-snug">
-                      {selectedItem.title || "Untitled resolution"}
-                    </div>
-
-                    <div className="mt-2 grid grid-cols-1 lg:grid-cols-2 gap-2 text-[11px] text-slate-400">
-                      <div>
-                        Entity:{" "}
-                        <span className="text-slate-200 font-semibold">
-                          {selectedItem.entity_name}
-                        </span>
-                      </div>
-                      <div>
-                        Created:{" "}
-                        <span className="text-slate-300">
-                          {formattedCreatedAt(selectedItem.created_at)}
-                        </span>
-                      </div>
-
-                      <div className="flex items-center gap-2">
-                        <span className="text-slate-500">Envelope:</span>
-                        {renderEnvelopeBadge(selectedItem)}
-                      </div>
-
-                      <div className="text-slate-400">
-                        Parties:{" "}
-                        <span className="text-slate-200 font-semibold">
-                          {selectedItem.parties_signed ?? 0}/{selectedItem.parties_total ?? 0}
-                        </span>
-                      </div>
-
-                      <div className="text-slate-400">
-                        Last signed:{" "}
-                        <span className="text-slate-200">
-                          {formattedLastSigned(selectedItem.last_signed_at)}
-                        </span>
-                      </div>
-
-                      <div className="flex items-center gap-2">
-                        <span className="text-slate-500">Risk:</span>
-                        <span className="inline-flex items-center gap-2">
-                          <span
-                            className={[
-                              "inline-flex h-2 w-2 rounded-full",
-                              riskLightClasses(riskSummary?.risk ?? "IDLE"),
-                            ].join(" ")}
-                          />
-                          <span className="text-slate-200 font-semibold">
-                            {riskSummary?.label ?? "—"}
-                          </span>
-                          <span className="text-slate-500">
-                            ({riskSummary?.detail ?? "—"})
-                          </span>
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Scrollable execution viewer */}
-                  <div className="flex-1 min-h-0 mt-4 flex flex-col">
-                    <div className="flex items-center justify-between mb-2 shrink-0">
-                      <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">
-                        Execution Monitor
-                      </div>
-                      <div className="text-[10px] text-slate-500">
-                        (Body preview can be added to v_forge_queue_latest later)
-                      </div>
-                    </div>
-
-                    <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-slate-800 bg-slate-950/70 px-4 py-3 text-[11px] leading-relaxed text-slate-200">
-                      <div className="text-slate-400">
-                        Forge is tracking signature state and execution readiness for this record.
-                      </div>
-
-                      <div className="mt-3 space-y-2 text-slate-300">
-                        <div>
-                          <span className="text-slate-500">Envelope ID:</span>{" "}
-                          <span className="font-mono text-[10px]">
-                            {selectedItem.envelope_id ?? "—"}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-slate-500">Envelope Status:</span>{" "}
-                          <span className="font-semibold">
-                            {selectedItem.envelope_status ?? "READY (not started)"}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-slate-500">Days since last signature:</span>{" "}
-                          <span className="font-semibold">
-                            {selectedItem.days_since_last_signature ?? "—"}
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="mt-4 rounded-xl border border-slate-800 bg-black/30 p-3 text-slate-300">
-                        <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500 mb-2">
-                          Operator Notes
-                        </div>
-                        <div className="text-slate-400">
-                          (Optional) Add body preview or execution checklist once the queue view includes it.
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </>
-              )}
-            </section>
-
-            {/* RIGHT – Execution Controls */}
-            <section className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex flex-col min-h-0">
-              <div className="flex items-start justify-between mb-3 shrink-0">
+            {/* RIGHT – Actions panel (Council decision analog) */}
+            <section className="border border-slate-800 rounded-2xl bg-slate-950/40 p-4 flex flex-col min-h-0">
+              <div className="flex items-center justify-between mb-3">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-200">
                     Execution Controls
                   </h2>
-                  <p className="mt-1 text-[11px] text-slate-400 max-w-sm">
-                    Start an envelope, trigger invites, and archive completed PDFs into the minute book.
+                  <p className="mt-1 text-[11px] text-slate-400 max-w-lg">
+                    Start the signature envelope for the selected record, trigger invite dispatch, and archive completed PDFs into the minute book.
                   </p>
                 </div>
-
-                <span className="px-2 py-0.5 rounded-full bg-sky-500/10 border border-sky-500/40 text-[10px] uppercase tracking-[0.18em] text-sky-200">
+                <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/40 text-[10px] uppercase tracking-[0.18em] text-emerald-300">
                   Ledger-Linked
                 </span>
               </div>
 
               <form onSubmit={handleStartSignature} className="flex-1 min-h-0 flex flex-col">
-                {/* Scrollable controls */}
-                <div className="flex-1 min-h-0 overflow-y-auto pr-1">
-                  <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                    <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 mb-2">
-                      Primary Signer
-                    </div>
+                {/* Controls body scroll */}
+                <div className="flex-1 min-h-0 overflow-y-auto">
+                  <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 mb-2">
+                    Primary Signer
+                  </div>
 
-                    <div className="grid gap-3">
-                      <input
-                        className="w-full rounded-2xl border border-slate-700 bg-slate-900/70 px-3 py-2 text-sm text-slate-100 outline-none"
-                        value={primarySignerName}
-                        onChange={(e) => setPrimarySignerName(e.target.value)}
-                        placeholder="Signer name"
-                        disabled={!selectedItem || envelopeLocked || isSending}
-                      />
-                      <input
-                        className="w-full rounded-2xl border border-slate-700 bg-slate-900/70 px-3 py-2 text-sm text-slate-100 outline-none"
-                        value={primarySignerEmail}
-                        onChange={(e) => setPrimarySignerEmail(e.target.value)}
-                        placeholder="Signer email"
-                        type="email"
-                        disabled={!selectedItem || envelopeLocked || isSending}
-                      />
-                      <input
-                        className="w-full rounded-2xl border border-slate-700 bg-slate-900/70 px-3 py-2 text-sm text-slate-100 outline-none"
-                        value={ccEmails}
-                        onChange={(e) => setCcEmails(e.target.value)}
-                        placeholder="CC emails (optional)"
-                        disabled={!selectedItem || isSending}
-                      />
-                      <div className="text-[10px] text-slate-500">
-                        CC is stored UI-side for now (wire once the Edge Function supports it).
-                      </div>
+                  <div className="grid gap-3">
+                    <input
+                      className="w-full rounded-2xl border border-slate-700 bg-slate-900/70 px-3 py-2 text-sm text-slate-100 outline-none"
+                      value={primarySignerName}
+                      onChange={(e) => setPrimarySignerName(e.target.value)}
+                      placeholder="Signer name"
+                      disabled={!selected || envelopeLocked || isSending}
+                    />
+                    <input
+                      className="w-full rounded-2xl border border-slate-700 bg-slate-900/70 px-3 py-2 text-sm text-slate-100 outline-none"
+                      value={primarySignerEmail}
+                      onChange={(e) => setPrimarySignerEmail(e.target.value)}
+                      placeholder="Signer email"
+                      type="email"
+                      disabled={!selected || envelopeLocked || isSending}
+                    />
+                    <input
+                      className="w-full rounded-2xl border border-slate-700 bg-slate-900/70 px-3 py-2 text-sm text-slate-100 outline-none"
+                      value={ccEmails}
+                      onChange={(e) => setCcEmails(e.target.value)}
+                      placeholder="CC emails (optional)"
+                      disabled={!selected || isSending}
+                    />
+
+                    <div className="text-[10px] text-slate-500">
+                      CC is UI-only for now (wire once the Edge Function supports it).
                     </div>
                   </div>
 
-                  {error && (
-                    <div className="mt-3 rounded-xl border border-rose-500/60 bg-rose-900/30 px-3 py-2 text-[11px] text-rose-100">
-                      {error}
-                    </div>
-                  )}
-                  {success && !error && (
-                    <div className="mt-3 rounded-xl border border-emerald-500/60 bg-emerald-900/30 px-3 py-2 text-[11px] text-emerald-100">
-                      {success}
-                    </div>
-                  )}
-
-                  <div className="mt-3 rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                  <div className="mt-4">
                     <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 mb-2">
                       Actions
                     </div>
 
-                    <div className="flex flex-wrap gap-3">
+                    <div className="flex flex-wrap items-center gap-3">
                       <button
                         type="button"
                         onClick={handleSendInviteNow}
                         disabled={isSendingInvite}
-                        className="inline-flex items-center rounded-full border border-emerald-500/70 bg-transparent px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-300 disabled:opacity-60"
+                        className={`rounded-full px-4 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase transition ${
+                          isSendingInvite
+                            ? "bg-emerald-500/20 text-emerald-200/60 cursor-not-allowed"
+                            : "bg-transparent border border-emerald-500/70 text-emerald-300 hover:bg-emerald-500/10"
+                        }`}
                       >
                         {isSendingInvite ? "Sending…" : "Send invite now"}
                       </button>
@@ -822,33 +758,64 @@ export default function ForgeClient({ entitySlug }: Props) {
                       <button
                         type="button"
                         onClick={handleArchiveSignedPdf}
-                        disabled={!envelopeSigned || isArchiving}
-                        className="inline-flex items-center rounded-full border border-sky-400/70 bg-sky-500/10 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-sky-100 disabled:opacity-60"
+                        disabled={!selected || !envelopeSigned || isArchiving}
+                        className={`rounded-full px-4 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase transition ${
+                          !selected || !envelopeSigned || isArchiving
+                            ? "bg-sky-500/20 text-sky-200/60 cursor-not-allowed"
+                            : "bg-sky-500 text-black hover:bg-sky-400"
+                        }`}
                       >
-                        {isArchiving
-                          ? "Archiving…"
-                          : envelopeSigned
-                            ? "Archive signed PDF"
-                            : "Archive (wait for signature)"}
+                        {isArchiving ? "Archiving…" : "Archive signed PDF"}
                       </button>
                     </div>
 
                     <div className="mt-3 text-[10px] text-slate-500">
-                      Archive requires an envelope in <span className="text-slate-300">completed</span> state.
+                      Archive is available once the envelope status is{" "}
+                      <span className="text-slate-200 font-semibold">completed</span>.
                     </div>
+                  </div>
+
+                  {/* Forge notes (Council notes analog) */}
+                  <div className="mt-5 flex flex-col min-h-[220px]">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">
+                        Forge Notes
+                      </div>
+                      <div className="text-[10px] text-slate-500">
+                        (Local-only for now)
+                      </div>
+                    </div>
+                    <textarea
+                      className="flex-1 min-h-[160px] rounded-xl bg-slate-950/70 border border-slate-800 px-3 py-2 text-sm text-slate-100 resize-none"
+                      placeholder="Track execution conditions, signer confirmations, and archiving notes..."
+                    />
                   </div>
                 </div>
 
-                {/* Sticky bottom primary CTA */}
-                <div className="mt-4 shrink-0 flex items-center justify-between">
-                  <div className="text-[10px] text-slate-500">
-                    CI-Forge · Oasis Digital Parliament Ledger
+                {/* Messages */}
+                {error && (
+                  <div className="mt-3 text-[11px] text-red-400 bg-red-950/40 border border-red-800/60 rounded-xl px-3 py-2">
+                    {error}
                   </div>
+                )}
 
+                {info && !error && (
+                  <div className="mt-3 text-[11px] text-emerald-300 bg-emerald-950/40 border border-emerald-700/60 rounded-xl px-3 py-2">
+                    {info}
+                  </div>
+                )}
+
+                {/* Bottom bar + primary action */}
+                <div className="mt-3 flex items-center justify-between text-[10px] text-slate-500">
+                  <span>CI-Forge · Oasis Digital Parliament Ledger</span>
                   <button
                     type="submit"
-                    disabled={isSending || !selectedItem || envelopeLocked}
-                    className="inline-flex items-center rounded-full bg-emerald-500 px-5 py-2 text-sm font-semibold text-emerald-950 disabled:opacity-60"
+                    disabled={isSending || !selected || envelopeLocked}
+                    className={`rounded-full px-4 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase transition ${
+                      !selected || envelopeLocked || isSending
+                        ? "bg-emerald-500/20 text-emerald-200/60 cursor-not-allowed"
+                        : "bg-emerald-500 text-black hover:bg-emerald-400"
+                    }`}
                   >
                     {envelopeLocked
                       ? "Envelope already created"
