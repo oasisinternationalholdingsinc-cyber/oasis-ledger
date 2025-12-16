@@ -2,9 +2,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
-export async function middleware(req: NextRequest) {
-  // Start with a response we can attach cookies to
-  const res = NextResponse.next();
+export async function middleware(request: NextRequest) {
+  let response = NextResponse.next();
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -12,20 +11,21 @@ export async function middleware(req: NextRequest) {
     {
       cookies: {
         getAll() {
-          return req.cookies.getAll();
+          return request.cookies.getAll();
         },
         setAll(cookiesToSet) {
           cookiesToSet.forEach(({ name, value, options }) => {
-            res.cookies.set(name, value, options);
+            // write cookies onto the response (this is the key)
+            response.cookies.set(name, value, options);
           });
         },
       },
     }
   );
 
-  const path = req.nextUrl.pathname;
+  const path = request.nextUrl.pathname;
 
-  // ✅ public routes (no auth)
+  // ✅ public routes
   const isPublic =
     path === "/" ||
     path.startsWith("/login") ||
@@ -35,31 +35,32 @@ export async function middleware(req: NextRequest) {
     path === "/robots.txt" ||
     path === "/sitemap.xml";
 
-  if (isPublic) return res;
-
-  // Optional: don’t force auth on API routes (prevents weird edge cases)
-  if (path.startsWith("/api")) return res;
+  // ✅ ignore Next internals + api
+  if (
+    isPublic ||
+    path.startsWith("/_next") ||
+    path.startsWith("/api") ||
+    path.startsWith("/favicon.ico")
+  ) {
+    return response;
+  }
 
   const { data } = await supabase.auth.getUser();
   const user = data?.user ?? null;
 
-  // 🔒 require auth
   if (!user) {
-    const url = req.nextUrl.clone();
+    const url = request.nextUrl.clone();
     url.pathname = "/login";
     url.searchParams.set("next", path);
 
-    // IMPORTANT: redirect response must also include cookies
-    const redirectRes = NextResponse.redirect(url);
-    res.cookies.getAll().forEach((c) => redirectRes.cookies.set(c));
-    return redirectRes;
+    // IMPORTANT: use the same `response` variable so cookie writes still work
+    response = NextResponse.redirect(url);
+    return response;
   }
 
-  return res;
+  return response;
 }
 
 export const config = {
-  matcher: [
-    "/((?!_next/static|_next/image|favicon.ico).*)",
-  ],
+  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
 };
