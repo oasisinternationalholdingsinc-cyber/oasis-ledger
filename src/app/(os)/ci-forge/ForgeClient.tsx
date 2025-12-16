@@ -4,12 +4,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 
-export default function ForgeClient({ entitySlug }: { entitySlug: string }) {
-  // ✅ delete: const searchParams = useSearchParams();
-  // ✅ delete: const entitySlug = searchParams.get("entity") ?? "holdings";
-
-  // ...rest of your file stays the same
-}
+type Props = { entitySlug: string };
 
 type ForgeQueueItem = {
   ledger_id: string;
@@ -52,12 +47,8 @@ type ArchiveSignedResolutionResponse = {
 
 type RiskLevel = "GREEN" | "AMBER" | "RED" | "IDLE";
 
-export default function ForgeClient() {
+export default function ForgeClient({ entitySlug }: Props) {
   const router = useRouter();
-  const searchParams = useSearchParams();
-
-  // Entity from OS header (?entity=holdings|lounge|real-estate)
-  const entitySlug = searchParams.get("entity") ?? "holdings";
 
   const [queue, setQueue] = useState<ForgeQueueItem[]>([]);
   const [loadingQueue, setLoadingQueue] = useState(false);
@@ -76,6 +67,9 @@ export default function ForgeClient() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
+  // ---------------------------------------------------------------------------
+  // Auth guard
+  // ---------------------------------------------------------------------------
   useEffect(() => {
     const checkAuth = async () => {
       const {
@@ -87,6 +81,9 @@ export default function ForgeClient() {
     checkAuth();
   }, [router]);
 
+  // ---------------------------------------------------------------------------
+  // Load Forge queue
+  // ---------------------------------------------------------------------------
   useEffect(() => {
     const fetchQueue = async () => {
       setLoadingQueue(true);
@@ -145,6 +142,9 @@ export default function ForgeClient() {
     fetchQueue();
   }, [entitySlug]);
 
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
   const formattedCreatedAt = (iso: string | null | undefined) => {
     if (!iso) return "—";
     try {
@@ -170,6 +170,9 @@ export default function ForgeClient() {
 
   const envelopeSigned = selectedItem?.envelope_status === "completed";
 
+  // ---------------------------------------------------------------------------
+  // Risk engine
+  // ---------------------------------------------------------------------------
   const computeRiskLevel = (item: ForgeQueueItem): RiskLevel => {
     const days = item.days_since_last_signature ?? null;
     const status = item.envelope_status;
@@ -227,6 +230,9 @@ export default function ForgeClient() {
     );
   };
 
+  // ---------------------------------------------------------------------------
+  // start-signature
+  // ---------------------------------------------------------------------------
   const handleStartSignature = async (e: FormEvent) => {
     e.preventDefault();
     if (!selectedItem) return;
@@ -254,6 +260,7 @@ export default function ForgeClient() {
         entity_slug: selectedItem.entity_slug,
         record_title: selectedItem.title,
         parties,
+        // ccEmails is UI-only for now (wire when edge fn supports it)
       };
 
       const { data, error } = await supabase.functions.invoke<StartSignatureResponse>(
@@ -264,7 +271,9 @@ export default function ForgeClient() {
       if (error) throw new Error(error.message ?? "Edge function error");
       if (!data?.ok) throw new Error(data?.error ?? "Edge returned ok: false");
 
-      setSuccess(data.reused ? "Existing signature envelope reused." : "Signature envelope created successfully.");
+      setSuccess(
+        data.reused ? "Existing signature envelope reused." : "Signature envelope created successfully.",
+      );
 
       if (data.envelope_id) {
         setQueue((prev) =>
@@ -286,6 +295,9 @@ export default function ForgeClient() {
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // send-signature-invite
+  // ---------------------------------------------------------------------------
   const handleSendInviteNow = async () => {
     setIsSendingInvite(true);
     setError("");
@@ -308,6 +320,9 @@ export default function ForgeClient() {
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // archive-signed-resolution
+  // ---------------------------------------------------------------------------
   const handleArchiveSignedPdf = async () => {
     if (!selectedItem?.envelope_id) {
       setError("No envelope ID found for this record.");
@@ -354,6 +369,9 @@ export default function ForgeClient() {
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // UI bits
+  // ---------------------------------------------------------------------------
   const renderEnvelopeBadge = (item: ForgeQueueItem) => {
     if (!item.envelope_status) {
       return (
@@ -436,14 +454,92 @@ export default function ForgeClient() {
     );
   };
 
+  // ---------------------------------------------------------------------------
+  // IMPORTANT: paste your full JSX layout here
+  // (Your earlier big UI return block goes here.)
+  // ---------------------------------------------------------------------------
   return (
     <div className="h-full flex flex-col px-8 pt-6 pb-6">
-      {/* KEEP your full UI below exactly as you had it */}
-      {/* ... (rest of your JSX unchanged) ... */}
+      {/* TODO: paste your full CI-Forge layout here (the big 2-column UI) */}
+      <div className="text-[12px] text-slate-400">
+        CI-Forge loaded for entity: <span className="text-slate-200 font-semibold">{entitySlug}</span>
+      </div>
 
-      {/* ✅ I’m not re-pasting the remaining JSX here to save your scroll,
-          but copy/paste the entire return() block from your current file
-          starting from <div className="h-full ..."> down to the end. */}
+      <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+        <div className="text-sm font-semibold text-slate-200 mb-2">Execution Queue</div>
+        <div className="rounded-xl border border-slate-800/80 bg-slate-950/60 overflow-hidden">
+          {loadingQueue && <div className="p-3 text-[11px] text-slate-400">Loading…</div>}
+          {!loadingQueue && queue.length === 0 && !error && (
+            <div className="p-3 text-[11px] text-slate-400">No records.</div>
+          )}
+          {!loadingQueue && queue.length > 0 && <>{queue.map(renderQueueRow)}</>}
+        </div>
+
+        {/* Actions (kept for wiring) */}
+        <form onSubmit={handleStartSignature} className="mt-4 grid gap-3">
+          <div className="grid gap-3 md:grid-cols-2">
+            <input
+              className="w-full rounded-2xl border border-slate-700 bg-slate-900/70 px-3 py-2 text-sm text-slate-100 outline-none"
+              value={primarySignerName}
+              onChange={(e) => setPrimarySignerName(e.target.value)}
+              placeholder="Primary signer name"
+            />
+            <input
+              className="w-full rounded-2xl border border-slate-700 bg-slate-900/70 px-3 py-2 text-sm text-slate-100 outline-none"
+              value={primarySignerEmail}
+              onChange={(e) => setPrimarySignerEmail(e.target.value)}
+              placeholder="Primary signer email"
+              type="email"
+            />
+          </div>
+
+          <input
+            className="w-full rounded-2xl border border-slate-700 bg-slate-900/70 px-3 py-2 text-sm text-slate-100 outline-none"
+            value={ccEmails}
+            onChange={(e) => setCcEmails(e.target.value)}
+            placeholder="CC emails (optional)"
+          />
+
+          {error && (
+            <div className="rounded-xl border border-rose-500/60 bg-rose-900/30 px-3 py-2 text-[11px] text-rose-100">
+              {error}
+            </div>
+          )}
+          {success && (
+            <div className="rounded-xl border border-emerald-500/60 bg-emerald-900/30 px-3 py-2 text-[11px] text-emerald-100">
+              {success}
+            </div>
+          )}
+
+          <div className="flex flex-wrap gap-3 justify-end">
+            <button
+              type="button"
+              onClick={handleSendInviteNow}
+              disabled={isSendingInvite}
+              className="inline-flex items-center rounded-full border border-emerald-500/70 bg-transparent px-4 py-2 text-xs font-semibold text-emerald-300 disabled:opacity-60"
+            >
+              {isSendingInvite ? "Sending…" : "Send invite now"}
+            </button>
+
+            <button
+              type="button"
+              onClick={handleArchiveSignedPdf}
+              disabled={!envelopeSigned || isArchiving}
+              className="inline-flex items-center rounded-full border border-sky-400/70 bg-sky-500/10 px-4 py-2 text-xs font-semibold text-sky-100 disabled:opacity-60"
+            >
+              {isArchiving ? "Archiving…" : envelopeSigned ? "Archive signed PDF" : "Archive (wait for signature)"}
+            </button>
+
+            <button
+              type="submit"
+              disabled={isSending || !selectedItem || envelopeLocked}
+              className="inline-flex items-center rounded-full bg-emerald-500 px-5 py-2 text-sm font-semibold text-emerald-950 disabled:opacity-60"
+            >
+              {envelopeLocked ? "Envelope already created" : isSending ? "Starting…" : "Start signature envelope"}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
