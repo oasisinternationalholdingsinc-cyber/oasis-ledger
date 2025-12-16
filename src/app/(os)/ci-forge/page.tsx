@@ -10,6 +10,5 @@ export default function Page({
 }) {
   const raw = searchParams?.entity;
   const entitySlug = Array.isArray(raw) ? raw[0] : raw ?? "holdings";
-
   return <ForgeClient entitySlug={entitySlug} />;
 }
