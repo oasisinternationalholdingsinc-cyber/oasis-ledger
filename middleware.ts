@@ -3,8 +3,25 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
 export async function middleware(request: NextRequest) {
-  // IMPORTANT: always mutate and return the same response instance
+  // ✅ must be a mutable response so Supabase can write cookies
   let response = NextResponse.next();
+
+  const path = request.nextUrl.pathname;
+
+  // ✅ public routes
+  const isPublic =
+    path === "/" ||
+    path.startsWith("/login") ||
+    path.startsWith("/auth") ||
+    path.startsWith("/public") ||
+    path === "/favicon.ico" ||
+    path === "/robots.txt" ||
+    path === "/sitemap.xml";
+
+  // ✅ ignore Next internals + api
+  if (isPublic || path.startsWith("/_next") || path.startsWith("/api")) {
+    return response;
+  }
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -23,34 +40,6 @@ export async function middleware(request: NextRequest) {
     }
   );
 
-  const path = request.nextUrl.pathname;
-
-  // ───────────────────────────────────────────────────────────
-  // ✅ PUBLIC ROUTES (no auth required)
-  // ───────────────────────────────────────────────────────────
-  const isPublic =
-    path === "/" ||
-    path.startsWith("/login") ||
-    path.startsWith("/auth") ||
-    path.startsWith("/public") ||
-    path.startsWith("/forgot-password") ||
-    path.startsWith("/reset-password") ||
-    path === "/favicon.ico" ||
-    path === "/robots.txt" ||
-    path === "/sitemap.xml";
-
-  // Ignore Next internals + API routes
-  if (
-    isPublic ||
-    path.startsWith("/_next") ||
-    path.startsWith("/api")
-  ) {
-    return response;
-  }
-
-  // ───────────────────────────────────────────────────────────
-  // 🔐 AUTH CHECK
-  // ───────────────────────────────────────────────────────────
   const { data } = await supabase.auth.getUser();
   const user = data?.user ?? null;
 
@@ -59,7 +48,7 @@ export async function middleware(request: NextRequest) {
     url.pathname = "/login";
     url.searchParams.set("next", path);
 
-    // IMPORTANT: still return the same response variable
+    // redirect response must also be mutable for cookies
     response = NextResponse.redirect(url);
     return response;
   }
@@ -67,7 +56,6 @@ export async function middleware(request: NextRequest) {
   return response;
 }
 
-// Apply to everything except static assets
 export const config = {
   matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
 };
