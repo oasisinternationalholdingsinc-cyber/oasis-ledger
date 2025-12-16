@@ -1,8 +1,15 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
+
+export default function ForgeClient({ entitySlug }: { entitySlug: string }) {
+  // ✅ delete: const searchParams = useSearchParams();
+  // ✅ delete: const entitySlug = searchParams.get("entity") ?? "holdings";
+
+  // ...rest of your file stays the same
+}
 
 type ForgeQueueItem = {
   ledger_id: string;
