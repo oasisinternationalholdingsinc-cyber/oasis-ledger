@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { OsHeader } from "@/components/OsHeader";
 import { OsDock } from "@/components/OsDock";
 import { OsEntityProvider } from "@/components/OsEntityContext";
+import { OsAuthGate } from "./os-auth-gate";
 
 export default function OsLayout({ children }: { children: ReactNode }) {
   return (
@@ -14,7 +15,11 @@ export default function OsLayout({ children }: { children: ReactNode }) {
         {/* Shell: dock + workspace */}
         <div className="os-shell">
           <OsDock />
-          <div className="os-workspace">{children}</div>
+
+          {/* ✅ Auth guard lives here (client) */}
+          <OsAuthGate>
+            <div className="os-workspace">{children}</div>
+          </OsAuthGate>
         </div>
 
         {/* Footer + Orb */}
