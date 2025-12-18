@@ -1,23 +1,43 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import type React from "react";
 import Link from "next/link";
+import {
+  BookOpen,
+  Building2,
+  FileCheck2,
+  FileSignature,
+  FileText,
+  Folder,
+  Gavel,
+  Landmark,
+  Receipt,
+  ScrollText,
+  Search,
+  ShieldCheck,
+  Share2,
+  Users,
+} from "lucide-react";
 import { supabaseBrowser } from "@/lib/supabase/browser";
 
 /**
  * CI-Archive (Registry-only)
- * - Canonical 3-column Oasis OS surface
- * - Minute Book + Verified + Ledger (draft/approved) view for clarity
- * - Ledger tab does NOT change Forge logic; it only reveals where Alchemy drafts live
- * - Archive status is inferred via minute_book_entries.source_record_id -> governance_ledger.id
+ * - Canonical 3-column Oasis OS surface (folders / entries / details)
+ * - Minute Book tab is the DIGITAL MINUTE BOOK registry (folders + icons)
+ * - Verified tab is the VERIFIED registry (signed/verified artifacts)
+ * - Ledger tab is a READ-ONLY window into where Alchemy drafts live (governance_ledger)
+ *   and whether a ledger record has been archived into the Minute Book (source_record_id).
+ *
+ * IMPORTANT: This page does NOT touch Forge logic. It only reads.
  */
 
 type MinuteBookEntry = {
   id: string;
   title: string | null;
+  entity_key: string | null;
   storage_path: string | null;
   file_name: string | null;
-  entity_key: string | null;
   entry_type: string | null;
   section_name: string | null;
   notes: string | null;
@@ -25,7 +45,7 @@ type MinuteBookEntry = {
   registry_status: string | null;
   source: string | null;
 
-  // IMPORTANT: links minute book row back to governance_ledger (your fix)
+  // links minute book row back to governance_ledger (your verified fix)
   source_record_id: string | null;
   source_envelope_id: string | null;
 
@@ -39,11 +59,8 @@ type VerifiedDocument = {
   storage_bucket: string | null;
   storage_path: string | null;
   file_hash: string | null;
-  file_size: number | null;
-  mime_type: string | null;
-  entity_slug: string | null;
-  document_class: string | null;
-  document_purpose: string | null;
+  file_name: string | null;
+  verified_by: string | null;
   verification_level: string | null;
   envelope_id: string | null;
   signed_at: string | null;
@@ -65,317 +82,182 @@ function cx(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(" ");
 }
 
-function shortId(id: string) {
-  return id.length > 10 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
+function safeLower(s: unknown) {
+  return (typeof s === "string" ? s : "").toLowerCase();
 }
 
-function fmt(dt: string | null | undefined) {
-  if (!dt) return "—";
-  const d = new Date(dt);
-  if (Number.isNaN(d.getTime())) return dt;
+/**
+ * Normalize storage paths because over time we used both:
+ * - holdings/AnnualReturns/x.pdf
+ * - minute_book/holdings/AnnualReturns/x.pdf
+ */
+function normalizeMinuteBookPath(path: string | null) {
+  if (!path) return "";
+  return path.startsWith("minute_book/") ? path.slice("minute_book/".length) : path;
+}
+
+/** Folder inference: entity_key/FOLDER/filename.pdf (fallback: General) */
+function inferFolderFromPath(pathRaw: string | null) {
+  const path = normalizeMinuteBookPath(pathRaw);
+  const parts = path.split("/").filter(Boolean);
+  // parts[0] is usually entity_key (holdings/oil/oire)
+  const folder = parts.length >= 2 ? parts[1] : "General";
+  return folder || "General";
+}
+
+/** A stable enterprise folder taxonomy (always shown, even if empty) */
+const CANONICAL_FOLDERS: Array<{
+  key: string;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+  // used to map legacy folder names -> canonical folder
+  aliases: string[];
+}> = [
+  { key: "Incorporation", label: "Incorporation", icon: Building2, aliases: ["incorporation", "articles", "bylaws"] },
+  { key: "AnnualReturns", label: "Annual Returns", icon: Receipt, aliases: ["annualreturns", "annual returns", "annual_return"] },
+  { key: "Resolutions", label: "Resolutions", icon: ScrollText, aliases: ["resolutions", "resolution"] },
+  { key: "Registers", label: "Registers", icon: BookOpen, aliases: ["registers", "register"] },
+  { key: "DirectorsOfficers", label: "Directors & Officers", icon: Users, aliases: ["directors", "officers", "directorsofficers"] },
+  { key: "ShareCapital", label: "Share Capital", icon: Share2, aliases: ["shares", "sharecapital", "share capital", "certificates"] },
+  { key: "Banking", label: "Banking", icon: Landmark, aliases: ["bank", "banking"] },
+  { key: "Tax", label: "Tax", icon: Receipt, aliases: ["tax", "cra", "hst", "corporate_tax"] },
+  { key: "Contracts", label: "Contracts", icon: FileSignature, aliases: ["contracts", "agreements", "intercompany"] },
+  { key: "Policies", label: "Policies", icon: ShieldCheck, aliases: ["policies", "compliance", "iso"] },
+  { key: "General", label: "General", icon: Folder, aliases: ["general", "misc"] },
+];
+
+function canonicalizeFolder(folderRaw: string) {
+  const f = safeLower(folderRaw).replace(/\s+/g, "");
+  const found = CANONICAL_FOLDERS.find((c) => c.aliases.some((a) => safeLower(a).replace(/\s+/g, "") === f));
+  // also match by key directly
+  const byKey = CANONICAL_FOLDERS.find((c) => safeLower(c.key) === safeLower(folderRaw));
+  return found ?? byKey ?? { key: folderRaw, label: folderRaw, icon: Folder, aliases: [folderRaw] };
+}
+
+function formatLocal(ts: string | null) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
   return d.toLocaleString();
 }
 
-function bytes(n: number | null | undefined) {
-  if (!n || n <= 0) return "—";
-  const units = ["B", "KB", "MB", "GB"];
-  let v = n;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+function shortId(id: string) {
+  if (!id) return "";
+  return `${id.slice(0, 6)}…${id.slice(-4)}`;
 }
 
-function normalizeMinuteBookStoragePath(storagePath: string | null) {
-  if (!storagePath) return null;
-  return storagePath.replace(/^minute_book\//, "");
-}
-
-function safeFolderFromPath(path: string | null) {
-  if (!path) return "Unsorted";
-  const p = path.replace(/^\/+/, "");
-  const first = p.split("/")[0]?.trim();
-  return first && first.length > 0 ? first : "Unsorted";
-}
-
-function folderForMinuteBook(storagePath: string | null) {
-  // Prevent “minute_book” showing up as a fake folder if some rows store prefixed paths
-  const p = normalizeMinuteBookStoragePath(storagePath);
-  return safeFolderFromPath(p);
-}
-
-function folderForGeneric(path: string | null) {
-  return safeFolderFromPath(path);
-}
-
-/** Oasis OS Signature: icon + subtle glow + gold accent when verified/signed */
-function RegistryGlyph({
-  kind,
-  verified,
-}: {
-  kind: "minute" | "verified" | "receipt" | "certificate" | "resolution" | "ledger" | "generic";
-  verified?: boolean;
-}) {
-  const gold = !!verified;
-
-  const ring = gold
-    ? "ring-amber-200/25 bg-amber-200/10"
-    : "ring-white/10 bg-white/5";
-
-  const glow = gold
-    ? "shadow-[0_0_0_1px_rgba(251,191,36,0.15),0_0_30px_rgba(251,191,36,0.10)]"
-    : "";
-
-  const stroke = gold ? "rgba(251,191,36,0.85)" : "rgba(255,255,255,0.65)";
-  const fill = gold ? "rgba(251,191,36,0.10)" : "rgba(255,255,255,0.08)";
-
-  const Icon = () => {
-    switch (kind) {
-      case "certificate":
-        return (
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-            <path d="M7 3h10a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" stroke={stroke} strokeWidth="1.6" />
-            <path d="M9 7h6" stroke={stroke} strokeWidth="1.6" strokeLinecap="round" />
-            <path d="M9 10h8" stroke={stroke} strokeWidth="1.6" strokeLinecap="round" />
-            <path d="M9 13h5" stroke={stroke} strokeWidth="1.6" strokeLinecap="round" />
-            <path d="M12 16v5l2-1 2 1v-5" stroke={stroke} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        );
-      case "resolution":
-        return (
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-            <path d="M7 3h7l3 3v15a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" stroke={stroke} strokeWidth="1.6" />
-            <path d="M14 3v4a1 1 0 0 0 1 1h4" stroke={stroke} strokeWidth="1.6" />
-            <path d="M8.5 12.2 10.6 14.3 15.5 9.4" stroke={stroke} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        );
-      case "receipt":
-        return (
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-            <path d="M7 3h10a2 2 0 0 1 2 2v16l-2-1-2 1-2-1-2 1-2-1-2 1V5a2 2 0 0 1 2-2Z" stroke={stroke} strokeWidth="1.6" />
-            <path d="M9 8h6" stroke={stroke} strokeWidth="1.6" strokeLinecap="round" />
-            <path d="M9 11h8" stroke={stroke} strokeWidth="1.6" strokeLinecap="round" />
-            <path d="M9 14h5" stroke={stroke} strokeWidth="1.6" strokeLinecap="round" />
-          </svg>
-        );
-      case "minute":
-        return (
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-            <path d="M7 3h7l3 3v15a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" stroke={stroke} strokeWidth="1.6" />
-            <path d="M14 3v4a1 1 0 0 0 1 1h4" stroke={stroke} strokeWidth="1.6" />
-            <path d="M9 11h6" stroke={stroke} strokeWidth="1.6" strokeLinecap="round" />
-            <path d="M9 14h8" stroke={stroke} strokeWidth="1.6" strokeLinecap="round" />
-            <path d="M9 17h5" stroke={stroke} strokeWidth="1.6" strokeLinecap="round" />
-          </svg>
-        );
-      case "ledger":
-        return (
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-            <path d="M6 4h11a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" stroke={stroke} strokeWidth="1.6" />
-            <path d="M8 8h9" stroke={stroke} strokeWidth="1.6" strokeLinecap="round" />
-            <path d="M8 11h7" stroke={stroke} strokeWidth="1.6" strokeLinecap="round" />
-            <path d="M8 14h9" stroke={stroke} strokeWidth="1.6" strokeLinecap="round" />
-          </svg>
-        );
-      case "verified":
-      default:
-        return (
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-            <path
-              d="M12 2l2.1 2.2 3-.2.9 2.9 2.6 1.4-1.3 2.6 1.3 2.6-2.6 1.4-.9 2.9-3-.2L12 22l-2.1-2.2-3 .2-.9-2.9-2.6-1.4 1.3-2.6-1.3-2.6L6 6.9 6.9 4l3 .2L12 2Z"
-              stroke={stroke}
-              strokeWidth="1.6"
-              fill={fill}
-            />
-            <path d="M8.7 12.3 10.7 14.3 15.7 9.3" stroke={stroke} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        );
-    }
-  };
-
-  return (
-    <div className={cx("h-9 w-9 rounded-2xl ring-1 grid place-items-center", ring, glow)}>
-      <Icon />
-    </div>
-  );
-}
-
-function isVerifiedMinuteBook(r: MinuteBookEntry) {
-  const s = (r.registry_status || "").toLowerCase();
-  const src = (r.source || "").toLowerCase();
-  return s.includes("verified") || s.includes("signed") || src.includes("signed") || !!r.pdf_hash;
-}
-
-function minuteKind(r: MinuteBookEntry): "minute" | "resolution" | "generic" {
-  const t = (r.entry_type || "").toLowerCase();
-  const s = (r.section_name || "").toLowerCase();
-  const title = (r.title || "").toLowerCase();
-  if (t.includes("resolution") || title.includes("resolution")) return "resolution";
-  if (s.includes("minutes") || title.includes("minutes")) return "minute";
-  return "minute";
-}
-
-function verifiedKind(r: VerifiedDocument): "verified" | "certificate" | "receipt" | "generic" {
-  const c = (r.document_class || "").toLowerCase();
-  const p = (r.document_purpose || "").toLowerCase();
-  const m = (r.mime_type || "").toLowerCase();
-  const title = (r.title || "").toLowerCase();
-
-  if (c.includes("certificate") || p.includes("certificate") || title.includes("certificate")) return "certificate";
-  if (c.includes("receipt") || p.includes("receipt") || title.includes("receipt") || c.includes("invoice")) return "receipt";
-  if (m.includes("pdf")) return "verified";
-  return "verified";
-}
-
-function isVerifiedDoc(r: VerifiedDocument) {
-  const v = (r.verification_level || "").toLowerCase();
-  return v.includes("verified") || v.includes("signed") || !!r.signed_at || !!r.envelope_id || !!r.file_hash;
-}
-
-function ledgerStatusBadge(status: string | null) {
-  const s = (status || "").toLowerCase();
-  if (s.includes("approved")) return { label: "Approved", cls: "bg-amber-200/10 text-amber-200 ring-amber-200/20" };
-  if (s.includes("draft")) return { label: "Drafted", cls: "bg-white/5 text-white/55 ring-white/10" };
-  if (s.includes("rejected")) return { label: "Rejected", cls: "bg-red-400/10 text-red-300 ring-red-300/20" };
-  return { label: status || "Unknown", cls: "bg-white/5 text-white/45 ring-white/10" };
+function statusPill(status: string | null) {
+  const s = safeLower(status);
+  if (s === "approved") return { label: "Approved", tone: "bg-emerald-500/10 text-emerald-200 border-emerald-400/20" };
+  if (s === "drafted" || s === "draft") return { label: "Draft", tone: "bg-slate-500/10 text-slate-200 border-slate-400/20" };
+  if (s === "rejected") return { label: "Rejected", tone: "bg-rose-500/10 text-rose-200 border-rose-400/20" };
+  if (s === "pending") return { label: "Pending", tone: "bg-amber-500/10 text-amber-200 border-amber-400/20" };
+  return { label: status ?? "—", tone: "bg-white/5 text-white/70 border-white/10" };
 }
 
 export default function CIArchivePage() {
-  const supabase = useMemo(() => supabaseBrowser(), []);
-  const [tab, setTab] = useState<TabKey>("minute_book");
+  const supabase = supabaseBrowser();
 
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<TabKey>("minute_book");
+  const [activeFolder, setActiveFolder] = useState<string>("All");
+  const [search, setSearch] = useState("");
 
   const [minuteBook, setMinuteBook] = useState<MinuteBookEntry[]>([]);
   const [verified, setVerified] = useState<VerifiedDocument[]>([]);
   const [ledger, setLedger] = useState<GovernanceLedgerRow[]>([]);
 
-  const [folder, setFolder] = useState<string>("All");
-  const [query, setQuery] = useState("");
-
+  const [activeEntity, setActiveEntity] = useState<string>("holdings"); // keep OS-consistent default
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
-  const [pdfBusy, setPdfBusy] = useState(false);
-  const lastPdfKey = useRef<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
 
-  // Map governance_ledger.id -> minute_book_entries row (archive evidence)
-  const archiveByLedgerId = useMemo(() => {
-    const m = new Map<string, MinuteBookEntry>();
-    for (const r of minuteBook) {
-      if (r.source_record_id) m.set(r.source_record_id, r);
-    }
-    return m;
-  }, [minuteBook]);
+  const hasLoadedRef = useRef(false);
 
   useEffect(() => {
-    let cancelled = false;
+    if (hasLoadedRef.current) return;
+    hasLoadedRef.current = true;
 
-    async function load() {
+    (async () => {
       setLoading(true);
-      setError(null);
+      setErr(null);
 
       try {
+        // Minute Book
         const mb = await supabase
           .from("minute_book_entries")
           .select(
-            "id,title,storage_path,file_name,entity_key,entry_type,section_name,notes,pdf_hash,registry_status,source,source_record_id,source_envelope_id,created_at,updated_at"
+            "id,title,entity_key,storage_path,file_name,entry_type,section_name,notes,pdf_hash,registry_status,source,source_record_id,source_envelope_id,created_at,updated_at"
           )
           .order("created_at", { ascending: false });
 
         if (mb.error) throw mb.error;
 
+        // Verified
         const vd = await supabase
           .from("verified_documents")
           .select(
-            "id,title,storage_bucket,storage_path,file_hash,file_size,mime_type,entity_slug,document_class,document_purpose,verification_level,envelope_id,signed_at,created_at,updated_at"
+            "id,title,storage_bucket,storage_path,file_hash,file_name,verified_by,verification_level,envelope_id,signed_at,created_at,updated_at"
           )
           .order("created_at", { ascending: false });
 
         if (vd.error) throw vd.error;
 
-        // Governance ledger: this is where CI-Alchemy drafts live.
-        // Showing this tab removes the confusion without touching Forge.
+        // Ledger (Alchemy drafts live here)
         const gl = await supabase
           .from("governance_ledger")
           .select("id,title,status,source,created_at")
+          .eq("source", "ci-alchemy")
           .order("created_at", { ascending: false })
-          .limit(250);
+          .limit(200);
 
         if (gl.error) throw gl.error;
 
-        if (!cancelled) {
-          setMinuteBook((mb.data as MinuteBookEntry[]) ?? []);
-          setVerified((vd.data as VerifiedDocument[]) ?? []);
-          setLedger((gl.data as GovernanceLedgerRow[]) ?? []);
-        }
+        setMinuteBook((mb.data ?? []) as MinuteBookEntry[]);
+        setVerified((vd.data ?? []) as VerifiedDocument[]);
+        setLedger((gl.data ?? []) as GovernanceLedgerRow[]);
       } catch (e: any) {
-        if (!cancelled) setError(e?.message ?? "Failed to load archive.");
+        setErr(e?.message ?? "Failed to load CI-Archive data.");
       } finally {
-        if (!cancelled) setLoading(false);
+        setLoading(false);
       }
-    }
-
-    load();
-    return () => {
-      cancelled = true;
-    };
+    })();
   }, [supabase]);
 
-  useEffect(() => {
-    setFolder("All");
-    setQuery("");
-    setSelectedId(null);
-    setPdfUrl(null);
-    lastPdfKey.current = null;
-  }, [tab]);
-
-  const activeRows = useMemo(() => {
-    if (tab === "minute_book") return minuteBook;
-    if (tab === "verified") return verified;
-    return ledger;
-  }, [tab, minuteBook, verified, ledger]);
-
-  const folders = useMemo(() => {
+  // Which governance_ledger rows have been archived into minute_book_entries?
+  const archivedLedgerIds = useMemo(() => {
     const set = new Set<string>();
-    for (const r of activeRows as any[]) {
-      const f =
-        tab === "minute_book"
-          ? folderForMinuteBook((r as MinuteBookEntry).storage_path)
-          : tab === "verified"
-          ? folderForGeneric((r as VerifiedDocument).storage_path)
-          : "Ledger";
-      set.add(f);
+    for (const r of minuteBook) {
+      if (r.source_record_id) set.add(r.source_record_id);
     }
-    const list = Array.from(set).sort((a, b) => a.localeCompare(b));
-    return ["All", ...list];
-  }, [activeRows, tab]);
+    return set;
+  }, [minuteBook]);
 
-  const filteredRows = useMemo(() => {
-    const q = query.trim().toLowerCase();
+  const tabRows = useMemo(() => {
+    const q = safeLower(search).trim();
 
-    if (tab === "minute_book") {
-      return (minuteBook ?? []).filter((r) => {
-        const f = folderForMinuteBook(r.storage_path);
-        if (folder !== "All" && f !== folder) return false;
+    if (activeTab === "minute_book") {
+      const rows = minuteBook
+        .filter((r) => safeLower(r.entity_key) === safeLower(activeEntity))
+        .map((r) => {
+          const folder = canonicalizeFolder(inferFolderFromPath(r.storage_path));
+          return { kind: "minute_book" as const, folderKey: folder.key, folderLabel: folder.label, folderIcon: folder.icon, row: r };
+        });
+
+      return rows.filter(({ row, folderKey }) => {
+        if (activeFolder !== "All" && folderKey !== activeFolder) return false;
         if (!q) return true;
         const hay = [
-          r.title,
-          normalizeMinuteBookStoragePath(r.storage_path),
-          r.file_name,
-          r.entity_key,
-          r.entry_type,
-          r.section_name,
-          r.registry_status,
-          r.source,
-          r.source_record_id,
-          r.source_envelope_id,
-          r.notes,
-          r.pdf_hash,
-          r.id,
+          row.title,
+          row.storage_path,
+          row.file_name,
+          row.entry_type,
+          row.section_name,
+          row.registry_status,
+          row.source,
+          row.notes,
+          row.pdf_hash,
+          row.id,
         ]
           .filter(Boolean)
           .join(" ")
@@ -384,23 +266,27 @@ export default function CIArchivePage() {
       });
     }
 
-    if (tab === "verified") {
-      return (verified ?? []).filter((r) => {
-        const f = folderForGeneric(r.storage_path);
-        if (folder !== "All" && f !== folder) return false;
+    if (activeTab === "verified") {
+      const rows = verified.map((r) => {
+        // For verified docs, folder is inferred similarly from storage_path, but it might not include entity_key,
+        // so we also allow "General".
+        const folder = canonicalizeFolder(inferFolderFromPath(r.storage_path));
+        return { kind: "verified" as const, folderKey: folder.key, folderLabel: folder.label, folderIcon: folder.icon, row: r };
+      });
+
+      return rows.filter(({ row, folderKey }) => {
+        if (activeFolder !== "All" && folderKey !== activeFolder) return false;
         if (!q) return true;
         const hay = [
-          r.title,
-          r.storage_bucket,
-          r.storage_path,
-          r.entity_slug,
-          r.document_class,
-          r.document_purpose,
-          r.verification_level,
-          r.mime_type,
-          r.file_hash,
-          r.envelope_id,
-          r.id,
+          row.title,
+          row.storage_bucket,
+          row.storage_path,
+          row.file_name,
+          row.file_hash,
+          row.verification_level,
+          row.verified_by,
+          row.envelope_id,
+          row.id,
         ]
           .filter(Boolean)
           .join(" ")
@@ -410,501 +296,422 @@ export default function CIArchivePage() {
     }
 
     // ledger
-    return (ledger ?? []).filter((r) => {
-      if (folder !== "All" && folder !== "Ledger") return false;
+    const rows = ledger.map((r) => {
+      const status = safeLower(r.status);
+      const folderKey =
+        activeFolder === "All"
+          ? "All"
+          : activeFolder;
+      // We build folders separately; here we just map
+      return { kind: "ledger" as const, folderKey: status || "unknown", folderLabel: r.status ?? "Unknown", folderIcon: Gavel, row: r };
+    });
+
+    return rows.filter(({ row }) => {
+      // folder filter for ledger is handled via derived folders below using activeFolder
+      if (activeFolder !== "All") {
+        const s = safeLower(row.status);
+        if (activeFolder === "PendingArchive") {
+          if (archivedLedgerIds.has(row.id)) return false;
+        } else if (activeFolder === "Archived") {
+          if (!archivedLedgerIds.has(row.id)) return false;
+        } else if (activeFolder === "Approved") {
+          if (s !== "approved") return false;
+        } else if (activeFolder === "Draft") {
+          if (s !== "drafted" && s !== "draft") return false;
+        } else if (activeFolder === "Rejected") {
+          if (s !== "rejected") return false;
+        }
+      }
+
       if (!q) return true;
-      const hay = [r.title, r.status, r.source, r.id].filter(Boolean).join(" ").toLowerCase();
+      const hay = [row.title, row.status, row.source, row.id].filter(Boolean).join(" ").toLowerCase();
       return hay.includes(q);
     });
-  }, [tab, folder, query, minuteBook, verified, ledger]);
+  }, [activeTab, minuteBook, verified, ledger, activeEntity, activeFolder, search, archivedLedgerIds]);
+
+  const folders = useMemo(() => {
+    if (activeTab === "ledger") {
+      const all = ledger.length;
+      const approved = ledger.filter((r) => safeLower(r.status) === "approved").length;
+      const drafted = ledger.filter((r) => ["drafted", "draft"].includes(safeLower(r.status))).length;
+      const rejected = ledger.filter((r) => safeLower(r.status) === "rejected").length;
+      const archived = ledger.filter((r) => archivedLedgerIds.has(r.id)).length;
+      const pendingArchive = all - archived;
+
+      return [
+        { key: "All", label: "All", icon: Gavel, count: all },
+        { key: "PendingArchive", label: "Pending Archive", icon: FileText, count: pendingArchive },
+        { key: "Archived", label: "Archived", icon: FileCheck2, count: archived },
+        { key: "Approved", label: "Approved", icon: ShieldCheck, count: approved },
+        { key: "Draft", label: "Draft", icon: FileText, count: drafted },
+        { key: "Rejected", label: "Rejected", icon: Gavel, count: rejected },
+      ];
+    }
+
+    // Minute book / verified: enterprise taxonomy + counts from data
+    const counts = new Map<string, number>();
+
+    const relevant =
+      activeTab === "minute_book"
+        ? minuteBook.filter((r) => safeLower(r.entity_key) === safeLower(activeEntity)).map((r) => canonicalizeFolder(inferFolderFromPath(r.storage_path)).key)
+        : verified.map((r) => canonicalizeFolder(inferFolderFromPath(r.storage_path)).key);
+
+    for (const k of relevant) counts.set(k, (counts.get(k) ?? 0) + 1);
+
+    // include any unknown folders as well (in case someone uploads to new folder)
+    const discovered = Array.from(counts.keys())
+      .filter((k) => !CANONICAL_FOLDERS.some((c) => c.key === k))
+      .sort((a, b) => a.localeCompare(b))
+      .map((k) => ({ key: k, label: k, icon: Folder, count: counts.get(k) ?? 0 }));
+
+    const canonical = CANONICAL_FOLDERS.map((c) => ({
+      key: c.key,
+      label: c.label,
+      icon: c.icon,
+      count: counts.get(c.key) ?? 0,
+    }));
+
+    const allCount = relevant.length;
+
+    return [{ key: "All", label: "All", icon: Folder, count: allCount }, ...canonical, ...discovered];
+  }, [activeTab, minuteBook, verified, ledger, activeEntity, archivedLedgerIds]);
+
+  // Keep selected row valid when switching tabs/folders/search
+  useEffect(() => {
+    if (!selectedId) return;
+    const exists = tabRows.some((r: any) => r.row?.id === selectedId);
+    if (!exists) setSelectedId(null);
+  }, [tabRows, selectedId]);
 
   const selected = useMemo(() => {
     if (!selectedId) return null;
-    if (tab === "minute_book") return minuteBook.find((x) => x.id === selectedId) ?? null;
-    if (tab === "verified") return verified.find((x) => x.id === selectedId) ?? null;
-    return ledger.find((x) => x.id === selectedId) ?? null;
-  }, [tab, selectedId, minuteBook, verified, ledger]);
+    const found = tabRows.find((r: any) => r.row?.id === selectedId);
+    return found ?? null;
+  }, [tabRows, selectedId]);
 
-  // Build preview URL for minute_book + verified docs (ledger drafts do not preview here)
-  useEffect(() => {
-    let cancelled = false;
+  // UI bits
+  const TabButton = ({ k, label }: { k: TabKey; label: string }) => (
+    <button
+      onClick={() => {
+        setActiveTab(k);
+        setActiveFolder("All");
+        setSelectedId(null);
+        setSearch("");
+      }}
+      className={cx(
+        "px-3 py-1.5 rounded-full text-xs border transition",
+        activeTab === k
+          ? "bg-[#d6b25e]/15 text-[#f3d68a] border-[#d6b25e]/30 shadow-[0_0_0_1px_rgba(214,178,94,0.12)]"
+          : "bg-white/5 text-white/70 border-white/10 hover:bg-white/7"
+      )}
+    >
+      {label}
+    </button>
+  );
 
-    async function buildSignedPdf() {
-      setPdfUrl(null);
-      setPdfBusy(false);
-      if (!selected) return;
+  const FolderRow = ({
+    folderKey,
+    label,
+    Icon,
+    count,
+  }: {
+    folderKey: string;
+    label: string;
+    Icon: React.ComponentType<{ className?: string }>;
+    count: number;
+  }) => (
+    <button
+      onClick={() => {
+        setActiveFolder(folderKey);
+        setSelectedId(null);
+      }}
+      className={cx(
+        "w-full flex items-center gap-2 px-3 py-2 rounded-lg border text-sm transition",
+        activeFolder === folderKey
+          ? "bg-[#d6b25e]/10 text-white border-[#d6b25e]/20 shadow-[0_0_0_1px_rgba(214,178,94,0.10)]"
+          : "bg-white/3 text-white/70 border-white/10 hover:bg-white/5"
+      )}
+    >
+      <Icon className={cx("h-4 w-4", activeFolder === folderKey ? "text-[#f3d68a]" : "text-white/55")} />
+      <span className="flex-1 truncate text-left">{label}</span>
+      <span className="text-xs px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-white/60">{count}</span>
+    </button>
+  );
 
-      // Only minute_book / verified have storage previews
-      if (tab === "ledger") return;
+  const EmptyState = ({ title, hint }: { title: string; hint?: string }) => (
+    <div className="text-sm text-white/60 px-4 py-6">
+      <div className="font-medium text-white/80">{title}</div>
+      {hint ? <div className="mt-1 text-white/50">{hint}</div> : null}
+    </div>
+  );
 
-      if (tab === "minute_book") {
-        const row = selected as MinuteBookEntry;
-        const raw = row.storage_path;
-        const path = normalizeMinuteBookStoragePath(raw);
-        if (!path) return;
-
-        const key = `minute_book::${path}`;
-        if (lastPdfKey.current === key) return;
-        lastPdfKey.current = key;
-
-        setPdfBusy(true);
-        const { data, error } = await supabase.storage.from("minute_book").createSignedUrl(path, 60 * 15);
-        setPdfBusy(false);
-
-        if (cancelled) return;
-        if (error) {
-          setPdfUrl(null);
-          return;
-        }
-        setPdfUrl(data?.signedUrl ?? null);
-        return;
-      }
-
-      const row = selected as VerifiedDocument;
-      const bucket = row.storage_bucket || "verified_documents";
-      const path = row.storage_path;
-      if (!path) return;
-
-      const key = `${bucket}::${path}`;
-      if (lastPdfKey.current === key) return;
-      lastPdfKey.current = key;
-
-      setPdfBusy(true);
-      const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 15);
-      setPdfBusy(false);
-
-      if (cancelled) return;
-      if (error) {
-        setPdfUrl(null);
-        return;
-      }
-      setPdfUrl(data?.signedUrl ?? null);
-    }
-
-    buildSignedPdf();
-    return () => {
-      cancelled = true;
-    };
-  }, [selected, tab, supabase]);
-
-  function openSignedInNewTab() {
-    if (!pdfUrl) return;
-    window.open(pdfUrl, "_blank", "noopener,noreferrer");
-  }
-
-  const ledgerPendingArchiveCount = useMemo(() => {
-    // “Pending archive” = drafted/approved in governance_ledger with no minute_book entry referencing it yet
-    let n = 0;
-    for (const r of ledger) {
-      const src = (r.source || "").toLowerCase();
-      if (!src.includes("ci-alchemy")) continue; // only the stream you care about
-      if (!archiveByLedgerId.has(r.id)) n++;
-    }
-    return n;
-  }, [ledger, archiveByLedgerId]);
+  const pageShell = "min-h-[calc(100vh-88px)] p-4 md:p-6";
+  const panelShell =
+    "rounded-2xl border border-white/10 bg-gradient-to-b from-white/5 to-black/20 shadow-[0_20px_80px_rgba(0,0,0,0.45)] overflow-hidden";
 
   return (
-    <div className="min-h-[calc(100vh-72px)] w-full">
-      {/* Header strip */}
-      <div className="px-8 pt-6">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <div className="text-[13px] text-white/60">CI-Archive</div>
-            <div className="text-[11px] text-white/35">Registry vault • strict three-column • Oasis OS signature</div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <div className="inline-flex rounded-full bg-white/5 p-1 ring-1 ring-white/10">
-              <button
-                className={cx(
-                  "px-3 py-1.5 text-[12px] rounded-full transition",
-                  tab === "minute_book" ? "bg-white/10 text-white" : "text-white/60 hover:text-white"
-                )}
-                onClick={() => setTab("minute_book")}
-              >
-                Minute Book
-              </button>
-              <button
-                className={cx(
-                  "px-3 py-1.5 text-[12px] rounded-full transition",
-                  tab === "verified" ? "bg-white/10 text-white" : "text-white/60 hover:text-white"
-                )}
-                onClick={() => setTab("verified")}
-              >
-                Verified
-              </button>
-              <button
-                className={cx(
-                  "px-3 py-1.5 text-[12px] rounded-full transition",
-                  tab === "ledger" ? "bg-white/10 text-white" : "text-white/60 hover:text-white"
-                )}
-                onClick={() => setTab("ledger")}
-              >
-                Ledger
-              </button>
+    <div className={pageShell}>
+      <div className={panelShell}>
+        {/* Header */}
+        <div className="px-5 py-4 border-b border-white/10 bg-gradient-to-r from-black/40 to-black/10">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm text-white/70">CI-Archive</div>
+              <div className="text-xs text-white/45">Registry vault · strict three-column · Oasis OS signature</div>
             </div>
 
-            <Link
-              href="/ci-archive/upload"
-              className="rounded-full bg-amber-300/10 px-3 py-1.5 text-[12px] text-amber-200 ring-1 ring-amber-200/20 hover:bg-amber-300/15"
-            >
-              Upload
-            </Link>
+            <div className="flex items-center gap-2">
+              <TabButton k="minute_book" label="Minute Book" />
+              <TabButton k="verified" label="Verified" />
+              <TabButton k="ledger" label="Ledger" />
+              <Link
+                href="/ci-archive/upload"
+                className="px-3 py-1.5 rounded-full text-xs border bg-[#d6b25e]/15 text-[#f3d68a] border-[#d6b25e]/30 hover:bg-[#d6b25e]/20 transition"
+              >
+                Upload
+              </Link>
+            </div>
           </div>
+
+          {/* Context banner */}
+          {activeTab === "ledger" ? (
+            <div className="mt-3 text-xs text-white/60 bg-black/20 border border-white/10 rounded-xl px-4 py-3">
+              <span className="text-[#f3d68a] font-medium">Alchemy drafts live here.</span>{" "}
+              Archive appears in <span className="text-white/80">Minute Book</span> only after signature routing creates a{" "}
+              <code className="text-white/70">minute_book_entries</code> row linked by{" "}
+              <code className="text-white/70">source_record_id</code>.
+              <div className="mt-1 text-white/45">
+                Pending archive (ci-alchemy stream):{" "}
+                <span className="text-white/80 font-medium">{ledger.filter((r) => !archivedLedgerIds.has(r.id)).length}</span>
+              </div>
+            </div>
+          ) : activeTab === "minute_book" ? (
+            <div className="mt-3 text-xs text-white/60 bg-black/20 border border-white/10 rounded-xl px-4 py-3">
+              <span className="text-[#f3d68a] font-medium">Digital Minute Book Registry.</span>{" "}
+              These are the archived, indexed records of the corporation minute book (not drafts). Folder taxonomy is canonical and
+              always visible for enterprise clarity.
+            </div>
+          ) : (
+            <div className="mt-3 text-xs text-white/60 bg-black/20 border border-white/10 rounded-xl px-4 py-3">
+              <span className="text-[#f3d68a] font-medium">Verified Registry.</span>{" "}
+              Signed/verified artifacts with hashes, envelopes, and verification metadata (audit-ready).
+            </div>
+          )}
         </div>
 
-        {/* Clarity strip for your exact pain point */}
-        {tab === "ledger" ? (
-          <div className="mt-4 rounded-2xl bg-black/30 ring-1 ring-amber-200/10 px-4 py-3">
-            <div className="text-[12px] text-white/70">
-              <span className="text-amber-200">Alchemy drafts live here</span>. Archive appears in Minute Book only after signature routing creates a
-              minute_book_entries row (linked by <span className="font-mono text-white/70">source_record_id</span>).
-            </div>
-            <div className="mt-1 text-[11px] text-white/35">
-              Pending archive (ci-alchemy stream): <span className="text-white/70">{ledgerPendingArchiveCount}</span>
-            </div>
-          </div>
-        ) : null}
-      </div>
-
-      {/* 3-column canonical surface */}
-      <div className="px-8 pb-10 pt-5">
-        <div className="rounded-3xl bg-black/30 ring-1 ring-white/10 shadow-[0_20px_80px_rgba(0,0,0,0.55)]">
-          {/* Top bar */}
-          <div className="flex items-center justify-between gap-3 px-5 py-4">
-            <div className="flex items-center gap-3">
-              <div className="h-2 w-2 rounded-full bg-amber-300/80" />
-              <div className="text-[12px] text-white/70">
-                {tab === "minute_book"
-                  ? "Minute Book Registry"
-                  : tab === "verified"
-                  ? "Verified Registry"
-                  : "Governance Ledger (Drafts / Approvals)"}
+        {/* Main 3-column surface */}
+        <div className="grid grid-cols-12 gap-4 p-4 md:p-5">
+          {/* Left: folders */}
+          <div className="col-span-12 md:col-span-3">
+            <div className="rounded-2xl border border-white/10 bg-black/25 overflow-hidden">
+              <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between">
+                <div className="text-xs text-white/55 tracking-wide">FOLDERS</div>
+                {activeTab === "minute_book" ? (
+                  <div className="text-[11px] text-white/50">
+                    Entity: <span className="text-white/75 font-medium">{activeEntity}</span>
+                  </div>
+                ) : null}
               </div>
-            </div>
 
-            <div className="w-[420px] max-w-full">
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder={
-                  tab === "ledger"
-                    ? "Search title, status, id…"
-                    : "Search title, path, hash, status…"
-                }
-                className="w-full rounded-xl bg-white/5 px-4 py-2 text-[12px] text-white/80 placeholder:text-white/30 ring-1 ring-white/10 focus:outline-none focus:ring-amber-200/20"
-              />
+              <div className="p-2 space-y-2 max-h-[56vh] overflow-auto">
+                {folders.map((f) => (
+                  <FolderRow key={f.key} folderKey={f.key} label={f.label} Icon={f.icon} count={f.count} />
+                ))}
+              </div>
+
+              {activeTab === "minute_book" ? (
+                <div className="px-4 py-3 border-t border-white/10 text-[11px] text-white/45">
+                  This is the <span className="text-white/70">minute book</span>. Not drafts. Drafts live in{" "}
+                  <span className="text-white/70">Ledger</span>.
+                </div>
+              ) : null}
             </div>
           </div>
 
-          <div className="grid grid-cols-12 gap-0 px-5 pb-5">
-            {/* LEFT: Folders */}
-            <div className="col-span-3 pr-4">
-              <div className="rounded-2xl bg-white/3 ring-1 ring-amber-200/10">
-                <div className="px-4 py-3 text-[11px] tracking-wide text-white/45">FOLDERS</div>
-                <div className="px-2 pb-2">
-                  {folders.map((f) => (
-                    <button
-                      key={f}
-                      onClick={() => setFolder(f)}
-                      className={cx(
-                        "w-full text-left rounded-xl px-3 py-2 text-[12px] transition",
-                        folder === f
-                          ? "bg-amber-200/10 text-amber-200 ring-1 ring-amber-200/20"
-                          : "text-white/70 hover:bg-white/5"
-                      )}
-                    >
-                      {f}
-                    </button>
-                  ))}
+          {/* Middle: entries */}
+          <div className="col-span-12 md:col-span-5">
+            <div className="rounded-2xl border border-white/10 bg-black/25 overflow-hidden">
+              <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between gap-3">
+                <div className="text-xs text-white/55 tracking-wide">
+                  ENTRIES <span className="text-white/35">·</span>{" "}
+                  <span className="text-white/70">{tabRows.length}</span>
+                </div>
+
+                <div className="relative w-full max-w-[320px]">
+                  <Search className="absolute left-3 top-2.5 h-4 w-4 text-white/35" />
+                  <input
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder={
+                      activeTab === "ledger"
+                        ? "Search title, status, id…"
+                        : activeTab === "verified"
+                        ? "Search title, path, hash…"
+                        : "Search title, folder, path, hash…"
+                    }
+                    className="w-full pl-9 pr-3 py-2 rounded-xl text-sm bg-black/40 border border-white/10 text-white/80 placeholder:text-white/35 focus:outline-none focus:ring-2 focus:ring-[#d6b25e]/20"
+                  />
                 </div>
               </div>
-            </div>
 
-            {/* MID: Entries */}
-            <div className="col-span-5 pr-4">
-              <div className="rounded-2xl bg-white/3 ring-1 ring-amber-200/10">
-                <div className="flex items-center justify-between px-4 py-3">
-                  <div className="text-[11px] tracking-wide text-white/45">ENTRIES</div>
-                  <div className="text-[11px] text-white/35">{filteredRows.length} items</div>
-                </div>
+              <div className="max-h-[56vh] overflow-auto">
+                {loading ? (
+                  <EmptyState title="Loading registry…" />
+                ) : err ? (
+                  <EmptyState title="Failed to load CI-Archive." hint={err} />
+                ) : tabRows.length === 0 ? (
+                  <EmptyState
+                    title="No entries found."
+                    hint={
+                      activeTab === "minute_book"
+                        ? "If you expect items here, confirm minute_book_entries has rows for this entity_key."
+                        : activeTab === "verified"
+                        ? "If you expect items here, confirm verified_documents has rows."
+                        : "If you expect items here, confirm governance_ledger rows exist for source = 'ci-alchemy'."
+                    }
+                  />
+                ) : (
+                  <div className="p-2 space-y-2">
+                    {tabRows.map((item: any) => {
+                      if (item.kind === "minute_book") {
+                        const r: MinuteBookEntry = item.row;
+                        const Icon = item.folderIcon ?? FileText;
+                        const pill = statusPill(r.registry_status ?? r.entry_type ?? "—");
+                        return (
+                          <button
+                            key={r.id}
+                            onClick={() => setSelectedId(r.id)}
+                            className={cx(
+                              "w-full text-left rounded-2xl border px-4 py-3 transition",
+                              selectedId === r.id
+                                ? "bg-white/6 border-[#d6b25e]/25 shadow-[0_0_0_1px_rgba(214,178,94,0.12)]"
+                                : "bg-white/3 border-white/10 hover:bg-white/5"
+                            )}
+                          >
+                            <div className="flex items-start gap-3">
+                              <div className="mt-0.5 h-8 w-8 rounded-xl bg-black/35 border border-white/10 flex items-center justify-center">
+                                <Icon className="h-4 w-4 text-[#f3d68a]" />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <div className="font-medium text-white/90 truncate">{r.title ?? "Untitled"}</div>
+                                  <span className={cx("text-[11px] px-2 py-0.5 rounded-full border", pill.tone)}>
+                                    {pill.label}
+                                  </span>
+                                </div>
+                                <div className="mt-1 text-xs text-white/50 truncate">
+                                  {normalizeMinuteBookPath(r.storage_path) || "—"}
+                                </div>
+                                <div className="mt-1 text-[11px] text-white/35">
+                                  {item.folderLabel} · {formatLocal(r.created_at)}
+                                </div>
+                              </div>
+                              <div className="text-[11px] text-white/40">{shortId(r.id)}</div>
+                            </div>
+                          </button>
+                        );
+                      }
 
-                <div className="max-h-[66vh] overflow-auto px-2 pb-2">
-                  {loading ? (
-                    <div className="px-3 py-6 text-[12px] text-white/40">Loading…</div>
-                  ) : error ? (
-                    <div className="px-3 py-6 text-[12px] text-red-300/80">{error}</div>
-                  ) : filteredRows.length === 0 ? (
-                    <div className="px-3 py-6 text-[12px] text-white/35">No entries found.</div>
-                  ) : (
-                    (filteredRows as any[]).map((r) => {
-                      const id = r.id as string;
-                      const isActive = selectedId === id;
+                      if (item.kind === "verified") {
+                        const r: VerifiedDocument = item.row;
+                        const Icon = item.folderIcon ?? FileCheck2;
+                        const pill = statusPill(r.verification_level ?? "Verified");
+                        return (
+                          <button
+                            key={r.id}
+                            onClick={() => setSelectedId(r.id)}
+                            className={cx(
+                              "w-full text-left rounded-2xl border px-4 py-3 transition",
+                              selectedId === r.id
+                                ? "bg-white/6 border-[#d6b25e]/25 shadow-[0_0_0_1px_rgba(214,178,94,0.12)]"
+                                : "bg-white/3 border-white/10 hover:bg-white/5"
+                            )}
+                          >
+                            <div className="flex items-start gap-3">
+                              <div className="mt-0.5 h-8 w-8 rounded-xl bg-black/35 border border-white/10 flex items-center justify-center">
+                                <Icon className="h-4 w-4 text-[#f3d68a]" />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <div className="font-medium text-white/90 truncate">{r.title ?? "Untitled"}</div>
+                                  <span className={cx("text-[11px] px-2 py-0.5 rounded-full border", pill.tone)}>
+                                    {pill.label}
+                                  </span>
+                                </div>
+                                <div className="mt-1 text-xs text-white/50 truncate">{r.storage_path ?? "—"}</div>
+                                <div className="mt-1 text-[11px] text-white/35">
+                                  {formatLocal(r.created_at)} · hash {r.file_hash ? shortId(r.file_hash) : "—"}
+                                </div>
+                              </div>
+                              <div className="text-[11px] text-white/40">{shortId(r.id)}</div>
+                            </div>
+                          </button>
+                        );
+                      }
 
-                      const title =
-                        (r.title as string | null) ||
-                        (r.storage_path as string | null) ||
-                        "Untitled";
-
-                      const path =
-                        tab === "minute_book"
-                          ? normalizeMinuteBookStoragePath((r as MinuteBookEntry).storage_path) || "—"
-                          : tab === "verified"
-                          ? (r.storage_path as string | null) || "—"
-                          : "governance_ledger";
-
-                      const verifiedAccent =
-                        tab === "minute_book"
-                          ? isVerifiedMinuteBook(r as MinuteBookEntry)
-                          : tab === "verified"
-                          ? isVerifiedDoc(r as VerifiedDocument)
-                          : !!archiveByLedgerId.has(id);
-
-                      const glyphKind =
-                        tab === "minute_book"
-                          ? minuteKind(r as MinuteBookEntry)
-                          : tab === "verified"
-                          ? verifiedKind(r as VerifiedDocument)
-                          : "ledger";
-
-                      const meta =
-                        tab === "minute_book"
-                          ? [
-                              (r.registry_status as string | null) || "registered",
-                              (r.entry_type as string | null) || "entry",
-                              (r.entity_key as string | null) || null,
-                            ]
-                              .filter(Boolean)
-                              .join(" • ")
-                          : tab === "verified"
-                          ? [
-                              (r.document_class as string | null) || "document",
-                              (r.verification_level as string | null) || null,
-                              (r.entity_slug as string | null) || null,
-                            ]
-                              .filter(Boolean)
-                              .join(" • ")
-                          : [
-                              (r.status as string | null) || "—",
-                              (r.source as string | null) || null,
-                              archiveByLedgerId.has(id) ? "archived" : "pending archive",
-                            ]
-                              .filter(Boolean)
-                              .join(" • ");
-
-                      const rightBadge =
-                        tab === "ledger"
-                          ? archiveByLedgerId.has(id)
-                            ? { label: "Archived", cls: "bg-amber-200/10 text-amber-200 ring-amber-200/20" }
-                            : { label: "Pending", cls: "bg-white/5 text-white/45 ring-white/10" }
-                          : verifiedAccent
-                          ? { label: "Verified", cls: "bg-amber-200/10 text-amber-200 ring-amber-200/20" }
-                          : { label: "Registered", cls: "bg-white/5 text-white/40 ring-white/10" };
-
+                      // ledger row
+                      const r: GovernanceLedgerRow = item.row;
+                      const pill = statusPill(r.status);
+                      const archived = archivedLedgerIds.has(r.id);
                       return (
                         <button
-                          key={id}
-                          onClick={() => setSelectedId(id)}
+                          key={r.id}
+                          onClick={() => setSelectedId(r.id)}
                           className={cx(
-                            "w-full text-left rounded-2xl px-3 py-3 mb-2 transition ring-1",
-                            isActive
-                              ? "bg-amber-200/10 ring-amber-200/25"
-                              : "bg-white/0 ring-white/5 hover:bg-white/5 hover:ring-white/10"
+                            "w-full text-left rounded-2xl border px-4 py-3 transition",
+                            selectedId === r.id
+                              ? "bg-white/6 border-[#d6b25e]/25 shadow-[0_0_0_1px_rgba(214,178,94,0.12)]"
+                              : "bg-white/3 border-white/10 hover:bg-white/5"
                           )}
                         >
                           <div className="flex items-start gap-3">
-                            <RegistryGlyph
-                              kind={glyphKind as any}
-                              verified={verifiedAccent}
-                            />
-
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="min-w-0">
-                                  <div className="truncate text-[13px] text-white/85">{title}</div>
-                                  <div className="truncate text-[11px] text-white/35">{path}</div>
-                                </div>
-
-                                <div className="shrink-0 flex items-center gap-2">
-                                  <span className={cx("rounded-full px-2 py-1 text-[10px] ring-1", rightBadge.cls)}>
-                                    {rightBadge.label}
-                                  </span>
-                                  <span className="text-[11px] text-white/25">{shortId(id)}</span>
-                                </div>
-                              </div>
-
-                              <div className="mt-2 text-[11px] text-white/40">{meta || "—"}</div>
+                            <div className="mt-0.5 h-8 w-8 rounded-xl bg-black/35 border border-white/10 flex items-center justify-center">
+                              <Gavel className="h-4 w-4 text-[#f3d68a]" />
                             </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2">
+                                <div className="font-medium text-white/90 truncate">{r.title ?? "Untitled Draft"}</div>
+                                <span className={cx("text-[11px] px-2 py-0.5 rounded-full border", pill.tone)}>{pill.label}</span>
+                                <span
+                                  className={cx(
+                                    "text-[11px] px-2 py-0.5 rounded-full border",
+                                    archived
+                                      ? "bg-emerald-500/10 text-emerald-200 border-emerald-400/20"
+                                      : "bg-white/5 text-white/60 border-white/10"
+                                  )}
+                                >
+                                  {archived ? "Archived" : "Pending"}
+                                </span>
+                              </div>
+                              <div className="mt-1 text-xs text-white/50 truncate">governance_ledger · source {r.source ?? "—"}</div>
+                              <div className="mt-1 text-[11px] text-white/35">{formatLocal(r.created_at)}</div>
+                            </div>
+                            <div className="text-[11px] text-white/40">{shortId(r.id)}</div>
                           </div>
                         </button>
                       );
-                    })
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* RIGHT: Details */}
-            <div className="col-span-4">
-              <div className="rounded-2xl bg-white/3 ring-1 ring-amber-200/10">
-                <div className="px-4 py-3 text-[11px] tracking-wide text-white/45">DETAILS</div>
-
-                {!selected ? (
-                  <div className="px-4 pb-4 text-[12px] text-white/35">Select an entry.</div>
-                ) : (
-                  <div className="px-4 pb-4">
-                    {/* Title + badge */}
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="text-[14px] text-white/90">
-                        {(selected as any).title || (selected as any).storage_path || "Untitled"}
-                      </div>
-
-                      {tab === "ledger" ? (
-                        (() => {
-                          const b = ledgerStatusBadge((selected as GovernanceLedgerRow).status);
-                          return <span className={cx("rounded-full px-2 py-1 text-[10px] ring-1", b.cls)}>{b.label}</span>;
-                        })()
-                      ) : tab === "minute_book" ? (
-                        isVerifiedMinuteBook(selected as MinuteBookEntry) ? (
-                          <span className="rounded-full bg-amber-200/10 px-2 py-1 text-[10px] text-amber-200 ring-1 ring-amber-200/20">
-                            Verified
-                          </span>
-                        ) : (
-                          <span className="rounded-full bg-white/5 px-2 py-1 text-[10px] text-white/40 ring-1 ring-white/10">
-                            Registered
-                          </span>
-                        )
-                      ) : isVerifiedDoc(selected as VerifiedDocument) ? (
-                        <span className="rounded-full bg-amber-200/10 px-2 py-1 text-[10px] text-amber-200 ring-1 ring-amber-200/20">
-                          Verified
-                        </span>
-                      ) : (
-                        <span className="rounded-full bg-white/5 px-2 py-1 text-[10px] text-white/40 ring-1 ring-white/10">
-                          Registered
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="mt-2 rounded-xl bg-black/30 p-3 ring-1 ring-white/10">
-                      <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-[11px]">
-                        {tab === "minute_book" ? (
-                          <>
-                            <Field label="ID" value={(selected as MinuteBookEntry).id} mono />
-                            <Field label="Created" value={fmt((selected as MinuteBookEntry).created_at)} />
-                            <Field label="Updated" value={fmt((selected as MinuteBookEntry).updated_at)} />
-                            <Field label="Entity" value={(selected as MinuteBookEntry).entity_key} />
-                            <Field label="Entry Type" value={(selected as MinuteBookEntry).entry_type} />
-                            <Field label="Section" value={(selected as MinuteBookEntry).section_name} />
-                            <Field label="Registry" value={(selected as MinuteBookEntry).registry_status} />
-                            <Field label="Source" value={(selected as MinuteBookEntry).source} />
-                            <Field label="Ledger ID" value={(selected as MinuteBookEntry).source_record_id} mono span2 />
-                            <Field label="Envelope" value={(selected as MinuteBookEntry).source_envelope_id} mono span2 />
-                            <Field label="Hash" value={(selected as MinuteBookEntry).pdf_hash} mono span2 />
-                            <Field
-                              label="Storage Path"
-                              value={normalizeMinuteBookStoragePath((selected as MinuteBookEntry).storage_path)}
-                              mono
-                              span2
-                            />
-                          </>
-                        ) : tab === "verified" ? (
-                          <>
-                            <Field label="ID" value={(selected as VerifiedDocument).id} mono />
-                            <Field label="Created" value={fmt((selected as VerifiedDocument).created_at)} />
-                            <Field label="Signed" value={fmt((selected as VerifiedDocument).signed_at)} />
-                            <Field label="Entity" value={(selected as VerifiedDocument).entity_slug} />
-                            <Field label="Class" value={(selected as VerifiedDocument).document_class} />
-                            <Field label="Purpose" value={(selected as VerifiedDocument).document_purpose} />
-                            <Field label="Verify" value={(selected as VerifiedDocument).verification_level} />
-                            <Field label="MIME" value={(selected as VerifiedDocument).mime_type} />
-                            <Field label="Size" value={bytes((selected as VerifiedDocument).file_size)} />
-                            <Field label="Envelope" value={(selected as VerifiedDocument).envelope_id} mono />
-                            <Field label="Hash" value={(selected as VerifiedDocument).file_hash} mono span2 />
-                            <Field label="Bucket" value={(selected as VerifiedDocument).storage_bucket} mono />
-                            <Field label="Storage Path" value={(selected as VerifiedDocument).storage_path} mono span2 />
-                          </>
-                        ) : (
-                          <>
-                            <Field label="Ledger ID" value={(selected as GovernanceLedgerRow).id} mono span2 />
-                            <Field label="Created" value={fmt((selected as GovernanceLedgerRow).created_at)} />
-                            <Field label="Status" value={(selected as GovernanceLedgerRow).status} />
-                            <Field label="Source" value={(selected as GovernanceLedgerRow).source} />
-                            <Field
-                              label="Archive"
-                              value={
-                                archiveByLedgerId.has((selected as GovernanceLedgerRow).id)
-                                  ? `Archived as ${archiveByLedgerId.get((selected as GovernanceLedgerRow).id)!.id}`
-                                  : "Not yet archived"
-                              }
-                              mono
-                              span2
-                            />
-                          </>
-                        )}
-                      </div>
-
-                      {tab === "minute_book" && (selected as MinuteBookEntry).notes ? (
-                        <div className="mt-3 border-t border-white/10 pt-3">
-                          <div className="text-[11px] text-white/40">Notes</div>
-                          <div className="mt-1 text-[12px] leading-relaxed text-white/70 whitespace-pre-wrap">
-                            {(selected as MinuteBookEntry).notes}
-                          </div>
-                        </div>
-                      ) : null}
-                    </div>
-
-                    {/* Preview only for storage-backed tabs */}
-                    {tab !== "ledger" ? (
-                      <>
-                        <div className="mt-3 flex items-center gap-2">
-                          <button
-                            onClick={openSignedInNewTab}
-                            disabled={!pdfUrl || pdfBusy}
-                            className={cx(
-                              "rounded-xl px-3 py-2 text-[12px] ring-1 transition",
-                              pdfUrl && !pdfBusy
-                                ? "bg-white/5 text-white/80 ring-white/15 hover:bg-white/8"
-                                : "bg-white/3 text-white/35 ring-white/10 cursor-not-allowed"
-                            )}
-                          >
-                            {pdfBusy ? "Preparing…" : "Open PDF"}
-                          </button>
-
-                          <div className="text-[11px] text-white/30">
-                            {pdfUrl ? "Signed URL ready (15 min)" : "No preview yet"}
-                          </div>
-                        </div>
-
-                        <div className="mt-3 overflow-hidden rounded-2xl ring-1 ring-white/10 bg-black/30">
-                          <div className="px-3 py-2 text-[11px] text-white/45 border-b border-white/10">Preview</div>
-
-                          {pdfUrl ? (
-                            <iframe title="ci-archive-preview" src={pdfUrl} className="h-[360px] w-full" />
-                          ) : (
-                            <div className="px-3 py-8 text-[12px] text-white/35">
-                              Select a record with a PDF to preview.
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="mt-3 text-[11px] text-white/30">
-                          If preview is blank: it’s almost always storage policy (SELECT) or a row path/bucket mismatch — not the UI.
-                        </div>
-                      </>
-                    ) : (
-                      <div className="mt-3 text-[11px] text-white/30">
-                        Ledger drafts preview happens in the drafting/sign flow (Forge/Council). CI-Archive remains registry-only.
-                      </div>
-                    )}
+                    })}
                   </div>
                 )}
               </div>
             </div>
           </div>
 
-          <div className="px-5 pb-5">
-            <div className="h-px w-full bg-gradient-to-r from-transparent via-amber-200/10 to-transparent" />
-            <div className="mt-3 text-[11px] text-white/30">Oasis Digital Parliament • CI-Archive • registry of record</div>
+          {/* Right: details */}
+          <div className="col-span-12 md:col-span-4">
+            <div className="rounded-2xl border border-white/10 bg-black/25 overflow-hidden">
+              <div className="px-4 py-3 border-b border-white/10 text-xs text-white/55 tracking-wide">DETAILS</div>
+
+              {!selected ? (
+                <EmptyState title="Select an entry." hint="Registry-only view. No destructive actions here." />
+              ) : selected.kind === "minute_book" ? (
+                <MinuteBookDetails row={selected.row as MinuteBookEntry} />
+              ) : selected.kind === "verified" ? (
+                <VerifiedDetails row={selected.row as VerifiedDocument} />
+              ) : (
+                <LedgerDetails row={selected.row as GovernanceLedgerRow} archived={archivedLedgerIds.has((selected.row as GovernanceLedgerRow).id)} />
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -912,23 +719,118 @@ export default function CIArchivePage() {
   );
 }
 
-function Field({
-  label,
-  value,
-  mono,
-  span2,
-}: {
-  label: string;
-  value: string | null | undefined;
-  mono?: boolean;
-  span2?: boolean;
-}) {
+function DetailShell({ children }: { children: React.ReactNode }) {
+  return <div className="p-4 space-y-3 text-sm text-white/80">{children}</div>;
+}
+
+function DetailRow({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className={cx(span2 && "col-span-2")}>
-      <div className="text-[10px] uppercase tracking-wide text-white/35">{label}</div>
-      <div className={cx("mt-0.5 text-[12px] text-white/80", mono && "font-mono text-[11px] text-white/70")}>
-        {value && value.length > 0 ? value : "—"}
-      </div>
+    <div className="flex items-start justify-between gap-3">
+      <div className="text-xs text-white/45">{label}</div>
+      <div className="text-xs text-white/80 text-right break-all">{value}</div>
     </div>
+  );
+}
+
+function MinuteBookDetails({ row }: { row: MinuteBookEntry }) {
+  const folder = canonicalizeFolder(inferFolderFromPath(row.storage_path));
+  const pill = statusPill(row.registry_status ?? row.entry_type ?? "—");
+
+  return (
+    <DetailShell>
+      <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-white/90 truncate">{row.title ?? "Untitled"}</div>
+            <div className="mt-1 text-xs text-white/50 truncate">{normalizeMinuteBookPath(row.storage_path) || "—"}</div>
+            <div className="mt-2 text-[11px] text-white/40">
+              <span className="text-white/65">{folder.label}</span> · {formatLocal(row.created_at)}
+            </div>
+          </div>
+          <span className={cx("text-[11px] px-2 py-0.5 rounded-full border", pill.tone)}>{pill.label}</span>
+        </div>
+      </div>
+
+      <DetailRow label="Entry ID" value={row.id} />
+      <DetailRow label="Entity" value={row.entity_key ?? "—"} />
+      <DetailRow label="Folder" value={folder.label} />
+      <DetailRow label="File name" value={row.file_name ?? "—"} />
+      <DetailRow label="PDF hash" value={row.pdf_hash ? row.pdf_hash : "—"} />
+      <DetailRow label="Source" value={row.source ?? "—"} />
+      <DetailRow label="Source record (ledger)" value={row.source_record_id ?? "—"} />
+      <DetailRow label="Envelope" value={row.source_envelope_id ?? "—"} />
+      {row.notes ? (
+        <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+          <div className="text-xs text-white/45">Notes</div>
+          <div className="mt-2 text-xs text-white/75 whitespace-pre-wrap">{row.notes}</div>
+        </div>
+      ) : null}
+    </DetailShell>
+  );
+}
+
+function VerifiedDetails({ row }: { row: VerifiedDocument }) {
+  const folder = canonicalizeFolder(inferFolderFromPath(row.storage_path));
+  const pill = statusPill(row.verification_level ?? "Verified");
+
+  return (
+    <DetailShell>
+      <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-white/90 truncate">{row.title ?? "Untitled"}</div>
+            <div className="mt-1 text-xs text-white/50 truncate">{row.storage_path ?? "—"}</div>
+            <div className="mt-2 text-[11px] text-white/40">
+              <span className="text-white/65">{folder.label}</span> · {formatLocal(row.created_at)}
+            </div>
+          </div>
+          <span className={cx("text-[11px] px-2 py-0.5 rounded-full border", pill.tone)}>{pill.label}</span>
+        </div>
+      </div>
+
+      <DetailRow label="Verified ID" value={row.id} />
+      <DetailRow label="Bucket" value={row.storage_bucket ?? "—"} />
+      <DetailRow label="File name" value={row.file_name ?? "—"} />
+      <DetailRow label="File hash" value={row.file_hash ?? "—"} />
+      <DetailRow label="Verification level" value={row.verification_level ?? "—"} />
+      <DetailRow label="Envelope" value={row.envelope_id ?? "—"} />
+      <DetailRow label="Signed at" value={row.signed_at ? formatLocal(row.signed_at) : "—"} />
+    </DetailShell>
+  );
+}
+
+function LedgerDetails({ row, archived }: { row: GovernanceLedgerRow; archived: boolean }) {
+  const pill = statusPill(row.status);
+
+  return (
+    <DetailShell>
+      <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-white/90 truncate">{row.title ?? "Untitled Draft"}</div>
+            <div className="mt-1 text-xs text-white/50 truncate">governance_ledger · source {row.source ?? "—"}</div>
+            <div className="mt-2 text-[11px] text-white/40">{formatLocal(row.created_at)}</div>
+          </div>
+          <div className="flex flex-col items-end gap-2">
+            <span className={cx("text-[11px] px-2 py-0.5 rounded-full border", pill.tone)}>{pill.label}</span>
+            <span
+              className={cx(
+                "text-[11px] px-2 py-0.5 rounded-full border",
+                archived ? "bg-emerald-500/10 text-emerald-200 border-emerald-400/20" : "bg-white/5 text-white/60 border-white/10"
+              )}
+            >
+              {archived ? "Archived" : "Not yet archived"}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <DetailRow label="Ledger ID" value={row.id} />
+      <DetailRow label="Status" value={row.status ?? "—"} />
+      <DetailRow label="Source" value={row.source ?? "—"} />
+      <div className="text-[11px] text-white/45">
+        Ledger drafts preview happens in the drafting/sign flow (Forge/Council). CI-Archive remains registry-only.
+      </div>
+    </DetailShell>
   );
 }
