@@ -3,859 +3,867 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { supabaseBrowser } from "@/lib/supabase/browser";
+import {
+  Building2,
+  FileText,
+  Folder,
+  Landmark,
+  Scale,
+  ShieldCheck,
+  Users,
+  Wallet,
+  Briefcase,
+  ScrollText,
+  BadgeCheck,
+  XCircle,
+  Clock,
+  CheckCircle2,
+  Pencil,
+} from "lucide-react";
 
 /**
  * CI-Archive (Registry-only)
- * - Canonical 3-column Oasis OS surface (never stacked).
- * - Minute Book = "digital minute book" view with ALWAYS-visible canonical folders.
- * - Verified = signed/verified artifacts (audit-ready).
- * - Ledger = where CI-Alchemy drafts live (read-only visibility; does NOT touch Forge).
- * - Upload is a separate page.
+ * - Canonical 3-column Oasis OS surface (never stacked)
+ * - Minute Book = digital minute book registry (canonical folders always visible)
+ * - Verified = signed/verified artifacts registry (audit-ready)
+ * - Ledger = visibility into where Alchemy drafts live (does NOT alter Forge/Council flows)
  *
  * IMPORTANT:
- * - Do NOT depend on columns that may not exist (ex: verified_documents.file_name).
- * - Fail gracefully: keep UI + folder taxonomy visible even if a query errors.
+ * Supabase schemas/columns can drift. This page must NEVER rely on specific columns existing.
+ * So: select("*") + safe mapping + client-side filtering.
  */
 
-type MinuteBookEntry = {
-  id: string;
-  entity_key: string | null;
-  title: string | null;
-  storage_path: string | null;
-  pdf_hash: string | null;
-  registry_status: string | null;
-  source: string | null;
-  source_record_id: string | null;
-  source_envelope_id: string | null;
-  created_at: string;
-  updated_at: string | null;
-};
-
-type VerifiedDoc = {
-  id: string;
-  entity_key: string | null;
-  title: string | null;
-  storage_bucket: string | null;
-  storage_path: string | null;
-  file_hash: string | null;
-  verification_level: string | null;
-  envelope_id: string | null;
-  signed_at: string | null;
-  created_at: string;
-  updated_at: string | null;
-};
-
-type GovernanceLedgerRow = {
-  id: string;
-  title: string | null;
-  status: string | null;
-  source: string | null;
-  created_at: string;
-};
+type AnyRow = Record<string, any>;
 
 type TabKey = "minute_book" | "verified" | "ledger";
+
+type CanonFolderKey =
+  | "All"
+  | "Incorporation"
+  | "Annual Returns"
+  | "Resolutions"
+  | "Registers"
+  | "Directors & Officers"
+  | "Share Capital"
+  | "Banking"
+  | "Tax"
+  | "Contracts"
+  | "Policies"
+  | "General";
+
+const CANON_FOLDERS: Array<{
+  key: CanonFolderKey;
+  label: string;
+  icon: any;
+}> = [
+  { key: "All", label: "All", icon: Folder },
+  { key: "Incorporation", label: "Incorporation", icon: Building2 },
+  { key: "Annual Returns", label: "Annual Returns", icon: ScrollText },
+  { key: "Resolutions", label: "Resolutions", icon: FileText },
+  { key: "Registers", label: "Registers", icon: Landmark },
+  { key: "Directors & Officers", label: "Directors & Officers", icon: Users },
+  { key: "Share Capital", label: "Share Capital", icon: Wallet },
+  { key: "Banking", label: "Banking", icon: Landmark },
+  { key: "Tax", label: "Tax", icon: Scale },
+  { key: "Contracts", label: "Contracts", icon: Briefcase },
+  { key: "Policies", label: "Policies", icon: ShieldCheck },
+  { key: "General", label: "General", icon: Folder },
+];
+
+type LedgerFolderKey =
+  | "All"
+  | "Pending Archive"
+  | "Archived"
+  | "Approved"
+  | "Draft"
+  | "Rejected";
+
+const LEDGER_FOLDERS: Array<{ key: LedgerFolderKey; icon: any }> = [
+  { key: "All", icon: Folder },
+  { key: "Pending Archive", icon: Clock },
+  { key: "Archived", icon: CheckCircle2 },
+  { key: "Approved", icon: BadgeCheck },
+  { key: "Draft", icon: Pencil },
+  { key: "Rejected", icon: XCircle },
+];
 
 function cx(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(" ");
 }
 
-function fmtDT(iso: string | null | undefined) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString();
+function safeLower(v: any) {
+  return String(v ?? "").toLowerCase();
 }
 
-function shortId(id: string | null | undefined) {
-  if (!id) return "";
-  return `${id.slice(0, 8)}…${id.slice(-4)}`;
+function getId(r: AnyRow) {
+  return r.id ?? r.record_id ?? r.uuid ?? null;
 }
 
-type CanonFolder = {
-  key:
-    | "all"
-    | "incorporation"
-    | "annual_returns"
-    | "resolutions"
-    | "registers"
-    | "directors_officers"
-    | "share_capital"
-    | "banking"
-    | "tax"
-    | "contracts"
-    | "policies"
-    | "general";
-  label: string;
-  icon: string;
-  hint?: string;
-};
-
-const CANON_FOLDERS: CanonFolder[] = [
-  { key: "all", label: "All", icon: "📁" },
-  { key: "incorporation", label: "Incorporation", icon: "🏛️" },
-  { key: "annual_returns", label: "Annual Returns", icon: "🗓️" },
-  { key: "resolutions", label: "Resolutions", icon: "🧾" },
-  { key: "registers", label: "Registers", icon: "📚" },
-  { key: "directors_officers", label: "Directors & Officers", icon: "👥" },
-  { key: "share_capital", label: "Share Capital", icon: "🧩" },
-  { key: "banking", label: "Banking", icon: "🏦" },
-  { key: "tax", label: "Tax", icon: "🧮" },
-  { key: "contracts", label: "Contracts", icon: "📜" },
-  { key: "policies", label: "Policies", icon: "🛡️" },
-  { key: "general", label: "General", icon: "🗂️" },
-];
-
-function normalizeFolderName(raw: string): CanonFolder["key"] {
-  const s = (raw || "").trim().toLowerCase();
-
-  // common variants that already exist in your storage_path
-  if (s === "annualreturns" || s === "annual_returns" || s === "annual-returns" || s === "annual return" || s === "annual returns")
-    return "annual_returns";
-  if (s === "incorporation" || s === "incorp") return "incorporation";
-  if (s === "resolutions" || s === "resolution") return "resolutions";
-  if (s === "registers" || s === "registry" || s === "register") return "registers";
-  if (s === "directors" || s === "officers" || s === "directorsandofficers" || s === "directors_officers" || s === "directors-officers")
-    return "directors_officers";
-  if (s === "sharecapital" || s === "share_capital" || s === "share-capital") return "share_capital";
-  if (s === "banking" || s === "bank") return "banking";
-  if (s === "tax" || s === "taxes") return "tax";
-  if (s === "contracts" || s === "contract") return "contracts";
-  if (s === "policies" || s === "policy") return "policies";
-  if (!s) return "general";
-
-  // fallback: if something unknown shows up, keep it under General for “minute book clarity”
-  return "general";
-}
-
-function extractFolderKeyFromStoragePath(storagePath: string | null, entityKey: string | null): CanonFolder["key"] {
-  if (!storagePath) return "general";
-  let p = storagePath.trim();
-
-  // tolerate both patterns:
-  //   holdings/AnnualReturns/...
-  //   minute_book/holdings/...
-  if (p.startsWith("minute_book/")) p = p.slice("minute_book/".length);
-
-  const ek = (entityKey || "").trim();
-  if (ek && p.startsWith(`${ek}/`)) p = p.slice(ek.length + 1);
-
-  const seg = p.split("/")[0] || "";
-  return normalizeFolderName(seg);
-}
-
-function looksLikeResolutionFolder(storagePath: string | null): boolean {
-  if (!storagePath) return false;
-  return storagePath.toLowerCase().includes("/resolutions/");
-}
-
-function oasisCardBase() {
-  return cx(
-    "rounded-2xl border border-white/10 bg-gradient-to-b from-white/[0.06] to-white/[0.02]",
-    "shadow-[0_8px_50px_-20px_rgba(0,0,0,0.75)] backdrop-blur"
+function getTitle(r: AnyRow) {
+  return (
+    r.title ??
+    r.name ??
+    r.document_title ??
+    r.file_title ??
+    r.filename ??
+    r.file_name ??
+    r.storage_path ??
+    "Untitled"
   );
 }
 
-function pill(active: boolean) {
-  return cx(
-    "px-3 py-1.5 rounded-full text-xs font-semibold tracking-wide border transition",
-    active
-      ? "bg-[#caa24b]/20 border-[#caa24b]/40 text-[#f3d58a]"
-      : "bg-white/5 border-white/10 text-white/70 hover:bg-white/8"
-  );
+function getCreatedAt(r: AnyRow) {
+  return r.created_at ?? r.createdAt ?? r.inserted_at ?? r.updated_at ?? null;
 }
 
-function badge(kind: "gold" | "muted" | "warn") {
-  const base = "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] border";
-  if (kind === "gold") return cx(base, "bg-[#caa24b]/15 border-[#caa24b]/40 text-[#f3d58a]");
-  if (kind === "warn") return cx(base, "bg-amber-500/10 border-amber-400/30 text-amber-200");
-  return cx(base, "bg-white/5 border-white/10 text-white/70");
+function getStoragePath(r: AnyRow) {
+  return r.storage_path ?? r.path ?? r.file_path ?? r.storagePath ?? r.object_path ?? null;
+}
+
+function getHash(r: AnyRow) {
+  return r.pdf_hash ?? r.file_hash ?? r.hash ?? r.sha256 ?? r.document_hash ?? null;
+}
+
+function getSourceRecordId(r: AnyRow) {
+  // minute_book_entries link back to governance_ledger via this field (your fix)
+  return r.source_record_id ?? r.sourceRecordId ?? null;
+}
+
+function getEntityKeyFromRow(r: AnyRow) {
+  // could be entity_key, entity_slug, entity, or nothing
+  return r.entity_key ?? r.entityKey ?? r.entity_slug ?? r.entitySlug ?? r.entity ?? null;
+}
+
+function normalizeEntityKey(v: any) {
+  const s = String(v ?? "").trim();
+  return s.length ? s : null;
+}
+
+/**
+ * Classify a storage_path into canonical minute book folders.
+ * Works with:
+ * - holdings/AnnualReturns/...
+ * - holdings/Resolutions/...
+ * - minute_book/holdings/...
+ * - OIH/Resolutions/...
+ */
+function classifyCanonicalFolderFromPath(storagePath: string | null): CanonFolderKey {
+  if (!storagePath) return "General";
+
+  const p = storagePath.replace(/\\/g, "/");
+  const parts = p.split("/").filter(Boolean);
+
+  // Remove optional "minute_book" prefix
+  const cleaned = parts[0] === "minute_book" ? parts.slice(1) : parts;
+
+  const joined = cleaned.join("/").toLowerCase();
+
+  const has = (needle: string) => joined.includes(needle.toLowerCase());
+
+  if (has("incorporation") || has("incorp") || has("articles")) return "Incorporation";
+  if (has("annualreturns") || has("annual_returns") || has("annual return")) return "Annual Returns";
+  if (has("resolutions") || has("/resolution")) return "Resolutions";
+  if (has("register") || has("registers")) return "Registers";
+  if (has("directors") || has("officers")) return "Directors & Officers";
+  if (has("share") || has("capital") || has("securities")) return "Share Capital";
+  if (has("bank") || has("banking")) return "Banking";
+  if (has("tax") || has("hst") || has("cra")) return "Tax";
+  if (has("contract") || has("agreement") || has("loa") || has("nda")) return "Contracts";
+  if (has("policy") || has("policies")) return "Policies";
+
+  return "General";
+}
+
+function ledgerStatusKey(r: AnyRow): string {
+  return String(r.status ?? r.ledger_status ?? r.state ?? "").toUpperCase();
+}
+
+function isLedgerApproved(r: AnyRow) {
+  const s = ledgerStatusKey(r);
+  return s === "APPROVED";
+}
+
+function isLedgerDraft(r: AnyRow) {
+  const s = ledgerStatusKey(r);
+  return s === "DRAFT" || s === "DRAFTED";
+}
+
+function isLedgerRejected(r: AnyRow) {
+  const s = ledgerStatusKey(r);
+  return s === "REJECTED";
 }
 
 export default function CIArchivePage() {
-  const supabase = useMemo(() => supabaseBrowser(), []);
+  const supabase = supabaseBrowser();
 
-  // you already have an entity selector in top bar (Holdings/Lounge/etc).
-  // this page stays registry-only; we use entity_key filtering.
+  // Entity selection: try URL first, then localStorage, then default to holdings
   const [entityKey, setEntityKey] = useState<string>("holdings");
 
-  const [tab, setTab] = useState<TabKey>("minute_book");
-  const [folderKey, setFolderKey] = useState<CanonFolder["key"]>("all");
-
-  const [q, setQ] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [errText, setErrText] = useState<string | null>(null);
-
-  const [minuteBook, setMinuteBook] = useState<MinuteBookEntry[]>([]);
-  const [verified, setVerified] = useState<VerifiedDoc[]>([]);
-  const [ledger, setLedger] = useState<GovernanceLedgerRow[]>([]);
-
-  const [selected, setSelected] = useState<{ kind: TabKey; id: string } | null>(null);
-
-  const abortRef = useRef({ cancelled: false });
-
   useEffect(() => {
-    abortRef.current.cancelled = false;
+    const url = new URL(window.location.href);
+    const qEntity = url.searchParams.get("entity");
+    const lsEntity = window.localStorage.getItem("oasis_entity_key") || window.localStorage.getItem("entity_key");
+    setEntityKey((qEntity || lsEntity || "holdings").trim() || "holdings");
+  }, []);
+
+  const [tab, setTab] = useState<TabKey>("minute_book");
+  const [folderCanon, setFolderCanon] = useState<CanonFolderKey>("All");
+  const [folderLedger, setFolderLedger] = useState<LedgerFolderKey>("All");
+  const [query, setQuery] = useState("");
+
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const [minuteRows, setMinuteRows] = useState<AnyRow[]>([]);
+  const [verifiedRows, setVerifiedRows] = useState<AnyRow[]>([]);
+  const [ledgerRows, setLedgerRows] = useState<AnyRow[]>([]);
+
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
     return () => {
-      abortRef.current.cancelled = true;
+      mounted.current = false;
     };
   }, []);
 
-  // Load everything needed for CI-Archive view (read-only)
+  // Reset folder when switching tabs
   useEffect(() => {
-    const run = async () => {
+    setQuery("");
+    if (tab === "minute_book") setFolderCanon("All");
+    if (tab === "verified") setFolderCanon("All");
+    if (tab === "ledger") setFolderLedger("All");
+  }, [tab]);
+
+  // Load all registries safely
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
       setLoading(true);
-      setErrText(null);
+      setError(null);
 
       try {
-        // 1) Minute book entries (digital minute book registry)
+        // 1) Minute book entries
+        // IMPORTANT: do not select explicit columns (schema drift). Use "*".
         const mb = await supabase
           .from("minute_book_entries")
-          .select(
-            "id,title,entity_key,storage_path,pdf_hash,registry_status,source,source_record_id,source_envelope_id,created_at,updated_at"
-          )
-          .eq("entity_key", entityKey)
+          .select("*")
           .order("created_at", { ascending: false });
 
         if (mb.error) throw mb.error;
 
-        // 2) Verified docs (signed/verified artifacts)
-        // NOTE: Do NOT select file_name (your prod error).
+        // 2) Verified documents
+        // IMPORTANT: schema drift. Use "*".
         const vd = await supabase
           .from("verified_documents")
-          .select(
-            "id,title,entity_key,storage_bucket,storage_path,file_hash,verification_level,envelope_id,signed_at,created_at,updated_at"
-          )
-          .eq("entity_key", entityKey)
+          .select("*")
           .order("created_at", { ascending: false });
 
-        if (vd.error) throw vd.error;
+        // Some environments may not have verified_documents yet:
+        // In that case, don't fail the whole screen.
+        const verifiedData = vd.error ? [] : (vd.data ?? []);
 
-        // 3) Governance ledger (where Alchemy drafts live)
+        // 3) Governance ledger (Alchemy drafts live here)
         const gl = await supabase
           .from("governance_ledger")
-          .select("id,title,status,source,created_at")
-          .eq("source", "ci-alchemy")
-          .order("created_at", { ascending: false })
-          .limit(250);
+          .select("*")
+          .order("created_at", { ascending: false });
 
-        if (gl.error) throw gl.error;
+        const ledgerData = gl.error ? [] : (gl.data ?? []);
 
-        if (!abortRef.current.cancelled) {
-          setMinuteBook((mb.data as MinuteBookEntry[]) || []);
-          setVerified((vd.data as VerifiedDoc[]) || []);
-          setLedger((gl.data as GovernanceLedgerRow[]) || []);
+        if (!cancelled && mounted.current) {
+          setMinuteRows((mb.data as AnyRow[]) ?? []);
+          setVerifiedRows((verifiedData as AnyRow[]) ?? []);
+          setLedgerRows((ledgerData as AnyRow[]) ?? []);
         }
       } catch (e: any) {
-        if (!abortRef.current.cancelled) {
-          setErrText(e?.message || "Failed to load CI-Archive.");
-          // keep lists stable; do not wipe folders UI
-          setMinuteBook([]);
-          setVerified([]);
-          setLedger([]);
+        if (!cancelled && mounted.current) {
+          setError(e?.message ?? "Failed to load CI-Archive.");
         }
       } finally {
-        if (!abortRef.current.cancelled) setLoading(false);
+        if (!cancelled && mounted.current) setLoading(false);
       }
+    }
+
+    load();
+    return () => {
+      cancelled = true;
     };
+  }, [supabase]);
 
-    run();
-  }, [supabase, entityKey]);
+  // Build archived set (minute_book_entries.source_record_id -> governance_ledger.id)
+  const archivedLedgerIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const r of minuteRows) {
+      const id = getSourceRecordId(r);
+      if (id) s.add(String(id));
+    }
+    return s;
+  }, [minuteRows]);
 
-  // Reset selection when switching tabs or entity/folder
-  useEffect(() => {
-    setSelected(null);
-  }, [tab, entityKey, folderKey]);
+  // Filter by entity where possible (client-side, because schemas drift)
+  const minuteRowsScoped = useMemo(() => {
+    const ek = normalizeEntityKey(entityKey);
+    if (!ek) return minuteRows;
 
-  // Counts per canonical folder for Minute Book
-  const minuteBookCounts = useMemo(() => {
-    const counts: Record<CanonFolder["key"], number> = {
-      all: 0,
-      incorporation: 0,
-      annual_returns: 0,
-      resolutions: 0,
-      registers: 0,
-      directors_officers: 0,
-      share_capital: 0,
-      banking: 0,
-      tax: 0,
-      contracts: 0,
-      policies: 0,
-      general: 0,
-    };
-    for (const row of minuteBook) {
-      counts.all += 1;
-      const fk = extractFolderKeyFromStoragePath(row.storage_path, row.entity_key || entityKey);
-      counts[fk] += 1;
+    return minuteRows.filter((r) => {
+      const rk = normalizeEntityKey(getEntityKeyFromRow(r));
+      // If row has entity key, enforce match; if not, allow (older rows)
+      return rk ? rk === ek : true;
+    });
+  }, [minuteRows, entityKey]);
+
+  const verifiedRowsScoped = useMemo(() => {
+    const ek = normalizeEntityKey(entityKey);
+    if (!ek) return verifiedRows;
+
+    return verifiedRows.filter((r) => {
+      const rk = normalizeEntityKey(getEntityKeyFromRow(r));
+      // If verified docs store only entity_id (uuid), we can't match; allow row but it will still classify by path.
+      return rk ? rk === ek : true;
+    });
+  }, [verifiedRows, entityKey]);
+
+  const ledgerRowsScoped = useMemo(() => {
+    const ek = normalizeEntityKey(entityKey);
+    if (!ek) return ledgerRows;
+
+    return ledgerRows.filter((r) => {
+      const rk = normalizeEntityKey(getEntityKeyFromRow(r));
+      return rk ? rk === ek : true;
+    });
+  }, [ledgerRows, entityKey]);
+
+  // Canonical folder counts (Minute/Verified share same folder list)
+  function buildCanonCounts(rows: AnyRow[]) {
+    const counts: Record<CanonFolderKey, number> = {} as any;
+    for (const f of CANON_FOLDERS) counts[f.key] = 0;
+
+    for (const r of rows) {
+      const key = classifyCanonicalFolderFromPath(getStoragePath(r));
+      counts[key] += 1;
+      counts["All"] += 1;
     }
     return counts;
-  }, [minuteBook, entityKey]);
+  }
 
-  // Counts per canonical folder for Verified
-  const verifiedCounts = useMemo(() => {
-    const counts: Record<CanonFolder["key"], number> = {
-      all: 0,
-      incorporation: 0,
-      annual_returns: 0,
-      resolutions: 0,
-      registers: 0,
-      directors_officers: 0,
-      share_capital: 0,
-      banking: 0,
-      tax: 0,
-      contracts: 0,
-      policies: 0,
-      general: 0,
+  const canonCountsMinute = useMemo(() => buildCanonCounts(minuteRowsScoped), [minuteRowsScoped]);
+  const canonCountsVerified = useMemo(() => buildCanonCounts(verifiedRowsScoped), [verifiedRowsScoped]);
+
+  const ledgerCounts = useMemo(() => {
+    const c: Record<LedgerFolderKey, number> = {
+      All: 0,
+      "Pending Archive": 0,
+      Archived: 0,
+      Approved: 0,
+      Draft: 0,
+      Rejected: 0,
     };
-    for (const row of verified) {
-      counts.all += 1;
-      const fk = extractFolderKeyFromStoragePath(row.storage_path, row.entity_key || entityKey);
-      counts[fk] += 1;
-    }
-    return counts;
-  }, [verified, entityKey]);
 
-  // Ledger folders are status-based
-  const ledgerFolders = useMemo(() => {
-    const base = [
-      { key: "all", label: "All", icon: "📌" },
-      { key: "pending", label: "Pending Archive", icon: "⏳" },
-      { key: "archived", label: "Archived", icon: "✅" },
-      { key: "approved", label: "Approved", icon: "🛡️" },
-      { key: "drafted", label: "Draft", icon: "📝" },
-      { key: "rejected", label: "Rejected", icon: "⛔" },
-    ] as const;
+    for (const r of ledgerRowsScoped) {
+      const id = String(getId(r) ?? "");
+      const archived = id && archivedLedgerIds.has(id);
 
-    const counts: Record<string, number> = {};
-    for (const f of base) counts[f.key] = 0;
+      c.All += 1;
+      if (archived) c.Archived += 1;
+      if (isLedgerApproved(r)) c.Approved += 1;
+      if (isLedgerDraft(r)) c.Draft += 1;
+      if (isLedgerRejected(r)) c.Rejected += 1;
 
-    // archived is inferred by existence of minute_book_entries.source_record_id = governance_ledger.id
-    const archivedSet = new Set(minuteBook.map((m) => m.source_record_id).filter(Boolean) as string[]);
-
-    for (const row of ledger) {
-      counts.all += 1;
-      const st = (row.status || "").toUpperCase();
-      if (archivedSet.has(row.id)) {
-        counts.archived += 1;
-      } else {
-        counts.pending += 1;
-      }
-      if (st === "APPROVED") counts.approved += 1;
-      else if (st === "DRAFTED" || st === "DRAFT") counts.drafted += 1;
-      else if (st === "REJECTED") counts.rejected += 1;
+      // Pending Archive = APPROVED but not yet archived
+      if (isLedgerApproved(r) && !archived) c["Pending Archive"] += 1;
     }
 
-    return { base, counts, archivedSet };
-  }, [ledger, minuteBook]);
+    return c;
+  }, [ledgerRowsScoped, archivedLedgerIds]);
 
-  const headerBlurb = useMemo(() => {
-    if (tab === "minute_book") {
-      return (
-        <>
-          <span className="text-[#f3d58a] font-semibold">Digital Minute Book Registry.</span>{" "}
-          <span className="text-white/70">
-            These are archived, indexed records (not drafts). Canonical folder taxonomy is always visible for enterprise clarity.
-          </span>
-        </>
-      );
-    }
-    if (tab === "verified") {
-      return (
-        <>
-          <span className="text-[#f3d58a] font-semibold">Verified Registry.</span>{" "}
-          <span className="text-white/70">Signed/verified artifacts with hashes & envelope metadata (audit-ready).</span>
-        </>
-      );
-    }
-    return (
-      <>
-        <span className="text-[#f3d58a] font-semibold">Alchemy drafts live here.</span>{" "}
-        <span className="text-white/70">
-          Archive appears in Minute Book only after signature routing creates a <code className="text-white/80">minute_book_entries</code>{" "}
-          row linked by <code className="text-white/80">source_record_id</code>.
-        </span>
-      </>
-    );
-  }, [tab]);
-
-  const activeRows = useMemo(() => {
-    const query = q.trim().toLowerCase();
+  // Build visible entries list
+  const visibleRows = useMemo(() => {
+    const q = safeLower(query);
 
     if (tab === "minute_book") {
-      let rows = minuteBook.slice();
+      const rows = minuteRowsScoped.filter((r) => {
+        const path = getStoragePath(r);
+        const f = classifyCanonicalFolderFromPath(path);
+        if (folderCanon !== "All" && f !== folderCanon) return false;
 
-      if (folderKey !== "all") {
-        rows = rows.filter((r) => extractFolderKeyFromStoragePath(r.storage_path, r.entity_key || entityKey) === folderKey);
-      }
+        const hay = [
+          getTitle(r),
+          path,
+          getHash(r),
+          getId(r),
+          getEntityKeyFromRow(r),
+          getSourceRecordId(r),
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
 
-      if (query) {
-        rows = rows.filter((r) => {
-          const a = (r.title || "").toLowerCase();
-          const b = (r.storage_path || "").toLowerCase();
-          const c = (r.pdf_hash || "").toLowerCase();
-          return a.includes(query) || b.includes(query) || c.includes(query);
-        });
-      }
-
-      return rows;
-    }
-
-    if (tab === "verified") {
-      let rows = verified.slice();
-      if (folderKey !== "all") {
-        rows = rows.filter((r) => extractFolderKeyFromStoragePath(r.storage_path, r.entity_key || entityKey) === folderKey);
-      }
-      if (query) {
-        rows = rows.filter((r) => {
-          const a = (r.title || "").toLowerCase();
-          const b = (r.storage_path || "").toLowerCase();
-          const c = (r.file_hash || "").toLowerCase();
-          return a.includes(query) || b.includes(query) || c.includes(query);
-        });
-      }
-      return rows;
-    }
-
-    // ledger tab uses status folders (folderKey repurposed)
-    const archivedSet = ledgerFolders.archivedSet;
-    let rows = ledger.slice();
-
-    const lk = folderKey as any;
-    if (lk && lk !== "all") {
-      if (lk === "pending") rows = rows.filter((r) => !archivedSet.has(r.id));
-      else if (lk === "archived") rows = rows.filter((r) => archivedSet.has(r.id));
-      else if (lk === "approved") rows = rows.filter((r) => (r.status || "").toUpperCase() === "APPROVED");
-      else if (lk === "drafted") rows = rows.filter((r) => ["DRAFT", "DRAFTED"].includes((r.status || "").toUpperCase()));
-      else if (lk === "rejected") rows = rows.filter((r) => (r.status || "").toUpperCase() === "REJECTED");
-    }
-
-    if (query) {
-      rows = rows.filter((r) => {
-        const a = (r.title || "").toLowerCase();
-        const b = (r.status || "").toLowerCase();
-        const c = (r.id || "").toLowerCase();
-        return a.includes(query) || b.includes(query) || c.includes(query);
+        return q ? hay.includes(q) : true;
       });
+
+      return rows;
     }
+
+    if (tab === "verified") {
+      const rows = verifiedRowsScoped.filter((r) => {
+        const path = getStoragePath(r);
+        const f = classifyCanonicalFolderFromPath(path);
+        if (folderCanon !== "All" && f !== folderCanon) return false;
+
+        const hay = [getTitle(r), path, getHash(r), getId(r), getEntityKeyFromRow(r)]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+
+        return q ? hay.includes(q) : true;
+      });
+
+      return rows;
+    }
+
+    // ledger
+    const rows = ledgerRowsScoped.filter((r) => {
+      const id = String(getId(r) ?? "");
+      const archived = id && archivedLedgerIds.has(id);
+
+      if (folderLedger === "Archived" && !archived) return false;
+      if (folderLedger === "Pending Archive" && !(isLedgerApproved(r) && !archived)) return false;
+      if (folderLedger === "Approved" && !isLedgerApproved(r)) return false;
+      if (folderLedger === "Draft" && !isLedgerDraft(r)) return false;
+      if (folderLedger === "Rejected" && !isLedgerRejected(r)) return false;
+
+      const hay = [
+        getTitle(r),
+        r.status,
+        r.source,
+        getId(r),
+        getEntityKeyFromRow(r),
+        archived ? "archived" : "not archived",
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return q ? hay.includes(q) : true;
+    });
 
     return rows;
-  }, [tab, minuteBook, verified, ledger, q, folderKey, entityKey, ledgerFolders]);
+  }, [
+    tab,
+    query,
+    folderCanon,
+    folderLedger,
+    minuteRowsScoped,
+    verifiedRowsScoped,
+    ledgerRowsScoped,
+    archivedLedgerIds,
+  ]);
+
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const selectedRow = useMemo(() => {
-    if (!selected) return null;
-    if (selected.kind === "minute_book") return minuteBook.find((x) => x.id === selected.id) || null;
-    if (selected.kind === "verified") return verified.find((x) => x.id === selected.id) || null;
-    return ledger.find((x) => x.id === selected.id) || null;
-  }, [selected, minuteBook, verified, ledger]);
+    if (!selectedId) return null;
+    return visibleRows.find((r) => String(getId(r)) === String(selectedId)) ?? null;
+  }, [selectedId, visibleRows]);
 
-  const pendingArchiveCount = useMemo(() => {
-    // ledger "pending archive" = alchemy + not archived yet
-    return ledgerFolders.counts.pending || 0;
-  }, [ledgerFolders]);
+  useEffect(() => {
+    setSelectedId(null);
+  }, [tab, folderCanon, folderLedger, query]);
+
+  // UI helpers
+  const bannerTitle =
+    tab === "minute_book"
+      ? "Digital Minute Book Registry."
+      : tab === "verified"
+        ? "Verified Registry."
+        : "Alchemy drafts live here.";
+
+  const bannerBody =
+    tab === "minute_book"
+      ? "These are the archived, indexed records (not drafts). Canonical folder taxonomy is always visible for enterprise clarity."
+      : tab === "verified"
+        ? "Signed/verified artifacts with hashes + verification metadata (audit-ready)."
+        : "Archive appears in Minute Book only after signature routing creates a minute_book_entries row linked by source_record_id.";
+
+  const pendingArchiveCount =
+    tab === "ledger" ? ledgerCounts["Pending Archive"] : 0;
+
+  // Styling (Oasis dark + gold)
+  const Shell = ({ children }: { children: React.ReactNode }) => (
+    <div className="min-h-[calc(100vh-96px)] w-full px-6 py-6">
+      <div className="mx-auto w-full max-w-[1400px]">{children}</div>
+    </div>
+  );
 
   return (
-    <div className="min-h-[calc(100vh-72px)] px-6 py-6 text-white">
-      <div className={cx(oasisCardBase(), "p-5")}>
-        <div className="flex items-start justify-between gap-4">
+    <Shell>
+      <div className="rounded-2xl border border-white/10 bg-gradient-to-b from-white/[0.06] to-white/[0.02] shadow-[0_0_0_1px_rgba(255,255,255,0.04),0_30px_80px_-40px_rgba(0,0,0,0.8)]">
+        {/* Header */}
+        <div className="flex items-start justify-between gap-4 border-b border-white/10 px-6 py-5">
           <div>
-            <div className="text-sm font-semibold tracking-wide text-white/85">CI-Archive</div>
-            <div className="text-xs text-white/55">Registry vault • strict three-column • Oasis OS signature</div>
+            <div className="text-[14px] font-semibold text-white/90">CI-Archive</div>
+            <div className="text-[12px] text-white/55">
+              Registry vault • strict three-column • Oasis OS signature
+            </div>
           </div>
 
           <div className="flex items-center gap-2">
-            <button className={pill(tab === "minute_book")} onClick={() => (setTab("minute_book"), setFolderKey("all"))}>
-              Minute Book
-            </button>
-            <button className={pill(tab === "verified")} onClick={() => (setTab("verified"), setFolderKey("all"))}>
-              Verified
-            </button>
-            <button className={pill(tab === "ledger")} onClick={() => (setTab("ledger"), setFolderKey("all" as any))}>
-              Ledger
-            </button>
-            <Link href="/ci-archive/upload" className={cx(pill(false), "border-[#caa24b]/35 text-[#f3d58a] hover:bg-[#caa24b]/10")}>
+            <div className="inline-flex rounded-full border border-white/10 bg-white/[0.03] p-1">
+              <button
+                onClick={() => setTab("minute_book")}
+                className={cx(
+                  "rounded-full px-3 py-1.5 text-[12px] transition",
+                  tab === "minute_book"
+                    ? "bg-[rgba(212,175,55,0.18)] text-[rgb(212,175,55)] shadow-[0_0_0_1px_rgba(212,175,55,0.25)]"
+                    : "text-white/70 hover:text-white"
+                )}
+              >
+                Minute Book
+              </button>
+              <button
+                onClick={() => setTab("verified")}
+                className={cx(
+                  "rounded-full px-3 py-1.5 text-[12px] transition",
+                  tab === "verified"
+                    ? "bg-[rgba(212,175,55,0.18)] text-[rgb(212,175,55)] shadow-[0_0_0_1px_rgba(212,175,55,0.25)]"
+                    : "text-white/70 hover:text-white"
+                )}
+              >
+                Verified
+              </button>
+              <button
+                onClick={() => setTab("ledger")}
+                className={cx(
+                  "rounded-full px-3 py-1.5 text-[12px] transition",
+                  tab === "ledger"
+                    ? "bg-[rgba(212,175,55,0.18)] text-[rgb(212,175,55)] shadow-[0_0_0_1px_rgba(212,175,55,0.25)]"
+                    : "text-white/70 hover:text-white"
+                )}
+              >
+                Ledger
+              </button>
+            </div>
+
+            <Link
+              href="/ci-archive/upload"
+              className="rounded-full border border-[rgba(212,175,55,0.25)] bg-[rgba(212,175,55,0.10)] px-4 py-2 text-[12px] font-semibold text-[rgb(212,175,55)] hover:bg-[rgba(212,175,55,0.14)]"
+            >
               Upload
             </Link>
           </div>
         </div>
 
-        <div className={cx("mt-4 rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm")}>{headerBlurb}</div>
-
-        {tab === "ledger" && (
-          <div className="mt-2 text-xs text-white/55">
-            Pending archive (ci-alchemy stream): <span className="text-white/75">{pendingArchiveCount}</span>
+        {/* Banner */}
+        <div className="px-6 py-4">
+          <div className="rounded-xl border border-[rgba(212,175,55,0.18)] bg-[rgba(212,175,55,0.06)] px-4 py-3">
+            <div className="text-[13px] font-semibold text-[rgb(212,175,55)]">
+              {bannerTitle}{" "}
+              <span className="font-normal text-white/70">{bannerBody}</span>
+            </div>
+            {tab === "ledger" ? (
+              <div className="mt-1 text-[12px] text-white/60">
+                Pending archive (ci-alchemy stream):{" "}
+                <span className="text-white/85">{pendingArchiveCount}</span>
+              </div>
+            ) : (
+              <div className="mt-1 text-[12px] text-white/60">
+                Entity: <span className="text-white/85">{entityKey}</span>
+              </div>
+            )}
           </div>
-        )}
 
-        {errText && (
-          <div className={cx("mt-4 rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100")}>
-            <div className="font-semibold">Failed to load CI-Archive.</div>
-            <div className="opacity-90">{errText}</div>
-          </div>
-        )}
-      </div>
+          {error ? (
+            <div className="mt-3 rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-[12px] text-red-200">
+              <div className="font-semibold">Failed to load CI-Archive.</div>
+              <div className="opacity-90">{error}</div>
+            </div>
+          ) : null}
+        </div>
 
-      {/* 3-column canonical layout */}
-      <div className={cx(oasisCardBase(), "mt-6 p-5")}>
-        <div className="grid grid-cols-12 gap-4">
-          {/* LEFT: folders */}
-          <div className="col-span-12 md:col-span-3">
-            <div className="flex items-center justify-between">
-              <div className="text-[11px] tracking-widest text-white/50">FOLDERS</div>
-              <div className="text-[11px] text-white/50">Entity: {entityKey}</div>
+        {/* 3-column layout */}
+        <div className="grid grid-cols-[360px_1fr_420px] gap-4 px-6 pb-6">
+          {/* LEFT: FOLDERS */}
+          <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-3">
+            <div className="mb-2 flex items-center justify-between px-2">
+              <div className="text-[11px] font-semibold tracking-wide text-white/55">
+                FOLDERS
+              </div>
+              <div className="text-[11px] text-white/45">
+                {tab === "ledger" ? `Entity: ${entityKey}` : `Entity: ${entityKey}`}
+              </div>
             </div>
 
-            <div className={cx("mt-3 rounded-2xl border border-white/10 bg-white/[0.03] p-2", "max-h-[540px] overflow-auto")}>
-              {tab !== "ledger" &&
-                CANON_FOLDERS.map((f) => {
-                  const cnt = tab === "minute_book" ? minuteBookCounts[f.key] : verifiedCounts[f.key];
-                  const active = folderKey === f.key;
-                  return (
-                    <button
-                      key={f.key}
-                      className={cx(
-                        "w-full text-left px-3 py-2 rounded-xl border transition flex items-center justify-between gap-3",
-                        active ? "border-[#caa24b]/35 bg-[#caa24b]/10" : "border-white/0 hover:border-white/10 hover:bg-white/5"
-                      )}
-                      onClick={() => setFolderKey(f.key)}
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="opacity-90">{f.icon}</span>
-                        <span className={cx("text-sm", active ? "text-[#f3d58a]" : "text-white/80")}>{f.label}</span>
-                      </div>
-                      <span className={cx("text-xs px-2 py-0.5 rounded-full border", active ? "border-[#caa24b]/35 text-[#f3d58a]" : "border-white/10 text-white/55")}>
-                        {cnt || 0}
-                      </span>
-                    </button>
-                  );
-                })}
-
-              {tab === "ledger" && (
-                <>
-                  {ledgerFolders.base.map((f) => {
-                    const active = (folderKey as any) === f.key;
-                    const cnt = ledgerFolders.counts[f.key] || 0;
+            <div className="max-h-[520px] overflow-auto pr-1">
+              {tab === "ledger" ? (
+                <div className="space-y-1">
+                  {LEDGER_FOLDERS.map((f) => {
+                    const Icon = f.icon;
+                    const count = ledgerCounts[f.key];
+                    const active = folderLedger === f.key;
                     return (
                       <button
                         key={f.key}
+                        onClick={() => setFolderLedger(f.key)}
                         className={cx(
-                          "w-full text-left px-3 py-2 rounded-xl border transition flex items-center justify-between gap-3",
-                          active ? "border-[#caa24b]/35 bg-[#caa24b]/10" : "border-white/0 hover:border-white/10 hover:bg-white/5"
+                          "flex w-full items-center justify-between rounded-xl border px-3 py-2 text-left transition",
+                          active
+                            ? "border-[rgba(212,175,55,0.28)] bg-[rgba(212,175,55,0.08)]"
+                            : "border-white/10 bg-white/[0.01] hover:bg-white/[0.03]"
                         )}
-                        onClick={() => setFolderKey(f.key as any)}
                       >
                         <div className="flex items-center gap-2">
-                          <span className="opacity-90">{f.icon}</span>
-                          <span className={cx("text-sm", active ? "text-[#f3d58a]" : "text-white/80")}>{f.label}</span>
+                          <Icon
+                            size={16}
+                            className={cx(
+                              active ? "text-[rgb(212,175,55)]" : "text-white/55"
+                            )}
+                          />
+                          <div className={cx("text-[13px]", active ? "text-white" : "text-white/80")}>
+                            {f.key}
+                          </div>
                         </div>
-                        <span className={cx("text-xs px-2 py-0.5 rounded-full border", active ? "border-[#caa24b]/35 text-[#f3d58a]" : "border-white/10 text-white/55")}>
-                          {cnt}
-                        </span>
+                        <div className="rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[11px] text-white/70">
+                          {count}
+                        </div>
                       </button>
                     );
                   })}
-                </>
+                  <div className="px-2 pt-2 text-[11px] text-white/50">
+                    Ledger visibility only. Forge/Council flows remain unchanged.
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  {(tab === "minute_book" ? CANON_FOLDERS : CANON_FOLDERS).map((f) => {
+                    const Icon = f.icon;
+                    const counts = tab === "minute_book" ? canonCountsMinute : canonCountsVerified;
+                    const count = counts[f.key];
+                    const active = folderCanon === f.key;
+                    return (
+                      <button
+                        key={f.key}
+                        onClick={() => setFolderCanon(f.key)}
+                        className={cx(
+                          "flex w-full items-center justify-between rounded-xl border px-3 py-2 text-left transition",
+                          active
+                            ? "border-[rgba(212,175,55,0.28)] bg-[rgba(212,175,55,0.08)]"
+                            : "border-white/10 bg-white/[0.01] hover:bg-white/[0.03]"
+                        )}
+                      >
+                        <div className="flex items-center gap-2">
+                          <Icon
+                            size={16}
+                            className={cx(
+                              active ? "text-[rgb(212,175,55)]" : "text-white/55"
+                            )}
+                          />
+                          <div className={cx("text-[13px]", active ? "text-white" : "text-white/80")}>
+                            {f.label}
+                          </div>
+                        </div>
+                        <div className="rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[11px] text-white/70">
+                          {count}
+                        </div>
+                      </button>
+                    );
+                  })}
+                  <div className="px-2 pt-2 text-[11px] text-white/50">
+                    {tab === "minute_book"
+                      ? "This is the minute book. Not drafts. Drafts live in Ledger."
+                      : "Verified artifacts are audit-ready. Registry-only view."}
+                  </div>
+                </div>
               )}
-
-              <div className="mt-3 px-2 text-[11px] text-white/45">
-                {tab === "minute_book" && <>This is the minute book. Not drafts. Drafts live in Ledger.</>}
-                {tab === "verified" && <>Verified artifacts are audit-ready. Registry-only view.</>}
-                {tab === "ledger" && <>Ledger visibility only. Forge/Council flows remain unchanged.</>}
-              </div>
             </div>
           </div>
 
-          {/* MIDDLE: entries */}
-          <div className="col-span-12 md:col-span-6">
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-[11px] tracking-widest text-white/50">
-                ENTRIES • <span className="text-white/70">{activeRows.length}</span>
+          {/* MIDDLE: ENTRIES */}
+          <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-3">
+            <div className="mb-2 flex items-center justify-between gap-3 px-2">
+              <div className="text-[11px] font-semibold tracking-wide text-white/55">
+                ENTRIES • {loading ? "…" : visibleRows.length}
               </div>
 
-              <div className="relative w-full max-w-[420px]">
+              <div className="relative w-[420px] max-w-full">
                 <input
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
                   placeholder={
-                    tab === "minute_book" ? "Search title, folder, path, hash…" : tab === "verified" ? "Search title, path, hash…" : "Search title, status, id…"
+                    tab === "ledger"
+                      ? "Search title, status, id…"
+                      : "Search title, folder, path, hash…"
                   }
-                  className={cx(
-                    "w-full rounded-xl border border-white/10 bg-white/[0.03] px-4 py-2 text-sm outline-none",
-                    "placeholder:text-white/35 focus:border-[#caa24b]/35 focus:bg-white/[0.05]"
-                  )}
+                  className="w-full rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-[12px] text-white/85 placeholder:text-white/35 outline-none focus:border-[rgba(212,175,55,0.28)]"
                 />
               </div>
             </div>
 
-            <div className={cx("mt-3 rounded-2xl border border-white/10 bg-white/[0.02] p-2", "max-h-[540px] overflow-auto")}>
-              {loading && (
-                <div className="p-4 text-sm text-white/60">
-                  Loading registry…
+            <div className="max-h-[560px] overflow-auto pr-1">
+              {loading ? (
+                <div className="px-2 py-6 text-[12px] text-white/55">Loading…</div>
+              ) : visibleRows.length === 0 ? (
+                <div className="px-2 py-6 text-[12px] text-white/55">No entries found.</div>
+              ) : (
+                <div className="space-y-2">
+                  {visibleRows.map((r) => {
+                    const id = String(getId(r) ?? "");
+                    const title = getTitle(r);
+                    const path = getStoragePath(r);
+                    const createdAt = getCreatedAt(r);
+                    const hash = getHash(r);
+
+                    // ledger extras
+                    const archived = tab === "ledger" ? archivedLedgerIds.has(id) : false;
+                    const status = tab === "ledger" ? (r.status ?? r.ledger_status ?? r.state ?? "") : null;
+
+                    const active = selectedId === id;
+
+                    return (
+                      <button
+                        key={id}
+                        onClick={() => setSelectedId(id)}
+                        className={cx(
+                          "w-full rounded-2xl border p-3 text-left transition",
+                          active
+                            ? "border-[rgba(212,175,55,0.28)] bg-[rgba(212,175,55,0.06)]"
+                            : "border-white/10 bg-white/[0.01] hover:bg-white/[0.03]"
+                        )}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="truncate text-[13px] font-semibold text-white/90">
+                              {title}
+                            </div>
+                            <div className="mt-0.5 truncate text-[11px] text-white/55">
+                              {path ?? (tab === "ledger" ? "governance_ledger" : "—")}
+                            </div>
+
+                            <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-white/50">
+                              {tab !== "ledger" ? (
+                                <>
+                                  {hash ? <span className="truncate">hash: {String(hash).slice(0, 12)}…</span> : null}
+                                  {createdAt ? <span>• {String(createdAt)}</span> : null}
+                                </>
+                              ) : (
+                                <>
+                                  {status ? <span className="uppercase">status: {String(status)}</span> : null}
+                                  <span className="text-white/35">•</span>
+                                  <span className={archived ? "text-[rgb(212,175,55)]" : "text-white/60"}>
+                                    {archived ? "Archived" : "Not yet archived"}
+                                  </span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+
+                          {tab === "verified" ? (
+                            <span className="rounded-full border border-[rgba(212,175,55,0.25)] bg-[rgba(212,175,55,0.10)] px-2 py-0.5 text-[10px] font-semibold text-[rgb(212,175,55)]">
+                              Verified
+                            </span>
+                          ) : null}
+
+                          {tab === "ledger" ? (
+                            <span
+                              className={cx(
+                                "rounded-full border px-2 py-0.5 text-[10px] font-semibold",
+                                archived
+                                  ? "border-[rgba(212,175,55,0.25)] bg-[rgba(212,175,55,0.10)] text-[rgb(212,175,55)]"
+                                  : "border-white/10 bg-white/[0.03] text-white/70"
+                              )}
+                            >
+                              {archived ? "Archived" : "Pending"}
+                            </span>
+                          ) : null}
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
               )}
-
-              {!loading && activeRows.length === 0 && (
-                <div className="p-6 text-sm text-white/55">
-                  No entries found.
-                </div>
-              )}
-
-              {!loading &&
-                tab === "minute_book" &&
-                (activeRows as MinuteBookEntry[]).map((r) => {
-                  const isActive = selected?.kind === "minute_book" && selected.id === r.id;
-                  const fk = extractFolderKeyFromStoragePath(r.storage_path, r.entity_key || entityKey);
-                  const folderLabel = CANON_FOLDERS.find((f) => f.key === fk)?.label || "General";
-
-                  const isRes = looksLikeResolutionFolder(r.storage_path);
-                  const title = r.title || (isRes ? "Resolution" : "Minute Book Entry");
-
-                  return (
-                    <button
-                      key={r.id}
-                      onClick={() => setSelected({ kind: "minute_book", id: r.id })}
-                      className={cx(
-                        "w-full text-left rounded-xl border p-3 transition mb-2",
-                        isActive ? "border-[#caa24b]/40 bg-[#caa24b]/10" : "border-white/10 bg-white/[0.02] hover:bg-white/[0.04]"
-                      )}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="opacity-85">{isRes ? "🧾" : "📄"}</span>
-                            <div className="truncate text-sm font-semibold text-white/90">{title}</div>
-                          </div>
-                          <div className="mt-1 text-xs text-white/55 truncate">{r.storage_path || ""}</div>
-                          <div className="mt-2 flex flex-wrap items-center gap-2">
-                            <span className={badge("muted")}>{folderLabel}</span>
-                            {r.registry_status ? <span className={badge("gold")}>{r.registry_status}</span> : <span className={badge("muted")}>registered</span>}
-                            {r.source_record_id ? <span className={badge("gold")}>linked</span> : <span className={badge("muted")}>manual</span>}
-                          </div>
-                        </div>
-
-                        <div className="shrink-0 text-xs text-white/45">{fmtDT(r.created_at)}</div>
-                      </div>
-                    </button>
-                  );
-                })}
-
-              {!loading &&
-                tab === "verified" &&
-                (activeRows as VerifiedDoc[]).map((r) => {
-                  const isActive = selected?.kind === "verified" && selected.id === r.id;
-                  const fk = extractFolderKeyFromStoragePath(r.storage_path, r.entity_key || entityKey);
-                  const folderLabel = CANON_FOLDERS.find((f) => f.key === fk)?.label || "General";
-                  const title = r.title || "Verified Document";
-
-                  return (
-                    <button
-                      key={r.id}
-                      onClick={() => setSelected({ kind: "verified", id: r.id })}
-                      className={cx(
-                        "w-full text-left rounded-xl border p-3 transition mb-2",
-                        isActive ? "border-[#caa24b]/40 bg-[#caa24b]/10" : "border-white/10 bg-white/[0.02] hover:bg-white/[0.04]"
-                      )}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="opacity-85">🛡️</span>
-                            <div className="truncate text-sm font-semibold text-white/90">{title}</div>
-                          </div>
-                          <div className="mt-1 text-xs text-white/55 truncate">{r.storage_path || ""}</div>
-                          <div className="mt-2 flex flex-wrap items-center gap-2">
-                            <span className={badge("muted")}>{folderLabel}</span>
-                            <span className={badge("gold")}>verified</span>
-                            {r.envelope_id ? <span className={badge("muted")}>env {shortId(r.envelope_id)}</span> : <span className={badge("muted")}>no envelope</span>}
-                          </div>
-                        </div>
-
-                        <div className="shrink-0 text-xs text-white/45">{fmtDT(r.created_at)}</div>
-                      </div>
-                    </button>
-                  );
-                })}
-
-              {!loading &&
-                tab === "ledger" &&
-                (activeRows as GovernanceLedgerRow[]).map((r) => {
-                  const isActive = selected?.kind === "ledger" && selected.id === r.id;
-                  const archived = ledgerFolders.archivedSet.has(r.id);
-                  const st = (r.status || "").toUpperCase() || "UNKNOWN";
-
-                  return (
-                    <button
-                      key={r.id}
-                      onClick={() => setSelected({ kind: "ledger", id: r.id })}
-                      className={cx(
-                        "w-full text-left rounded-xl border p-3 transition mb-2",
-                        isActive ? "border-[#caa24b]/40 bg-[#caa24b]/10" : "border-white/10 bg-white/[0.02] hover:bg-white/[0.04]"
-                      )}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="opacity-85">🧪</span>
-                            <div className="truncate text-sm font-semibold text-white/90">{r.title || "Ledger Draft"}</div>
-                          </div>
-                          <div className="mt-1 text-xs text-white/55 truncate">governance_ledger • {r.id}</div>
-                          <div className="mt-2 flex flex-wrap items-center gap-2">
-                            <span className={badge("muted")}>{st}</span>
-                            {archived ? <span className={badge("gold")}>archived</span> : <span className={badge("warn")}>pending archive</span>}
-                            <span className={badge("muted")}>{r.source || "unknown source"}</span>
-                          </div>
-                        </div>
-
-                        <div className="shrink-0 text-xs text-white/45">{fmtDT(r.created_at)}</div>
-                      </div>
-                    </button>
-                  );
-                })}
             </div>
           </div>
 
-          {/* RIGHT: details */}
-          <div className="col-span-12 md:col-span-3">
-            <div className="text-[11px] tracking-widest text-white/50">DETAILS</div>
-
-            <div className={cx("mt-3 rounded-2xl border border-white/10 bg-white/[0.02] p-4", "min-h-[540px]")}>
-              {!selectedRow && (
-                <div className="text-sm text-white/65">
-                  <div className="font-semibold text-white/85">Select an entry.</div>
+          {/* RIGHT: DETAILS */}
+          <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4">
+            {!selectedRow ? (
+              <>
+                <div className="text-[12px] font-semibold text-white/80">DETAILS</div>
+                <div className="mt-2 rounded-xl border border-white/10 bg-white/[0.01] p-4 text-[12px] text-white/55">
+                  <div className="font-semibold text-white/75">Select an entry.</div>
                   <div className="mt-1">Registry-only view. No destructive actions here.</div>
                 </div>
-              )}
+              </>
+            ) : (
+              <>
+                <div className="text-[12px] font-semibold text-white/80">DETAILS</div>
 
-              {!!selectedRow && tab === "minute_book" && (() => {
-                const r = selectedRow as MinuteBookEntry;
-                const fk = extractFolderKeyFromStoragePath(r.storage_path, r.entity_key || entityKey);
-                const folderLabel = CANON_FOLDERS.find((f) => f.key === fk)?.label || "General";
-                const isRes = looksLikeResolutionFolder(r.storage_path);
-                return (
-                  <div className="space-y-3">
-                    <div className="text-sm font-semibold text-white/90">{r.title || (isRes ? "Resolution" : "Minute Book Entry")}</div>
-                    <div className="text-xs text-white/55 break-words">{r.storage_path || ""}</div>
-
-                    <div className="grid grid-cols-2 gap-2 text-xs">
-                      <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
-                        <div className="text-white/45">Folder</div>
-                        <div className="mt-1 text-white/80">{folderLabel}</div>
-                      </div>
-                      <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
-                        <div className="text-white/45">Registry</div>
-                        <div className="mt-1 text-white/80">{r.registry_status || "registered"}</div>
-                      </div>
-                      <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
-                        <div className="text-white/45">Source</div>
-                        <div className="mt-1 text-white/80">{r.source || "manual_upload"}</div>
-                      </div>
-                      <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
-                        <div className="text-white/45">Created</div>
-                        <div className="mt-1 text-white/80">{fmtDT(r.created_at)}</div>
-                      </div>
-                    </div>
-
-                    <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3 text-xs">
-                      <div className="text-white/45">Link to Ledger (if routed)</div>
-                      <div className="mt-1 text-white/80">
-                        {r.source_record_id ? (
-                          <span>
-                            source_record_id: <span className="text-[#f3d58a]">{r.source_record_id}</span>
-                          </span>
-                        ) : (
-                          <span className="text-white/55">Not linked (manual minute book entry).</span>
-                        )}
-                      </div>
-                    </div>
-
-                    {r.pdf_hash && (
-                      <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3 text-xs">
-                        <div className="text-white/45">PDF Hash</div>
-                        <div className="mt-1 text-white/80 break-words">{r.pdf_hash}</div>
-                      </div>
-                    )}
+                <div className="mt-2 rounded-xl border border-white/10 bg-white/[0.01] p-4">
+                  <div className="text-[13px] font-semibold text-white/90">
+                    {getTitle(selectedRow)}
                   </div>
-                );
-              })()}
 
-              {!!selectedRow && tab === "verified" && (() => {
-                const r = selectedRow as VerifiedDoc;
-                const fk = extractFolderKeyFromStoragePath(r.storage_path, r.entity_key || entityKey);
-                const folderLabel = CANON_FOLDERS.find((f) => f.key === fk)?.label || "General";
-                return (
-                  <div className="space-y-3">
-                    <div className="text-sm font-semibold text-white/90">{r.title || "Verified Document"}</div>
-                    <div className="text-xs text-white/55 break-words">{r.storage_path || ""}</div>
+                  <div className="mt-2 grid grid-cols-2 gap-3 text-[12px]">
+                    <div>
+                      <div className="text-white/45">ID</div>
+                      <div className="mt-0.5 break-all text-white/80">{String(getId(selectedRow))}</div>
+                    </div>
 
-                    <div className="grid grid-cols-2 gap-2 text-xs">
-                      <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
-                        <div className="text-white/45">Folder</div>
-                        <div className="mt-1 text-white/80">{folderLabel}</div>
-                      </div>
-                      <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
-                        <div className="text-white/45">Verification</div>
-                        <div className="mt-1 text-white/80">{r.verification_level || "verified"}</div>
-                      </div>
-                      <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
-                        <div className="text-white/45">Envelope</div>
-                        <div className="mt-1 text-white/80">{r.envelope_id ? shortId(r.envelope_id) : "—"}</div>
-                      </div>
-                      <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
-                        <div className="text-white/45">Signed At</div>
-                        <div className="mt-1 text-white/80">{r.signed_at ? fmtDT(r.signed_at) : "—"}</div>
+                    <div>
+                      <div className="text-white/45">Entity</div>
+                      <div className="mt-0.5 text-white/80">
+                        {String(getEntityKeyFromRow(selectedRow) ?? entityKey)}
                       </div>
                     </div>
 
-                    {r.file_hash && (
-                      <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3 text-xs">
-                        <div className="text-white/45">File Hash</div>
-                        <div className="mt-1 text-white/80 break-words">{r.file_hash}</div>
+                    <div className="col-span-2">
+                      <div className="text-white/45">Storage Path</div>
+                      <div className="mt-0.5 break-all text-white/80">
+                        {getStoragePath(selectedRow) ?? "—"}
                       </div>
-                    )}
+                    </div>
+
+                    <div className="col-span-2">
+                      <div className="text-white/45">Hash</div>
+                      <div className="mt-0.5 break-all text-white/80">{String(getHash(selectedRow) ?? "—")}</div>
+                    </div>
+
+                    {tab === "minute_book" ? (
+                      <div className="col-span-2">
+                        <div className="text-white/45">Source Record Link (Ledger)</div>
+                        <div className="mt-0.5 break-all text-white/80">
+                          {String(getSourceRecordId(selectedRow) ?? "—")}
+                        </div>
+                        <div className="mt-1 text-[11px] text-white/55">
+                          This is the link that proves a signed workflow was routed into the Minute Book.
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {tab === "ledger" ? (
+                      <div className="col-span-2">
+                        <div className="text-white/45">Archive Status</div>
+                        <div className="mt-0.5 text-white/80">
+                          {archivedLedgerIds.has(String(getId(selectedRow) ?? ""))
+                            ? "Archived (exists in minute_book_entries via source_record_id)"
+                            : "Not yet archived"}
+                        </div>
+                        <div className="mt-1 text-[11px] text-white/55">
+                          Ledger drafts preview happens in Forge/Council flow. CI-Archive remains registry-only.
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
-                );
-              })()}
-
-              {!!selectedRow && tab === "ledger" && (() => {
-                const r = selectedRow as GovernanceLedgerRow;
-                const archived = ledgerFolders.archivedSet.has(r.id);
-                const st = (r.status || "").toUpperCase() || "UNKNOWN";
-                return (
-                  <div className="space-y-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="text-sm font-semibold text-white/90">{r.title || "Ledger Draft"}</div>
-                      <span className={badge(st === "APPROVED" ? "gold" : st === "REJECTED" ? "warn" : "muted")}>{st}</span>
-                    </div>
-
-                    <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3 text-xs space-y-1">
-                      <div>
-                        <span className="text-white/45">Ledger ID</span>: <span className="text-white/80">{r.id}</span>
-                      </div>
-                      <div>
-                        <span className="text-white/45">Created</span>: <span className="text-white/80">{fmtDT(r.created_at)}</span>
-                      </div>
-                      <div>
-                        <span className="text-white/45">Source</span>: <span className="text-white/80">{r.source || "unknown"}</span>
-                      </div>
-                      <div>
-                        <span className="text-white/45">Archive</span>:{" "}
-                        <span className={archived ? "text-[#f3d58a]" : "text-white/70"}>{archived ? "Archived to Minute Book" : "Not yet archived"}</span>
-                      </div>
-                    </div>
-
-                    <div className="text-xs text-white/55">
-                      Ledger drafts preview happens in the drafting/sign flow (Forge/Council). CI-Archive remains registry-only.
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>
+                </div>
+              </>
+            )}
           </div>
         </div>
-      </div>
 
-      {/* bottom hint */}
-      <div className="mt-4 text-center text-[11px] text-white/35">
-        Oasis Digital Parliament • CI-Archive • registry of record
+        <div className="border-t border-white/10 px-6 py-4 text-center text-[11px] text-white/35">
+          Oasis Digital Parliament • CI-Archive • registry of record
+        </div>
       </div>
-    </div>
+    </Shell>
   );
 }
