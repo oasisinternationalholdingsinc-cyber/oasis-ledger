@@ -2,13 +2,15 @@
 export const dynamic = "force-dynamic";
 
 /**
- * CI-Archive → Minute Book (FINAL PRODUCTION)
- * - OS-consistent 3-column registry-only view
- * - NO upload logic here (upload is /ci-archive/upload)
- * - NO per-route auth gating (OS layout gates)
- * - NO useSearchParams
- * - Uses canonical supabaseBrowser singleton (NOT a function)
- * - Loads from v_registry_minute_book_entries (fallback: minute_book_entries)
+ * CI-Archive → Minute Book (FINAL PRODUCTION OS)
+ * - STRICT 3-column registry surface (no stacked layout)
+ * - OS entity-scoped ONLY (useEntity)
+ * - Registry-only (NO upload logic)
+ * - WIRING LOCKED:
+ *    - Reads v_registry_minute_book_entries (fallback minute_book_entries)
+ *    - Uses supabaseBrowser singleton (NOT callable)
+ * - Adds: OFFICIAL-first preview + download (falls back to uploaded PDF)
+ * - Adds: Archive launchpad pill instead of generic back
  */
 
 import Link from "next/link";
@@ -20,9 +22,9 @@ type MinuteBookRow = {
   id: string;
   entity_key?: string | null;
 
-  // common registry fields (vary by view/table)
   title?: string | null;
   entry_type?: string | null;
+
   section?: string | null;
   doc_section?: string | null;
 
@@ -36,28 +38,22 @@ type MinuteBookRow = {
   created_at?: string | null;
   created_by?: string | null;
 
-  // optional extra fields (harmless if absent)
   notes?: string | null;
   source?: string | null;
+
+  // Optional future-proof fields (won't break if absent)
+  official_storage_path?: string | null;
+  official_bucket_id?: string | null;
 };
 
-function fmtBytes(n?: number | null) {
-  if (!n || n <= 0) return "—";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let v = n;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i += 1;
-  }
-  return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
-}
+type OfficialArtifact = {
+  bucket_id: string;
+  storage_path: string;
+  file_name?: string | null;
+  kind?: "official" | "certified" | "verified";
+};
 
-function shortHash(h?: string | null) {
-  if (!h) return "—";
-  if (h.length <= 18) return h;
-  return `${h.slice(0, 10)}…${h.slice(-6)}`;
-}
+/* ---------------- helpers ---------------- */
 
 function norm(s?: string | null, fallback = "") {
   const x = (s || "").toString().trim();
@@ -81,10 +77,43 @@ function getCreatedAtMs(r: MinuteBookRow) {
   return Number.isFinite(t) ? t : 0;
 }
 
-async function loadMinuteBook(entityKey: string) {
-  const sb = supabaseBrowser; // IMPORTANT: singleton client, do NOT call it
+function fmtBytes(n?: number | null) {
+  if (!n || n <= 0) return "—";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
 
-  // 1) Try the registry view (preferred)
+function shortHash(h?: string | null) {
+  if (!h) return "—";
+  if (h.length <= 18) return h;
+  return `${h.slice(0, 10)}…${h.slice(-6)}`;
+}
+
+// Presentation-only icon mapping (no schema changes)
+function sectionIcon(section: string) {
+  const s = section.toLowerCase();
+  if (s.includes("incorp") || s.includes("articles")) return "📜";
+  if (s.includes("profile") || s.includes("corporate")) return "🛡️";
+  if (s.includes("return") || s.includes("annual")) return "🗓️";
+  if (s.includes("register") || s.includes("share")) return "📚";
+  if (s.includes("resolution") || s.includes("minutes")) return "⚖️";
+  if (s.includes("bank") || s.includes("finance")) return "💼";
+  if (s.includes("tax") || s.includes("cra")) return "🧾";
+  return "🗂️";
+}
+
+/* ---------------- data loading (WIRING LOCKED) ---------------- */
+
+async function loadMinuteBook(entityKey: string) {
+  const sb = supabaseBrowser;
+
+  // Preferred: registry view
   try {
     const { data, error } = await sb
       .from("v_registry_minute_book_entries")
@@ -94,22 +123,104 @@ async function loadMinuteBook(entityKey: string) {
 
     if (!error && data) return data as MinuteBookRow[];
   } catch {
-    // ignore; fallback below
+    // fallback below
   }
 
-  // 2) Fallback: table
-  const { data: data2, error: error2 } = await sb
+  // Fallback: table
+  const { data, error } = await sb
     .from("minute_book_entries")
     .select("*")
     .eq("entity_key", entityKey)
     .limit(1000);
 
-  if (error2) throw error2;
-  return (data2 || []) as MinuteBookRow[];
+  if (error) throw error;
+  return (data || []) as MinuteBookRow[];
 }
 
-export default function MinuteBookClient() {
+/**
+ * OFFICIAL-first resolution (no wiring changes).
+ * We do NOT mutate anything. We only attempt to find a higher-authority artifact.
+ *
+ * Priority:
+ * 1) explicit official_storage_path fields if present on the row
+ * 2) lookup in verified_documents by hash/path/entry_id (best-effort, safe fallback)
+ * 3) none -> fall back to uploaded (minute_book bucket)
+ */
+async function resolveOfficialArtifact(entityKey: string, row: MinuteBookRow): Promise<OfficialArtifact | null> {
   const sb = supabaseBrowser;
+
+  // (1) Explicit official pointers (future-proof)
+  const explicitPath = row.official_storage_path;
+  const explicitBucket = row.official_bucket_id;
+  if (explicitPath && explicitBucket) {
+    return {
+      bucket_id: explicitBucket,
+      storage_path: explicitPath,
+      file_name: row.file_name || null,
+      kind: "official",
+    };
+  }
+
+  // (2) Best-effort: verified_documents lookup (does not change current behavior if table differs)
+  // We try a few common linkage fields. If your verified_documents schema differs, this will harmlessly fail and return null.
+  try {
+    const hash = row.file_hash || null;
+    const path = row.storage_path || null;
+    const id = row.id;
+
+    // try to find the most recent verified artifact for this entity that matches hash/path/source id
+    const { data, error } = await sb
+      .from("verified_documents")
+      .select("*")
+      .eq("entity_key", entityKey)
+      .or(
+        [
+          hash ? `file_hash.eq.${hash}` : "",
+          path ? `source_storage_path.eq.${path}` : "",
+          `source_entry_id.eq.${id}`,
+          `minute_book_entry_id.eq.${id}`,
+        ]
+          .filter(Boolean)
+          .join(",")
+      )
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (!error && data && data.length) {
+      const v: any = data[0];
+      const bucket = v.bucket_id || v.storage_bucket || "verified_documents";
+      const vpath = v.storage_path || v.file_path || v.path;
+      if (bucket && vpath) {
+        return {
+          bucket_id: bucket,
+          storage_path: vpath,
+          file_name: v.file_name || row.file_name || null,
+          kind: v.kind || "verified",
+        };
+      }
+    }
+  } catch {
+    // ignore and fall back
+  }
+
+  return null;
+}
+
+async function signedUrlFor(bucketId: string, storagePath: string, downloadName?: string | null) {
+  const sb = supabaseBrowser;
+
+  // Supabase signed URL (short-lived, safe)
+  // If downloadName is provided, browsers will download; otherwise preview works in embed.
+  const opts: any = downloadName ? { download: downloadName } : undefined;
+
+  const { data, error } = await sb.storage.from(bucketId).createSignedUrl(storagePath, 60 * 10, opts);
+  if (error) throw error;
+  return data.signedUrl;
+}
+
+/* ---------------- UI ---------------- */
+
+export default function MinuteBookClient() {
   const { entityKey } = useEntity();
 
   const [loading, setLoading] = useState(false);
@@ -121,14 +232,20 @@ export default function MinuteBookClient() {
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  // derived: sections
+  // Preview state (OFFICIAL-first)
+  const [official, setOfficial] = useState<OfficialArtifact | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewLabel, setPreviewLabel] = useState<string>("");
+
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [pdfErr, setPdfErr] = useState<string | null>(null);
+
   const sections = useMemo(() => {
     const uniq = new Set<string>();
     rows.forEach((r) => uniq.add(getSection(r)));
     return ["All", ...Array.from(uniq).sort((a, b) => a.localeCompare(b))];
   }, [rows]);
 
-  // derived: filtered rows
   const visibleRows = useMemo(() => {
     const q = query.trim().toLowerCase();
     const filtered = rows.filter((r) => {
@@ -150,7 +267,6 @@ export default function MinuteBookClient() {
       return hay.includes(q);
     });
 
-    // newest first
     filtered.sort((a, b) => getCreatedAtMs(b) - getCreatedAtMs(a));
     return filtered;
   }, [rows, activeSection, query]);
@@ -160,7 +276,7 @@ export default function MinuteBookClient() {
     return rows.find((r) => r.id === selectedId) || null;
   }, [rows, selectedId]);
 
-  // load on entity change
+  // Load registry on entity change (WIRING LOCKED)
   useEffect(() => {
     let alive = true;
 
@@ -171,6 +287,11 @@ export default function MinuteBookClient() {
       setSelectedId(null);
       setActiveSection("All");
       setQuery("");
+
+      setOfficial(null);
+      setPreviewUrl(null);
+      setPreviewLabel("");
+      setPdfErr(null);
 
       if (!entityKey) {
         setLoading(false);
@@ -183,7 +304,6 @@ export default function MinuteBookClient() {
 
         setRows(data);
 
-        // keep a stable selection: pick most recent if available
         if (data.length) {
           const newest = [...data].sort((a, b) => getCreatedAtMs(b) - getCreatedAtMs(a))[0];
           setSelectedId(newest?.id || null);
@@ -202,11 +322,133 @@ export default function MinuteBookClient() {
     };
   }, [entityKey]);
 
-  // ensure active section stays valid if rows change
+  // Keep active section valid
   useEffect(() => {
     if (!sections.includes(activeSection)) setActiveSection("All");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sections.join("|")]);
+
+  // Resolve OFFICIAL artifact on selection (no writes, read-only)
+  useEffect(() => {
+    let alive = true;
+
+    async function run() {
+      setPdfErr(null);
+      setPreviewUrl(null);
+      setPreviewLabel("");
+      setOfficial(null);
+
+      if (!entityKey || !selected) return;
+
+      setPdfBusy(true);
+      try {
+        const off = await resolveOfficialArtifact(entityKey, selected);
+        if (!alive) return;
+        setOfficial(off);
+      } catch (e: any) {
+        if (!alive) return;
+        // not fatal
+        setOfficial(null);
+      } finally {
+        if (alive) setPdfBusy(false);
+      }
+    }
+
+    run();
+    return () => {
+      alive = false;
+    };
+  }, [entityKey, selected?.id]);
+
+  async function viewOfficialOrFallback() {
+    if (!entityKey || !selected) return;
+
+    setPdfErr(null);
+    setPdfBusy(true);
+    try {
+      // OFFICIAL-first
+      if (official?.bucket_id && official?.storage_path) {
+        const url = await signedUrlFor(
+          official.bucket_id,
+          official.storage_path,
+          null // preview mode
+        );
+        setPreviewUrl(url);
+        setPreviewLabel("Official PDF");
+        return;
+      }
+
+      // fallback: uploaded evidence (minute_book bucket)
+      if (!selected.storage_path) throw new Error("No storage_path on selected record.");
+      const url = await signedUrlFor("minute_book", selected.storage_path, null);
+      setPreviewUrl(url);
+      setPreviewLabel("Uploaded PDF");
+    } catch (e: any) {
+      setPdfErr(e?.message || "Failed to generate preview URL.");
+    } finally {
+      setPdfBusy(false);
+    }
+  }
+
+  async function downloadOfficialOrFallback() {
+    if (!entityKey || !selected) return;
+
+    setPdfErr(null);
+    setPdfBusy(true);
+    try {
+      const name = selected.file_name || `${getTitle(selected)}.pdf`;
+
+      // OFFICIAL-first
+      if (official?.bucket_id && official?.storage_path) {
+        const url = await signedUrlFor(official.bucket_id, official.storage_path, name);
+        window.open(url, "_blank", "noopener,noreferrer");
+        return;
+      }
+
+      // fallback: uploaded evidence
+      if (!selected.storage_path) throw new Error("No storage_path on selected record.");
+      const url = await signedUrlFor("minute_book", selected.storage_path, name);
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch (e: any) {
+      setPdfErr(e?.message || "Failed to generate download URL.");
+    } finally {
+      setPdfBusy(false);
+    }
+  }
+
+  async function openInNewTab() {
+    if (!entityKey || !selected) return;
+
+    setPdfErr(null);
+    setPdfBusy(true);
+    try {
+      // Use preview URL if already created; else create one OFFICIAL-first
+      if (previewUrl) {
+        window.open(previewUrl, "_blank", "noopener,noreferrer");
+        return;
+      }
+
+      if (official?.bucket_id && official?.storage_path) {
+        const url = await signedUrlFor(official.bucket_id, official.storage_path, null);
+        window.open(url, "_blank", "noopener,noreferrer");
+        return;
+      }
+
+      if (!selected.storage_path) throw new Error("No storage_path on selected record.");
+      const url = await signedUrlFor("minute_book", selected.storage_path, null);
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch (e: any) {
+      setPdfErr(e?.message || "Failed to open PDF.");
+    } finally {
+      setPdfBusy(false);
+    }
+  }
+
+  const authorityBadge = useMemo(() => {
+    if (!selected) return null;
+    if (official) return { label: "OFFICIAL", tone: "gold" as const };
+    return { label: "UPLOADED", tone: "neutral" as const };
+  }, [selected?.id, !!official]);
 
   return (
     <div className="min-h-[calc(100vh-56px)] w-full px-4 py-4">
@@ -218,17 +460,20 @@ export default function MinuteBookClient() {
             Minute Book Registry
           </div>
           <div className="mt-1 text-sm text-white/50">
-            Read-only registry. Upload is a separate enterprise filing flow.
+            Evidence registry. Read-only. Official-first viewing when available.
           </div>
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
+          {/* Subtle launchpad pill instead of generic Back */}
           <Link
             href="/ci-archive"
             className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/80 hover:bg-white/10"
+            title="CI-Archive Launchpad"
           >
-            Back
+            Archive
           </Link>
+
           <Link
             href="/ci-archive/upload"
             className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm font-medium text-amber-200 hover:bg-amber-400/15"
@@ -245,12 +490,12 @@ export default function MinuteBookClient() {
         </div>
       ) : (
         <div className="grid grid-cols-12 gap-4">
-          {/* Left: Sections */}
+          {/* Left: Sections / Domains */}
           <div className="col-span-12 md:col-span-3">
             <div className="h-[calc(100vh-160px)] overflow-hidden rounded-2xl border border-white/10 bg-white/5">
               <div className="border-b border-white/10 px-4 py-3">
-                <div className="text-sm font-medium text-white">Sections</div>
-                <div className="text-xs text-white/50">Domain grouping (no folders UI)</div>
+                <div className="text-sm font-medium text-white">Domains</div>
+                <div className="text-xs text-white/50">Canonical taxonomy (not folders)</div>
               </div>
 
               <div className="h-full overflow-auto p-2">
@@ -273,7 +518,12 @@ export default function MinuteBookClient() {
                       ].join(" ")}
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <span className="truncate">{s}</span>
+                        <span className="flex min-w-0 items-center gap-2">
+                          <span className="grid h-7 w-7 place-items-center rounded-xl border border-white/10 bg-black/20 text-sm">
+                            {s === "All" ? "◆" : sectionIcon(s)}
+                          </span>
+                          <span className="truncate">{s}</span>
+                        </span>
                         <span className="text-xs text-white/40">{count}</span>
                       </div>
                     </button>
@@ -321,9 +571,8 @@ export default function MinuteBookClient() {
                   <div className="p-3 text-sm text-white/60">
                     No entries found for this entity yet.
                     <div className="mt-2 text-xs text-white/40">
-                      If you uploaded a document recently: verify the OS entity selection matches the
-                      upload’s <span className="text-white/70">entity_key</span>. Registry is scoped by
-                      OS entity context.
+                      If you uploaded recently: confirm OS entity matches the upload’s{" "}
+                      <span className="text-white/70">entity_key</span>.
                     </div>
                   </div>
                 ) : (
@@ -363,9 +612,7 @@ export default function MinuteBookClient() {
 
                           <div className="shrink-0 text-right">
                             <div className="text-xs text-white/50">{fmtBytes(r.file_size)}</div>
-                            <div className="mt-1 text-[11px] text-white/40">
-                              {norm(r.status, "—")}
-                            </div>
+                            <div className="mt-1 text-[11px] text-white/40">{norm(r.status, "—")}</div>
                           </div>
                         </div>
                       </button>
@@ -376,12 +623,30 @@ export default function MinuteBookClient() {
             </div>
           </div>
 
-          {/* Right: Details */}
+          {/* Right: Details + PDF Preview */}
           <div className="col-span-12 md:col-span-4">
             <div className="h-[calc(100vh-160px)] overflow-hidden rounded-2xl border border-white/10 bg-white/5">
               <div className="border-b border-white/10 px-4 py-3">
-                <div className="text-sm font-medium text-white">Details</div>
-                <div className="text-xs text-white/50">Hash-first, OS-signature metadata</div>
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium text-white">Details</div>
+                    <div className="text-xs text-white/50">Hash-first metadata + document actions</div>
+                  </div>
+
+                  {authorityBadge ? (
+                    <span
+                      className={[
+                        "rounded-full border px-2 py-1 text-[11px] font-semibold tracking-wide",
+                        authorityBadge.tone === "gold"
+                          ? "border-amber-400/30 bg-amber-400/10 text-amber-200"
+                          : "border-white/10 bg-white/5 text-white/60",
+                      ].join(" ")}
+                      title={authorityBadge.tone === "gold" ? "Official artifact available" : "Uploaded evidence"}
+                    >
+                      {authorityBadge.label}
+                    </span>
+                  ) : null}
+                </div>
               </div>
 
               <div className="h-full overflow-auto p-4">
@@ -409,6 +674,70 @@ export default function MinuteBookClient() {
                           </span>
                         ) : null}
                       </div>
+                    </div>
+
+                    {/* Actions */}
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <div className="text-xs font-medium text-white/80">Document</div>
+                          <div className="text-[11px] text-white/40">
+                            {official ? "Official-first (fallback to uploaded)" : "Uploaded evidence (official not found)"}
+                          </div>
+                        </div>
+
+                        <div className="text-[11px] text-white/40">
+                          {pdfBusy ? "Working…" : previewLabel ? previewLabel : ""}
+                        </div>
+                      </div>
+
+                      {pdfErr ? (
+                        <div className="mt-2 rounded-xl border border-red-400/20 bg-red-400/10 p-2 text-xs text-red-200">
+                          {pdfErr}
+                        </div>
+                      ) : null}
+
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          onClick={viewOfficialOrFallback}
+                          disabled={pdfBusy}
+                          className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm font-medium text-amber-200 hover:bg-amber-400/15 disabled:opacity-50"
+                        >
+                          View {official ? "Official" : "PDF"}
+                        </button>
+
+                        <button
+                          onClick={downloadOfficialOrFallback}
+                          disabled={pdfBusy}
+                          className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/80 hover:bg-white/10 disabled:opacity-50"
+                        >
+                          Download {official ? "Official" : "PDF"}
+                        </button>
+
+                        <button
+                          onClick={openInNewTab}
+                          disabled={pdfBusy}
+                          className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/80 hover:bg-white/10 disabled:opacity-50"
+                        >
+                          Open New Tab
+                        </button>
+                      </div>
+
+                      {/* Inline preview */}
+                      {previewUrl ? (
+                        <div className="mt-3 overflow-hidden rounded-2xl border border-white/10 bg-black/30">
+                          <div className="border-b border-white/10 px-3 py-2 text-xs text-white/60">
+                            Preview — {previewLabel || (official ? "Official PDF" : "Uploaded PDF")}
+                          </div>
+                          <div className="h-[420px]">
+                            <iframe
+                              title="PDF Preview"
+                              src={previewUrl}
+                              className="h-full w-full"
+                            />
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
 
                     {/* Storage */}
@@ -442,9 +771,9 @@ export default function MinuteBookClient() {
                       </div>
                     </div>
 
-                    {/* Verification */}
+                    {/* Verification hint (Minute Book does not claim verification) */}
                     <div className="rounded-2xl border border-amber-400/20 bg-amber-400/10 p-3">
-                      <div className="text-xs font-medium text-amber-100">Verification</div>
+                      <div className="text-xs font-medium text-amber-100">Integrity</div>
                       <div className="mt-2 space-y-2 text-sm text-amber-100/90">
                         <div className="flex items-start justify-between gap-3">
                           <div className="text-amber-100/60">SHA-256</div>
@@ -453,8 +782,7 @@ export default function MinuteBookClient() {
                           </div>
                         </div>
                         <div className="text-[11px] text-amber-100/60">
-                          Upload flow computes SHA-256 client-side and registers via the canonical SQL
-                          function. Registry is read-only.
+                          Minute Book is evidence access. Certification/attestation lives in Verified Registry.
                         </div>
                       </div>
                     </div>
@@ -488,24 +816,25 @@ export default function MinuteBookClient() {
                       </div>
                     </div>
 
-                    {/* Action */}
+                    {/* Footer nav */}
                     <div className="pt-1">
-                      <Link
-                        href="/ci-archive/upload"
-                        className="inline-flex w-full items-center justify-center rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm font-medium text-amber-200 hover:bg-amber-400/15"
-                      >
-                        File another upload
-                      </Link>
-                      <div className="mt-2 text-center text-[11px] text-white/40">
-                        Upload is the sole write entry point. Registry stays OS-native and read-only.
+                      <div className="grid grid-cols-2 gap-2">
+                        <Link
+                          href="/ci-archive"
+                          className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/80 hover:bg-white/10"
+                        >
+                          Archive Launchpad
+                        </Link>
+                        <Link
+                          href="/ci-archive/upload"
+                          className="inline-flex items-center justify-center rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm font-medium text-amber-200 hover:bg-amber-400/15"
+                        >
+                          File Another Upload
+                        </Link>
                       </div>
-                    </div>
-
-                    {/* Tiny health hint */}
-                    <div className="text-[11px] text-white/35">
-                      If your “corporate file from 2 hours ago” isn’t showing, the most common cause is
-                      OS entity selection not matching the upload’s{" "}
-                      <span className="text-white/60">entity_key</span>.
+                      <div className="mt-2 text-center text-[11px] text-white/40">
+                        Upload is the sole write entry point. Registry remains OS-native and read-only.
+                      </div>
                     </div>
                   </div>
                 )}
@@ -514,9 +843,6 @@ export default function MinuteBookClient() {
           </div>
         </div>
       )}
-
-      {/* (Hidden) keep sb referenced so bundlers don't tree-shake incorrectly in some setups */}
-      <span className="hidden">{String(!!sb)}</span>
     </div>
   );
 }
