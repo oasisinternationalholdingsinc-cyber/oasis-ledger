@@ -1,11 +1,8 @@
-import MinuteBookClient from "./minute-book.client";
-
+// src/app/(os)/ci-archive/minute-book/page.tsx
 export const dynamic = "force-dynamic";
 
-export default function MinuteBookPage() {
-  return (
-    <div className="h-[calc(100vh-56px)] overflow-hidden">
-      <MinuteBookClient />
-    </div>
-  );
+import MinuteBookClient from "./minute-book.client";
+
+export default function Page() {
+  return <MinuteBookClient />;
 }
