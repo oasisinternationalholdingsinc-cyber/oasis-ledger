@@ -1,15 +1,21 @@
 "use client";
+export const dynamic = "force-dynamic";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { supabaseBrowser } from "@/lib/supabase/browser";
 
-export default function UploadClient() {
+type Domain = {
+  key: string;
+  label: string;
+};
+
+export default function CIArchiveUpload() {
+  const router = useRouter();
   const supabase = useMemo(() => supabaseBrowser(), []);
 
   const [entityKey, setEntityKey] = useState<string | null>(null);
-  const [domains, setDomains] = useState<Array<{ key: string; label: string }>>(
-    []
-  );
+  const [domains, setDomains] = useState<Domain[]>([]);
   const [entryTypes, setEntryTypes] = useState<string[]>([]);
 
   const [domainKey, setDomainKey] = useState("");
@@ -19,27 +25,46 @@ export default function UploadClient() {
   const [file, setFile] = useState<File | null>(null);
 
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [ok, setOk] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
 
-  /* ---------------- bootstrap ---------------- */
+  /* ---------------- auth + scope ---------------- */
 
   useEffect(() => {
-    const sp = new URLSearchParams(window.location.search);
-    const ek =
-      sp.get("entity_key") ||
-      localStorage.getItem("oasis_entity_key") ||
-      null;
+    const boot = async () => {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
 
-    if (ek) {
+      if (!session) {
+        router.replace("/login");
+        return;
+      }
+
+      const sp = new URLSearchParams(window.location.search);
+      const ek =
+        sp.get("entity_key") ||
+        localStorage.getItem("oasis_entity_key") ||
+        null;
+
+      if (!ek) {
+        setError("No entity scope provided.");
+        return;
+      }
+
       setEntityKey(ek);
       localStorage.setItem("oasis_entity_key", ek);
-    }
-  }, []);
+    };
+
+    boot();
+  }, [router, supabase]);
+
+  /* ---------------- load domains + enums ---------------- */
 
   useEffect(() => {
-    async function load() {
-      // domains
+    if (!entityKey) return;
+
+    const load = async () => {
       const { data: d } = await supabase
         .from("governance_domains")
         .select("key,label")
@@ -51,23 +76,22 @@ export default function UploadClient() {
         setDomainKey(d[0].key);
       }
 
-      // entry_type_enum
       const { data: e } = await supabase.rpc("enum_range", {
         enum_name: "entry_type_enum",
       });
 
-      if (Array.isArray(e) && e.length) {
+      if (Array.isArray(e)) {
         setEntryTypes(e);
         setEntryType(e[0]);
       }
-    }
+    };
 
     load();
-  }, [supabase]);
+  }, [entityKey, supabase]);
 
   /* ---------------- helpers ---------------- */
 
-  async function sha256Hex(f: File): Promise<string> {
+  async function sha256Hex(f: File) {
     const buf = await f.arrayBuffer();
     const hash = await crypto.subtle.digest("SHA-256", buf);
     return Array.from(new Uint8Array(hash))
@@ -77,15 +101,15 @@ export default function UploadClient() {
 
   /* ---------------- submit ---------------- */
 
-  async function submit() {
-    setErr(null);
-    setOk(null);
+  async function handleUpload() {
+    setError(null);
+    setInfo(null);
 
-    if (!entityKey) return setErr("Missing entity scope.");
-    if (!domainKey) return setErr("Domain required.");
-    if (!entryType) return setErr("Entry type required.");
-    if (!title.trim()) return setErr("Title required.");
-    if (!file) return setErr("PDF required.");
+    if (!entityKey) return setError("Missing entity scope.");
+    if (!domainKey) return setError("Domain required.");
+    if (!entryType) return setError("Entry type required.");
+    if (!title.trim()) return setError("Title required.");
+    if (!file) return setError("PDF required.");
 
     setBusy(true);
     try {
@@ -93,10 +117,8 @@ export default function UploadClient() {
       const date = new Date().toISOString().slice(0, 10);
       const safe = file.name.replace(/[^\w.\-]+/g, "_");
 
-      // canonical storage path
       const storagePath = `${entityKey}/${domainKey}/${entryType}/${date}/${hash}-${safe}`;
 
-      // upload file
       const { error: upErr } = await supabase.storage
         .from("minute_book")
         .upload(storagePath, file, {
@@ -106,7 +128,6 @@ export default function UploadClient() {
 
       if (upErr) throw upErr;
 
-      // register via canonical SQL contract
       const { error: rpcErr } = await supabase.rpc(
         "register_minute_book_upload",
         {
@@ -127,60 +148,148 @@ export default function UploadClient() {
 
       if (rpcErr) throw rpcErr;
 
-      setOk("Upload registered successfully.");
+      setInfo("Document registered in CI-Archive.");
       setTitle("");
       setNotes("");
       setFile(null);
     } catch (e: any) {
-      setErr(e?.message ?? "Upload failed.");
+      setError(e.message || "Upload failed.");
     } finally {
       setBusy(false);
     }
   }
 
-  /* ---------------- UI (intentionally plain) ---------------- */
+  /* ---------------- UI ---------------- */
 
   return (
-    <div style={{ padding: 24, maxWidth: 720 }}>
-      <h2>CI-Archive Upload</h2>
+    <div className="h-full flex flex-col px-8 pt-6 pb-6">
+      <div className="mb-4 shrink-0">
+        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">
+          CI-ARCHIVE
+        </div>
+        <p className="mt-1 text-[11px] text-slate-400">
+          Registry Upload Console •{" "}
+          <span className="font-semibold text-slate-200">
+            Oasis Digital Parliament Ledger
+          </span>
+        </p>
+      </div>
 
-      {err && <p style={{ color: "red" }}>{err}</p>}
-      {ok && <p style={{ color: "green" }}>{ok}</p>}
+      <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
+        <div className="w-full max-w-[1100px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-6 py-5 flex flex-col overflow-hidden">
+          <div className="mb-4 shrink-0">
+            <h1 className="text-lg font-semibold text-slate-50">
+              Minute Book & Registry Upload
+            </h1>
+            <p className="mt-1 text-xs text-slate-400">
+              Domain-driven filing · SHA-256 enforced · Ledger-linked
+            </p>
+          </div>
 
-      <label>Domain</label>
-      <select value={domainKey} onChange={(e) => setDomainKey(e.target.value)}>
-        {domains.map((d) => (
-          <option key={d.key} value={d.key}>
-            {d.label}
-          </option>
-        ))}
-      </select>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <Field label="Entity">
+              <div className="text-sm text-slate-200">{entityKey}</div>
+            </Field>
 
-      <label>Entry Type</label>
-      <select value={entryType} onChange={(e) => setEntryType(e.target.value)}>
-        {entryTypes.map((t) => (
-          <option key={t} value={t}>
-            {t}
-          </option>
-        ))}
-      </select>
+            <Field label="Domain">
+              <select
+                value={domainKey}
+                onChange={(e) => setDomainKey(e.target.value)}
+                className="input"
+              >
+                {domains.map((d) => (
+                  <option key={d.key} value={d.key}>
+                    {d.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
 
-      <label>Title</label>
-      <input value={title} onChange={(e) => setTitle(e.target.value)} />
+            <Field label="Entry Type">
+              <select
+                value={entryType}
+                onChange={(e) => setEntryType(e.target.value)}
+                className="input"
+              >
+                {entryTypes.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+            </Field>
 
-      <label>Notes</label>
-      <textarea value={notes} onChange={(e) => setNotes(e.target.value)} />
+            <Field label="Title">
+              <input
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                className="input"
+              />
+            </Field>
 
-      <label>PDF</label>
-      <input
-        type="file"
-        accept="application/pdf"
-        onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-      />
+            <Field label="PDF">
+              <input
+                type="file"
+                accept="application/pdf"
+                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                className="input"
+              />
+            </Field>
 
-      <button disabled={busy} onClick={submit}>
-        {busy ? "Registering…" : "Upload & Register"}
-      </button>
+            <Field label="Notes">
+              <textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                rows={4}
+                className="input"
+              />
+            </Field>
+          </div>
+
+          {error && (
+            <div className="mt-4 text-[11px] text-red-400 bg-red-950/40 border border-red-800/60 rounded-xl px-3 py-2">
+              {error}
+            </div>
+          )}
+
+          {info && (
+            <div className="mt-4 text-[11px] text-emerald-300 bg-emerald-950/40 border border-emerald-700/60 rounded-xl px-3 py-2">
+              {info}
+            </div>
+          )}
+
+          <div className="mt-6 flex justify-end">
+            <button
+              onClick={handleUpload}
+              disabled={busy}
+              className={`rounded-full px-5 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition ${
+                busy
+                  ? "bg-slate-700 text-slate-400 cursor-not-allowed"
+                  : "bg-yellow-500 text-black hover:bg-yellow-400"
+              }`}
+            >
+              {busy ? "Registering…" : "Upload & Register"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <div className="mb-1 text-[10px] uppercase tracking-[0.25em] text-slate-500">
+        {label}
+      </div>
+      {children}
     </div>
   );
 }
