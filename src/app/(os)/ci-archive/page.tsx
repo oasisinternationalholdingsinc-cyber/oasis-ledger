@@ -3,15 +3,8 @@ export const dynamic = "force-dynamic";
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
-import {
-  Archive,
-  BadgeCheck,
-  BookOpen,
-  UploadCloud,
-  ArrowRight,
-  Shield,
-} from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Archive, BadgeCheck, BookOpen, UploadCloud, ArrowRight, Shield } from "lucide-react";
 
 import { supabaseBrowser } from "@/lib/supabase/browser";
 
@@ -36,12 +29,8 @@ function CountPill({
 }) {
   return (
     <div className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/50 px-3 py-1">
-      <span className="text-[10px] uppercase tracking-[0.22em] text-slate-500">
-        {label}
-      </span>
-      <span className="text-[11px] font-semibold text-slate-200">
-        {loading ? "…" : value ?? "—"}
-      </span>
+      <span className="text-[10px] uppercase tracking-[0.22em] text-slate-500">{label}</span>
+      <span className="text-[11px] font-semibold text-slate-200">{loading ? "…" : value ?? "—"}</span>
     </div>
   );
 }
@@ -52,16 +41,20 @@ function Tile({
   subtitle,
   icon,
   tag,
+  entityKey,
 }: {
   href: string;
   title: string;
   subtitle: string;
   icon: React.ReactNode;
   tag: string;
+  entityKey: string | null;
 }) {
+  const scopedHref = entityKey ? `${href}?entity_key=${encodeURIComponent(entityKey)}` : href;
+
   return (
     <Link
-      href={href}
+      href={scopedHref}
       className={cx(
         "group relative overflow-hidden rounded-3xl",
         "border border-slate-900 bg-black/60",
@@ -75,16 +68,12 @@ function Tile({
       <div className="p-6 flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <span className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
-              {tag}
-            </span>
+            <span className="text-[10px] uppercase tracking-[0.28em] text-slate-500">{tag}</span>
           </div>
-          <div className="mt-2 text-lg font-semibold text-slate-50">
-            {title}
-          </div>
-          <p className="mt-2 text-[12px] leading-relaxed text-slate-400">
-            {subtitle}
-          </p>
+
+          <div className="mt-2 text-lg font-semibold text-slate-50">{title}</div>
+
+          <p className="mt-2 text-[12px] leading-relaxed text-slate-400">{subtitle}</p>
 
           <div className="mt-5 inline-flex items-center gap-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-amber-300">
             Open <ArrowRight className="h-4 w-4 transition group-hover:translate-x-0.5" />
@@ -106,7 +95,10 @@ function Tile({
 
 export default function CIArchiveLaunchpad() {
   const router = useRouter();
+  const sp = useSearchParams();
   const supabase = useMemo(() => supabaseBrowser(), []);
+
+  const [entityKey, setEntityKey] = useState<string | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [counts, setCounts] = useState<Counts>({
@@ -114,6 +106,23 @@ export default function CIArchiveLaunchpad() {
     verified: null,
     ledger: null,
   });
+
+  // ✅ Canonical entity scope: URL param first, then localStorage fallback.
+  // Also ensures /ci-archive root stays URL-scoped (so tiles propagate).
+  useEffect(() => {
+    const fromUrl = sp.get("entity_key") || sp.get("entityKey") || sp.get("entity");
+    if (fromUrl) {
+      setEntityKey(fromUrl);
+      try {
+        localStorage.setItem("oasis_entity_key", fromUrl);
+      } catch {}
+      return;
+    }
+    try {
+      const saved = localStorage.getItem("oasis_entity_key");
+      if (saved) setEntityKey(saved);
+    } catch {}
+  }, [sp]);
 
   // 🔐 If your (os) layout already hard-gates, this is redundant — but harmless.
   useEffect(() => {
@@ -127,28 +136,34 @@ export default function CIArchiveLaunchpad() {
   }, [router, supabase]);
 
   // Lightweight “enterprise glance” counts (no heavy joins; no flicker loops)
+  // If entityKey exists, counts are scoped to entity_key where applicable.
   useEffect(() => {
     let cancelled = false;
+
+    const safeCount = async (table: string, entityScoped: boolean) => {
+      try {
+        let q = supabase.from(table).select("id", { count: "exact", head: true });
+
+        // Minute book + verified are entity-scoped
+        if (entityScoped && entityKey) q = q.eq("entity_key", entityKey);
+
+        // governance_ledger in your schema may be entity-scoped via entity_id, not entity_key.
+        // So we keep ledger unscoped here (glance count).
+        const { count, error } = await q;
+        if (error) return null;
+        return typeof count === "number" ? count : null;
+      } catch {
+        return null;
+      }
+    };
 
     const loadCounts = async () => {
       setLoading(true);
 
-      const safeCount = async (table: string) => {
-        try {
-          const { count, error } = await supabase
-            .from(table)
-            .select("id", { count: "exact", head: true });
-          if (error) return null;
-          return typeof count === "number" ? count : null;
-        } catch {
-          return null;
-        }
-      };
-
       const [minuteBook, verified, ledger] = await Promise.all([
-        safeCount("minute_book_entries"),
-        safeCount("verified_documents"),
-        safeCount("governance_ledger"),
+        safeCount("minute_book_entries", true),
+        safeCount("verified_documents", true),
+        safeCount("governance_ledger", false),
       ]);
 
       if (!cancelled) {
@@ -161,21 +176,15 @@ export default function CIArchiveLaunchpad() {
     return () => {
       cancelled = true;
     };
-  }, [supabase]);
+  }, [supabase, entityKey]);
 
   return (
     <div className="h-full flex flex-col px-8 pt-6 pb-6">
       {/* Header under OS bar */}
       <div className="mb-4 shrink-0">
-        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">
-          CI-ARCHIVE
-        </div>
+        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI-ARCHIVE</div>
         <p className="mt-1 text-[11px] text-slate-400">
-          Registry vault •{" "}
-          <span className="font-semibold text-slate-200">
-            strict three-column surfaces
-          </span>{" "}
-          • Oasis OS signature
+          Registry vault • <span className="font-semibold text-slate-200">strict three-column surfaces</span> • Oasis OS signature
         </p>
       </div>
 
@@ -184,39 +193,36 @@ export default function CIArchiveLaunchpad() {
         <div className="w-full max-w-[1400px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-6 py-5 flex flex-col overflow-hidden">
           {/* Window Title */}
           <div className="flex items-start justify-between mb-4 shrink-0">
-            <div>
-              <h1 className="text-lg font-semibold text-slate-50">
-                CI-Archive Launchpad
-              </h1>
+            <div className="min-w-0">
+              <h1 className="text-lg font-semibold text-slate-50">CI-Archive Launchpad</h1>
+
               <p className="mt-1 text-xs text-slate-400 max-w-3xl">
-                CI-Archive is{" "}
-                <span className="font-semibold text-amber-300">registry-only</span>
-                . No bucket UI. No destructive actions. Use the dedicated pages
-                below to view the{" "}
-                <span className="font-semibold text-slate-200">
-                  Digital Minute Book
-                </span>
-                ,{" "}
-                <span className="font-semibold text-slate-200">Verified Vault</span>
-                , and{" "}
-                <span className="font-semibold text-slate-200">Ledger visibility</span>
-                — plus the separate{" "}
-                <span className="font-semibold text-slate-200">Upload & Index</span>{" "}
-                page.
+                CI-Archive is <span className="font-semibold text-amber-300">registry-only</span>. No bucket UI. No destructive
+                actions. Use the dedicated pages below to view the{" "}
+                <span className="font-semibold text-slate-200">Digital Minute Book</span>,{" "}
+                <span className="font-semibold text-slate-200">Verified Vault</span>, and{" "}
+                <span className="font-semibold text-slate-200">Ledger visibility</span> — plus the separate{" "}
+                <span className="font-semibold text-slate-200">Upload & Index</span> page.
               </p>
+
+              {/* Entity scope (quiet) */}
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {entityKey ? (
+                  <div className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/40 px-3 py-1">
+                    <span className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Entity</span>
+                    <span className="text-[11px] font-semibold text-slate-200">{entityKey}</span>
+                  </div>
+                ) : (
+                  <div className="inline-flex items-center gap-2 rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1">
+                    <span className="text-[10px] uppercase tracking-[0.22em] text-amber-200/80">No entity scope</span>
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className="hidden md:flex items-center gap-2">
-              <CountPill
-                label="Minute Book"
-                value={counts.minuteBook}
-                loading={loading}
-              />
-              <CountPill
-                label="Verified"
-                value={counts.verified}
-                loading={loading}
-              />
+              <CountPill label="Minute Book" value={counts.minuteBook} loading={loading} />
+              <CountPill label="Verified" value={counts.verified} loading={loading} />
               <CountPill label="Ledger" value={counts.ledger} loading={loading} />
             </div>
           </div>
@@ -225,9 +231,10 @@ export default function CIArchiveLaunchpad() {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 flex-1 min-h-0 overflow-y-auto pr-1">
             <Tile
               href="/ci-archive/minute-book"
+              entityKey={entityKey}
               tag="Digital Minute Book"
               title="Minute Book Registry"
-              subtitle="Canonical folder taxonomy with Oasis OS signatures. This is the corporate minute book view (archived & indexed records only)."
+              subtitle="Canonical folder taxonomy with Oasis OS signatures. Archived & indexed records only."
               icon={
                 <div className="h-10 w-10 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-center">
                   <BookOpen className="h-5 w-5 text-amber-300" />
@@ -237,6 +244,7 @@ export default function CIArchiveLaunchpad() {
 
             <Tile
               href="/ci-archive/verified"
+              entityKey={entityKey}
               tag="Verified Vault"
               title="Verified Registry"
               subtitle="Signed/verified artifacts with hashes, envelopes, and audit metadata. Built for compliance and external verification."
@@ -249,6 +257,7 @@ export default function CIArchiveLaunchpad() {
 
             <Tile
               href="/ci-archive/ledger"
+              entityKey={entityKey}
               tag="Ledger Visibility"
               title="Drafts & Approvals"
               subtitle="Read-only visibility into ledger records (drafted → pending → approved). Archive linking occurs when minute_book_entries.source_record_id exists."
@@ -261,9 +270,10 @@ export default function CIArchiveLaunchpad() {
 
             <Tile
               href="/ci-archive/upload"
+              entityKey={entityKey}
               tag="Upload & Index"
               title="Upload to Registry"
-              subtitle="Designated upload surface (separate from CI-Archive registry view). Upload PDF → index → appears under Minute Book or Verified."
+              subtitle="Designated filing surface (separate from CI-Archive registry view). Upload PDF → index → appears under Minute Book or Verified."
               icon={
                 <div className="h-10 w-10 rounded-xl bg-violet-500/10 border border-violet-500/25 flex items-center justify-center">
                   <UploadCloud className="h-5 w-5 text-violet-300" />

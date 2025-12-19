@@ -78,7 +78,7 @@ function isPdf(name?: string | null) {
   return (name || "").toLowerCase().endsWith(".pdf");
 }
 
-export default function MinuteBookPage() {
+export default function MinuteBookClient() {
   const sp = useSearchParams();
   const supabase = useMemo(() => supabaseBrowser(), []);
 
@@ -188,7 +188,9 @@ export default function MinuteBookPage() {
     const base = domain === "all" ? entries : entries.filter((e) => e.domain_key === domain);
     if (!q.trim()) return base;
     const s = q.trim().toLowerCase();
-    return base.filter((e) => (e.title || "").toLowerCase().includes(s) || (e.file_name || "").toLowerCase().includes(s));
+    return base.filter(
+      (e) => (e.title || "").toLowerCase().includes(s) || (e.file_name || "").toLowerCase().includes(s)
+    );
   }, [entries, domain, q]);
 
   const selected = useMemo(() => {
@@ -211,9 +213,7 @@ export default function MinuteBookPage() {
 
   async function openDownload() {
     if (!selected?.storage_path) return;
-    const { data, error } = await supabase.storage
-      .from(BUCKET_MINUTE_BOOK)
-      .createSignedUrl(selected.storage_path, 60 * 10);
+    const { data, error } = await supabase.storage.from(BUCKET_MINUTE_BOOK).createSignedUrl(selected.storage_path, 60 * 10);
     if (error || !data?.signedUrl) return;
     window.open(data.signedUrl, "_blank", "noopener,noreferrer");
   }
@@ -228,9 +228,7 @@ export default function MinuteBookPage() {
     }
 
     setPreviewBusy(true);
-    const { data, error } = await supabase.storage
-      .from(BUCKET_MINUTE_BOOK)
-      .createSignedUrl(selected.storage_path, 60 * 10);
+    const { data, error } = await supabase.storage.from(BUCKET_MINUTE_BOOK).createSignedUrl(selected.storage_path, 60 * 10);
 
     if (error || !data?.signedUrl) {
       setPreviewErr("Preview unavailable — use Open/Download.");
@@ -324,12 +322,7 @@ export default function MinuteBookPage() {
               <div className="h-px bg-white/10" />
 
               <div className="p-2">
-                <RailItem
-                  label="All"
-                  count={entries.length}
-                  active={domain === "all"}
-                  onClick={() => setDomain("all")}
-                />
+                <RailItem label="All" count={entries.length} active={domain === "all"} onClick={() => setDomain("all")} />
                 <div className="my-2 h-px bg-white/10" />
                 {loading ? (
                   <div className="space-y-2 px-2 py-2">
@@ -419,13 +412,7 @@ export default function MinuteBookPage() {
                           <div className="flex items-center justify-between gap-3 px-4 py-3">
                             <div className="min-w-0">
                               <div className="flex items-center gap-2">
-                                {/* Gold hairline for selected */}
-                                <span
-                                  className={cls(
-                                    "h-4 w-[2px] rounded-full",
-                                    active ? "bg-yellow-400/80" : "bg-transparent"
-                                  )}
-                                />
+                                <span className={cls("h-4 w-[2px] rounded-full", active ? "bg-yellow-400/80" : "bg-transparent")} />
                                 <div className="truncate text-sm font-semibold text-white/90">{e.title}</div>
                               </div>
 
@@ -486,7 +473,6 @@ export default function MinuteBookPage() {
                   </div>
                 ) : (
                   <div className="space-y-4">
-                    {/* Title + badge */}
                     <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
@@ -510,7 +496,6 @@ export default function MinuteBookPage() {
                       </div>
                     </div>
 
-                    {/* Notes */}
                     <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
                       <div className="text-xs font-semibold tracking-wide text-white/55">NOTES</div>
                       <div className="mt-2 whitespace-pre-wrap text-sm text-white/80">
@@ -518,7 +503,6 @@ export default function MinuteBookPage() {
                       </div>
                     </div>
 
-                    {/* File */}
                     <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
                       <div className="flex items-center justify-between gap-2">
                         <div className="text-xs font-semibold tracking-wide text-white/55">FILE</div>
@@ -544,7 +528,6 @@ export default function MinuteBookPage() {
                       )}
                     </div>
 
-                    {/* Preview (collapsible, default closed) */}
                     {selected.storage_path && isPdf(selected.file_name) ? (
                       <div className="rounded-2xl border border-yellow-500/20 bg-yellow-500/5">
                         <button
@@ -588,7 +571,6 @@ export default function MinuteBookPage() {
                       </div>
                     ) : null}
 
-                    {/* Optional links (kept quiet) */}
                     {(selected.source_record_id || selected.source_envelope_id) ? (
                       <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
                         <div className="text-xs font-semibold tracking-wide text-white/55">LINKS</div>
@@ -659,7 +641,14 @@ function RailItem({
         <span className={cls("h-4 w-[2px] rounded-full", active ? "bg-yellow-400/80" : "bg-transparent")} />
         <span className={cls("truncate text-sm", active ? "text-white/95" : "text-white/75")}>{label}</span>
       </div>
-      <span className={cls("shrink-0 rounded-full px-2 py-0.5 text-[11px]", active ? "text-yellow-100/80 border border-yellow-500/20 bg-yellow-500/10" : "text-white/55 border border-white/10 bg-black/20")}>
+      <span
+        className={cls(
+          "shrink-0 rounded-full px-2 py-0.5 text-[11px]",
+          active
+            ? "text-yellow-100/80 border border-yellow-500/20 bg-yellow-500/10"
+            : "text-white/55 border border-white/10 bg-black/20"
+        )}
+      >
         {count}
       </span>
     </button>
@@ -701,11 +690,7 @@ function VaultIcon() {
         stroke="currentColor"
         strokeWidth="1.6"
       />
-      <path
-        d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0-6 0Z"
-        stroke="currentColor"
-        strokeWidth="1.6"
-      />
+      <path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0-6 0Z" stroke="currentColor" strokeWidth="1.6" />
       <path d="M12 9v3l2 2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
     </svg>
   );
@@ -716,7 +701,12 @@ function UploadIcon() {
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" className="text-white/80">
       <path d="M12 3v10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
       <path d="M8 7l4-4 4 4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M4 14v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      <path
+        d="M4 14v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
     </svg>
   );
 }
