@@ -1,82 +1,65 @@
-// src/components/OsEntityContext.tsx
 "use client";
 
-import { createContext, useContext, useEffect, useMemo, useState, ReactNode } from "react";
+import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
 
-export type EntityKey = "holdings" | "lounge" | "real-estate";
+export type EntityKey = "holdings" | "real-estate" | "lounge";
 
-type EntityContextValue = {
+export type EntityContextValue = {
+  /** canonical */
   activeEntity: EntityKey;
-  setActiveEntity: (key: EntityKey) => void;
+  setActiveEntity: (v: EntityKey) => void;
+
+  /** aliases (backwards/for safety) */
+  entityKey: EntityKey;
+  setEntityKey: (v: EntityKey) => void;
 };
 
-const EntityContext = createContext<EntityContextValue | undefined>(undefined);
+const DEFAULT_ENTITY: EntityKey = "holdings";
+const STORAGE_KEY = "oasis_entity_key";
 
-function isEntityKey(v: string | null): v is EntityKey {
-  return v === "holdings" || v === "lounge" || v === "real-estate";
-}
+const EntityContext = createContext<EntityContextValue | null>(null);
 
-function readEntityFromUrl(): EntityKey | null {
-  if (typeof window === "undefined") return null;
-  const params = new URLSearchParams(window.location.search);
-  const v = params.get("entity_key");
-  return isEntityKey(v) ? v : null;
-}
+export function OsEntityProvider({ children }: { children: React.ReactNode }) {
+  const [activeEntity, setActiveEntityState] = useState<EntityKey>(DEFAULT_ENTITY);
 
-function readEntityFromStorage(): EntityKey | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const v = window.localStorage.getItem("oasis_entity_key");
-    return isEntityKey(v) ? v : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeEntityToStorage(v: EntityKey) {
-  try {
-    window.localStorage.setItem("oasis_entity_key", v);
-  } catch {
-    // ignore
-  }
-}
-
-export function OsEntityProvider({ children }: { children: ReactNode }) {
-  const [activeEntity, _setActiveEntity] = useState<EntityKey>("holdings");
-
-  // Bootstrap from URL first, then localStorage (so refresh + deep-links are stable)
+  // hydrate once
   useEffect(() => {
-    const fromUrl = readEntityFromUrl();
-    if (fromUrl) {
-      _setActiveEntity(fromUrl);
-      writeEntityToStorage(fromUrl);
-      return;
-    }
-
-    const fromStorage = readEntityFromStorage();
-    if (fromStorage) {
-      _setActiveEntity(fromStorage);
-    }
+    try {
+      const saved = (localStorage.getItem(STORAGE_KEY) || "").toLowerCase();
+      if (saved === "holdings" || saved === "real-estate" || saved === "lounge") {
+        setActiveEntityState(saved);
+      }
+    } catch {}
   }, []);
 
-  const setActiveEntity = useMemo(() => {
-    return (key: EntityKey) => {
-      _setActiveEntity(key);
-      writeEntityToStorage(key);
-    };
-  }, []);
+  const setActiveEntity = (v: EntityKey) => {
+    setActiveEntityState(v);
+    try {
+      localStorage.setItem(STORAGE_KEY, v);
+    } catch {}
+  };
 
-  return (
-    <EntityContext.Provider value={{ activeEntity, setActiveEntity }}>
-      {children}
-    </EntityContext.Provider>
+  const value = useMemo<EntityContextValue>(
+    () => ({
+      activeEntity,
+      setActiveEntity,
+      entityKey: activeEntity,
+      setEntityKey: setActiveEntity,
+    }),
+    [activeEntity]
   );
+
+  return <EntityContext.Provider value={value}>{children}</EntityContext.Provider>;
 }
 
 export function useEntity() {
   const ctx = useContext(EntityContext);
-  if (!ctx) {
-    throw new Error("useEntity must be used inside <OsEntityProvider>");
-  }
+  if (!ctx) throw new Error("useEntity must be used within OsEntityProvider");
   return ctx;
 }
+
+/**
+ * Backwards-compatible alias:
+ * Some CI modules/pages import `useOsEntity` — keep it stable.
+ */
+export const useOsEntity = useEntity;
