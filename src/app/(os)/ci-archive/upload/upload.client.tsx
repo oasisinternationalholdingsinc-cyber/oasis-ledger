@@ -12,8 +12,8 @@ export default function UploadClient() {
   );
   const [entryTypes, setEntryTypes] = useState<string[]>([]);
 
-  const [domainKey, setDomainKey] = useState<string>("");
-  const [entryType, setEntryType] = useState<string>("");
+  const [domainKey, setDomainKey] = useState("");
+  const [entryType, setEntryType] = useState("");
   const [title, setTitle] = useState("");
   const [notes, setNotes] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -22,7 +22,8 @@ export default function UploadClient() {
   const [err, setErr] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
 
-  // ---------- bootstrap ----------
+  /* ---------------- bootstrap ---------------- */
+
   useEffect(() => {
     const sp = new URLSearchParams(window.location.search);
     const ek =
@@ -38,6 +39,7 @@ export default function UploadClient() {
 
   useEffect(() => {
     async function load() {
+      // domains
       const { data: d } = await supabase
         .from("governance_domains")
         .select("key,label")
@@ -49,12 +51,12 @@ export default function UploadClient() {
         setDomainKey(d[0].key);
       }
 
-      // entry_type_enum → enum_range
+      // entry_type_enum
       const { data: e } = await supabase.rpc("enum_range", {
         enum_name: "entry_type_enum",
       });
 
-      if (Array.isArray(e)) {
+      if (Array.isArray(e) && e.length) {
         setEntryTypes(e);
         setEntryType(e[0]);
       }
@@ -63,7 +65,8 @@ export default function UploadClient() {
     load();
   }, [supabase]);
 
-  // ---------- helpers ----------
+  /* ---------------- helpers ---------------- */
+
   async function sha256Hex(f: File): Promise<string> {
     const buf = await f.arrayBuffer();
     const hash = await crypto.subtle.digest("SHA-256", buf);
@@ -72,7 +75,8 @@ export default function UploadClient() {
       .join("");
   }
 
-  // ---------- submit ----------
+  /* ---------------- submit ---------------- */
+
   async function submit() {
     setErr(null);
     setOk(null);
@@ -89,9 +93,10 @@ export default function UploadClient() {
       const date = new Date().toISOString().slice(0, 10);
       const safe = file.name.replace(/[^\w.\-]+/g, "_");
 
+      // canonical storage path
       const storagePath = `${entityKey}/${domainKey}/${entryType}/${date}/${hash}-${safe}`;
 
-      // upload
+      // upload file
       const { error: upErr } = await supabase.storage
         .from("minute_book")
         .upload(storagePath, file, {
@@ -101,7 +106,7 @@ export default function UploadClient() {
 
       if (upErr) throw upErr;
 
-      // register
+      // register via canonical SQL contract
       const { error: rpcErr } = await supabase.rpc(
         "register_minute_book_upload",
         {
@@ -122,18 +127,19 @@ export default function UploadClient() {
 
       if (rpcErr) throw rpcErr;
 
-      setOk("Registered successfully.");
+      setOk("Upload registered successfully.");
       setTitle("");
       setNotes("");
       setFile(null);
     } catch (e: any) {
-      setErr(e.message ?? "Upload failed");
+      setErr(e?.message ?? "Upload failed.");
     } finally {
       setBusy(false);
     }
   }
 
-  // ---------- UI ----------
+  /* ---------------- UI (intentionally plain) ---------------- */
+
   return (
     <div style={{ padding: 24, maxWidth: 720 }}>
       <h2>CI-Archive Upload</h2>
