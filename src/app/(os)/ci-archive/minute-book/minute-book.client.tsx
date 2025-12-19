@@ -2,9 +2,8 @@
 export const dynamic = "force-dynamic";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
-import { createClient } from "@supabase/supabase-js";
-import { useOsEntity } from "@/components/OsEntityContext";
+import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
+import { useEntity } from "@/components/OsEntityContext";
 
 type MinuteBookEntry = {
   id: string;
