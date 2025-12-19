@@ -25,7 +25,12 @@ function useClock() {
   return now;
 }
 
-export default function OsGlobalBar() {
+/**
+ * Export BOTH:
+ * - named export: OsHeader imports { OsGlobalBar }
+ * - default export: other places may import default
+ */
+export function OsGlobalBar() {
   const router = useRouter();
   const supabase = useMemo(() => supabaseBrowser(), []);
   const { activeEntity, setActiveEntity } = useEntity();
@@ -129,3 +134,5 @@ export default function OsGlobalBar() {
     </div>
   );
 }
+
+export default OsGlobalBar;
