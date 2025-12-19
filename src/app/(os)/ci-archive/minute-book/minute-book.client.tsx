@@ -1,7 +1,5 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { useSearchParams } from "next/navigation";
 
 type MinuteBookEntry = {
