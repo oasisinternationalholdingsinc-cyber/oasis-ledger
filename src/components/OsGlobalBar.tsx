@@ -1,8 +1,9 @@
 // src/components/OsGlobalBar.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity, EntityKey } from "@/components/OsEntityContext";
 
@@ -14,19 +15,24 @@ function getTimeString() {
   });
 }
 
+function isEntityKey(v: string | null): v is EntityKey {
+  return v === "holdings" || v === "lounge" || v === "real-estate";
+}
+
 export function OsGlobalBar() {
   const [time, setTime] = useState<string>(() => getTimeString());
   const [operatorEmail, setOperatorEmail] = useState<string | null>(null);
+
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
 
   // 🔥 global entity brain
   const { activeEntity, setActiveEntity } = useEntity();
 
   // live clock
   useEffect(() => {
-    const timer = setInterval(() => {
-      setTime(getTimeString());
-    }, 1000);
-
+    const timer = setInterval(() => setTime(getTimeString()), 1000);
     return () => clearInterval(timer);
   }, []);
 
@@ -43,6 +49,27 @@ export function OsGlobalBar() {
       })
       .catch((err) => console.error("Unexpected error getting user:", err));
   }, []);
+
+  // Keep context aligned with URL if user lands on a deep link like ?entity_key=holdings
+  useEffect(() => {
+    const urlEntity = searchParams.get("entity_key");
+    if (isEntityKey(urlEntity) && urlEntity !== activeEntity) {
+      setActiveEntity(urlEntity);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
+  const onEntityChange = useMemo(() => {
+    return (next: EntityKey) => {
+      setActiveEntity(next);
+
+      // Update the URL so every page (CI-Archive included) receives the scope
+      const params = new URLSearchParams(searchParams.toString());
+      params.set("entity_key", next);
+
+      router.push(`${pathname}?${params.toString()}`);
+    };
+  }, [pathname, router, searchParams, setActiveEntity]);
 
   return (
     <div
@@ -71,9 +98,7 @@ export function OsGlobalBar() {
         <select
           className="os-entity"
           value={activeEntity}
-          onChange={(e) =>
-            setActiveEntity(e.target.value as EntityKey)
-          }
+          onChange={(e) => onEntityChange(e.target.value as EntityKey)}
         >
           <option value="holdings">Holdings</option>
           <option value="lounge">Lounge</option>
@@ -82,9 +107,7 @@ export function OsGlobalBar() {
 
         <span className="os-role-pill">OPERATOR</span>
 
-        <span className="os-email">
-          {operatorEmail ?? "loading@oasis-os"}
-        </span>
+        <span className="os-email">{operatorEmail ?? "loading@oasis-os"}</span>
 
         <Link href="/login" className="os-signout">
           Sign Out
