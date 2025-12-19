@@ -3,7 +3,6 @@ export const dynamic = "force-dynamic";
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
 import { Archive, BadgeCheck, BookOpen, UploadCloud, ArrowRight, Shield } from "lucide-react";
 
 import { supabaseBrowser } from "@/lib/supabase/browser";
@@ -84,21 +83,15 @@ function Tile({
 }
 
 export default function CIArchiveLaunchpad() {
-  const router = useRouter();
   const supabase = useMemo(() => supabaseBrowser(), []);
   const { activeEntity } = useEntity();
 
   const [loading, setLoading] = useState(true);
   const [counts, setCounts] = useState<Counts>({ minuteBook: null, verified: null, ledger: null });
 
-  // auth gate (harmless if layout already gates)
-  useEffect(() => {
-    const checkAuth = async () => {
-      const { data } = await supabase.auth.getSession();
-      if (!data?.session) router.replace("/login");
-    };
-    checkAuth();
-  }, [router, supabase]);
+  // IMPORTANT:
+  // Auth gating belongs to (os)/layout or os-auth-gate.
+  // Do NOT redirect to /login from inside CI modules (prevents false "logout" due to session hydration timing).
 
   useEffect(() => {
     let cancelled = false;
@@ -120,6 +113,7 @@ export default function CIArchiveLaunchpad() {
         safeCount("verified_documents"),
         safeCount("governance_ledger"),
       ]);
+
       if (!cancelled) {
         setCounts({ minuteBook, verified, ledger });
         setLoading(false);
