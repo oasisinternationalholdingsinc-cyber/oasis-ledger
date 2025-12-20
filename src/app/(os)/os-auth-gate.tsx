@@ -1,42 +1,44 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
+import type { AuthChangeEvent, Session } from "@supabase/supabase-js";
 
-export function OsAuthGate({ children }: { children: React.ReactNode }) {
+export default function OsAuthGate({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
-  const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    let mounted = true;
+    let alive = true;
 
     (async () => {
-      const { data } = await supabase.auth.getSession();
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
 
-      if (!data.session) {
-        const next = encodeURIComponent(pathname || "/ci-council");
-        router.replace(`/login?next=${next}`);
-        return;
-      }
+      if (!alive) return;
 
-      if (mounted) setReady(true);
-    })();
-
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
       if (!session) {
         const next = encodeURIComponent(pathname || "/ci-council");
         router.replace(`/login?next=${next}`);
       }
-    });
+    })();
+
+    const { data: sub } = supabase.auth.onAuthStateChange(
+      (_event: AuthChangeEvent, session: Session | null) => {
+        if (!session) {
+          const next = encodeURIComponent(pathname || "/ci-council");
+          router.replace(`/login?next=${next}`);
+        }
+      }
+    );
 
     return () => {
-      mounted = false;
+      alive = false;
       sub.subscription.unsubscribe();
     };
   }, [router, pathname]);
 
-  if (!ready) return null; // you can swap this to a loader later
   return <>{children}</>;
 }

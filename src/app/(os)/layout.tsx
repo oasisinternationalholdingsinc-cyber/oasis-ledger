@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { OsHeader } from "@/components/OsHeader";
 import { OsDock } from "@/components/OsDock";
 import { OsEntityProvider } from "@/components/OsEntityContext";
-import { OsAuthGate } from "./os-auth-gate";
+import OsAuthGate from "./os-auth-gate"; // ✅ default import
 
 export default function OsLayout({ children }: { children: ReactNode }) {
   return (
