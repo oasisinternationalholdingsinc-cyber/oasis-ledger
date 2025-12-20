@@ -4,12 +4,11 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import clsx from "clsx";
 import {
-  Orbit,       // Dashboard – OS Core / Orb
+  Orbit,       // Dashboard – Oasis Os Core 
   Edit,        // CI-Alchemy – Scribe / Drafting
   Landmark,    // CI-Parliament – Parliament / Council
   Flame,       // CI-Forge – Execution / Fire
   ShieldAlert, // CI-Sentinel – Guardian / Alerts
-  Eye,         // CI-Oracle – Seer / Insight
   Archive,     // CI-Archive – Vault / Records
 } from "lucide-react";
 
@@ -59,13 +58,6 @@ const FUTURE_ITEMS: DockItem[] = [
     Icon: ShieldAlert,
     tintClass: "text-rose-300",
     moduleKey: "sentinel",
-  },
-  {
-    href: "/ci-oracle",
-    label: "CI-Oracle",
-    Icon: Eye,
-    tintClass: "text-fuchsia-300",
-    moduleKey: "oracle",
   },
   {
     href: "/ci-archive",
