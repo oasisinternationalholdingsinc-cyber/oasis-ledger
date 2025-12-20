@@ -52,7 +52,8 @@ export default function UploadClient() {
 
   // form
   const [domainKey, setDomainKey] = useState<string>("");
-  const [entryType, setEntryType] = useState<(typeof ENTRY_TYPES)[number]>("filing");
+  const [entryType, setEntryType] =
+    useState<(typeof ENTRY_TYPES)[number]>("filing");
   const [title, setTitle] = useState<string>("");
   const [notes, setNotes] = useState<string>("");
   const [file, setFile] = useState<File | null>(null);
@@ -66,15 +67,16 @@ export default function UploadClient() {
   useEffect(() => {
     const fromUrl = readEntityKeyFromUrl();
     if (fromUrl) {
-      setEntityKey(fromUrl);
+      const norm = String(fromUrl).trim().toLowerCase();
+      setEntityKey(norm);
       try {
-        localStorage.setItem("oasis_entity_key", fromUrl);
+        localStorage.setItem("oasis_entity_key", norm);
       } catch {}
       return;
     }
     try {
       const saved = localStorage.getItem("oasis_entity_key");
-      if (saved) setEntityKey(saved);
+      if (saved) setEntityKey(String(saved).trim().toLowerCase());
     } catch {}
   }, []);
 
@@ -115,7 +117,10 @@ export default function UploadClient() {
     setErr(null);
     setOk(null);
 
-    if (!entityKey) return setErr("Missing entity scope. Open from OS with ?entity_key=holdings");
+    if (!entityKey)
+      return setErr(
+        "Missing entity scope. Open from OS with ?entity_key=holdings"
+      );
     if (!domainKey) return setErr("Domain is required.");
     if (!entryType) return setErr("Entry type is required.");
     if (!title.trim()) return setErr("Title is required.");
@@ -123,15 +128,21 @@ export default function UploadClient() {
 
     setBusy(true);
     try {
+      // 0) sanity: ensure user session exists (prevents confusing RLS results)
+      const { data: sess } = await supabase.auth.getSession();
+      if (!sess?.session) {
+        throw new Error("Not signed in. Please log in again and retry upload.");
+      }
+
       // 1) compute hash
       const hash = await sha256Hex(file);
 
-      // 2) build path (domain-driven)
+      // 2) build path (domain-driven, stable)
       const date = new Date().toISOString().slice(0, 10);
       const safe = safeFileName(file.name);
       const storagePath = `${entityKey}/${domainKey}/${entryType}/${date}/${hash}-${safe}`;
 
-      // 3) upload file
+      // 3) upload file to minute_book bucket
       const { error: upErr } = await supabase.storage
         .from("minute_book")
         .upload(storagePath, file, {
@@ -140,25 +151,33 @@ export default function UploadClient() {
           cacheControl: "3600",
         });
 
-      if (upErr) throw new Error(upErr.message);
+      if (upErr) throw new Error(`Storage upload failed: ${upErr.message}`);
 
-      // 4) register via canonical SQL contract (your real function)
-      const { data: entryId, error: rpcErr } = await supabase.rpc("register_minute_book_upload", {
-        p_entity_key: entityKey,
-        p_domain_key: domainKey,
-        p_entry_type: entryType,
-        p_entry_date: date,
-        p_title: title,
-        p_notes: notes?.trim() ? notes.trim() : null,
-        p_primary_file_name: file.name,
-        p_primary_storage_path: storagePath,
-        p_primary_file_hash: hash,
-        p_primary_file_size: file.size,
-        p_primary_mime_type: "application/pdf",
-        p_supporting: [],
-      });
+      // 4) register via canonical SQL contract (entity_key overload)
+      // IMPORTANT: we pass entryType values that exist in entry_type_enum (NO manual_upload)
+      const { data: entryId, error: rpcErr } = await supabase.rpc(
+        "register_minute_book_upload",
+        {
+          p_entity_key: entityKey, // casts to entity_key_enum
+          p_domain_key: domainKey,
+          p_entry_type: entryType, // casts to entry_type_enum
+          p_entry_date: date,
+          p_title: title.trim(),
+          p_notes: notes?.trim() ? notes.trim() : null,
+          p_primary_file_name: file.name,
+          p_primary_storage_path: storagePath,
+          p_primary_file_hash: hash,
+          p_primary_file_size: file.size,
+          p_primary_mime_type: "application/pdf",
+          p_supporting: [],
+        }
+      );
 
-      if (rpcErr) throw new Error(rpcErr.message);
+      if (rpcErr) {
+        // If registration fails, the file is already in storage.
+        // That’s OK — we can clean storage after the fact if needed.
+        throw new Error(`Registry RPC failed: ${rpcErr.message}`);
+      }
 
       setOk(`Registered: ${String(entryId ?? "")}`.trim());
       setTitle("");
@@ -172,16 +191,21 @@ export default function UploadClient() {
   }
 
   // ---------- UI ----------
-  const domainLabel = domains.find((d) => d.key === domainKey)?.label ?? domainKey;
+  const domainLabel =
+    domains.find((d) => d.key === domainKey)?.label ?? domainKey;
 
   return (
     <div className="h-full flex flex-col px-8 pt-6 pb-6">
       {/* Header under OS bar */}
       <div className="mb-4 shrink-0">
-        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI-ARCHIVE</div>
+        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">
+          CI-ARCHIVE
+        </div>
         <p className="mt-1 text-[11px] text-slate-400">
-          Registry Upload Console •{" "}
-          <span className="font-semibold text-slate-200">Minute Book & Supporting Docs</span>
+          Upload Console •{" "}
+          <span className="font-semibold text-slate-200">
+            Minute Book Registry
+          </span>
         </p>
       </div>
 
@@ -191,10 +215,14 @@ export default function UploadClient() {
           {/* Window Title */}
           <div className="flex items-start justify-between mb-4 shrink-0">
             <div>
-              <h1 className="text-lg font-semibold text-slate-50">Minute Book & Registry Upload</h1>
+              <h1 className="text-lg font-semibold text-slate-50">
+                Minute Book Upload
+              </h1>
               <p className="mt-1 text-xs text-slate-400">
-                Domain-driven filing • SHA-256 enforced • Ledger-linked via{" "}
-                <span className="font-semibold text-amber-300">register_minute_book_upload</span>
+                Domain-driven filing • SHA-256 enforced • Writes via{" "}
+                <span className="font-semibold text-amber-300">
+                  register_minute_book_upload
+                </span>
               </p>
             </div>
             <div className="hidden md:flex items-center text-[10px] uppercase tracking-[0.3em] text-slate-500">
@@ -223,9 +251,11 @@ export default function UploadClient() {
             {/* LEFT – Form */}
             <section className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex flex-col min-h-0">
               <div className="flex items-center justify-between mb-3">
-                <div className="text-sm font-semibold text-slate-200">Filing</div>
+                <div className="text-sm font-semibold text-slate-200">
+                  Filing
+                </div>
                 <span className="px-2 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/40 text-[10px] uppercase tracking-[0.18em] text-amber-300">
-                  Registry Contract
+                  Enterprise Contract
                 </span>
               </div>
 
@@ -239,10 +269,17 @@ export default function UploadClient() {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <Field label="Entity">
                     <div className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-100">
-                      {entityKey ?? <span className="text-red-300">Missing entity scope</span>}
+                      {entityKey ?? (
+                        <span className="text-red-300">
+                          Missing entity scope
+                        </span>
+                      )}
                     </div>
                     <div className="mt-1 text-[10px] text-slate-500">
-                      Open via OS with <span className="text-slate-300">?entity_key=holdings</span>
+                      Open via OS with{" "}
+                      <span className="text-slate-300">
+                        ?entity_key=holdings
+                      </span>
                     </div>
                   </Field>
 
@@ -262,7 +299,8 @@ export default function UploadClient() {
                       ))}
                     </select>
                     <div className="mt-1 text-[10px] text-slate-500">
-                      Source: <span className="text-slate-300">governance_domains</span>
+                      Source:{" "}
+                      <span className="text-slate-300">governance_domains</span>
                     </div>
                   </Field>
 
@@ -279,7 +317,8 @@ export default function UploadClient() {
                       ))}
                     </select>
                     <div className="mt-1 text-[10px] text-slate-500">
-                      Source: <span className="text-slate-300">entry_type_enum</span>
+                      Source:{" "}
+                      <span className="text-slate-300">entry_type_enum</span>
                     </div>
                   </Field>
 
@@ -291,7 +330,8 @@ export default function UploadClient() {
                       className="w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 outline-none"
                     />
                     <div className="mt-1 text-[10px] text-slate-500">
-                      Bucket: <span className="text-slate-300">minute_book</span>
+                      Bucket:{" "}
+                      <span className="text-slate-300">minute_book</span>
                     </div>
                   </Field>
 
@@ -336,14 +376,19 @@ export default function UploadClient() {
               </form>
             </section>
 
-            {/* RIGHT – Preview / status */}
+            {/* RIGHT – Preview */}
             <section className="border border-slate-800 rounded-2xl bg-slate-950/40 p-4 flex flex-col min-h-0">
               <div className="flex items-center justify-between mb-3">
                 <div>
-                  <h2 className="text-sm font-semibold text-slate-200">Registry Preview</h2>
+                  <h2 className="text-sm font-semibold text-slate-200">
+                    Registry Preview
+                  </h2>
                   <p className="mt-1 text-[11px] text-slate-400">
-                    This is exactly what will be written into{" "}
-                    <span className="text-slate-200 font-semibold">minute_book_entries</span> (and supporting docs).
+                    Exactly what will be written into{" "}
+                    <span className="text-slate-200 font-semibold">
+                      minute_book_entries
+                    </span>{" "}
+                    + supporting docs.
                   </p>
                 </div>
                 <span className="px-2 py-0.5 rounded-full bg-sky-500/10 border border-sky-500/40 text-[10px] uppercase tracking-[0.18em] text-sky-300">
@@ -352,7 +397,9 @@ export default function UploadClient() {
               </div>
 
               <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-[12px] text-slate-200">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 mb-2">Selected</div>
+                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 mb-2">
+                  Selected
+                </div>
                 <div className="space-y-2">
                   <Row k="Entity" v={entityKey ?? "—"} />
                   <Row k="Domain" v={domainLabel || "—"} />
@@ -361,14 +408,18 @@ export default function UploadClient() {
                   <Row k="File" v={file?.name || "—"} />
                 </div>
 
-                <div className="mt-4 text-[10px] uppercase tracking-[0.2em] text-slate-500 mb-2">Path Pattern</div>
+                <div className="mt-4 text-[10px] uppercase tracking-[0.2em] text-slate-500 mb-2">
+                  Path Pattern
+                </div>
                 <div className="rounded-lg border border-slate-800 bg-black/40 px-3 py-2 text-[11px] text-slate-300">
-                  {entityKey ? `${entityKey}/${domainKey || "domain"}/${entryType || "type"}/YYYY-MM-DD/{sha256}-{filename}` : "—"}
+                  {entityKey
+                    ? `${entityKey}/${domainKey || "domain"}/${entryType || "type"}/YYYY-MM-DD/{sha256}-{filename}`
+                    : "—"}
                 </div>
               </div>
 
               <div className="mt-3 flex items-center justify-between text-[10px] text-slate-500">
-                <span>CI-Archive · Oasis Digital Parliament Ledger</span>
+                <span>CI-Archive · Oasis Digital Parliament</span>
                 <span>ODP.AI · Registry Intake</span>
               </div>
             </section>
@@ -382,7 +433,9 @@ export default function UploadClient() {
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <div className="mb-1 text-[11px] font-semibold tracking-[0.18em] text-slate-500">{label.toUpperCase()}</div>
+      <div className="mb-1 text-[11px] font-semibold tracking-[0.18em] text-slate-500">
+        {label.toUpperCase()}
+      </div>
       {children}
     </div>
   );
