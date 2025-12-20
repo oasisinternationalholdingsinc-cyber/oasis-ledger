@@ -2,16 +2,13 @@
 export const dynamic = "force-dynamic";
 
 /**
- * CI-Archive → Minute Book (FINAL ENTERPRISE OS)
- *
- * CONSTITUTION:
- * - READ-ONLY registry (NO upload, NO mutation)
- * - CI-Council layout discipline (NO overflow)
- * - STRICT 3-column OS surface
- * - DOMAIN SOURCE OF TRUTH = minute_book_entries.domain_key
- * - PDF-first evidence (RIGHT column)
- * - Metadata Zone stays RIGHT, secondary, collapsible
- * - Upload lives on its OWN page
+ * CI-Archive → Minute Book (FINAL PRODUCTION OS – COUNCIL-FRAMED)
+ * - Window-in-OS framing (matches CI-Council)
+ * - STRICT 3-column containment (no overflow)
+ * - Registry-only (NO upload logic)
+ * - Entity-scoped ONLY (useEntity)
+ * - Domain source = minute_book_entries.domain_key ONLY (no inference)
+ * - PDF-first right panel; metadata secondary (collapsible)
  */
 
 import Link from "next/link";
@@ -19,12 +16,12 @@ import { useEffect, useMemo, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 
-/* ================= TYPES ================= */
+/* ---------------- types ---------------- */
 
 type MinuteBookRow = {
   id: string;
-  entity_key: string;
-  domain_key: string;
+  entity_key?: string | null;
+  domain_key?: string | null;
 
   title?: string | null;
   entry_type?: string | null;
@@ -35,273 +32,319 @@ type MinuteBookRow = {
   file_size?: number | null;
   mime_type?: string | null;
 
+  status?: string | null;
   created_at?: string | null;
   created_by?: string | null;
+  source?: string | null;
 };
 
-/* ================= HELPERS ================= */
+type DomainDef = {
+  key: string;
+  label: string;
+  icon: string;
+};
 
-function titleOf(r: MinuteBookRow) {
-  return r.title || r.file_name || "Untitled";
-}
+type OfficialArtifact = {
+  bucket_id: string;
+  storage_path: string;
+  file_name?: string | null;
+  kind?: "official" | "verified";
+};
 
-function fmtBytes(n?: number | null) {
-  if (!n) return "—";
+/* ---------------- helpers ---------------- */
+
+const fmtBytes = (n?: number | null) => {
+  if (!n || n <= 0) return "—";
   const u = ["B", "KB", "MB", "GB"];
-  let i = 0, v = n;
+  let v = n, i = 0;
   while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-  return `${v.toFixed(v >= 10 ? 0 : 1)} ${u[i]}`;
-}
+  return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${u[i]}`;
+};
 
-function shortHash(h?: string | null) {
-  if (!h) return "—";
-  return h.length <= 18 ? h : `${h.slice(0, 10)}…${h.slice(-6)}`;
-}
+const shortHash = (h?: string | null) =>
+  !h ? "—" : h.length <= 18 ? h : `${h.slice(0, 10)}…${h.slice(-6)}`;
 
-/* ================= CANONICAL DOMAINS (MATCH UPLOAD) ================= */
+const titleOf = (r: MinuteBookRow) => r.title || r.file_name || "Untitled";
 
-const DOMAIN_CABINET = [
-  { key: "formation", label: "Formation" },
-  { key: "corporate_profile", label: "Corporate Profile" },
-  { key: "share_certificates", label: "Share Capital" },
-  { key: "directors_officers", label: "Directors & Officers" },
-  { key: "resolutions", label: "Resolutions & Minutes" },
-  { key: "bylaws", label: "Bylaws & Governance" },
-  { key: "annual_returns", label: "Annual Returns & Tax" },
-  { key: "banking", label: "Banking & Finance" },
-  { key: "insurance", label: "Insurance & Risk" },
-  { key: "contracts", label: "Contracts & Agreements" },
-  { key: "brand_ip", label: "Brand & IP" },
-  { key: "appraisal", label: "Real Estate & Assets" },
-  { key: "compliance", label: "Compliance" },
-  { key: "litigation", label: "Litigation" },
-  { key: "annexes", label: "Annexes" },
+/* ---------------- canonical domains (MATCH UPLOAD) ---------------- */
+
+const DOMAINS: DomainDef[] = [
+  { key: "formation", label: "Formation", icon: "📜" },
+  { key: "corporate_profile", label: "Corporate Profile", icon: "🛡️" },
+  { key: "share_capital", label: "Share Capital", icon: "📈" },
+  { key: "directors_officers", label: "Directors & Officers", icon: "👤" },
+  { key: "resolutions", label: "Resolutions & Minutes", icon: "⚖️" },
+  { key: "bylaws", label: "Bylaws & Governance", icon: "📘" },
+  { key: "annual_returns", label: "Annual Returns & Tax", icon: "🧾" },
+  { key: "banking", label: "Banking & Finance", icon: "🏦" },
+  { key: "insurance", label: "Insurance & Risk", icon: "🛡️" },
+  { key: "contracts", label: "Contracts & Agreements", icon: "🤝" },
+  { key: "brand_ip", label: "Brand & IP", icon: "™️" },
+  { key: "real_estate", label: "Real Estate & Assets", icon: "🏠" },
+  { key: "compliance", label: "Compliance", icon: "✅" },
+  { key: "litigation", label: "Litigation", icon: "⚠️" },
+  { key: "annexes", label: "Annexes", icon: "🗂️" },
 ];
 
-/* ================= DATA ================= */
+const ALL = { key: "all", label: "All", icon: "◆" } as DomainDef;
+
+/* ---------------- data ---------------- */
 
 async function loadMinuteBook(entityKey: string) {
-  const sb = supabaseBrowser;
-  const { data, error } = await sb
-    .from("minute_book_entries")
+  const { data, error } = await supabaseBrowser
+    .from("v_registry_minute_book_entries")
     .select("*")
     .eq("entity_key", entityKey)
-    .order("created_at", { ascending: false })
     .limit(1000);
 
   if (error) throw error;
   return (data || []) as MinuteBookRow[];
 }
 
-async function signedUrl(path: string) {
-  const sb = supabaseBrowser;
-  const { data, error } = await sb.storage
-    .from("minute_book")
-    .createSignedUrl(path, 600);
+async function resolveOfficial(entityKey: string, row: MinuteBookRow): Promise<OfficialArtifact | null> {
+  // Optional official-first lookup; safe if none exists
+  try {
+    const { data } = await supabaseBrowser
+      .from("verified_documents")
+      .select("*")
+      .eq("entity_key", entityKey)
+      .eq("source_entry_id", row.id)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    if (data && data[0]?.storage_path) {
+      return {
+        bucket_id: data[0].bucket_id || "verified_documents",
+        storage_path: data[0].storage_path,
+        file_name: data[0].file_name || row.file_name || null,
+        kind: "verified",
+      };
+    }
+  } catch {}
+  return null;
+}
 
+async function signedUrl(bucket: string, path: string, download?: string | null) {
+  const { data, error } = await supabaseBrowser
+    .storage.from(bucket)
+    .createSignedUrl(path, 600, download ? { download } : undefined);
   if (error) throw error;
   return data.signedUrl;
 }
 
-/* ================= COMPONENT ================= */
+/* ---------------- UI ---------------- */
 
 export default function MinuteBookClient() {
   const { entityKey } = useEntity();
 
   const [rows, setRows] = useState<MinuteBookRow[]>([]);
-  const [activeDomain, setActiveDomain] = useState<string>("all");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-
-  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  /* Load registry */
-  useEffect(() => {
-    if (!entityKey) return;
-    setErr(null);
-    loadMinuteBook(entityKey)
-      .then((d) => {
-        setRows(d);
-        setSelectedId(d[0]?.id || null);
-      })
-      .catch((e) => setErr(e.message));
-  }, [entityKey]);
+  const [activeDomain, setActiveDomain] = useState<string>(ALL.key);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  /* Derived */
-  const filtered = useMemo(() => {
-    if (activeDomain === "all") return rows;
-    return rows.filter((r) => r.domain_key === activeDomain);
-  }, [rows, activeDomain]);
+  const [official, setOfficial] = useState<OfficialArtifact | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   const selected = useMemo(
-    () => rows.find((r) => r.id === selectedId) || null,
+    () => rows.find(r => r.id === selectedId) || null,
     [rows, selectedId]
   );
 
-  async function viewPdf() {
-    if (!selected?.storage_path) return;
-    try {
-      const url = await signedUrl(selected.storage_path);
-      setPdfUrl(url);
-    } catch (e: any) {
-      setErr(e.message);
-    }
-  }
+  const visible = useMemo(() => {
+    if (activeDomain === ALL.key) return rows;
+    return rows.filter(r => r.domain_key === activeDomain);
+  }, [rows, activeDomain]);
 
-  /* ================= RENDER ================= */
+  useEffect(() => {
+    let alive = true;
+    async function run() {
+      if (!entityKey) return;
+      setLoading(true);
+      try {
+        const data = await loadMinuteBook(entityKey);
+        if (!alive) return;
+        setRows(data);
+        setSelectedId(data[0]?.id ?? null);
+      } catch (e: any) {
+        if (!alive) return;
+        setErr(e?.message || "Failed to load registry.");
+      } finally {
+        if (alive) setLoading(false);
+      }
+    }
+    run();
+    return () => { alive = false; };
+  }, [entityKey]);
+
+  useEffect(() => {
+    let alive = true;
+    async function run() {
+      setOfficial(null);
+      setPreviewUrl(null);
+      if (!entityKey || !selected) return;
+      const off = await resolveOfficial(entityKey, selected);
+      if (alive) setOfficial(off);
+    }
+    run();
+    return () => { alive = false; };
+  }, [entityKey, selected?.id]);
+
+  const viewPdf = async () => {
+    if (!selected) return;
+    if (official) {
+      setPreviewUrl(await signedUrl(official.bucket_id, official.storage_path));
+    } else if (selected.storage_path) {
+      setPreviewUrl(await signedUrl("minute_book", selected.storage_path));
+    }
+  };
+
+  /* ---------------- render ---------------- */
 
   return (
-    <div className="h-[calc(100vh-56px)] w-full overflow-hidden px-4 py-4">
-
-      {/* HEADER */}
-      <div className="mb-4 flex items-start justify-between">
-        <div>
-          <div className="text-xs text-white/50">CI-Archive</div>
-          <div className="text-xl font-semibold text-white">Minute Book Registry</div>
-          <div className="text-sm text-white/50">Read-only • Evidence-first</div>
+    <div className="h-full flex flex-col px-8 pt-6 pb-6 overflow-hidden">
+      {/* Header */}
+      <div className="mb-4 shrink-0">
+        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">
+          CI-ARCHIVE
         </div>
-
-        <Link
-          href="/ci-archive/upload"
-          className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-200"
-        >
-          Go to Upload →
-        </Link>
+        <p className="mt-1 text-[11px] text-slate-400">
+          Minute Book Registry • <span className="font-semibold text-slate-200">Read-only · Evidence-first</span>
+        </p>
       </div>
 
-      {!entityKey ? (
-        <div className="rounded-xl border border-white/10 bg-white/5 p-4 text-white/60">
-          Select an entity from the OS bar.
-        </div>
-      ) : (
-        <div className="grid h-[calc(100vh-56px-96px)] grid-cols-12 gap-4">
+      {/* Window Frame (CI-Council style) */}
+      <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
+        <div className="w-full max-w-[1400px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-6 py-5 flex flex-col overflow-hidden">
 
-          {/* LEFT — DOMAINS */}
-          <div className="col-span-3 overflow-hidden rounded-2xl border border-white/10 bg-white/5">
-            <div className="border-b border-white/10 px-4 py-3 text-sm text-white">
-              Domains
+          {/* Window Title */}
+          <div className="flex items-start justify-between mb-4 shrink-0">
+            <div>
+              <h1 className="text-lg font-semibold text-slate-50">
+                Minute Book Registry
+              </h1>
+              <p className="mt-1 text-xs text-slate-400">
+                Canonical archive indexed by governance domain.
+              </p>
             </div>
-            <div className="h-full overflow-auto p-2 space-y-1">
-              <button
-                onClick={() => setActiveDomain("all")}
-                className={`w-full rounded-xl px-3 py-2 text-left ${
-                  activeDomain === "all"
-                    ? "bg-amber-400/10 text-amber-200"
-                    : "text-white/70"
-                }`}
-              >
-                All
-              </button>
-
-              {DOMAIN_CABINET.map((d) => (
-                <button
-                  key={d.key}
-                  onClick={() => setActiveDomain(d.key)}
-                  className={`w-full rounded-xl px-3 py-2 text-left ${
-                    activeDomain === d.key
-                      ? "bg-amber-400/10 text-amber-200"
-                      : "text-white/70"
-                  }`}
-                >
-                  {d.label}
-                </button>
-              ))}
-            </div>
+            <Link
+              href="/ci-archive/upload"
+              className="rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-300 hover:bg-amber-500/15"
+            >
+              Go to Upload →
+            </Link>
           </div>
 
-          {/* MIDDLE — REGISTRY */}
-          <div className="col-span-5 overflow-hidden rounded-2xl border border-white/10 bg-white/5">
-            <div className="border-b border-white/10 px-4 py-3 text-sm text-white">
-              Registry Entries ({filtered.length})
-            </div>
-            <div className="h-full overflow-auto p-2 space-y-2">
-              {filtered.map((r) => (
-                <button
-                  key={r.id}
-                  onClick={() => setSelectedId(r.id)}
-                  className={`w-full rounded-xl border px-3 py-3 text-left ${
-                    selectedId === r.id
-                      ? "border-amber-400/30 bg-amber-400/10"
-                      : "border-white/10 hover:bg-white/5"
-                  }`}
-                >
-                  <div className="text-sm font-medium text-white">
-                    {titleOf(r)}
-                  </div>
-                  <div className="mt-1 text-xs text-white/50">
-                    {r.entry_type || "Document"} •{" "}
-                    {r.created_at
-                      ? new Date(r.created_at).toLocaleString()
-                      : "—"}
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
+          {/* Three Columns */}
+          <div className="grid grid-cols-[260px,minmax(0,1fr),360px] gap-6 flex-1 min-h-0">
 
-          {/* RIGHT — EVIDENCE */}
-          <div className="col-span-4 overflow-hidden rounded-2xl border border-white/10 bg-white/5">
-            <div className="border-b border-white/10 px-4 py-3 text-sm text-white">
-              Evidence
-            </div>
-            <div className="h-full overflow-auto p-4">
+            {/* LEFT – Domains (Finder-style tabs) */}
+            <aside className="rounded-2xl border border-slate-800 bg-slate-950/40 p-2 flex flex-col min-h-0">
+              {[ALL, ...DOMAINS].map(d => {
+                const active = activeDomain === d.key;
+                return (
+                  <button
+                    key={d.key}
+                    onClick={() => setActiveDomain(d.key)}
+                    className={[
+                      "w-full flex items-center gap-3 px-3 py-2 rounded-xl text-sm transition",
+                      active
+                        ? "bg-amber-500/10 border border-amber-500/30 text-amber-200 shadow-[0_0_0_1px_rgba(245,158,11,0.35)]"
+                        : "border border-transparent text-slate-300 hover:bg-slate-900/60",
+                    ].join(" ")}
+                  >
+                    <span className="w-6 text-center">{d.icon}</span>
+                    <span className="truncate">{d.label}</span>
+                  </button>
+                );
+              })}
+            </aside>
+
+            {/* MIDDLE – Entries */}
+            <section className="rounded-2xl border border-slate-800 bg-slate-950/40 p-3 flex flex-col min-h-0">
+              <div className="text-sm font-semibold text-slate-200 mb-2">
+                Registry Entries ({visible.length})
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto space-y-1">
+                {loading && <div className="text-xs text-slate-400">Loading…</div>}
+                {err && <div className="text-xs text-red-400">{err}</div>}
+                {!loading && visible.map(r => {
+                  const active = r.id === selectedId;
+                  return (
+                    <button
+                      key={r.id}
+                      onClick={() => setSelectedId(r.id)}
+                      className={[
+                        "w-full text-left px-3 py-2 rounded-xl border transition",
+                        active
+                          ? "bg-slate-900/80 border-sky-400/40"
+                          : "border-slate-800 hover:bg-slate-900/60",
+                      ].join(" ")}
+                    >
+                      <div className="text-sm font-medium text-slate-100">
+                        {titleOf(r)}
+                      </div>
+                      <div className="text-[11px] text-slate-400">
+                        {r.entry_type || "document"} • {r.created_at ? new Date(r.created_at).toLocaleString() : "—"}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+
+            {/* RIGHT – Evidence + Metadata */}
+            <aside className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4 flex flex-col min-h-0">
               {!selected ? (
-                <div className="text-white/60">Select an entry.</div>
+                <div className="text-sm text-slate-400">Select a record to inspect evidence.</div>
               ) : (
                 <>
-                  <div className="text-lg font-semibold text-white">
-                    {titleOf(selected)}
+                  <div className="flex items-center justify-between mb-2">
+                    <h2 className="text-sm font-semibold text-slate-200">
+                      {titleOf(selected)}
+                    </h2>
+                    <span className="px-2 py-0.5 rounded-full border border-amber-500/40 bg-amber-500/10 text-[10px] uppercase tracking-[0.18em] text-amber-300">
+                      {official ? "VERIFIED" : "UPLOADED"}
+                    </span>
                   </div>
 
-                  <div className="mt-3">
-                    <button
-                      onClick={viewPdf}
-                      className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-200"
-                    >
-                      View PDF
-                    </button>
-                  </div>
+                  <button
+                    onClick={viewPdf}
+                    className="mb-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200 hover:bg-amber-500/15"
+                  >
+                    View PDF
+                  </button>
 
-                  {pdfUrl && (
-                    <div className="mt-4 h-[480px] overflow-hidden rounded-xl border border-white/10">
-                      <iframe src={pdfUrl} className="h-full w-full" />
+                  {previewUrl && (
+                    <div className="mb-3 rounded-xl border border-slate-800 overflow-hidden">
+                      <iframe src={previewUrl} className="w-full h-[360px]" />
                     </div>
                   )}
 
-                  {/* METADATA ZONE */}
-                  <details open className="mt-4 rounded-xl border border-white/10 bg-black/20 p-3">
-                    <summary className="cursor-pointer text-sm text-white/70">
-                      Metadata (secondary)
-                    </summary>
-                    <div className="mt-3 space-y-2 text-sm text-white/70">
-                      <div>
-                        SHA-256:{" "}
-                        <span className="font-mono">
-                          {shortHash(selected.file_hash)}
-                        </span>
+                  {/* Metadata (secondary) */}
+                  <div className="mt-auto space-y-2">
+                    <details open className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3">
+                      <summary className="text-sm text-amber-200 cursor-pointer">Hash</summary>
+                      <div className="mt-2 text-xs text-amber-100">
+                        SHA-256: <span className="font-mono">{shortHash(selected.file_hash)}</span>
                       </div>
-                      <div className="break-all">
-                        Path:{" "}
-                        <span className="font-mono text-xs">
-                          {selected.storage_path}
-                        </span>
+                    </details>
+
+                    <details className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                      <summary className="text-sm text-slate-300 cursor-pointer">Storage</summary>
+                      <div className="mt-2 text-xs text-slate-400">
+                        Path: {selected.storage_path || "—"}<br />
+                        Size: {fmtBytes(selected.file_size)}<br />
+                        MIME: {selected.mime_type || "—"}
                       </div>
-                      <div>Size: {fmtBytes(selected.file_size)}</div>
-                      <div>MIME: {selected.mime_type || "—"}</div>
-                    </div>
-                  </details>
+                    </details>
+                  </div>
                 </>
               )}
-
-              {err && (
-                <div className="mt-3 text-sm text-red-300">
-                  {err}
-                </div>
-              )}
-            </div>
+            </aside>
           </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }
