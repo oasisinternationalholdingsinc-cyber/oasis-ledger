@@ -2,13 +2,9 @@
 export const dynamic = "force-dynamic";
 
 /**
- * CI-Archive → Minute Book (FINAL — CANONICAL)
- * OS-consistent (CI-Council grade)
- * 3-column surface: Domains | Entries | Evidence
- * Evidence-first, read-only
- * Guarded audit deletion
- * Icons restored
- * TypeScript strict-safe
+ * CI-Archive → Minute Book (FINAL — LOCKED CONTRACT)
+ * STRICT 3-column OS surface: Domains | Registry | Evidence
+ * TypeScript strict-safe (noImplicitAny compliant)
  */
 
 import Link from "next/link";
@@ -16,47 +12,12 @@ import { useEffect, useMemo, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 
-/* ---------------- ICON MAP (UI-ONLY) ---------------- */
-
-const DOMAIN_ICON: Record<string, string> = {
-  incorporation: "📜",
-  formation: "📜",
-  "incorporation-and-formation": "📜",
-  corporate_profile: "🛡️",
-  "corporate-profile": "🛡️",
-  share_capital: "📈",
-  "share-capital": "📈",
-  share_certificates: "📈",
-  directors_officers: "👤",
-  "directors-and-officers": "👤",
-  resolutions: "⚖️",
-  minutes: "⚖️",
-  bylaws: "📘",
-  governance: "📘",
-  annual_returns: "🧾",
-  tax: "🧾",
-  banking: "🏦",
-  insurance: "🛡️",
-  risk: "🛡️",
-  real_estate: "🏠",
-  assets: "🏠",
-  contracts: "🤝",
-  agreements: "🤝",
-  brand_ip: "™️",
-  brand: "™️",
-  compliance: "✅",
-  regulatory: "✅",
-  litigation: "⚠️",
-  legal: "⚠️",
-  annexes: "🗂️",
-  misc: "🗂️",
-};
-
-/* ---------------- TYPES ---------------- */
+/* ---------------- types ---------------- */
 
 type GovernanceDomain = {
   key: string;
   label: string;
+  description?: string | null;
   sort_order?: number | null;
   active?: boolean | null;
 };
@@ -65,14 +26,17 @@ type MinuteBookEntry = {
   id: string;
   entity_key: string;
   domain_key: string | null;
+  section_name?: string | null;
   entry_type?: string | null;
   title?: string | null;
+  notes?: string | null;
   created_at?: string | null;
   created_by?: string | null;
   source?: string | null;
 };
 
 type SupportingDoc = {
+  id: string;
   entry_id: string;
   file_path: string | null;
   file_name: string | null;
@@ -84,6 +48,7 @@ type SupportingDoc = {
 };
 
 type EntryWithDoc = MinuteBookEntry & {
+  document_id?: string | null;
   storage_path?: string | null;
   file_name?: string | null;
   file_hash?: string | null;
@@ -91,65 +56,111 @@ type EntryWithDoc = MinuteBookEntry & {
   mime_type?: string | null;
 };
 
-/* ---------------- HELPERS ---------------- */
+type OfficialArtifact = {
+  bucket_id: string;
+  storage_path: string;
+  file_name?: string | null;
+  kind?: "official" | "verified";
+};
 
-const fmtBytes = (n?: number | null) =>
-  !n ? "—" : n > 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.round(n / 1024)} KB`;
+/* ---------------- helpers ---------------- */
 
-const shortHash = (h?: string | null) =>
-  !h ? "—" : h.length <= 18 ? h : `${h.slice(0, 12)}…${h.slice(-6)}`;
+function norm(v?: string | null, fb = "—") {
+  return v && v.trim().length ? v : fb;
+}
 
-/* ---------------- DATA LOADERS ---------------- */
+function fmtBytes(n?: number | null) {
+  if (!n) return "—";
+  const u = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < u.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(1)} ${u[i]}`;
+}
+
+function shortHash(h?: string | null) {
+  if (!h) return "—";
+  return h.length > 18 ? `${h.slice(0, 10)}…${h.slice(-6)}` : h;
+}
+
+/* ---------------- icon map (UI only) ---------------- */
+
+const DOMAIN_ICON: Record<string, string> = {
+  incorporation: "📜",
+  formation: "📜",
+  resolutions: "⚖️",
+  minutes: "⚖️",
+  bylaws: "📘",
+  share_capital: "📈",
+  directors_officers: "👤",
+  annual_returns: "🧾",
+  tax: "🧾",
+  banking: "🏦",
+  insurance: "🛡️",
+  real_estate: "🏠",
+  contracts: "🤝",
+  brand_ip: "™️",
+  compliance: "✅",
+  legal: "⚠️",
+};
+
+/* ---------------- data loaders ---------------- */
 
 async function loadDomains(): Promise<GovernanceDomain[]> {
   const { data, error } = await supabaseBrowser
     .from("governance_domains")
-    .select("key,label,sort_order,active")
+    .select("key,label,description,sort_order,active")
     .eq("active", true)
-    .order("sort_order", { ascending: true });
+    .order("sort_order");
+
   if (error) throw error;
-  return data || [];
+  return (data || []) as GovernanceDomain[];
 }
 
-async function loadEntries(entityKey: string): Promise<EntryWithDoc[]> {
+async function loadEntries(entityKey: string): Promise<MinuteBookEntry[]> {
   const { data, error } = await supabaseBrowser
     .from("minute_book_entries")
-    .select("id,entity_key,domain_key,entry_type,title,created_at,created_by,source")
+    .select("id,entity_key,domain_key,section_name,entry_type,title,notes,created_at,created_by,source")
     .eq("entity_key", entityKey)
     .order("created_at", { ascending: false });
 
   if (error) throw error;
+  return (data || []) as MinuteBookEntry[];
+}
 
-  // ✅ TS-SAFE FIX (THIS WAS THE BUILD ERROR)
-  const ids = ((data || []) as { id: string }[]).map((d) => d.id);
-  if (!ids.length) return [];
-
-  const { data: docs } = await supabaseBrowser
+async function loadSupportingDocs(entryIds: string[]): Promise<SupportingDoc[]> {
+  if (!entryIds.length) return [];
+  const { data, error } = await supabaseBrowser
     .from("supporting_documents")
-    .select("entry_id,file_path,file_name,file_hash,file_size,mime_type,version,uploaded_at")
-    .in("entry_id", ids)
+    .select("id,entry_id,file_path,file_name,file_hash,file_size,mime_type,version,uploaded_at")
+    .in("entry_id", entryIds)
     .order("version", { ascending: false })
     .order("uploaded_at", { ascending: false });
 
-  const primary = new Map<string, SupportingDoc>();
-  (docs || []).forEach((d) => {
-    if (!primary.has(d.entry_id)) primary.set(d.entry_id, d);
-  });
-
-  return (data || []).map((e) => {
-    const d = primary.get(e.id);
-    return {
-      ...e,
-      storage_path: d?.file_path ?? null,
-      file_name: d?.file_name ?? null,
-      file_hash: d?.file_hash ?? null,
-      file_size: d?.file_size ?? null,
-      mime_type: d?.mime_type ?? null,
-    };
-  });
+  if (error) throw error;
+  return (data || []) as SupportingDoc[];
 }
 
-/* ---------------- COMPONENT ---------------- */
+function pickPrimaryDocByEntry(docs: SupportingDoc[]): Map<string, SupportingDoc> {
+  const primary = new Map<string, SupportingDoc>();
+  (docs as SupportingDoc[]).forEach((d) => {
+    if (!primary.has(d.entry_id)) primary.set(d.entry_id, d);
+  });
+  return primary;
+}
+
+async function signedUrl(bucket: string, path: string, download?: string | null) {
+  const { data, error } = await supabaseBrowser.storage
+    .from(bucket)
+    .createSignedUrl(path, 600, download ? { download } : undefined);
+  if (error) throw error;
+  return data.signedUrl;
+}
+
+/* ---------------- component ---------------- */
 
 export default function MinuteBookClient() {
   const { entityKey } = useEntity();
@@ -158,30 +169,60 @@ export default function MinuteBookClient() {
   const [entries, setEntries] = useState<EntryWithDoc[]>([]);
   const [activeDomain, setActiveDomain] = useState<string>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  // Delete (audit action)
-  const [showDelete, setShowDelete] = useState(false);
-  const [deleteReason, setDeleteReason] = useState("");
-  const [busyDelete, setBusyDelete] = useState(false);
-
+  /* load domains */
   useEffect(() => {
-    loadDomains().then(setDomains);
+    loadDomains().then(setDomains).catch((e) => setError(e.message));
   }, []);
 
+  /* load entries */
   useEffect(() => {
     if (!entityKey) return;
-    loadEntries(entityKey).then((rows) => {
-      setEntries(rows);
-      setSelectedId(rows[0]?.id ?? null);
-    });
+    let alive = true;
+
+    (async () => {
+      setLoading(true);
+      try {
+        const base = await loadEntries(entityKey);
+        const ids = (base as MinuteBookEntry[]).map((d) => d.id);
+        const docs = await loadSupportingDocs(ids);
+        const primary = pickPrimaryDocByEntry(docs);
+
+        const merged: EntryWithDoc[] = base.map((e) => {
+          const d = primary.get(e.id);
+          return {
+            ...e,
+            document_id: d?.id ?? null,
+            storage_path: d?.file_path ?? null,
+            file_name: d?.file_name ?? null,
+            file_hash: d?.file_hash ?? null,
+            file_size: d?.file_size ?? null,
+            mime_type: d?.mime_type ?? null,
+          };
+        });
+
+        if (!alive) return;
+        setEntries(merged);
+        setSelectedId(merged[0]?.id ?? null);
+      } catch (e: any) {
+        setError(e.message);
+      } finally {
+        setLoading(false);
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
   }, [entityKey]);
 
   const filtered = useMemo(() => {
-    let list = entries;
-    if (activeDomain !== "all") list = list.filter((e) => e.domain_key === activeDomain);
-    return list;
+    return activeDomain === "all"
+      ? entries
+      : entries.filter((e) => e.domain_key === activeDomain);
   }, [entries, activeDomain]);
 
   const selected = useMemo(
@@ -191,218 +232,89 @@ export default function MinuteBookClient() {
 
   async function viewPdf() {
     if (!selected?.storage_path) return;
-    const { data } = await supabaseBrowser.storage
-      .from("minute_book")
-      .createSignedUrl(selected.storage_path, 600);
-    setPreviewUrl(data?.signedUrl ?? null);
+    const url = await signedUrl("minute_book", selected.storage_path);
+    setPreviewUrl(url);
   }
-
-  async function confirmDelete() {
-    if (!selected || !deleteReason.trim()) return;
-    setBusyDelete(true);
-
-    const { error } = await supabaseBrowser.rpc(
-      "delete_minute_book_entry_and_files",
-      {
-        p_entry_id: selected.id,
-        p_reason: deleteReason,
-      }
-    );
-
-    setBusyDelete(false);
-    setShowDelete(false);
-    setDeleteReason("");
-
-    if (!error) {
-      const refreshed = await loadEntries(entityKey!);
-      setEntries(refreshed);
-      setSelectedId(refreshed[0]?.id ?? null);
-    } else {
-      alert(error.message);
-    }
-  }
-
-  /* ---------------- RENDER ---------------- */
 
   return (
     <div className="h-full flex flex-col px-8 pt-6 pb-6">
-      <div className="mb-4">
-        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI-ARCHIVE</div>
-        <p className="mt-1 text-[11px] text-slate-400">
-          Minute Book Registry • Read-only • Evidence-first
-        </p>
+      <div className="text-xs tracking-[0.3em] uppercase text-slate-500 mb-2">
+        CI-ARCHIVE
       </div>
 
-      <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
-        <div className="w-full max-w-[1600px] h-full rounded-3xl border border-slate-900 bg-black/60 px-6 py-5 flex flex-col overflow-hidden">
-          <div className="grid grid-cols-12 gap-6 flex-1 min-h-0">
+      <div className="flex-1 grid grid-cols-12 gap-6 min-h-0">
+        {/* Domains */}
+        <section className="col-span-3 bg-black/50 rounded-2xl border border-slate-800 p-4 overflow-y-auto">
+          <button
+            onClick={() => setActiveDomain("all")}
+            className="w-full text-left mb-2 text-sm text-slate-200"
+          >
+            ◆ All
+          </button>
+          {domains.map((d) => (
+            <button
+              key={d.key}
+              onClick={() => setActiveDomain(d.key)}
+              className="w-full text-left flex gap-2 py-1 text-slate-300 hover:text-amber-300"
+            >
+              <span>{DOMAIN_ICON[d.key] || "•"}</span>
+              <span>{d.label}</span>
+            </button>
+          ))}
+        </section>
 
-            {/* LEFT — DOMAINS */}
-            <section className="col-span-3 min-h-0 flex flex-col">
-              <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex-1 overflow-y-auto">
-                <div className="text-sm font-semibold text-slate-200 mb-3">Domains</div>
+        {/* Registry */}
+        <section className="col-span-5 bg-black/50 rounded-2xl border border-slate-800 overflow-y-auto">
+          {loading ? (
+            <div className="p-4 text-slate-400">Loading…</div>
+          ) : (
+            filtered.map((e) => (
+              <button
+                key={e.id}
+                onClick={() => setSelectedId(e.id)}
+                className={`w-full text-left p-3 border-b border-slate-800 ${
+                  e.id === selectedId ? "bg-slate-900" : ""
+                }`}
+              >
+                <div className="text-sm text-slate-100">{e.title || e.file_name}</div>
+                <div className="text-xs text-slate-400">
+                  {fmtBytes(e.file_size)} · {e.entry_type}
+                </div>
+              </button>
+            ))
+          )}
+        </section>
 
+        {/* Evidence */}
+        <section className="col-span-4 bg-black/50 rounded-2xl border border-slate-800 flex flex-col">
+          {selected ? (
+            <>
+              <div className="p-4 border-b border-slate-800">
+                <div className="text-sm text-slate-100">{selected.title}</div>
+                <div className="text-xs text-slate-400">
+                  Hash: {shortHash(selected.file_hash)}
+                </div>
                 <button
-                  onClick={() => setActiveDomain("all")}
-                  className={`w-full flex items-center gap-3 px-3 py-2 mb-1 rounded-xl ${
-                    activeDomain === "all"
-                      ? "bg-amber-500/10 border border-amber-500/40"
-                      : "hover:bg-slate-900/60"
-                  }`}
+                  onClick={viewPdf}
+                  className="mt-2 px-4 py-1 text-xs bg-amber-500 text-black rounded-full"
                 >
-                  <span className="w-7 h-7 grid place-items-center rounded-lg border border-slate-800 bg-slate-950/70 text-[12px]">
-                    ◆
-                  </span>
-                  <span>All</span>
+                  View PDF
                 </button>
-
-                {domains.map((d) => {
-                  const icon = DOMAIN_ICON[d.key] || "•";
-                  return (
-                    <button
-                      key={d.key}
-                      onClick={() => setActiveDomain(d.key)}
-                      className={`w-full flex items-center gap-3 px-3 py-2 mb-1 rounded-xl ${
-                        activeDomain === d.key
-                          ? "bg-amber-500/10 border border-amber-500/40"
-                          : "hover:bg-slate-900/60"
-                      }`}
-                    >
-                      <span className="w-7 h-7 grid place-items-center rounded-lg border border-slate-800 bg-slate-950/70 text-[12px]">
-                        {icon}
-                      </span>
-                      <span>{d.label}</span>
-                    </button>
-                  );
-                })}
               </div>
-            </section>
-
-            {/* MIDDLE — ENTRIES */}
-            <section className="col-span-5 min-h-0 flex flex-col">
-              <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex-1 overflow-y-auto">
-                <div className="text-sm font-semibold text-slate-200 mb-3">Registry Entries</div>
-
-                {filtered.map((e) => (
-                  <button
-                    key={e.id}
-                    onClick={() => setSelectedId(e.id)}
-                    className={`w-full px-3 py-3 mb-1 rounded-xl text-left ${
-                      selectedId === e.id
-                        ? "bg-slate-900/90 shadow-[0_0_0_1px_rgba(245,158,11,0.35)]"
-                        : "hover:bg-slate-900/60"
-                    }`}
-                  >
-                    <div className="text-xs font-semibold text-slate-100">
-                      {e.title || e.file_name || "Untitled"}
-                    </div>
-                    <div className="text-[11px] text-slate-400 mt-1">
-                      {e.entry_type || "document"} • {fmtBytes(e.file_size)}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </section>
-
-            {/* RIGHT — EVIDENCE */}
-            <section className="col-span-4 min-h-0 flex flex-col">
-              <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex flex-col min-h-0">
-
-                {!selected ? (
-                  <div className="text-[11px] text-slate-400">
-                    Select a record to inspect evidence.
-                  </div>
+              <div className="flex-1">
+                {previewUrl ? (
+                  <iframe src={previewUrl} className="w-full h-full" />
                 ) : (
-                  <>
-                    <div className="mb-3">
-                      <div className="text-sm font-semibold text-slate-200">
-                        {selected.title || selected.file_name}
-                      </div>
-                      <div className="mt-1 text-[11px] text-slate-500">
-                        {selected.entry_type || "document"}
-                      </div>
-                    </div>
-
-                    <div className="flex gap-2 mb-3">
-                      <button
-                        onClick={viewPdf}
-                        className="rounded-full px-4 py-1.5 text-[11px] font-semibold bg-amber-500 text-black"
-                      >
-                        View PDF
-                      </button>
-                    </div>
-
-                    <div className="flex-1 min-h-0 rounded-xl border border-slate-800 overflow-hidden mb-3">
-                      {previewUrl ? (
-                        <iframe src={previewUrl} className="w-full h-full" />
-                      ) : (
-                        <div className="h-full grid place-items-center text-[11px] text-slate-500">
-                          Preview appears here
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 mb-3">
-                      <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 mb-2">
-                        Metadata
-                      </div>
-                      <div className="text-[11px] text-slate-300">
-                        <div>Hash: <span className="font-mono">{shortHash(selected.file_hash)}</span></div>
-                        <div>Size: {fmtBytes(selected.file_size)}</div>
-                      </div>
-                    </div>
-
-                    <div className="border-t border-slate-800 pt-3">
-                      {!showDelete ? (
-                        <>
-                          <button
-                            onClick={() => setShowDelete(true)}
-                            className="text-sm text-red-400 hover:text-red-300"
-                          >
-                            Authorize deletion of record
-                          </button>
-                          <p className="mt-1 text-[11px] text-slate-400">
-                            Permanently deletes this record and its evidence. Reason required.
-                          </p>
-                        </>
-                      ) : (
-                        <div className="space-y-2">
-                          <textarea
-                            value={deleteReason}
-                            onChange={(e) => setDeleteReason(e.target.value)}
-                            placeholder="Deletion reason (required)"
-                            className="w-full rounded-lg bg-black border border-slate-800 p-2 text-sm"
-                          />
-                          <div className="flex gap-2">
-                            <button
-                              onClick={() => setShowDelete(false)}
-                              className="px-3 py-1.5 text-sm border border-slate-700 rounded"
-                            >
-                              Cancel
-                            </button>
-                            <button
-                              disabled={busyDelete || !deleteReason.trim()}
-                              onClick={confirmDelete}
-                              className="px-3 py-1.5 text-sm border border-red-600 text-red-400 rounded"
-                            >
-                              Confirm Permanent Deletion
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </>
+                  <div className="h-full grid place-items-center text-xs text-slate-500">
+                    No preview loaded
+                  </div>
                 )}
               </div>
-            </section>
-
-          </div>
-
-          <div className="mt-3 text-[10px] text-slate-500 flex justify-between">
-            <span>CI-Archive · Oasis Digital Parliament</span>
-            <span>Upload is the sole write entry point</span>
-          </div>
-        </div>
+            </>
+          ) : (
+            <div className="p-4 text-slate-400">Select a record</div>
+          )}
+        </section>
       </div>
     </div>
   );
