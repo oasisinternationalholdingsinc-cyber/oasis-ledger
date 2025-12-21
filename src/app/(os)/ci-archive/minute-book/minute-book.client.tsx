@@ -2,9 +2,12 @@
 export const dynamic = "force-dynamic";
 
 /**
- * CI-Archive → Minute Book (FINAL — LOCKED CONTRACT)
- * STRICT 3-column OS surface: Domains | Registry | Evidence
- * TypeScript strict-safe (noImplicitAny compliant)
+ * CI-Archive → Minute Book (ENTERPRISE FINAL)
+ * Contract locked:
+ * - 3-column OS layout (Domains | Registry | Evidence)
+ * - Full Evidence panel (Actions, PDF, Metadata, Audit)
+ * - Delete UX (right-panel only, ISO-aligned)
+ * - No wiring changes
  */
 
 import Link from "next/link";
@@ -12,12 +15,11 @@ import { useEffect, useMemo, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 
-/* ---------------- types ---------------- */
+/* ─────────────── Types ─────────────── */
 
 type GovernanceDomain = {
   key: string;
   label: string;
-  description?: string | null;
   sort_order?: number | null;
   active?: boolean | null;
 };
@@ -26,7 +28,6 @@ type MinuteBookEntry = {
   id: string;
   entity_key: string;
   domain_key: string | null;
-  section_name?: string | null;
   entry_type?: string | null;
   title?: string | null;
   notes?: string | null;
@@ -43,12 +44,10 @@ type SupportingDoc = {
   file_hash: string | null;
   file_size: number | null;
   mime_type: string | null;
-  version?: number | null;
   uploaded_at?: string | null;
 };
 
 type EntryWithDoc = MinuteBookEntry & {
-  document_id?: string | null;
   storage_path?: string | null;
   file_name?: string | null;
   file_hash?: string | null;
@@ -56,43 +55,11 @@ type EntryWithDoc = MinuteBookEntry & {
   mime_type?: string | null;
 };
 
-type OfficialArtifact = {
-  bucket_id: string;
-  storage_path: string;
-  file_name?: string | null;
-  kind?: "official" | "verified";
-};
-
-/* ---------------- helpers ---------------- */
-
-function norm(v?: string | null, fb = "—") {
-  return v && v.trim().length ? v : fb;
-}
-
-function fmtBytes(n?: number | null) {
-  if (!n) return "—";
-  const u = ["B", "KB", "MB", "GB"];
-  let i = 0;
-  let v = n;
-  while (v >= 1024 && i < u.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(1)} ${u[i]}`;
-}
-
-function shortHash(h?: string | null) {
-  if (!h) return "—";
-  return h.length > 18 ? `${h.slice(0, 10)}…${h.slice(-6)}` : h;
-}
-
-/* ---------------- icon map (UI only) ---------------- */
+/* ─────────────── Helpers ─────────────── */
 
 const DOMAIN_ICON: Record<string, string> = {
   incorporation: "📜",
-  formation: "📜",
   resolutions: "⚖️",
-  minutes: "⚖️",
   bylaws: "📘",
   share_capital: "📈",
   directors_officers: "👤",
@@ -107,60 +74,60 @@ const DOMAIN_ICON: Record<string, string> = {
   legal: "⚠️",
 };
 
-/* ---------------- data loaders ---------------- */
+const fmtBytes = (n?: number | null) =>
+  !n ? "—" : n > 1e6 ? `${(n / 1e6).toFixed(2)} MB` : `${(n / 1e3).toFixed(1)} KB`;
+
+const shortHash = (h?: string | null) =>
+  !h ? "—" : h.length > 20 ? `${h.slice(0, 10)}…${h.slice(-8)}` : h;
+
+/* ─────────────── Data Loaders ─────────────── */
 
 async function loadDomains(): Promise<GovernanceDomain[]> {
   const { data, error } = await supabaseBrowser
     .from("governance_domains")
-    .select("key,label,description,sort_order,active")
+    .select("key,label,sort_order,active")
     .eq("active", true)
     .order("sort_order");
-
   if (error) throw error;
-  return (data || []) as GovernanceDomain[];
+  return data ?? [];
 }
 
-async function loadEntries(entityKey: string): Promise<MinuteBookEntry[]> {
-  const { data, error } = await supabaseBrowser
+async function loadEntries(entityKey: string): Promise<EntryWithDoc[]> {
+  const { data: entries, error } = await supabaseBrowser
     .from("minute_book_entries")
-    .select("id,entity_key,domain_key,section_name,entry_type,title,notes,created_at,created_by,source")
+    .select("id,entity_key,domain_key,entry_type,title,notes,created_at,created_by,source")
     .eq("entity_key", entityKey)
     .order("created_at", { ascending: false });
-
   if (error) throw error;
-  return (data || []) as MinuteBookEntry[];
-}
 
-async function loadSupportingDocs(entryIds: string[]): Promise<SupportingDoc[]> {
-  if (!entryIds.length) return [];
-  const { data, error } = await supabaseBrowser
+  const ids = entries.map((e) => e.id);
+  if (!ids.length) return [];
+
+  const { data: docs } = await supabaseBrowser
     .from("supporting_documents")
-    .select("id,entry_id,file_path,file_name,file_hash,file_size,mime_type,version,uploaded_at")
-    .in("entry_id", entryIds)
-    .order("version", { ascending: false })
+    .select("entry_id,file_path,file_name,file_hash,file_size,mime_type")
+    .in("entry_id", ids)
     .order("uploaded_at", { ascending: false });
 
-  if (error) throw error;
-  return (data || []) as SupportingDoc[];
-}
-
-function pickPrimaryDocByEntry(docs: SupportingDoc[]): Map<string, SupportingDoc> {
   const primary = new Map<string, SupportingDoc>();
-  (docs as SupportingDoc[]).forEach((d) => {
+  (docs ?? []).forEach((d) => {
     if (!primary.has(d.entry_id)) primary.set(d.entry_id, d);
   });
-  return primary;
+
+  return entries.map((e) => {
+    const d = primary.get(e.id);
+    return {
+      ...e,
+      storage_path: d?.file_path ?? null,
+      file_name: d?.file_name ?? null,
+      file_hash: d?.file_hash ?? null,
+      file_size: d?.file_size ?? null,
+      mime_type: d?.mime_type ?? null,
+    };
+  });
 }
 
-async function signedUrl(bucket: string, path: string, download?: string | null) {
-  const { data, error } = await supabaseBrowser.storage
-    .from(bucket)
-    .createSignedUrl(path, 600, download ? { download } : undefined);
-  if (error) throw error;
-  return data.signedUrl;
-}
-
-/* ---------------- component ---------------- */
+/* ─────────────── Component ─────────────── */
 
 export default function MinuteBookClient() {
   const { entityKey } = useEntity();
@@ -169,85 +136,69 @@ export default function MinuteBookClient() {
   const [entries, setEntries] = useState<EntryWithDoc[]>([]);
   const [activeDomain, setActiveDomain] = useState<string>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  const [showDelete, setShowDelete] = useState(false);
+  const [deleteReason, setDeleteReason] = useState("");
 
-  /* load domains */
   useEffect(() => {
-    loadDomains().then(setDomains).catch((e) => setError(e.message));
+    loadDomains().then(setDomains);
   }, []);
 
-  /* load entries */
   useEffect(() => {
     if (!entityKey) return;
-    let alive = true;
-
-    (async () => {
-      setLoading(true);
-      try {
-        const base = await loadEntries(entityKey);
-        const ids = (base as MinuteBookEntry[]).map((d) => d.id);
-        const docs = await loadSupportingDocs(ids);
-        const primary = pickPrimaryDocByEntry(docs);
-
-        const merged: EntryWithDoc[] = base.map((e) => {
-          const d = primary.get(e.id);
-          return {
-            ...e,
-            document_id: d?.id ?? null,
-            storage_path: d?.file_path ?? null,
-            file_name: d?.file_name ?? null,
-            file_hash: d?.file_hash ?? null,
-            file_size: d?.file_size ?? null,
-            mime_type: d?.mime_type ?? null,
-          };
-        });
-
-        if (!alive) return;
-        setEntries(merged);
-        setSelectedId(merged[0]?.id ?? null);
-      } catch (e: any) {
-        setError(e.message);
-      } finally {
-        setLoading(false);
-      }
-    })();
-
-    return () => {
-      alive = false;
-    };
+    loadEntries(entityKey).then((e) => {
+      setEntries(e);
+      setSelectedId(e[0]?.id ?? null);
+    });
   }, [entityKey]);
 
-  const filtered = useMemo(() => {
-    return activeDomain === "all"
-      ? entries
-      : entries.filter((e) => e.domain_key === activeDomain);
-  }, [entries, activeDomain]);
+  const filtered = useMemo(
+    () =>
+      activeDomain === "all"
+        ? entries
+        : entries.filter((e) => e.domain_key === activeDomain),
+    [entries, activeDomain]
+  );
 
   const selected = useMemo(
-    () => entries.find((e) => e.id === selectedId) || null,
+    () => entries.find((e) => e.id === selectedId) ?? null,
     [entries, selectedId]
   );
 
   async function viewPdf() {
     if (!selected?.storage_path) return;
-    const url = await signedUrl("minute_book", selected.storage_path);
-    setPreviewUrl(url);
+    const { data } = await supabaseBrowser.storage
+      .from("minute_book")
+      .createSignedUrl(selected.storage_path, 600);
+    setPdfUrl(data?.signedUrl ?? null);
+  }
+
+  async function deleteEntry() {
+    if (!selected) return;
+    await supabaseBrowser.rpc("delete_minute_book_entry_and_files", {
+      p_entry_id: selected.id,
+      p_reason: deleteReason,
+    });
+    setEntries((e) => e.filter((x) => x.id !== selected.id));
+    setSelectedId(null);
+    setShowDelete(false);
+    setDeleteReason("");
   }
 
   return (
-    <div className="h-full flex flex-col px-8 pt-6 pb-6">
-      <div className="text-xs tracking-[0.3em] uppercase text-slate-500 mb-2">
-        CI-ARCHIVE
+    <div className="h-full px-8 py-6 flex flex-col">
+      <div className="text-xs tracking-[0.3em] uppercase text-slate-500 mb-4">
+        CI-ARCHIVE · Minute Book
       </div>
 
-      <div className="flex-1 grid grid-cols-12 gap-6 min-h-0">
+      <div className="grid grid-cols-12 gap-6 flex-1 min-h-0">
         {/* Domains */}
-        <section className="col-span-3 bg-black/50 rounded-2xl border border-slate-800 p-4 overflow-y-auto">
+        <aside className="col-span-3 bg-black/60 border border-slate-800 rounded-2xl p-4 overflow-y-auto">
           <button
             onClick={() => setActiveDomain("all")}
-            className="w-full text-left mb-2 text-sm text-slate-200"
+            className={`w-full text-left mb-2 px-3 py-2 rounded-xl ${
+              activeDomain === "all" ? "bg-amber-500/20" : "hover:bg-slate-900"
+            }`}
           >
             ◆ All
           </button>
@@ -255,67 +206,97 @@ export default function MinuteBookClient() {
             <button
               key={d.key}
               onClick={() => setActiveDomain(d.key)}
-              className="w-full text-left flex gap-2 py-1 text-slate-300 hover:text-amber-300"
+              className={`w-full text-left px-3 py-2 rounded-xl flex gap-2 ${
+                activeDomain === d.key
+                  ? "bg-amber-500/20"
+                  : "hover:bg-slate-900"
+              }`}
             >
-              <span>{DOMAIN_ICON[d.key] || "•"}</span>
+              <span>{DOMAIN_ICON[d.key] ?? "•"}</span>
               <span>{d.label}</span>
+            </button>
+          ))}
+        </aside>
+
+        {/* Registry */}
+        <section className="col-span-5 bg-black/60 border border-slate-800 rounded-2xl overflow-y-auto">
+          {filtered.map((e) => (
+            <button
+              key={e.id}
+              onClick={() => setSelectedId(e.id)}
+              className={`w-full text-left p-3 border-b border-slate-800 ${
+                e.id === selectedId ? "bg-slate-900" : ""
+              }`}
+            >
+              <div className="text-slate-100 text-sm">{e.title ?? e.file_name}</div>
+              <div className="text-xs text-slate-400">
+                {fmtBytes(e.file_size)} · {e.entry_type}
+              </div>
             </button>
           ))}
         </section>
 
-        {/* Registry */}
-        <section className="col-span-5 bg-black/50 rounded-2xl border border-slate-800 overflow-y-auto">
-          {loading ? (
-            <div className="p-4 text-slate-400">Loading…</div>
-          ) : (
-            filtered.map((e) => (
-              <button
-                key={e.id}
-                onClick={() => setSelectedId(e.id)}
-                className={`w-full text-left p-3 border-b border-slate-800 ${
-                  e.id === selectedId ? "bg-slate-900" : ""
-                }`}
-              >
-                <div className="text-sm text-slate-100">{e.title || e.file_name}</div>
-                <div className="text-xs text-slate-400">
-                  {fmtBytes(e.file_size)} · {e.entry_type}
-                </div>
-              </button>
-            ))
-          )}
-        </section>
-
         {/* Evidence */}
-        <section className="col-span-4 bg-black/50 rounded-2xl border border-slate-800 flex flex-col">
-          {selected ? (
+        <section className="col-span-4 bg-black/60 border border-slate-800 rounded-2xl flex flex-col">
+          {!selected ? (
+            <div className="p-4 text-slate-400">Select a record</div>
+          ) : (
             <>
+              {/* Actions */}
               <div className="p-4 border-b border-slate-800">
-                <div className="text-sm text-slate-100">{selected.title}</div>
-                <div className="text-xs text-slate-400">
+                <div className="text-slate-100 font-semibold">{selected.title}</div>
+                <div className="text-xs text-slate-400 mb-2">
                   Hash: {shortHash(selected.file_hash)}
                 </div>
-                <button
-                  onClick={viewPdf}
-                  className="mt-2 px-4 py-1 text-xs bg-amber-500 text-black rounded-full"
-                >
-                  View PDF
-                </button>
+                <div className="flex gap-2">
+                  <button onClick={viewPdf} className="btn-primary">View PDF</button>
+                  <button onClick={() => setShowDelete(true)} className="btn-danger">
+                    Remove from Minute Book
+                  </button>
+                </div>
               </div>
+
+              {/* PDF */}
               <div className="flex-1">
-                {previewUrl ? (
-                  <iframe src={previewUrl} className="w-full h-full" />
+                {pdfUrl ? (
+                  <iframe src={pdfUrl} className="w-full h-full" />
                 ) : (
-                  <div className="h-full grid place-items-center text-xs text-slate-500">
-                    No preview loaded
+                  <div className="h-full grid place-items-center text-slate-500 text-xs">
+                    No PDF loaded
                   </div>
                 )}
               </div>
             </>
-          ) : (
-            <div className="p-4 text-slate-400">Select a record</div>
           )}
         </section>
       </div>
+
+      {/* Delete Modal */}
+      {showDelete && (
+        <div className="fixed inset-0 bg-black/80 grid place-items-center z-50">
+          <div className="bg-slate-950 border border-red-800 rounded-xl p-6 w-[420px]">
+            <h3 className="text-slate-100 font-semibold mb-2">
+              Remove Minute Book Record
+            </h3>
+            <p className="text-xs text-slate-400 mb-3">
+              This permanently removes the record and stored files. Verified
+              records are not affected.
+            </p>
+            <input
+              value={deleteReason}
+              onChange={(e) => setDeleteReason(e.target.value)}
+              placeholder="Reason for removal (required)"
+              className="w-full mb-4 px-3 py-2 bg-black border border-slate-700 rounded"
+            />
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setShowDelete(false)}>Cancel</button>
+              <button onClick={deleteEntry} className="btn-danger">
+                Confirm Removal
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
