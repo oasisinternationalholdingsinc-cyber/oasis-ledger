@@ -2,12 +2,16 @@
 export const dynamic = "force-dynamic";
 
 /**
- * CI-Archive → Minute Book (ENTERPRISE FINAL)
- * Contract locked:
- * - 3-column OS layout (Domains | Registry | Evidence)
- * - Full Evidence panel (Actions, PDF, Metadata, Audit)
- * - Delete UX (right-panel only, ISO-aligned)
- * - No wiring changes
+ * CI-Archive → Minute Book (FINAL — LOCKED CONTRACT)
+ * ✅ STRICT 3-column surface: Domains | Entries | Evidence (PDF + Metadata Zone)
+ * ✅ Domains source of truth: governance_domains (same as Upload)
+ * ✅ Entries source of truth: minute_book_entries + supporting_documents (primary doc)
+ * ✅ Entity scope: minute_book_entries.entity_key = useEntity().entityKey
+ * ✅ Domain scope: minute_book_entries.domain_key = selected domain.key
+ * ✅ Evidence: PDF signed URL from minute_book bucket using supporting_documents.file_path
+ * ✅ Metadata Zone preserved (Storage / Hash / Audit) — no removal
+ * ✅ Hard delete UX: right panel → calls public.delete_minute_book_entry_and_files(entry_id, reason)
+ * ❌ NO querying v_registry_minute_book_entries.entity_key (that column doesn't exist)
  */
 
 import Link from "next/link";
@@ -15,11 +19,12 @@ import { useEffect, useMemo, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 
-/* ─────────────── Types ─────────────── */
+/* ---------------- types (schema-aligned) ---------------- */
 
 type GovernanceDomain = {
   key: string;
   label: string;
+  description?: string | null;
   sort_order?: number | null;
   active?: boolean | null;
 };
@@ -28,6 +33,7 @@ type MinuteBookEntry = {
   id: string;
   entity_key: string;
   domain_key: string | null;
+  section_name?: string | null;
   entry_type?: string | null;
   title?: string | null;
   notes?: string | null;
@@ -44,10 +50,13 @@ type SupportingDoc = {
   file_hash: string | null;
   file_size: number | null;
   mime_type: string | null;
+  version?: number | null;
   uploaded_at?: string | null;
+  thumbnail_path?: string | null; // optional; function deletes if exists in DB
 };
 
 type EntryWithDoc = MinuteBookEntry & {
+  document_id?: string | null;
   storage_path?: string | null;
   file_name?: string | null;
   file_hash?: string | null;
@@ -55,248 +64,1094 @@ type EntryWithDoc = MinuteBookEntry & {
   mime_type?: string | null;
 };
 
-/* ─────────────── Helpers ─────────────── */
+type OfficialArtifact = {
+  bucket_id: string;
+  storage_path: string;
+  file_name?: string | null;
+  kind?: "official" | "certified" | "verified";
+};
 
+type DeleteResult = {
+  ok?: boolean;
+  entry_id?: string;
+  entity_key?: string;
+  deleted_storage_objects?: number;
+  deleted_entry_rows?: number;
+  reason?: string | null;
+};
+
+/* ---------------- helpers ---------------- */
+
+function norm(s?: string | null, fb = "—") {
+  const x = (s || "").toString().trim();
+  return x.length ? x : fb;
+}
+
+function fmtBytes(n?: number | null) {
+  if (!n || n <= 0) return "—";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function shortHash(h?: string | null) {
+  if (!h) return "—";
+  if (h.length <= 20) return h;
+  return `${h.slice(0, 12)}…${h.slice(-8)}`;
+}
+
+function getCreatedAtMs(iso?: string | null) {
+  if (!iso) return 0;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? t : 0;
+}
+
+/** Optional OS icon map (UI-only; does not affect wiring) */
 const DOMAIN_ICON: Record<string, string> = {
   incorporation: "📜",
-  resolutions: "⚖️",
-  bylaws: "📘",
+  formation: "📜",
+  "incorporation-and-formation": "📜",
+  corporate_profile: "🛡️",
+  "corporate-profile": "🛡️",
   share_capital: "📈",
+  "share-capital": "📈",
+  share_certificates: "📈",
   directors_officers: "👤",
+  "directors-and-officers": "👤",
+  resolutions: "⚖️",
+  minutes: "⚖️",
+  bylaws: "📘",
+  governance: "📘",
   annual_returns: "🧾",
   tax: "🧾",
   banking: "🏦",
   insurance: "🛡️",
+  risk: "🛡️",
   real_estate: "🏠",
+  assets: "🏠",
   contracts: "🤝",
+  agreements: "🤝",
   brand_ip: "™️",
+  brand: "™️",
   compliance: "✅",
+  regulatory: "✅",
+  litigation: "⚠️",
   legal: "⚠️",
+  annexes: "🗂️",
+  misc: "🗂️",
 };
 
-const fmtBytes = (n?: number | null) =>
-  !n ? "—" : n > 1e6 ? `${(n / 1e6).toFixed(2)} MB` : `${(n / 1e3).toFixed(1)} KB`;
-
-const shortHash = (h?: string | null) =>
-  !h ? "—" : h.length > 20 ? `${h.slice(0, 10)}…${h.slice(-8)}` : h;
-
-/* ─────────────── Data Loaders ─────────────── */
+/* ---------------- data loaders (LOCKED to Supabase schema) ---------------- */
 
 async function loadDomains(): Promise<GovernanceDomain[]> {
-  const { data, error } = await supabaseBrowser
+  const sb = supabaseBrowser;
+  const { data, error } = await sb
     .from("governance_domains")
-    .select("key,label,sort_order,active")
+    .select("key,label,description,sort_order,active")
     .eq("active", true)
-    .order("sort_order");
+    .order("sort_order", { ascending: true });
+
   if (error) throw error;
-  return data ?? [];
+  return (data || []) as GovernanceDomain[];
 }
 
-async function loadEntries(entityKey: string): Promise<EntryWithDoc[]> {
-  const { data: entries, error } = await supabaseBrowser
+async function loadEntries(entityKey: string): Promise<MinuteBookEntry[]> {
+  const sb = supabaseBrowser;
+  const { data, error } = await sb
     .from("minute_book_entries")
-    .select("id,entity_key,domain_key,entry_type,title,notes,created_at,created_by,source")
+    .select("id,entity_key,domain_key,section_name,entry_type,title,notes,created_at,created_by,source")
     .eq("entity_key", entityKey)
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false })
+    .limit(1000);
+
   if (error) throw error;
+  return (data || []) as MinuteBookEntry[];
+}
 
-  const ids = entries.map((e) => e.id);
-  if (!ids.length) return [];
+async function loadSupportingDocs(entryIds: string[]): Promise<SupportingDoc[]> {
+  if (!entryIds.length) return [];
+  const sb = supabaseBrowser;
 
-  const { data: docs } = await supabaseBrowser
+  const { data, error } = await sb
     .from("supporting_documents")
-    .select("entry_id,file_path,file_name,file_hash,file_size,mime_type")
-    .in("entry_id", ids)
+    .select("id,entry_id,file_path,file_name,file_hash,file_size,mime_type,version,uploaded_at,thumbnail_path")
+    .in("entry_id", entryIds)
+    .order("version", { ascending: false })
     .order("uploaded_at", { ascending: false });
 
-  const primary = new Map<string, SupportingDoc>();
-  (docs ?? []).forEach((d) => {
-    if (!primary.has(d.entry_id)) primary.set(d.entry_id, d);
-  });
-
-  return entries.map((e) => {
-    const d = primary.get(e.id);
-    return {
-      ...e,
-      storage_path: d?.file_path ?? null,
-      file_name: d?.file_name ?? null,
-      file_hash: d?.file_hash ?? null,
-      file_size: d?.file_size ?? null,
-      mime_type: d?.mime_type ?? null,
-    };
-  });
+  if (error) throw error;
+  return (data || []) as SupportingDoc[];
 }
 
-/* ─────────────── Component ─────────────── */
+function pickPrimaryDocByEntry(docs: SupportingDoc[]): Map<string, SupportingDoc> {
+  const m = new Map<string, SupportingDoc>();
+  for (const d of docs) {
+    if (!d.entry_id) continue;
+    if (!m.has(d.entry_id)) m.set(d.entry_id, d);
+  }
+  return m;
+}
+
+/**
+ * OFFICIAL-first artifact resolver (read-only)
+ * - if verified_documents references this entry/hash/path, prefer it
+ * - otherwise fallback to minute_book evidence doc
+ */
+async function resolveOfficialArtifact(entityKey: string, entry: EntryWithDoc): Promise<OfficialArtifact | null> {
+  const sb = supabaseBrowser;
+  try {
+    const hash = entry.file_hash || null;
+    const path = entry.storage_path || null;
+
+    const orParts = [
+      hash ? `file_hash.eq.${hash}` : "",
+      path ? `source_storage_path.eq.${path}` : "",
+      `source_entry_id.eq.${entry.id}`,
+      `minute_book_entry_id.eq.${entry.id}`,
+    ].filter(Boolean);
+
+    if (!orParts.length) return null;
+
+    const { data, error } = await sb
+      .from("verified_documents")
+      .select("*")
+      .eq("entity_key", entityKey)
+      .or(orParts.join(","))
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (error) return null;
+    if (!data || !data.length) return null;
+
+    const v: any = data[0];
+    const bucket = v.bucket_id || v.storage_bucket || "verified_documents";
+    const vpath = v.storage_path || v.file_path || v.path;
+
+    if (!bucket || !vpath) return null;
+
+    return {
+      bucket_id: bucket,
+      storage_path: vpath,
+      file_name: v.file_name || entry.file_name || null,
+      kind: v.kind || "verified",
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function signedUrlFor(bucketId: string, storagePath: string, downloadName?: string | null) {
+  const sb = supabaseBrowser;
+  const opts: any = downloadName ? { download: downloadName } : undefined;
+  const { data, error } = await sb.storage.from(bucketId).createSignedUrl(storagePath, 60 * 10, opts);
+  if (error) throw error;
+  return data.signedUrl;
+}
+
+/* ---------------- UI ---------------- */
 
 export default function MinuteBookClient() {
   const { entityKey } = useEntity();
 
+  // domains
   const [domains, setDomains] = useState<GovernanceDomain[]>([]);
-  const [entries, setEntries] = useState<EntryWithDoc[]>([]);
-  const [activeDomain, setActiveDomain] = useState<string>("all");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
-  const [showDelete, setShowDelete] = useState(false);
-  const [deleteReason, setDeleteReason] = useState("");
+  const [activeDomainKey, setActiveDomainKey] = useState<string>("all");
 
+  // entries
+  const [entries, setEntries] = useState<EntryWithDoc[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // ui state
+  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // evidence state (official-first)
+  const [official, setOfficial] = useState<OfficialArtifact | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [pdfErr, setPdfErr] = useState<string | null>(null);
+
+  // focus reader
+  const [focusOpen, setFocusOpen] = useState(false);
+
+  // delete UX
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteReason, setDeleteReason] = useState("");
+  const [deleteAcknowledge, setDeleteAcknowledge] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteErr, setDeleteErr] = useState<string | null>(null);
+
+  // Load domains
   useEffect(() => {
-    loadDomains().then(setDomains);
+    let alive = true;
+    (async () => {
+      try {
+        const d = await loadDomains();
+        if (!alive) return;
+        setDomains(d);
+      } catch (e: any) {
+        if (!alive) return;
+        setDomains([]);
+        setErr(e?.message || "Failed to load governance domains.");
+      }
+    })();
+    return () => {
+      alive = false;
+    };
   }, []);
 
+  // Load entries (entity-scoped) + resolve primary docs
   useEffect(() => {
-    if (!entityKey) return;
-    loadEntries(entityKey).then((e) => {
-      setEntries(e);
-      setSelectedId(e[0]?.id ?? null);
-    });
+    let alive = true;
+
+    async function run() {
+      setErr(null);
+      setLoading(true);
+
+      setEntries([]);
+      setSelectedId(null);
+
+      setOfficial(null);
+      setPreviewUrl(null);
+      setPdfErr(null);
+
+      if (!entityKey) {
+        setLoading(false);
+        return;
+      }
+
+      try {
+        const base = await loadEntries(entityKey);
+        if (!alive) return;
+
+        const ids: string[] = base.map((x: MinuteBookEntry) => x.id);
+        const docs = await loadSupportingDocs(ids);
+        if (!alive) return;
+
+        const primary = pickPrimaryDocByEntry(docs);
+
+        const merged: EntryWithDoc[] = base.map((e: MinuteBookEntry) => {
+          const doc = primary.get(e.id);
+          return {
+            ...e,
+            document_id: doc?.id ?? null,
+            storage_path: doc?.file_path ?? null,
+            file_name: doc?.file_name ?? null,
+            file_hash: doc?.file_hash ?? null,
+            file_size: doc?.file_size ?? null,
+            mime_type: doc?.mime_type ?? null,
+          };
+        });
+
+        merged.sort((a, b) => getCreatedAtMs(b.created_at) - getCreatedAtMs(a.created_at));
+
+        setEntries(merged);
+        setSelectedId(merged[0]?.id ?? null);
+
+        if (activeDomainKey !== "all") {
+          const exists = domains.some((d: GovernanceDomain) => d.key === activeDomainKey);
+          if (!exists) setActiveDomainKey("all");
+        }
+      } catch (e: any) {
+        if (!alive) return;
+        setErr(e?.message || "Failed to load Minute Book entries.");
+      } finally {
+        if (alive) setLoading(false);
+      }
+    }
+
+    run();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entityKey]);
 
-  const filtered = useMemo(
-    () =>
-      activeDomain === "all"
-        ? entries
-        : entries.filter((e) => e.domain_key === activeDomain),
-    [entries, activeDomain]
-  );
+  const filteredEntries = useMemo(() => {
+    const q = query.trim().toLowerCase();
 
-  const selected = useMemo(
-    () => entries.find((e) => e.id === selectedId) ?? null,
-    [entries, selectedId]
-  );
+    let list = entries;
+
+    if (activeDomainKey !== "all") {
+      list = list.filter((e: EntryWithDoc) => (e.domain_key || "") === activeDomainKey);
+    }
+
+    if (q) {
+      list = list.filter((e: EntryWithDoc) => {
+        const hay = [
+          e.title || "",
+          e.entry_type || "",
+          e.domain_key || "",
+          e.section_name || "",
+          e.file_name || "",
+          e.storage_path || "",
+          e.file_hash || "",
+        ]
+          .join(" ")
+          .toLowerCase();
+        return hay.includes(q);
+      });
+    }
+
+    return [...list].sort((a, b) => getCreatedAtMs(b.created_at) - getCreatedAtMs(a.created_at));
+  }, [entries, activeDomainKey, query]);
+
+  const selected = useMemo(() => {
+    if (!selectedId) return null;
+    return entries.find((e: EntryWithDoc) => e.id === selectedId) || null;
+  }, [entries, selectedId]);
+
+  const domainCounts = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const d of domains) m.set(d.key, 0);
+    for (const e of entries) {
+      if (e.domain_key) m.set(e.domain_key, (m.get(e.domain_key) || 0) + 1);
+    }
+    return m;
+  }, [domains, entries]);
+
+  // Resolve OFFICIAL artifact when selection changes
+  useEffect(() => {
+    let alive = true;
+
+    (async () => {
+      setOfficial(null);
+      setPdfErr(null);
+      setPreviewUrl(null);
+
+      if (!entityKey || !selected) return;
+
+      setPdfBusy(true);
+      try {
+        const off = await resolveOfficialArtifact(entityKey, selected);
+        if (!alive) return;
+        setOfficial(off);
+      } finally {
+        if (alive) setPdfBusy(false);
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, [entityKey, selected?.id]);
+
+  const authorityBadge = useMemo(() => {
+    if (!selected) return null;
+    if (official) return { label: "OFFICIAL", tone: "gold" as const };
+    return { label: "UPLOADED", tone: "neutral" as const };
+  }, [selected?.id, !!official]);
+
+  const activeDomainLabel = useMemo(() => {
+    if (activeDomainKey === "all") return "All";
+    return domains.find((d: GovernanceDomain) => d.key === activeDomainKey)?.label || "Domain";
+  }, [activeDomainKey, domains]);
+
+  async function ensurePreviewUrl(): Promise<string> {
+    if (!selected) throw new Error("No record selected.");
+
+    // official-first
+    if (official?.bucket_id && official?.storage_path) {
+      const url = await signedUrlFor(official.bucket_id, official.storage_path, null);
+      setPreviewUrl(url);
+      return url;
+    }
+
+    // fallback: minute_book evidence
+    if (!selected.storage_path) throw new Error("No storage_path on the primary document.");
+    const url = await signedUrlFor("minute_book", selected.storage_path, null);
+    setPreviewUrl(url);
+    return url;
+  }
 
   async function viewPdf() {
-    if (!selected?.storage_path) return;
-    const { data } = await supabaseBrowser.storage
-      .from("minute_book")
-      .createSignedUrl(selected.storage_path, 600);
-    setPdfUrl(data?.signedUrl ?? null);
+    if (!selected) return;
+    setPdfErr(null);
+    setPdfBusy(true);
+
+    try {
+      await ensurePreviewUrl();
+    } catch (e: any) {
+      setPdfErr(e?.message || "Failed to generate PDF preview.");
+    } finally {
+      setPdfBusy(false);
+    }
   }
 
-  async function deleteEntry() {
+  async function downloadPdf() {
     if (!selected) return;
-    await supabaseBrowser.rpc("delete_minute_book_entry_and_files", {
-      p_entry_id: selected.id,
-      p_reason: deleteReason,
-    });
-    setEntries((e) => e.filter((x) => x.id !== selected.id));
-    setSelectedId(null);
-    setShowDelete(false);
-    setDeleteReason("");
+    setPdfErr(null);
+    setPdfBusy(true);
+
+    try {
+      const name = selected.file_name || `${norm(selected.title, "document")}.pdf`;
+
+      if (official?.bucket_id && official?.storage_path) {
+        const url = await signedUrlFor(official.bucket_id, official.storage_path, name);
+        window.open(url, "_blank", "noopener,noreferrer");
+        return;
+      }
+
+      if (!selected.storage_path) throw new Error("No storage_path on the primary document.");
+      const url = await signedUrlFor("minute_book", selected.storage_path, name);
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch (e: any) {
+      setPdfErr(e?.message || "Failed to generate download URL.");
+    } finally {
+      setPdfBusy(false);
+    }
   }
+
+  async function openNewTab() {
+    if (!selected) return;
+    setPdfErr(null);
+    setPdfBusy(true);
+
+    try {
+      const url = previewUrl ? previewUrl : await ensurePreviewUrl();
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch (e: any) {
+      setPdfErr(e?.message || "Failed to open PDF.");
+    } finally {
+      setPdfBusy(false);
+    }
+  }
+
+  async function openFocus() {
+    if (!selected) return;
+    setPdfErr(null);
+    setPdfBusy(true);
+
+    try {
+      await ensurePreviewUrl();
+      setFocusOpen(true);
+    } catch (e: any) {
+      setPdfErr(e?.message || "Failed to open Focus View.");
+    } finally {
+      setPdfBusy(false);
+    }
+  }
+
+  function closeDeleteModal() {
+    setDeleteOpen(false);
+    setDeleteReason("");
+    setDeleteAcknowledge(false);
+    setDeleteBusy(false);
+    setDeleteErr(null);
+  }
+
+  async function runDelete() {
+    if (!selected) return;
+    setDeleteErr(null);
+    setDeleteBusy(true);
+
+    try {
+      const reason = deleteReason.trim();
+      if (reason.length < 6) throw new Error("Reason must be at least 6 characters.");
+
+      const { data, error } = await supabaseBrowser.rpc("delete_minute_book_entry_and_files", {
+        p_entry_id: selected.id,
+        p_reason: reason,
+      });
+
+      if (error) throw error;
+
+      const res = (data || {}) as DeleteResult;
+      if (!res.ok) throw new Error("Delete failed.");
+
+      // Remove from local state (no refetch storm; keeps OS stable)
+      setEntries((prev) => prev.filter((e) => e.id !== selected.id));
+
+      // Select next available row (or null)
+      setSelectedId((prevId) => {
+        if (prevId !== selected.id) return prevId;
+        const remaining = entries.filter((e) => e.id !== selected.id);
+        return remaining[0]?.id ?? null;
+      });
+
+      setPreviewUrl(null);
+      setOfficial(null);
+      setFocusOpen(false);
+      closeDeleteModal();
+    } catch (e: any) {
+      setDeleteErr(e?.message || "Delete failed.");
+      setDeleteBusy(false);
+    }
+  }
+
+  /* ---------------- render ---------------- */
 
   return (
-    <div className="h-full px-8 py-6 flex flex-col">
-      <div className="text-xs tracking-[0.3em] uppercase text-slate-500 mb-4">
-        CI-ARCHIVE · Minute Book
+    <div className="h-full flex flex-col px-8 pt-6 pb-6">
+      {/* Header under OS bar */}
+      <div className="mb-4 shrink-0">
+        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI-ARCHIVE</div>
+        <p className="mt-1 text-[11px] text-slate-400">
+          Minute Book Registry • <span className="font-semibold text-slate-200">Read-only • Evidence-first</span>
+        </p>
       </div>
 
-      <div className="grid grid-cols-12 gap-6 flex-1 min-h-0">
-        {/* Domains */}
-        <aside className="col-span-3 bg-black/60 border border-slate-800 rounded-2xl p-4 overflow-y-auto">
-          <button
-            onClick={() => setActiveDomain("all")}
-            className={`w-full text-left mb-2 px-3 py-2 rounded-xl ${
-              activeDomain === "all" ? "bg-amber-500/20" : "hover:bg-slate-900"
-            }`}
-          >
-            ◆ All
-          </button>
-          {domains.map((d) => (
-            <button
-              key={d.key}
-              onClick={() => setActiveDomain(d.key)}
-              className={`w-full text-left px-3 py-2 rounded-xl flex gap-2 ${
-                activeDomain === d.key
-                  ? "bg-amber-500/20"
-                  : "hover:bg-slate-900"
-              }`}
-            >
-              <span>{DOMAIN_ICON[d.key] ?? "•"}</span>
-              <span>{d.label}</span>
-            </button>
-          ))}
-        </aside>
+      {/* Main Window – council-framed */}
+      <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
+        <div className="w-full max-w-[1600px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-6 py-5 flex flex-col overflow-hidden">
+          {/* Window Title */}
+          <div className="flex items-start justify-between mb-4 shrink-0">
+            <div className="min-w-0">
+              <h1 className="text-lg font-semibold text-slate-50 truncate">Minute Book Registry</h1>
+              <p className="mt-1 text-xs text-slate-400">
+                Canonical archive indexed by governance domain.{" "}
+                <span className="text-slate-500">Domains are sourced from governance_domains (Upload contract).</span>
+              </p>
+            </div>
 
-        {/* Registry */}
-        <section className="col-span-5 bg-black/60 border border-slate-800 rounded-2xl overflow-y-auto">
-          {filtered.map((e) => (
-            <button
-              key={e.id}
-              onClick={() => setSelectedId(e.id)}
-              className={`w-full text-left p-3 border-b border-slate-800 ${
-                e.id === selectedId ? "bg-slate-900" : ""
-              }`}
-            >
-              <div className="text-slate-100 text-sm">{e.title ?? e.file_name}</div>
-              <div className="text-xs text-slate-400">
-                {fmtBytes(e.file_size)} · {e.entry_type}
+            <div className="flex items-center gap-2 shrink-0">
+              <div className="hidden md:flex items-center text-[10px] uppercase tracking-[0.3em] text-slate-500">
+                CI-ARCHIVE • LIVE
               </div>
-            </button>
-          ))}
-        </section>
+              <Link
+                href="/ci-archive/upload"
+                className="rounded-full border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/15"
+              >
+                Go to Upload →
+              </Link>
+            </div>
+          </div>
 
-        {/* Evidence */}
-        <section className="col-span-4 bg-black/60 border border-slate-800 rounded-2xl flex flex-col">
-          {!selected ? (
-            <div className="p-4 text-slate-400">Select a record</div>
+          {!entityKey ? (
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4 text-sm text-slate-300">
+              Select an entity in the OS bar to view Minute Book records.
+            </div>
           ) : (
-            <>
-              {/* Actions */}
-              <div className="p-4 border-b border-slate-800">
-                <div className="text-slate-100 font-semibold">{selected.title}</div>
-                <div className="text-xs text-slate-400 mb-2">
-                  Hash: {shortHash(selected.file_hash)}
+            <div className="grid grid-cols-12 gap-6 flex-1 min-h-0">
+              {/* LEFT: Domains */}
+              <section className="col-span-12 lg:col-span-3 min-h-0 flex flex-col">
+                <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex flex-col min-h-0">
+                  <div className="flex items-center justify-between mb-3 shrink-0">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-200">Domains</div>
+                      <div className="text-[11px] text-slate-500">Source: governance_domains</div>
+                    </div>
+                    <div className="text-[10px] uppercase tracking-[0.25em] text-slate-500">
+                      {domains.length || "—"}
+                    </div>
+                  </div>
+
+                  {/* tabs list (hover glow + click glow) */}
+                  <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-slate-800/80 bg-slate-950/60 p-2">
+                    <button
+                      type="button"
+                      onClick={() => setActiveDomainKey("all")}
+                      className={[
+                        "w-full flex items-center justify-between gap-3 px-3 py-2 rounded-xl transition",
+                        "hover:bg-slate-900/70 hover:shadow-[0_0_0_1px_rgba(245,158,11,0.18)]",
+                        activeDomainKey === "all"
+                          ? "bg-amber-500/10 border border-amber-500/40 shadow-[0_0_0_1px_rgba(245,158,11,0.35)]"
+                          : "border border-transparent",
+                      ].join(" ")}
+                    >
+                      <span className="flex items-center gap-2 min-w-0">
+                        <span className="w-7 h-7 grid place-items-center rounded-lg border border-slate-800 bg-slate-950/70 text-[12px]">
+                          ◆
+                        </span>
+                        <span className="text-sm text-slate-100 truncate">All</span>
+                      </span>
+                      <span className="text-[11px] text-slate-500">{entries.length}</span>
+                    </button>
+
+                    <div className="mt-2 space-y-1">
+                      {domains.map((d: GovernanceDomain) => {
+                        const active = d.key === activeDomainKey;
+                        const count = domainCounts.get(d.key) || 0;
+                        const icon = DOMAIN_ICON[d.key] || "•";
+
+                        return (
+                          <button
+                            key={d.key}
+                            type="button"
+                            onClick={() => setActiveDomainKey(d.key)}
+                            className={[
+                              "w-full flex items-center justify-between gap-3 px-3 py-2 rounded-xl transition",
+                              "hover:bg-slate-900/70 hover:shadow-[0_0_0_1px_rgba(245,158,11,0.18)]",
+                              active
+                                ? "bg-amber-500/10 border border-amber-500/40 shadow-[0_0_0_1px_rgba(245,158,11,0.35)]"
+                                : "border border-transparent",
+                            ].join(" ")}
+                          >
+                            <span className="flex items-center gap-2 min-w-0">
+                              <span className="w-7 h-7 grid place-items-center rounded-lg border border-slate-800 bg-slate-950/70 text-[12px]">
+                                {icon}
+                              </span>
+                              <span className="text-sm text-slate-100 truncate">{d.label}</span>
+                            </span>
+                            <span className={["text-[11px]", count ? "text-amber-200/80" : "text-slate-600"].join(" ")}>
+                              {count}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {err ? (
+                      <div className="mt-3 rounded-xl border border-red-800/60 bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
+                        {err}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="mt-3 text-[10px] text-slate-500 flex items-center justify-between">
+                    <span>
+                      Entity: <span className="text-slate-300">{entityKey}</span>
+                    </span>
+                    <Link href="/ci-archive" className="text-slate-400 hover:text-slate-200">
+                      Launchpad
+                    </Link>
+                  </div>
                 </div>
-                <div className="flex gap-2">
-                  <button onClick={viewPdf} className="btn-primary">View PDF</button>
-                  <button onClick={() => setShowDelete(true)} className="btn-danger">
-                    Remove from Minute Book
+              </section>
+
+              {/* MIDDLE: Entries */}
+              <section className="col-span-12 lg:col-span-5 min-h-0 flex flex-col">
+                <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex flex-col min-h-0">
+                  <div className="flex items-start justify-between mb-3 shrink-0">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-200">Registry Entries</div>
+                      <div className="text-[11px] text-slate-500">
+                        {loading ? "Loading…" : `${filteredEntries.length} item(s)`} •{" "}
+                        <span className="text-slate-300">{activeDomainLabel}</span>
+                      </div>
+                    </div>
+                    <span className="px-2 py-0.5 rounded-full bg-sky-500/10 border border-sky-500/30 text-[10px] uppercase tracking-[0.18em] text-sky-200">
+                      Evidence Index
+                    </span>
+                  </div>
+
+                  <div className="mb-3 shrink-0">
+                    <input
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value)}
+                      placeholder="Search title, hash, path…"
+                      className="w-full rounded-xl bg-slate-950/70 border border-slate-800 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 outline-none focus:border-amber-500/40"
+                    />
+                  </div>
+
+                  <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-slate-800/80 bg-slate-950/60">
+                    {loading ? (
+                      <div className="p-3 text-[11px] text-slate-400">Loading entries…</div>
+                    ) : filteredEntries.length === 0 ? (
+                      <div className="p-3 text-[11px] text-slate-400">
+                        No records filed under <span className="text-slate-200">{activeDomainLabel}</span> yet.
+                        <div className="mt-2 text-[10px] text-slate-500">
+                          Upload later — it will appear here automatically (domain_key driven).
+                        </div>
+                      </div>
+                    ) : (
+                      filteredEntries.map((e: EntryWithDoc) => {
+                        const active = e.id === selectedId;
+                        const createdAt = e.created_at ? new Date(e.created_at).toLocaleString() : "—";
+
+                        return (
+                          <button
+                            key={e.id}
+                            type="button"
+                            onClick={() => setSelectedId(e.id)}
+                            className={[
+                              "w-full text-left px-3 py-3 border-b border-slate-800 last:border-b-0 transition",
+                              active
+                                ? "bg-slate-900/90 shadow-[0_0_0_1px_rgba(245,158,11,0.35)]"
+                                : "hover:bg-slate-900/60",
+                            ].join(" ")}
+                          >
+                            <div className="text-xs font-semibold text-slate-100 line-clamp-2">
+                              {e.title || e.file_name || "Untitled filing"}
+                            </div>
+                            <div className="mt-1 text-[11px] text-slate-400 flex items-center gap-2 flex-wrap">
+                              <span className="capitalize">{e.entry_type || "document"}</span>
+                              <span className="w-1 h-1 rounded-full bg-slate-600" />
+                              <span className="text-slate-500">{createdAt}</span>
+                              <span className="w-1 h-1 rounded-full bg-slate-700" />
+                              <span className="text-slate-500">{fmtBytes(e.file_size)}</span>
+                            </div>
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              </section>
+
+              {/* RIGHT: Evidence */}
+              <section className="col-span-12 lg:col-span-4 min-h-0 flex flex-col">
+                <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex flex-col min-h-0">
+                  <div className="flex items-start justify-between mb-3 shrink-0">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-200">Evidence</div>
+                      <div className="text-[11px] text-slate-500">PDF-first • Metadata secondary</div>
+                    </div>
+
+                    {authorityBadge ? (
+                      <span
+                        className={[
+                          "px-2 py-0.5 rounded-full border text-[10px] uppercase tracking-[0.18em] font-semibold",
+                          authorityBadge.tone === "gold"
+                            ? "bg-amber-500/10 border-amber-500/40 text-amber-200"
+                            : "bg-slate-900/40 border-slate-700 text-slate-300",
+                        ].join(" ")}
+                      >
+                        {authorityBadge.label}
+                      </span>
+                    ) : null}
+                  </div>
+
+                  {!selected ? (
+                    <div className="flex-1 min-h-0 rounded-xl border border-slate-800/80 bg-slate-950/60 p-3 text-[11px] text-slate-400">
+                      Select a record to inspect evidence.
+                    </div>
+                  ) : (
+                    <>
+                      {/* Title + Actions */}
+                      <div className="rounded-xl border border-slate-800/80 bg-slate-950/60 p-3 shrink-0">
+                        <div className="text-sm font-semibold text-slate-100">
+                          {selected.title || selected.file_name || "Untitled filing"}
+                        </div>
+
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          <span className="px-2 py-1 rounded-full bg-slate-900/60 border border-slate-800 text-[11px] text-slate-200 capitalize">
+                            {selected.entry_type || "document"}
+                          </span>
+                          <span className="px-2 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200">
+                            {domains.find((d: GovernanceDomain) => d.key === selected.domain_key)?.label ||
+                              norm(selected.domain_key, "—")}
+                          </span>
+                        </div>
+
+                        {pdfErr ? (
+                          <div className="mt-3 rounded-xl border border-red-800/60 bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
+                            {pdfErr}
+                          </div>
+                        ) : null}
+
+                        <div className="mt-3">
+                          <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500 mb-2">Actions</div>
+
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={viewPdf}
+                              disabled={pdfBusy}
+                              className={`rounded-full px-4 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase transition ${
+                                pdfBusy
+                                  ? "bg-amber-500/20 text-amber-200/60 cursor-not-allowed"
+                                  : "bg-amber-500 text-black hover:bg-amber-400"
+                              }`}
+                              title="Load preview in panel"
+                            >
+                              View PDF
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={downloadPdf}
+                              disabled={pdfBusy}
+                              className={`rounded-full px-4 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase transition ${
+                                pdfBusy
+                                  ? "bg-slate-800/40 text-slate-300/60 cursor-not-allowed"
+                                  : "bg-slate-200 text-black hover:bg-white"
+                              }`}
+                              title="Download"
+                            >
+                              Download
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={openNewTab}
+                              disabled={pdfBusy}
+                              className={`rounded-full px-4 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase transition ${
+                                pdfBusy
+                                  ? "bg-slate-800/40 text-slate-300/60 cursor-not-allowed"
+                                  : "bg-slate-900/60 border border-slate-700 text-slate-200 hover:bg-slate-900"
+                              }`}
+                              title="Open in new tab"
+                            >
+                              Open New Tab
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={openFocus}
+                              disabled={pdfBusy}
+                              className={`rounded-full px-4 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase transition ${
+                                pdfBusy
+                                  ? "bg-slate-800/40 text-slate-300/60 cursor-not-allowed"
+                                  : "bg-slate-900/60 border border-amber-500/30 text-amber-200 hover:bg-slate-900"
+                              }`}
+                              title="Full-size readable viewer"
+                            >
+                              Focus View
+                            </button>
+
+                            {/* Delete (danger) */}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDeleteErr(null);
+                                setDeleteOpen(true);
+                              }}
+                              className="rounded-full px-4 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase transition bg-red-500/10 border border-red-500/30 text-red-200 hover:bg-red-500/15"
+                              title="Hard delete (owner/admin only)"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* PDF Preview */}
+                      <div className="mt-3 flex-1 min-h-0 rounded-xl border border-slate-800/80 bg-slate-950/60 overflow-hidden">
+                        {previewUrl ? (
+                          <iframe title="PDF Preview" src={previewUrl} className="h-full w-full" />
+                        ) : (
+                          <div className="h-full w-full grid place-items-center text-[11px] text-slate-500">
+                            Preview will appear here after “View PDF”.
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Metadata Zone */}
+                      <div className="mt-3 rounded-xl border border-slate-800/80 bg-slate-950/60 p-3 shrink-0">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Metadata Zone</div>
+                          <span className="px-2 py-0.5 rounded-full bg-slate-900/60 border border-slate-800 text-[10px] tracking-[0.18em] uppercase text-slate-300">
+                            secondary
+                          </span>
+                        </div>
+
+                        <div className="space-y-2">
+                          <details className="rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2">
+                            <summary className="cursor-pointer text-[11px] text-slate-200">Storage</summary>
+                            <div className="mt-2 space-y-1 text-[11px] text-slate-300">
+                              <div className="flex items-start justify-between gap-3">
+                                <span className="text-slate-500">Path</span>
+                                <span className="text-right font-mono break-all">{norm(selected.storage_path, "—")}</span>
+                              </div>
+                              <div className="flex items-start justify-between gap-3">
+                                <span className="text-slate-500">File</span>
+                                <span className="text-right break-all">{norm(selected.file_name, "—")}</span>
+                              </div>
+                              <div className="flex items-start justify-between gap-3">
+                                <span className="text-slate-500">Size</span>
+                                <span className="text-right">{fmtBytes(selected.file_size)}</span>
+                              </div>
+                              <div className="flex items-start justify-between gap-3">
+                                <span className="text-slate-500">MIME</span>
+                                <span className="text-right">{norm(selected.mime_type, "—")}</span>
+                              </div>
+                            </div>
+                          </details>
+
+                          <details open className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+                            <summary className="cursor-pointer text-[11px] text-amber-200">Hash</summary>
+                            <div className="mt-2 text-[11px] text-amber-100/90">
+                              <div className="flex items-start justify-between gap-3">
+                                <span className="text-amber-200/60">SHA-256</span>
+                                <span className="text-right font-mono break-all">{shortHash(selected.file_hash)}</span>
+                              </div>
+                              <div className="mt-1 text-[10px] text-amber-200/60">
+                                Minute Book = evidence access. Certification/attestation lives in Verified Registry.
+                              </div>
+                            </div>
+                          </details>
+
+                          <details className="rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2">
+                            <summary className="cursor-pointer text-[11px] text-slate-200">Audit</summary>
+                            <div className="mt-2 space-y-1 text-[11px] text-slate-300">
+                              <div className="flex items-start justify-between gap-3">
+                                <span className="text-slate-500">Created</span>
+                                <span className="text-right">
+                                  {selected.created_at ? new Date(selected.created_at).toLocaleString() : "—"}
+                                </span>
+                              </div>
+                              <div className="flex items-start justify-between gap-3">
+                                <span className="text-slate-500">Created By</span>
+                                <span className="text-right font-mono break-all">{norm(selected.created_by, "—")}</span>
+                              </div>
+                              <div className="flex items-start justify-between gap-3">
+                                <span className="text-slate-500">Source</span>
+                                <span className="text-right break-all">{norm(selected.source, "—")}</span>
+                              </div>
+                            </div>
+                          </details>
+                        </div>
+
+                        <div className="mt-3 flex items-center justify-between text-[10px] text-slate-500">
+                          <Link href="/ci-archive" className="hover:text-slate-200">
+                            Archive Launchpad
+                          </Link>
+                          <span>Upload is the sole write entry point.</span>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </section>
+            </div>
+          )}
+
+          <div className="mt-3 flex items-center justify-between text-[10px] text-slate-500">
+            <span>CI-Archive · Oasis Digital Parliament</span>
+            <span>ODP.AI · Governance Firmware</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Focus View overlay */}
+      {focusOpen ? (
+        <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm">
+          <div className="absolute inset-0 flex items-center justify-center p-6">
+            <div className="w-full max-w-[1200px] h-[88vh] rounded-3xl border border-slate-800 bg-black/70 shadow-[0_0_80px_rgba(0,0,0,0.6)] overflow-hidden flex flex-col">
+              <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
+                <div className="min-w-0">
+                  <div className="text-[10px] uppercase tracking-[0.28em] text-slate-500">Focus View</div>
+                  <div className="text-sm font-semibold text-slate-100 truncate">
+                    {selected?.title || selected?.file_name || "Untitled filing"}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={downloadPdf}
+                    className="rounded-full bg-slate-200 text-black hover:bg-white px-4 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase"
+                  >
+                    Download
+                  </button>
+                  <button
+                    type="button"
+                    onClick={openNewTab}
+                    className="rounded-full bg-slate-900/60 border border-slate-700 text-slate-200 hover:bg-slate-900 px-4 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase"
+                  >
+                    Open New Tab
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFocusOpen(false)}
+                    className="rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-200 hover:bg-amber-500/15 px-4 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase"
+                  >
+                    Close
                   </button>
                 </div>
               </div>
 
-              {/* PDF */}
-              <div className="flex-1">
-                {pdfUrl ? (
-                  <iframe src={pdfUrl} className="w-full h-full" />
+              <div className="flex-1 bg-slate-950/40">
+                {previewUrl ? (
+                  <iframe title="PDF Focus" src={previewUrl} className="h-full w-full" />
                 ) : (
-                  <div className="h-full grid place-items-center text-slate-500 text-xs">
-                    No PDF loaded
-                  </div>
+                  <div className="h-full w-full grid place-items-center text-[11px] text-slate-500">Loading…</div>
                 )}
               </div>
-            </>
-          )}
-        </section>
-      </div>
 
-      {/* Delete Modal */}
-      {showDelete && (
-        <div className="fixed inset-0 bg-black/80 grid place-items-center z-50">
-          <div className="bg-slate-950 border border-red-800 rounded-xl p-6 w-[420px]">
-            <h3 className="text-slate-100 font-semibold mb-2">
-              Remove Minute Book Record
-            </h3>
-            <p className="text-xs text-slate-400 mb-3">
-              This permanently removes the record and stored files. Verified
-              records are not affected.
-            </p>
-            <input
-              value={deleteReason}
-              onChange={(e) => setDeleteReason(e.target.value)}
-              placeholder="Reason for removal (required)"
-              className="w-full mb-4 px-3 py-2 bg-black border border-slate-700 rounded"
-            />
-            <div className="flex justify-end gap-2">
-              <button onClick={() => setShowDelete(false)}>Cancel</button>
-              <button onClick={deleteEntry} className="btn-danger">
-                Confirm Removal
-              </button>
+              <div className="px-5 py-3 border-t border-slate-800 flex items-center justify-between text-[10px] text-slate-500">
+                <span>Entity: {entityKey}</span>
+                <span className="font-mono">{shortHash(selected?.file_hash || null)}</span>
+              </div>
             </div>
           </div>
         </div>
-      )}
+      ) : null}
+
+      {/* Delete confirmation modal */}
+      {deleteOpen && selected ? (
+        <div className="fixed inset-0 z-[110] bg-black/60 backdrop-blur-sm">
+          <div className="absolute inset-0 flex items-center justify-center p-6">
+            <div className="w-full max-w-[720px] rounded-3xl border border-slate-800 bg-black/75 shadow-[0_0_80px_rgba(0,0,0,0.6)] overflow-hidden">
+              <div className="px-6 py-5 border-b border-slate-800">
+                <div className="text-[10px] uppercase tracking-[0.28em] text-red-300">Hard Delete</div>
+                <div className="mt-1 text-lg font-semibold text-slate-100">Hard delete this filing?</div>
+                <div className="mt-2 text-[12px] text-slate-400">
+                  This permanently removes the Minute Book entry and all stored evidence files (including thumbnails). This action cannot be undone.
+                </div>
+              </div>
+
+              <div className="px-6 py-5 space-y-4">
+                <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
+                  <div className="text-sm font-semibold text-slate-100">
+                    {selected.title || selected.file_name || "Untitled filing"}
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                    <span className="px-2 py-1 rounded-full bg-slate-900/60 border border-slate-800 text-slate-200">
+                      Entity: {entityKey}
+                    </span>
+                    <span className="px-2 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-200">
+                      Domain: {domains.find((d) => d.key === selected.domain_key)?.label || norm(selected.domain_key, "—")}
+                    </span>
+                    <span className="px-2 py-1 rounded-full bg-slate-900/60 border border-slate-800 text-slate-300 font-mono">
+                      {shortHash(selected.file_hash)}
+                    </span>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500 mb-2">Reason (required)</div>
+                  <textarea
+                    value={deleteReason}
+                    onChange={(e) => setDeleteReason(e.target.value)}
+                    placeholder="Example: Uploaded under wrong entity. Re-filed correctly under real-estate."
+                    className="w-full min-h-[92px] rounded-2xl bg-slate-950/60 border border-slate-800 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-600 outline-none focus:border-amber-500/40"
+                  />
+                </div>
+
+                <label className="flex items-start gap-3 text-sm text-slate-300 select-none">
+                  <input
+                    type="checkbox"
+                    checked={deleteAcknowledge}
+                    onChange={(e) => setDeleteAcknowledge(e.target.checked)}
+                    className="mt-1"
+                  />
+                  <span>
+                    I understand this is permanent and will remove the entry and evidence files from storage.
+                  </span>
+                </label>
+
+                {deleteErr ? (
+                  <div className="rounded-2xl border border-red-800/60 bg-red-950/40 px-4 py-3 text-[12px] text-red-300">
+                    {deleteErr}
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="px-6 py-5 border-t border-slate-800 flex items-center justify-between">
+                <button
+                  type="button"
+                  onClick={closeDeleteModal}
+                  disabled={deleteBusy}
+                  className="rounded-full bg-slate-900/60 border border-slate-700 text-slate-200 hover:bg-slate-900 px-5 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase"
+                >
+                  Cancel
+                </button>
+
+                <button
+                  type="button"
+                  onClick={runDelete}
+                  disabled={deleteBusy || !deleteAcknowledge || deleteReason.trim().length < 6}
+                  className={`rounded-full px-5 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition ${
+                    deleteBusy || !deleteAcknowledge || deleteReason.trim().length < 6
+                      ? "bg-red-500/10 border border-red-500/20 text-red-200/50 cursor-not-allowed"
+                      : "bg-red-500/15 border border-red-500/40 text-red-200 hover:bg-red-500/20"
+                  }`}
+                >
+                  {deleteBusy ? "Deleting…" : "Delete permanently"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
