@@ -7,9 +7,9 @@ import Link from "next/link";
 import {
   UploadCloud,
   ShieldCheck,
-  Hash,
-  FileText,
   AlertTriangle,
+  CheckCircle2,
+  Hash,
 } from "lucide-react";
 
 import { supabaseBrowser } from "@/lib/supabase/browser";
@@ -26,7 +26,7 @@ function ymd(d = new Date()) {
 }
 
 function safe(name: string) {
-  return name.replace(/\s+/g, "_").replace(/[^a-zA-Z0-9._-]/g, "");
+  return name.trim().replace(/\s+/g, "_").replace(/[^a-zA-Z0-9._-]/g, "");
 }
 
 async function sha256(file: File) {
@@ -39,28 +39,60 @@ async function sha256(file: File) {
 
 /* ---------------- component ---------------- */
 
+type Domain = {
+  key: string;
+  label: string;
+  sort_order: number | null;
+};
+
 export default function UploadClient() {
   const supabase = useMemo(() => supabaseBrowser(), []);
   const { entityKey } = useEntity();
 
   const fileRef = useRef<HTMLInputElement | null>(null);
 
-  const [domainKey, setDomainKey] = useState("incorporation");
+  // taxonomy (UNCHANGED SOURCE)
+  const [domains, setDomains] = useState<Domain[]>([]);
+  const [domainKey, setDomainKey] = useState<string>("");
+
+  // filing
   const [entryType, setEntryType] = useState("filing");
   const [entryDate, setEntryDate] = useState(ymd());
-
   const [title, setTitle] = useState("");
   const [notes, setNotes] = useState("");
 
+  // file
   const [file, setFile] = useState<File | null>(null);
   const [hash, setHash] = useState<string>("");
 
+  // state
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
 
+  /* -------- load domains (same ~15 as before) -------- */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const d = await supabase
+        .from("governance_domains")
+        .select("key,label,sort_order")
+        .eq("active", true)
+        .order("sort_order", { ascending: true });
+
+      if (!cancelled && !d.error) {
+        setDomains(d.data as Domain[]);
+        if (!domainKey && d.data?.length) setDomainKey(d.data[0].key);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [supabase, domainKey]);
+
+  /* -------- projection -------- */
   const preview = useMemo(() => {
-    if (!file || !hash || !title) return null;
+    if (!file || !hash || !title || !domainKey) return null;
     const clean = safe(file.name);
     return {
       path: `${entityKey}/${domainKey}/${entryType}/${entryDate}/${hash}-${clean}`,
@@ -68,8 +100,9 @@ export default function UploadClient() {
       size: file.size,
       type: file.type || "application/pdf",
     };
-  }, [file, hash, title, entityKey, domainKey, entryType, entryDate]);
+  }, [file, hash, title, domainKey, entityKey, entryType, entryDate]);
 
+  /* -------- actions -------- */
   async function pick(f: File | null) {
     setErr(null);
     setOk(null);
@@ -78,14 +111,13 @@ export default function UploadClient() {
 
     if (!f) return;
     if (!f.name.toLowerCase().endsWith(".pdf")) {
-      setErr("PDF required");
+      setErr("PDF required.");
       return;
     }
 
     setFile(f);
     const h = await sha256(f);
     setHash(h);
-
     if (!title) setTitle(f.name.replace(/\.[^.]+$/, ""));
   }
 
@@ -93,6 +125,7 @@ export default function UploadClient() {
     if (!preview || !file) return;
     setBusy(true);
     setErr(null);
+    setOk(null);
 
     try {
       // STORAGE (unchanged)
@@ -125,14 +158,14 @@ export default function UploadClient() {
 
       if (rpc.error) throw rpc.error;
 
-      setOk("Filed into Minute Book");
+      setOk("Filed successfully into the Minute Book.");
       setTitle("");
       setNotes("");
       setFile(null);
       setHash("");
       if (fileRef.current) fileRef.current.value = "";
     } catch (e: any) {
-      setErr(e.message ?? "Upload failed");
+      setErr(e.message ?? "Upload failed.");
     } finally {
       setBusy(false);
     }
@@ -142,7 +175,7 @@ export default function UploadClient() {
 
   return (
     <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-      {/* HEADER — locked */}
+      {/* TOP BAR */}
       <div className="shrink-0 px-6 py-4 border-b border-slate-800 bg-slate-950/80">
         <div className="flex items-center justify-between">
           <div>
@@ -151,30 +184,39 @@ export default function UploadClient() {
             </h1>
             <div className="mt-1 text-xs text-slate-400 flex items-center gap-2">
               <ShieldCheck className="h-4 w-4 text-emerald-300" />
-              Enterprise Contract • SHA-256 enforced
+              Enterprise Contract · SHA-256 enforced
             </div>
           </div>
 
-          <button
-            onClick={submit}
-            disabled={!preview || busy}
-            className={cx(
-              "rounded-xl px-4 py-2 text-sm font-semibold",
-              preview && !busy
-                ? "bg-amber-500 text-black hover:bg-amber-400"
-                : "bg-slate-800 text-slate-400"
-            )}
-          >
-            {busy ? "Filing…" : "File into Minute Book"}
-          </button>
+          <div className="flex items-center gap-3">
+            <Link
+              href="/ci-archive"
+              className="text-xs text-slate-400 hover:text-slate-200"
+            >
+              ← Launchpad
+            </Link>
+
+            <button
+              onClick={submit}
+              disabled={!preview || busy}
+              className={cx(
+                "rounded-xl px-4 py-2 text-sm font-semibold transition",
+                preview && !busy
+                  ? "bg-amber-500 text-black hover:bg-amber-400"
+                  : "bg-slate-800 text-slate-400 cursor-not-allowed"
+              )}
+            >
+              {busy ? "Filing…" : "File into Minute Book"}
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* CONSOLE — locked height */}
+      {/* CONSOLE */}
       <div className="flex-1 min-h-0 overflow-hidden px-6 py-4">
-        <div className="h-full min-h-0 grid grid-cols-12 gap-4">
-          {/* LEFT — taxonomy */}
-          <div className="col-span-3 min-h-0 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
+        <div className="h-full grid grid-cols-12 gap-4">
+          {/* LEFT — Context */}
+          <div className="col-span-3 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
             <div className="text-xs uppercase tracking-wider text-slate-400">
               Filing Context
             </div>
@@ -186,11 +228,17 @@ export default function UploadClient() {
 
             <div className="mt-4">
               <label className="text-xs text-slate-400">Domain</label>
-              <input
+              <select
                 value={domainKey}
                 onChange={(e) => setDomainKey(e.target.value)}
                 className="mt-1 w-full rounded-lg bg-slate-900 border border-slate-800 px-2 py-1 text-sm"
-              />
+              >
+                {domains.map((d) => (
+                  <option key={d.key} value={d.key}>
+                    {d.label}
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div className="mt-4">
@@ -213,8 +261,8 @@ export default function UploadClient() {
             </div>
           </div>
 
-          {/* MIDDLE — action */}
-          <div className="col-span-5 min-h-0 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
+          {/* CENTER — Payload */}
+          <div className="col-span-5 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
             <div className="text-xs uppercase tracking-wider text-slate-400">
               Filing Payload
             </div>
@@ -226,8 +274,8 @@ export default function UploadClient() {
             )}
 
             {ok && (
-              <div className="mt-3 text-sm text-emerald-300">
-                {ok}
+              <div className="mt-3 text-sm text-emerald-300 flex gap-2">
+                <CheckCircle2 className="h-4 w-4" /> {ok}
               </div>
             )}
 
@@ -260,15 +308,13 @@ export default function UploadClient() {
             </div>
           </div>
 
-          {/* RIGHT — projection */}
-          <div className="col-span-4 min-h-0 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
+          {/* RIGHT — Projection */}
+          <div className="col-span-4 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
             <div className="text-xs uppercase tracking-wider text-slate-400">
               Registry Projection
             </div>
 
-            <div className="mt-4 text-xs text-slate-500">
-              Storage Path
-            </div>
+            <div className="mt-4 text-xs text-slate-500">Storage Path</div>
             <div className="mt-1 text-xs font-mono break-all text-slate-300">
               {preview?.path ?? "—"}
             </div>
@@ -278,7 +324,7 @@ export default function UploadClient() {
               SHA-256 enforced
             </div>
 
-            <div className="mt-2 text-xs font-mono text-slate-300">
+            <div className="mt-1 text-xs font-mono text-slate-300">
               {hash ? `${hash.slice(0, 20)}…` : "—"}
             </div>
 
