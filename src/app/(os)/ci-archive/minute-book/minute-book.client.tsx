@@ -2,10 +2,13 @@
 export const dynamic = "force-dynamic";
 
 /**
- * CI-Archive → Minute Book (FINAL — PRODUCTION LOCK)
- * - OS-consistent (CI-Council grade)
- * - Evidence-first
- * - Read-only surface with guarded audit deletion
+ * CI-Archive → Minute Book (FINAL — CANONICAL)
+ * OS-consistent (CI-Council grade)
+ * 3-column surface: Domains | Entries | Evidence
+ * Evidence-first, read-only
+ * Guarded audit deletion
+ * Icons restored
+ * TypeScript strict-safe
  */
 
 import Link from "next/link";
@@ -13,7 +16,43 @@ import { useEffect, useMemo, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 
-/* ---------------- types ---------------- */
+/* ---------------- ICON MAP (UI-ONLY) ---------------- */
+
+const DOMAIN_ICON: Record<string, string> = {
+  incorporation: "📜",
+  formation: "📜",
+  "incorporation-and-formation": "📜",
+  corporate_profile: "🛡️",
+  "corporate-profile": "🛡️",
+  share_capital: "📈",
+  "share-capital": "📈",
+  share_certificates: "📈",
+  directors_officers: "👤",
+  "directors-and-officers": "👤",
+  resolutions: "⚖️",
+  minutes: "⚖️",
+  bylaws: "📘",
+  governance: "📘",
+  annual_returns: "🧾",
+  tax: "🧾",
+  banking: "🏦",
+  insurance: "🛡️",
+  risk: "🛡️",
+  real_estate: "🏠",
+  assets: "🏠",
+  contracts: "🤝",
+  agreements: "🤝",
+  brand_ip: "™️",
+  brand: "™️",
+  compliance: "✅",
+  regulatory: "✅",
+  litigation: "⚠️",
+  legal: "⚠️",
+  annexes: "🗂️",
+  misc: "🗂️",
+};
+
+/* ---------------- TYPES ---------------- */
 
 type GovernanceDomain = {
   key: string;
@@ -34,7 +73,6 @@ type MinuteBookEntry = {
 };
 
 type SupportingDoc = {
-  id: string;
   entry_id: string;
   file_path: string | null;
   file_name: string | null;
@@ -53,7 +91,7 @@ type EntryWithDoc = MinuteBookEntry & {
   mime_type?: string | null;
 };
 
-/* ---------------- helpers ---------------- */
+/* ---------------- HELPERS ---------------- */
 
 const fmtBytes = (n?: number | null) =>
   !n ? "—" : n > 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.round(n / 1024)} KB`;
@@ -61,7 +99,7 @@ const fmtBytes = (n?: number | null) =>
 const shortHash = (h?: string | null) =>
   !h ? "—" : h.length <= 18 ? h : `${h.slice(0, 12)}…${h.slice(-6)}`;
 
-/* ---------------- data loaders ---------------- */
+/* ---------------- DATA LOADERS ---------------- */
 
 async function loadDomains(): Promise<GovernanceDomain[]> {
   const { data, error } = await supabaseBrowser
@@ -79,9 +117,11 @@ async function loadEntries(entityKey: string): Promise<EntryWithDoc[]> {
     .select("id,entity_key,domain_key,entry_type,title,created_at,created_by,source")
     .eq("entity_key", entityKey)
     .order("created_at", { ascending: false });
+
   if (error) throw error;
 
-  const ids = (data || []).map((d) => d.id);
+  // ✅ TS-SAFE FIX (THIS WAS THE BUILD ERROR)
+  const ids = ((data || []) as { id: string }[]).map((d) => d.id);
   if (!ids.length) return [];
 
   const { data: docs } = await supabaseBrowser
@@ -109,7 +149,7 @@ async function loadEntries(entityKey: string): Promise<EntryWithDoc[]> {
   });
 }
 
-/* ---------------- component ---------------- */
+/* ---------------- COMPONENT ---------------- */
 
 export default function MinuteBookClient() {
   const { entityKey } = useEntity();
@@ -119,10 +159,9 @@ export default function MinuteBookClient() {
   const [activeDomain, setActiveDomain] = useState<string>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  // PDF
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
-  // Delete (AUDIT ACTION)
+  // Delete (audit action)
   const [showDelete, setShowDelete] = useState(false);
   const [deleteReason, setDeleteReason] = useState("");
   const [busyDelete, setBusyDelete] = useState(false);
@@ -183,7 +222,7 @@ export default function MinuteBookClient() {
     }
   }
 
-  /* ---------------- render ---------------- */
+  /* ---------------- RENDER ---------------- */
 
   return (
     <div className="h-full flex flex-col px-8 pt-6 pb-6">
@@ -196,35 +235,46 @@ export default function MinuteBookClient() {
 
       <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
         <div className="w-full max-w-[1600px] h-full rounded-3xl border border-slate-900 bg-black/60 px-6 py-5 flex flex-col overflow-hidden">
-
-          {/* MAIN GRID */}
           <div className="grid grid-cols-12 gap-6 flex-1 min-h-0">
 
             {/* LEFT — DOMAINS */}
             <section className="col-span-3 min-h-0 flex flex-col">
               <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex-1 overflow-y-auto">
                 <div className="text-sm font-semibold text-slate-200 mb-3">Domains</div>
+
                 <button
                   onClick={() => setActiveDomain("all")}
-                  className={`w-full mb-1 px-3 py-2 rounded-xl text-left ${
-                    activeDomain === "all" ? "bg-amber-500/10 border border-amber-500/40" : "hover:bg-slate-900/60"
+                  className={`w-full flex items-center gap-3 px-3 py-2 mb-1 rounded-xl ${
+                    activeDomain === "all"
+                      ? "bg-amber-500/10 border border-amber-500/40"
+                      : "hover:bg-slate-900/60"
                   }`}
                 >
-                  All
+                  <span className="w-7 h-7 grid place-items-center rounded-lg border border-slate-800 bg-slate-950/70 text-[12px]">
+                    ◆
+                  </span>
+                  <span>All</span>
                 </button>
-                {domains.map((d) => (
-                  <button
-                    key={d.key}
-                    onClick={() => setActiveDomain(d.key)}
-                    className={`w-full mb-1 px-3 py-2 rounded-xl text-left ${
-                      activeDomain === d.key
-                        ? "bg-amber-500/10 border border-amber-500/40"
-                        : "hover:bg-slate-900/60"
-                    }`}
-                  >
-                    {d.label}
-                  </button>
-                ))}
+
+                {domains.map((d) => {
+                  const icon = DOMAIN_ICON[d.key] || "•";
+                  return (
+                    <button
+                      key={d.key}
+                      onClick={() => setActiveDomain(d.key)}
+                      className={`w-full flex items-center gap-3 px-3 py-2 mb-1 rounded-xl ${
+                        activeDomain === d.key
+                          ? "bg-amber-500/10 border border-amber-500/40"
+                          : "hover:bg-slate-900/60"
+                      }`}
+                    >
+                      <span className="w-7 h-7 grid place-items-center rounded-lg border border-slate-800 bg-slate-950/70 text-[12px]">
+                        {icon}
+                      </span>
+                      <span>{d.label}</span>
+                    </button>
+                  );
+                })}
               </div>
             </section>
 
@@ -232,6 +282,7 @@ export default function MinuteBookClient() {
             <section className="col-span-5 min-h-0 flex flex-col">
               <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex-1 overflow-y-auto">
                 <div className="text-sm font-semibold text-slate-200 mb-3">Registry Entries</div>
+
                 {filtered.map((e) => (
                   <button
                     key={e.id}
@@ -253,7 +304,7 @@ export default function MinuteBookClient() {
               </div>
             </section>
 
-            {/* RIGHT — EVIDENCE + AUDIT */}
+            {/* RIGHT — EVIDENCE */}
             <section className="col-span-4 min-h-0 flex flex-col">
               <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex flex-col min-h-0">
 
@@ -263,7 +314,6 @@ export default function MinuteBookClient() {
                   </div>
                 ) : (
                   <>
-                    {/* EVIDENCE HEADER */}
                     <div className="mb-3">
                       <div className="text-sm font-semibold text-slate-200">
                         {selected.title || selected.file_name}
@@ -273,7 +323,6 @@ export default function MinuteBookClient() {
                       </div>
                     </div>
 
-                    {/* ACTIONS */}
                     <div className="flex gap-2 mb-3">
                       <button
                         onClick={viewPdf}
@@ -283,7 +332,6 @@ export default function MinuteBookClient() {
                       </button>
                     </div>
 
-                    {/* PDF PREVIEW */}
                     <div className="flex-1 min-h-0 rounded-xl border border-slate-800 overflow-hidden mb-3">
                       {previewUrl ? (
                         <iframe src={previewUrl} className="w-full h-full" />
@@ -294,7 +342,6 @@ export default function MinuteBookClient() {
                       )}
                     </div>
 
-                    {/* METADATA */}
                     <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 mb-3">
                       <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 mb-2">
                         Metadata
@@ -305,7 +352,6 @@ export default function MinuteBookClient() {
                       </div>
                     </div>
 
-                    {/* AUDIT ACTION — DELETE */}
                     <div className="border-t border-slate-800 pt-3">
                       {!showDelete ? (
                         <>
