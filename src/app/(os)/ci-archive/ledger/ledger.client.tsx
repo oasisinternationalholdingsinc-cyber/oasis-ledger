@@ -1,4 +1,3 @@
-// src/app/(os)/ci-archive/ledger/ledger.client.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -30,24 +29,32 @@ type LedgerRecord = {
   id: string;
   title: string | null;
   status: LedgerStatus | null;
-  created_at: string | null;
-  updated_at: string | null;
 
-  // optional fields (don’t assume they exist)
+  // REQUIRED (exists)
+  created_at: string | null;
+
+  // OPTIONAL (do not assume)
   record_type?: string | null;
   entity_key?: string | null;
   entity_slug?: string | null;
   source_record_id?: string | null;
 
-  // signature/envelope-related (optional)
+  // OPTIONAL: signature/envelope
   envelope_id?: string | null;
   envelope_status?: string | null;
 
-  // archive linkage (optional)
+  // OPTIONAL: archive linkage
   archived_entry_id?: string | null;
 };
 
-type TabKey = "all" | "drafted" | "pending" | "approved" | "signing" | "signed" | "archived";
+type TabKey =
+  | "all"
+  | "drafted"
+  | "pending"
+  | "approved"
+  | "signing"
+  | "signed"
+  | "archived";
 
 function cx(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(" ");
@@ -56,8 +63,7 @@ function cx(...parts: Array<string | false | null | undefined>) {
 function formatDate(d: string | null) {
   if (!d) return "—";
   try {
-    const dt = new Date(d);
-    return dt.toLocaleString();
+    return new Date(d).toLocaleString();
   } catch {
     return d;
   }
@@ -115,9 +121,11 @@ function TabButton({
   );
 }
 
-export default function DraftsApprovalsClient() {
+export default function LedgerLifecycleClient() {
   const supabase = useMemo(() => supabaseBrowser(), []);
-  const { activeEntity, entityKey } = useEntity(); // some builds expose both; we’ll use whichever exists
+
+  // OS selector only — no hard defaults.
+  const { activeEntity, entityKey } = useEntity() as any;
   const scopedEntity = (entityKey || activeEntity || "").toString();
 
   const [loading, setLoading] = useState(true);
@@ -136,17 +144,15 @@ export default function DraftsApprovalsClient() {
 
   const normalized = useMemo(() => {
     const term = q.trim().toLowerCase();
-    const filtered = records.filter((r) => {
-      const st = statusLabel(r.status);
+    return records.filter((r) => {
+      const st = statusLabel(r.status) as TabKey;
       if (tab !== "all" && st !== tab) return false;
-      if (!term) return true;
 
+      if (!term) return true;
       const title = (r.title || "").toLowerCase();
       const type = ((r.record_type as any) || "").toString().toLowerCase();
       return title.includes(term) || type.includes(term) || st.includes(term);
     });
-
-    return filtered;
   }, [records, tab, q]);
 
   const counts = useMemo(() => {
@@ -167,8 +173,7 @@ export default function DraftsApprovalsClient() {
   }, [records]);
 
   const scopeQuery = useMemo(() => {
-    const ek = scopedEntity ? `?entity_key=${encodeURIComponent(scopedEntity)}` : "";
-    return ek;
+    return scopedEntity ? `?entity_key=${encodeURIComponent(scopedEntity)}` : "";
   }, [scopedEntity]);
 
   async function load() {
@@ -176,30 +181,23 @@ export default function DraftsApprovalsClient() {
     setErr(null);
 
     try {
-      // Keep it forgiving: only select columns that definitely exist in your schema.
-      // If your governance_ledger has more fields, we can expand later.
+      // IMPORTANT: governance_ledger.updated_at does NOT exist (per your screenshot).
+      // Use created_at as the canonical timestamp for ordering + display.
       const sel =
-        "id,title,status,created_at,updated_at,record_type,entity_key,entity_slug,source_record_id,envelope_id,envelope_status,archived_entry_id";
+        "id,title,status,created_at,record_type,entity_key,entity_slug,source_record_id,envelope_id,envelope_status,archived_entry_id";
 
       let query = supabase
         .from("governance_ledger")
         .select(sel)
-        .order("updated_at", { ascending: false });
+        .order("created_at", { ascending: false });
 
-      if (scopedEntity) {
-        // Your ecosystem uses entity_key heavily (holdings/lounge/real-estate).
-        query = query.eq("entity_key", scopedEntity);
-      }
+      if (scopedEntity) query = query.eq("entity_key", scopedEntity);
 
       const { data, error } = await query;
-
       if (error) throw error;
 
       const list = (data ?? []) as LedgerRecord[];
       setRecords(list);
-
-      // auto-select first visible record if none selected
-      if (!selectedId && list.length) setSelectedId(list[0]!.id);
     } catch (e: any) {
       setErr(e?.message ?? "Failed to load governance_ledger.");
       setRecords([]);
@@ -209,22 +207,29 @@ export default function DraftsApprovalsClient() {
   }
 
   useEffect(() => {
-    // IMPORTANT: auth gating belongs to (os)/layout or os-auth-gate — do NOT redirect here.
+    // Auth gating belongs to OS (layout / os-auth-gate) — do NOT redirect here.
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopedEntity]);
 
-  // CTA enablement logic (wiring-safe: just links / disabled states)
+  // Auto-select first visible record (after filtering) if none selected
+  useEffect(() => {
+    if (!selectedId && normalized.length) setSelectedId(normalized[0]!.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [normalized.length]);
+
+  // CTA rules (as locked)
   const st = selected ? statusLabel(selected.status) : "";
   const canOpenForge = !!selected && (st === "approved" || st === "signing" || st === "signed");
   const canArchiveNow = !!selected && st === "signed";
-  const canOpenArchive = !!selected && (st === "archived" || st === "signed" || st === "signing");
+  const canOpenArchive = !!selected && st === "archived";
 
   const openInForgeHref = selected
-    ? `/ci-forge?record_id=${encodeURIComponent(selected.id)}${scopedEntity ? `&entity_key=${encodeURIComponent(scopedEntity)}` : ""}`
+    ? `/ci-forge?record_id=${encodeURIComponent(selected.id)}${
+        scopedEntity ? `&entity_key=${encodeURIComponent(scopedEntity)}` : ""
+      }`
     : "#";
 
-  // if you later support deep-linking by archived_entry_id, this will “just work” visually
   const openInArchiveHref = selected
     ? `/ci-archive/minute-book${scopedEntity ? `?entity_key=${encodeURIComponent(scopedEntity)}` : ""}`
     : "#";
@@ -235,7 +240,8 @@ export default function DraftsApprovalsClient() {
       <div className="mb-4 shrink-0">
         <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI-ARCHIVE</div>
         <p className="mt-1 text-[11px] text-slate-400">
-          Drafts & Approvals • <span className="font-semibold text-slate-200">Lifecycle surface</span> • Entity-scoped via OS selector
+          Drafts &amp; Approvals •{" "}
+          <span className="font-semibold text-slate-200">Lifecycle surface</span> • Entity-scoped via OS selector
         </p>
       </div>
 
@@ -348,7 +354,7 @@ export default function DraftsApprovalsClient() {
                                 {r.title || "(Untitled record)"}
                               </div>
                               <div className="mt-1 text-[11px] text-slate-500">
-                                Updated: <span className="text-slate-300">{formatDate(r.updated_at)}</span>
+                                Created: <span className="text-slate-300">{formatDate(r.created_at)}</span>
                               </div>
                             </div>
 
@@ -391,16 +397,10 @@ export default function DraftsApprovalsClient() {
                           </div>
                           <div className="mt-2 text-xs text-slate-400 flex flex-wrap gap-x-6 gap-y-2">
                             <span>
-                              Status:{" "}
-                              <span className="text-slate-200">{statusLabel(selected.status)}</span>
+                              Status: <span className="text-slate-200">{statusLabel(selected.status)}</span>
                             </span>
                             <span>
-                              Created:{" "}
-                              <span className="text-slate-200">{formatDate(selected.created_at)}</span>
-                            </span>
-                            <span>
-                              Updated:{" "}
-                              <span className="text-slate-200">{formatDate(selected.updated_at)}</span>
+                              Created: <span className="text-slate-200">{formatDate(selected.created_at)}</span>
                             </span>
                           </div>
                         </div>
@@ -423,11 +423,7 @@ export default function DraftsApprovalsClient() {
                         <div className="rounded-2xl border border-slate-900 bg-black/20 p-3">
                           <div className="text-[11px] text-slate-500">Envelope</div>
                           <div className="mt-1 text-slate-200">
-                            {selected.envelope_id ? (
-                              <span className="break-all">{selected.envelope_id}</span>
-                            ) : (
-                              "—"
-                            )}
+                            {selected.envelope_id ? <span className="break-all">{selected.envelope_id}</span> : "—"}
                           </div>
                         </div>
 
@@ -471,7 +467,7 @@ export default function DraftsApprovalsClient() {
                 </div>
 
                 <div className="p-4 space-y-2">
-                  {/* Open in Forge */}
+                  {/* APPROVED → Open in Forge */}
                   <Link
                     href={canOpenForge ? openInForgeHref : "#"}
                     className={cx(
@@ -489,7 +485,7 @@ export default function DraftsApprovalsClient() {
                     <ArrowRight className="h-4 w-4" />
                   </Link>
 
-                  {/* Archive Now (disabled for now; wiring later) */}
+                  {/* SIGNED → Archive Now (wiring later; enabled only when signed) */}
                   <button
                     disabled={!canArchiveNow}
                     className={cx(
@@ -498,11 +494,7 @@ export default function DraftsApprovalsClient() {
                         ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
                         : "border-slate-900 bg-black/20 text-slate-600 cursor-not-allowed"
                     )}
-                    title={
-                      canArchiveNow
-                        ? "Archive the signed artifact into CI-Archive (wiring next)."
-                        : "Archive is available once signed."
-                    }
+                    title={canArchiveNow ? "Archive the signed artifact into CI-Archive (wire next)." : "Archive is available once signed."}
                   >
                     <span className="inline-flex items-center gap-2">
                       <ArchiveIcon className="h-4 w-4" />
@@ -511,7 +503,7 @@ export default function DraftsApprovalsClient() {
                     <ArrowRight className="h-4 w-4" />
                   </button>
 
-                  {/* Open in CI-Archive */}
+                  {/* ARCHIVED → Open in CI-Archive */}
                   <Link
                     href={canOpenArchive ? openInArchiveHref : "#"}
                     className={cx(
@@ -520,7 +512,7 @@ export default function DraftsApprovalsClient() {
                         ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
                         : "border-slate-900 bg-black/20 text-slate-600 cursor-not-allowed pointer-events-none"
                     )}
-                    title={canOpenArchive ? "Open registry surfaces (Minute Book)" : "Available after signing / archival."}
+                    title={canOpenArchive ? "Open CI-Archive Minute Book" : "Available once archived."}
                   >
                     <span className="inline-flex items-center gap-2">
                       <ExternalLink className="h-4 w-4" />
@@ -530,12 +522,12 @@ export default function DraftsApprovalsClient() {
                   </Link>
 
                   <div className="mt-3 rounded-2xl border border-slate-900 bg-black/20 p-3 text-xs text-slate-400">
-                    Approval + Archive: Both execution paths must produce the same archive-quality artifact (PDF + hash + registry entry).
+                    Approval + Archive: both execution paths must produce the same archive-quality artifact (PDF + hash + registry entry).
                   </div>
                 </div>
               </div>
 
-              {/* AXIOM Advisory (placeholder panel; wiring later) */}
+              {/* AXIOM Advisory (shell only) */}
               <div className="rounded-3xl border border-slate-900 bg-slate-950/30 overflow-hidden">
                 <div className="p-4 border-b border-slate-900">
                   <div className="flex items-start justify-between gap-3">
@@ -581,7 +573,6 @@ export default function DraftsApprovalsClient() {
                 </div>
               </div>
 
-              {/* Small footer marker */}
               <div className="hidden lg:flex items-center gap-2 px-1 text-[10px] uppercase tracking-[0.28em] text-slate-600">
                 <FileCheck2 className="h-4 w-4" />
                 Oasis OS • lifecycle discipline • evidence-first registry
