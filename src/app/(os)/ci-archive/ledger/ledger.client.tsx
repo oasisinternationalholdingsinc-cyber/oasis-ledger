@@ -1,3 +1,4 @@
+// src/app/(os)/ci-archive/ledger/ledger.client.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -27,24 +28,30 @@ type LedgerStatus =
 
 type LedgerRecord = {
   id: string;
+  entity_id: string | null;
+
   title: string | null;
+  description?: string | null;
+
+  record_type?: string | null;
+  record_no?: string | null;
+
   status: LedgerStatus | null;
 
-  // REQUIRED (exists)
+  // These exist in your schema (per screenshot)
+  approved?: boolean | null;
+  archived?: boolean | null;
+
   created_at: string | null;
 
-  // OPTIONAL (do not assume)
-  record_type?: string | null;
-  entity_key?: string | null;
-  entity_slug?: string | null;
-  source_record_id?: string | null;
+  // Optional (may exist later; do not assume)
+  source?: string | null;
+  provenance?: string | null;
+  version?: number | null;
+  locked?: boolean | null;
 
-  // OPTIONAL: signature/envelope
-  envelope_id?: string | null;
-  envelope_status?: string | null;
-
-  // OPTIONAL: archive linkage
-  archived_entry_id?: string | null;
+  // Optional future links
+  ai_summary_id?: string | null;
 };
 
 type TabKey =
@@ -63,27 +70,44 @@ function cx(...parts: Array<string | false | null | undefined>) {
 function formatDate(d: string | null) {
   if (!d) return "—";
   try {
-    return new Date(d).toLocaleString();
+    const dt = new Date(d);
+    return dt.toLocaleString();
   } catch {
     return d;
   }
 }
 
-function statusLabel(s: string | null | undefined) {
-  const v = (s || "").toLowerCase();
-  if (!v) return "—";
-  if (v === "draft") return "drafted";
-  return v;
+/**
+ * Normalize lifecycle for UI:
+ * - archived=true => archived
+ * - else if status present => status
+ * - else if approved=true => approved
+ * - else => drafted
+ */
+function normalizedStatus(r: LedgerRecord): TabKey {
+  if (r.archived) return "archived";
+
+  const s = (r.status || "").toString().toLowerCase().trim();
+  if (s === "draft") return "drafted";
+  if (s === "drafted") return "drafted";
+  if (s === "pending") return "pending";
+  if (s === "approved") return "approved";
+  if (s === "signing") return "signing";
+  if (s === "signed") return "signed";
+  if (s === "archived") return "archived";
+
+  if (r.approved) return "approved";
+
+  return "drafted";
 }
 
-function statusPillClass(s: string) {
-  const v = s.toLowerCase();
-  if (v === "approved") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-200";
-  if (v === "signed") return "border-cyan-500/30 bg-cyan-500/10 text-cyan-200";
-  if (v === "archived") return "border-slate-500/30 bg-slate-500/10 text-slate-200";
-  if (v === "signing") return "border-amber-500/30 bg-amber-500/10 text-amber-200";
-  if (v === "pending") return "border-indigo-500/30 bg-indigo-500/10 text-indigo-200";
-  if (v === "drafted") return "border-slate-600/30 bg-slate-900/40 text-slate-200";
+function statusPillClass(tab: TabKey) {
+  if (tab === "approved") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-200";
+  if (tab === "signed") return "border-cyan-500/30 bg-cyan-500/10 text-cyan-200";
+  if (tab === "archived") return "border-slate-500/30 bg-slate-500/10 text-slate-200";
+  if (tab === "signing") return "border-amber-500/30 bg-amber-500/10 text-amber-200";
+  if (tab === "pending") return "border-indigo-500/30 bg-indigo-500/10 text-indigo-200";
+  if (tab === "drafted") return "border-slate-600/30 bg-slate-900/40 text-slate-200";
   return "border-slate-700 bg-slate-900/40 text-slate-200";
 }
 
@@ -121,12 +145,23 @@ function TabButton({
   );
 }
 
-export default function LedgerLifecycleClient() {
+export default function DraftsApprovalsClient() {
   const supabase = useMemo(() => supabaseBrowser(), []);
 
-  // OS selector only — no hard defaults.
-  const { activeEntity, entityKey } = useEntity() as any;
-  const scopedEntity = (entityKey || activeEntity || "").toString();
+  // Make NO assumptions about your context shape — pull anything that looks like an ID.
+  const entityCtx: any = useEntity() as any;
+  const activeEntity = entityCtx?.activeEntity ?? null;
+
+  const scopedEntityId: string =
+    (entityCtx?.entityId ||
+      activeEntity?.id ||
+      activeEntity?.entity_id ||
+      entityCtx?.activeEntityId ||
+      "")?.toString() ?? "";
+
+  const scopedEntityLabel: string =
+    (activeEntity?.slug || activeEntity?.key || activeEntity?.name || "")?.toString() ||
+    (scopedEntityId ? "selected" : "—");
 
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -142,16 +177,18 @@ export default function LedgerLifecycleClient() {
     [records, selectedId]
   );
 
-  const normalized = useMemo(() => {
+  const filtered = useMemo(() => {
     const term = q.trim().toLowerCase();
-    return records.filter((r) => {
-      const st = statusLabel(r.status) as TabKey;
-      if (tab !== "all" && st !== tab) return false;
 
+    return records.filter((r) => {
+      const st = normalizedStatus(r);
+      if (tab !== "all" && st !== tab) return false;
       if (!term) return true;
+
       const title = (r.title || "").toLowerCase();
       const type = ((r.record_type as any) || "").toString().toLowerCase();
-      return title.includes(term) || type.includes(term) || st.includes(term);
+      const desc = ((r.description as any) || "").toString().toLowerCase();
+      return title.includes(term) || type.includes(term) || desc.includes(term) || st.includes(term);
     });
   }, [records, tab, q]);
 
@@ -165,39 +202,42 @@ export default function LedgerLifecycleClient() {
       signed: 0,
       archived: 0,
     };
+
     for (const r of records) {
-      const st = statusLabel(r.status) as TabKey;
-      if (c[st] !== undefined) c[st] += 1;
+      const st = normalizedStatus(r);
+      c[st] += 1;
     }
     return c;
   }, [records]);
 
   const scopeQuery = useMemo(() => {
-    return scopedEntity ? `?entity_key=${encodeURIComponent(scopedEntity)}` : "";
-  }, [scopedEntity]);
+    // keep query param for nav UX, but we do NOT rely on it for filtering
+    return scopedEntityId ? `?entity_id=${encodeURIComponent(scopedEntityId)}` : "";
+  }, [scopedEntityId]);
 
   async function load() {
     setLoading(true);
     setErr(null);
 
     try {
-      // IMPORTANT: governance_ledger.updated_at does NOT exist (per your screenshot).
-      // Use created_at as the canonical timestamp for ordering + display.
       const sel =
-        "id,title,status,created_at,record_type,entity_key,entity_slug,source_record_id,envelope_id,envelope_status,archived_entry_id";
+        "id,entity_id,title,description,record_type,record_no,status,approved,archived,created_at,source,provenance,version,locked,ai_summary_id";
 
-      let query = supabase
-        .from("governance_ledger")
-        .select(sel)
-        .order("created_at", { ascending: false });
+      let query = supabase.from("governance_ledger").select(sel);
 
-      if (scopedEntity) query = query.eq("entity_key", scopedEntity);
+      // Entity scope (real fix)
+      if (scopedEntityId) query = query.eq("entity_id", scopedEntityId);
+
+      // Order by created_at (updated_at does NOT exist)
+      query = query.order("created_at", { ascending: false });
 
       const { data, error } = await query;
       if (error) throw error;
 
       const list = (data ?? []) as LedgerRecord[];
       setRecords(list);
+
+      if (!selectedId && list.length) setSelectedId(list[0]!.id);
     } catch (e: any) {
       setErr(e?.message ?? "Failed to load governance_ledger.");
       setRecords([]);
@@ -207,31 +247,23 @@ export default function LedgerLifecycleClient() {
   }
 
   useEffect(() => {
-    // Auth gating belongs to OS (layout / os-auth-gate) — do NOT redirect here.
+    // Auth gating belongs to (os)/layout or os-auth-gate — do NOT redirect here.
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scopedEntity]);
+  }, [scopedEntityId]);
 
-  // Auto-select first visible record (after filtering) if none selected
-  useEffect(() => {
-    if (!selectedId && normalized.length) setSelectedId(normalized[0]!.id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [normalized.length]);
-
-  // CTA rules (as locked)
-  const st = selected ? statusLabel(selected.status) : "";
+  // CTA enablement logic (wiring-safe, just state + links)
+  const st: TabKey = selected ? normalizedStatus(selected) : "drafted";
   const canOpenForge = !!selected && (st === "approved" || st === "signing" || st === "signed");
   const canArchiveNow = !!selected && st === "signed";
-  const canOpenArchive = !!selected && st === "archived";
+  const canOpenArchive = !!selected && (st === "archived" || st === "signed" || st === "signing");
 
   const openInForgeHref = selected
-    ? `/ci-forge?record_id=${encodeURIComponent(selected.id)}${
-        scopedEntity ? `&entity_key=${encodeURIComponent(scopedEntity)}` : ""
-      }`
+    ? `/ci-forge?record_id=${encodeURIComponent(selected.id)}`
     : "#";
 
   const openInArchiveHref = selected
-    ? `/ci-archive/minute-book${scopedEntity ? `?entity_key=${encodeURIComponent(scopedEntity)}` : ""}`
+    ? `/ci-archive/minute-book${scopeQuery}`
     : "#";
 
   return (
@@ -240,8 +272,7 @@ export default function LedgerLifecycleClient() {
       <div className="mb-4 shrink-0">
         <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI-ARCHIVE</div>
         <p className="mt-1 text-[11px] text-slate-400">
-          Drafts &amp; Approvals •{" "}
-          <span className="font-semibold text-slate-200">Lifecycle surface</span> • Entity-scoped via OS selector
+          Drafts &amp; Approvals • <span className="font-semibold text-slate-200">Lifecycle surface</span> • Entity-scoped via OS selector
         </p>
       </div>
 
@@ -290,9 +321,15 @@ export default function LedgerLifecycleClient() {
                   <div>
                     <div className="text-sm font-semibold text-slate-50">Queue</div>
                     <div className="text-[11px] text-slate-400">
-                      Entity: <span className="text-slate-200">{scopedEntity || "—"}</span>
+                      Entity: <span className="text-slate-200">{scopedEntityLabel}</span>
                     </div>
+                    {!scopedEntityId && (
+                      <div className="mt-2 text-[11px] text-amber-200/90">
+                        Note: no entity_id found in OS selector context — loading unscoped.
+                      </div>
+                    )}
                   </div>
+
                   <div className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-black/40 px-3 py-1">
                     <span className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Records</span>
                     <span className="text-[11px] font-semibold text-slate-200">
@@ -330,13 +367,13 @@ export default function LedgerLifecycleClient() {
               <div className="flex-1 min-h-0 overflow-auto p-2">
                 {loading ? (
                   <div className="p-3 text-sm text-slate-400">Loading…</div>
-                ) : normalized.length === 0 ? (
+                ) : filtered.length === 0 ? (
                   <div className="p-3 text-sm text-slate-500">No records match this view.</div>
                 ) : (
                   <div className="space-y-2">
-                    {normalized.map((r) => {
+                    {filtered.map((r) => {
                       const isSel = r.id === selectedId;
-                      const st = statusLabel(r.status);
+                      const st = normalizedStatus(r);
                       return (
                         <button
                           key={r.id}
@@ -397,57 +434,70 @@ export default function LedgerLifecycleClient() {
                           </div>
                           <div className="mt-2 text-xs text-slate-400 flex flex-wrap gap-x-6 gap-y-2">
                             <span>
-                              Status: <span className="text-slate-200">{statusLabel(selected.status)}</span>
+                              Status:{" "}
+                              <span className="text-slate-200">{normalizedStatus(selected)}</span>
                             </span>
                             <span>
-                              Created: <span className="text-slate-200">{formatDate(selected.created_at)}</span>
+                              Created:{" "}
+                              <span className="text-slate-200">{formatDate(selected.created_at)}</span>
                             </span>
+                            {selected.record_type && (
+                              <span>
+                                Type: <span className="text-slate-200">{selected.record_type}</span>
+                              </span>
+                            )}
+                            {selected.record_no && (
+                              <span>
+                                No: <span className="text-slate-200">{selected.record_no}</span>
+                              </span>
+                            )}
                           </div>
                         </div>
 
                         <div
                           className={cx(
                             "shrink-0 rounded-full border px-3 py-1.5 text-[10px] uppercase tracking-[0.22em]",
-                            statusPillClass(statusLabel(selected.status))
+                            statusPillClass(normalizedStatus(selected))
                           )}
                         >
-                          {statusLabel(selected.status)}
+                          {normalizedStatus(selected)}
                         </div>
                       </div>
                     </div>
 
                     <div className="rounded-3xl border border-slate-900 bg-black/30 p-4">
-                      <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Execution monitor</div>
+                      <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Execution posture</div>
 
                       <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
                         <div className="rounded-2xl border border-slate-900 bg-black/20 p-3">
-                          <div className="text-[11px] text-slate-500">Envelope</div>
+                          <div className="text-[11px] text-slate-500">Approved</div>
                           <div className="mt-1 text-slate-200">
-                            {selected.envelope_id ? <span className="break-all">{selected.envelope_id}</span> : "—"}
+                            {selected.approved ? "Yes" : "No"}
                           </div>
                         </div>
 
                         <div className="rounded-2xl border border-slate-900 bg-black/20 p-3">
-                          <div className="text-[11px] text-slate-500">Envelope status</div>
-                          <div className="mt-1 text-slate-200">{selected.envelope_status || "—"}</div>
+                          <div className="text-[11px] text-slate-500">Archived</div>
+                          <div className="mt-1 text-slate-200">
+                            {selected.archived ? "Yes" : "No"}
+                          </div>
                         </div>
 
                         <div className="col-span-2 rounded-2xl border border-slate-900 bg-black/20 p-3">
-                          <div className="text-[11px] text-slate-500">Archive linkage</div>
+                          <div className="text-[11px] text-slate-500">Discipline</div>
                           <div className="mt-1 text-slate-200">
-                            {selected.archived_entry_id ? (
-                              <span className="break-all">{selected.archived_entry_id}</span>
-                            ) : (
-                              "Not linked yet (registry entry created after archive)."
-                            )}
+                            Approval ≠ archived. Execution creates archive-quality artifacts (PDF + hash + registry entry).
                           </div>
                         </div>
                       </div>
                     </div>
 
-                    <div className="rounded-3xl border border-slate-900 bg-black/20 p-4 text-xs text-slate-400">
-                      Discipline: approval ≠ archived. Both execution paths must produce the same archive-quality artifact (PDF + hash + registry entry).
-                    </div>
+                    {selected.description && (
+                      <div className="rounded-3xl border border-slate-900 bg-black/20 p-4 text-sm text-slate-200">
+                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Description</div>
+                        <div className="mt-2 whitespace-pre-wrap">{selected.description}</div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -467,7 +517,6 @@ export default function LedgerLifecycleClient() {
                 </div>
 
                 <div className="p-4 space-y-2">
-                  {/* APPROVED → Open in Forge */}
                   <Link
                     href={canOpenForge ? openInForgeHref : "#"}
                     className={cx(
@@ -485,7 +534,6 @@ export default function LedgerLifecycleClient() {
                     <ArrowRight className="h-4 w-4" />
                   </Link>
 
-                  {/* SIGNED → Archive Now (wiring later; enabled only when signed) */}
                   <button
                     disabled={!canArchiveNow}
                     className={cx(
@@ -494,7 +542,7 @@ export default function LedgerLifecycleClient() {
                         ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
                         : "border-slate-900 bg-black/20 text-slate-600 cursor-not-allowed"
                     )}
-                    title={canArchiveNow ? "Archive the signed artifact into CI-Archive (wire next)." : "Archive is available once signed."}
+                    title={canArchiveNow ? "Archive signed artifact (wiring next)." : "Archive is available once signed."}
                   >
                     <span className="inline-flex items-center gap-2">
                       <ArchiveIcon className="h-4 w-4" />
@@ -503,7 +551,6 @@ export default function LedgerLifecycleClient() {
                     <ArrowRight className="h-4 w-4" />
                   </button>
 
-                  {/* ARCHIVED → Open in CI-Archive */}
                   <Link
                     href={canOpenArchive ? openInArchiveHref : "#"}
                     className={cx(
@@ -512,7 +559,7 @@ export default function LedgerLifecycleClient() {
                         ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
                         : "border-slate-900 bg-black/20 text-slate-600 cursor-not-allowed pointer-events-none"
                     )}
-                    title={canOpenArchive ? "Open CI-Archive Minute Book" : "Available once archived."}
+                    title={canOpenArchive ? "Open registry surfaces (Minute Book)" : "Available after signing / archival."}
                   >
                     <span className="inline-flex items-center gap-2">
                       <ExternalLink className="h-4 w-4" />
@@ -522,12 +569,11 @@ export default function LedgerLifecycleClient() {
                   </Link>
 
                   <div className="mt-3 rounded-2xl border border-slate-900 bg-black/20 p-3 text-xs text-slate-400">
-                    Approval + Archive: both execution paths must produce the same archive-quality artifact (PDF + hash + registry entry).
+                    Approval + Archive: both execution paths must yield the same archive-quality artifact (PDF + hash + registry entry).
                   </div>
                 </div>
               </div>
 
-              {/* AXIOM Advisory (shell only) */}
               <div className="rounded-3xl border border-slate-900 bg-slate-950/30 overflow-hidden">
                 <div className="p-4 border-b border-slate-900">
                   <div className="flex items-start justify-between gap-3">
@@ -557,18 +603,6 @@ export default function LedgerLifecycleClient() {
 
                   <div className="mt-3 rounded-2xl border border-slate-900 bg-black/20 p-3 text-xs text-slate-400">
                     This panel is where summaries / risk notes / compliance cautions render once you wire AXIOM outputs for the selected record.
-                  </div>
-
-                  <div className="mt-3 flex items-center gap-2">
-                    <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-emerald-200">
-                      Green
-                    </span>
-                    <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-amber-200">
-                      Amber
-                    </span>
-                    <span className="rounded-full border border-red-500/30 bg-red-500/10 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-red-200">
-                      Red
-                    </span>
                   </div>
                 </div>
               </div>
