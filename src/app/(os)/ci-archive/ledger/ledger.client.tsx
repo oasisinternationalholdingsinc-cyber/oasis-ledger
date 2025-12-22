@@ -13,8 +13,6 @@ import {
   Archive as ArchiveIcon,
   FileCheck2,
   Trash2,
-  X,
-  AlertTriangle,
 } from "lucide-react";
 
 import { supabaseBrowser } from "@/lib/supabase/browser";
@@ -29,6 +27,41 @@ type LedgerStatus =
   | "archived"
   | string;
 
+type LedgerRecord = {
+  id: string;
+
+  // Scoping
+  entity_id: string | null;
+
+  // Core
+  title: string | null;
+  description?: string | null;
+  record_type?: string | null;
+  record_no?: string | null;
+  status: LedgerStatus | null;
+  approved?: boolean | null;
+  archived?: boolean | null;
+  created_at: string | null;
+
+  // Cleanup hooks surfaced by your view (optional)
+  draft_id?: string | null; // if your view exposes latest draft id
+  envelope_id?: string | null;
+
+  // Portal URLs (your view can expose these)
+  signer_url?: string | null;
+  viewer_url?: string | null;
+  verify_url?: string | null;
+  certificate_url?: string | null;
+
+  // Optional flags / metadata (don’t assume)
+  is_test?: boolean | null;
+  source?: string | null;
+  provenance?: string | null;
+  version?: number | null;
+  locked?: boolean | null;
+  ai_summary_id?: string | null;
+};
+
 type TabKey =
   | "all"
   | "drafted"
@@ -38,59 +71,17 @@ type TabKey =
   | "signed"
   | "archived";
 
-type LedgerRecord = {
-  id: string;
-
-  // from view
-  entity_id?: string | null;
-  entity_key?: string | null;
-
-  title?: string | null;
-  description?: string | null;
-
-  record_type?: string | null;
-  record_no?: string | null;
-
-  status?: LedgerStatus | null;
-
-  approved?: boolean | null;
-  archived?: boolean | null;
-
-  created_at?: string | null;
-
-  // links surfaced by view when envelope exists
-  envelope_id?: string | null;
-  signer_url?: string | null;
-  viewer_url?: string | null;
-  verify_url?: string | null;
-  certificate_url?: string | null;
-
-  // for cleanup gating
-  is_test?: boolean | null;
-
-  // optional linkage to drafts (if your view exposes it)
-  draft_id?: string | null;
-  source_record_id?: string | null;
-
-  // optional
-  source?: string | null;
-  provenance?: string | null;
-  version?: number | null;
-  locked?: boolean | null;
-  ai_summary_id?: string | null;
-};
-
 function cx(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(" ");
 }
 
-function formatDate(d: string | null | undefined) {
+function formatDate(d: string | null) {
   if (!d) return "—";
   try {
     const dt = new Date(d);
     return dt.toLocaleString();
   } catch {
-    return String(d);
+    return d;
   }
 }
 
@@ -161,46 +152,10 @@ function TabButton({
   );
 }
 
-function Modal({
-  title,
-  subtitle,
-  children,
-  onClose,
-}: {
-  title: string;
-  subtitle?: string;
-  children: React.ReactNode;
-  onClose: () => void;
-}) {
-  return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
-      <div className="w-full max-w-[620px] rounded-3xl border border-slate-900 bg-black/80 shadow-[0_0_80px_rgba(0,0,0,0.65)] overflow-hidden">
-        <div className="flex items-start justify-between gap-3 p-5 border-b border-slate-900">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="h-4 w-4 text-amber-300" />
-              <div className="text-sm font-semibold text-slate-100">{title}</div>
-            </div>
-            {subtitle && <div className="mt-1 text-[12px] text-slate-400">{subtitle}</div>}
-          </div>
-          <button
-            onClick={onClose}
-            className="shrink-0 inline-flex items-center justify-center rounded-full border border-slate-800 bg-slate-950/40 p-2 text-slate-200 hover:border-slate-700"
-            title="Close"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        <div className="p-5">{children}</div>
-      </div>
-    </div>
-  );
-}
-
 export default function DraftsApprovalsClient() {
   const supabase = useMemo(() => supabaseBrowser(), []);
 
-  // OS entity context
+  // Pull entity id from OS context (no assumptions)
   const entityCtx: any = useEntity() as any;
   const activeEntity = entityCtx?.activeEntity ?? null;
 
@@ -224,13 +179,6 @@ export default function DraftsApprovalsClient() {
   const [tab, setTab] = useState<TabKey>("all");
   const [q, setQ] = useState("");
 
-  // cleanup modals
-  const [showDeleteDraft, setShowDeleteDraft] = useState(false);
-  const [showDeleteEnvelope, setShowDeleteEnvelope] = useState(false);
-  const [reason, setReason] = useState("SANDBOX CLEANUP");
-  const [busy, setBusy] = useState<null | "draft" | "envelope">(null);
-  const [actionMsg, setActionMsg] = useState<string | null>(null);
-
   const selected = useMemo(
     () => records.find((r) => r.id === selectedId) ?? null,
     [records, selectedId]
@@ -247,14 +195,7 @@ export default function DraftsApprovalsClient() {
       const title = (r.title || "").toLowerCase();
       const type = ((r.record_type as any) || "").toString().toLowerCase();
       const desc = ((r.description as any) || "").toString().toLowerCase();
-      const entityKey = ((r.entity_key as any) || "").toString().toLowerCase();
-      return (
-        title.includes(term) ||
-        type.includes(term) ||
-        desc.includes(term) ||
-        st.includes(term) ||
-        entityKey.includes(term)
-      );
+      return title.includes(term) || type.includes(term) || desc.includes(term) || st.includes(term);
     });
   }, [records, tab, q]);
 
@@ -270,28 +211,27 @@ export default function DraftsApprovalsClient() {
     };
 
     for (const r of records) {
-      c[normalizedStatus(r)] += 1;
+      const st = normalizedStatus(r);
+      c[st] += 1;
     }
     return c;
   }, [records]);
 
   const scopeQuery = useMemo(() => {
+    // Keep for nav UX only
     return scopedEntityId ? `?entity_id=${encodeURIComponent(scopedEntityId)}` : "";
   }, [scopedEntityId]);
 
   async function load() {
     setLoading(true);
     setErr(null);
-    setActionMsg(null);
 
     try {
-      // IMPORTANT:
-      // Use the existing enterprise view (already has entity_key + portal URLs + envelope_id when available)
-      // and keep UI entity scoped by entity_id.
+      // Pull from view (hides tests at SQL level)
+      // If a column doesn’t exist in the view, just remove it from this list.
       const sel = [
         "id",
         "entity_id",
-        "entity_key",
         "title",
         "description",
         "record_type",
@@ -300,14 +240,12 @@ export default function DraftsApprovalsClient() {
         "approved",
         "archived",
         "created_at",
-        "is_test",
+        "draft_id",
         "envelope_id",
         "signer_url",
         "viewer_url",
         "verify_url",
         "certificate_url",
-        "draft_id",
-        "source_record_id",
         "source",
         "provenance",
         "version",
@@ -317,22 +255,19 @@ export default function DraftsApprovalsClient() {
 
       let query = supabase.from("v_governance_ledger_scoped").select(sel);
 
+      // Entity scope (Holdings / Real Estate / Lounge)
       if (scopedEntityId) query = query.eq("entity_id", scopedEntityId);
 
-      // If view exposes is_test and you want extra safety even if view filter changes:
-      // query = query.eq("is_test", false);
-
+      // Order (updated_at does not exist)
       query = query.order("created_at", { ascending: false });
 
       const { data, error } = await query;
       if (error) throw error;
 
-      const list = (data ?? []) as LedgerRecord[];
+      const list = (data ?? []) as unknown as LedgerRecord[];
       setRecords(list);
 
-      if ((!selectedId || !list.some((x) => x.id === selectedId)) && list.length) {
-        setSelectedId(list[0]!.id);
-      }
+      if (!selectedId && list.length) setSelectedId(list[0]!.id);
     } catch (e: any) {
       setErr(e?.message ?? "Failed to load v_governance_ledger_scoped.");
       setRecords([]);
@@ -346,8 +281,8 @@ export default function DraftsApprovalsClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopedEntityId]);
 
+  // CTA enablement
   const st: TabKey = selected ? normalizedStatus(selected) : "drafted";
-
   const canOpenForge = !!selected && (st === "approved" || st === "signing" || st === "signed");
   const canArchiveNow = !!selected && st === "signed";
   const canOpenArchive = !!selected && (st === "archived" || st === "signed" || st === "signing");
@@ -355,84 +290,85 @@ export default function DraftsApprovalsClient() {
   const openInForgeHref = selected ? `/ci-forge?record_id=${encodeURIComponent(selected.id)}` : "#";
   const openInArchiveHref = selected ? `/ci-archive/minute-book${scopeQuery}` : "#";
 
-  // cleanup buttons
-  const draftId = selected?.draft_id || selected?.source_record_id || null;
-  const canDeleteDraft = !!draftId; // function will refuse if linked/locked; UI still shows but it’ll message.
+  // Cleanup buttons (SECURITY DEFINER funcs already exist in prod)
+  const canDeleteDraft = !!selected?.draft_id;
   const canDeleteEnvelope = !!selected?.envelope_id;
 
-  async function doDeleteDraft() {
-    if (!draftId) return;
-    setBusy("draft");
-    setActionMsg(null);
+  async function deleteDraft() {
+    if (!selected?.draft_id) return;
 
+    const reason =
+      window.prompt("Delete draft reason (required for audit):", "cleanup test draft")?.trim() || "";
+    if (!reason) return;
+
+    setErr(null);
     try {
-      const r = reason.trim();
-      if (!r) throw new Error("Reason is required.");
-
-      // RPC signature: owner_delete_governance_draft(draft_id uuid, reason text)
-      const { data, error } = await supabase.rpc("owner_delete_governance_draft", {
-        draft_id: draftId,
-        reason: r,
+      const { data, error } = await supabase.rpc("owner_delete_governance_draft" as any, {
+        p_draft_id: selected.draft_id,
+        p_reason: reason,
       } as any);
-
       if (error) throw error;
 
-      setActionMsg(`Draft delete attempted: ${JSON.stringify(data ?? { ok: true })}`);
-      setShowDeleteDraft(false);
+      // optional: console log response for confidence
+      // eslint-disable-next-line no-console
+      console.log("owner_delete_governance_draft:", data);
+
       await load();
     } catch (e: any) {
-      setActionMsg(e?.message ?? "Delete draft failed.");
-    } finally {
-      setBusy(null);
+      setErr(e?.message ?? "Draft delete failed.");
     }
   }
 
-  async function doDeleteEnvelope() {
-    const envelopeId = selected?.envelope_id;
-    if (!envelopeId) return;
+  async function deleteEnvelope() {
+    if (!selected?.envelope_id) return;
 
-    setBusy("envelope");
-    setActionMsg(null);
+    const reason =
+      window.prompt("Delete envelope reason (required for audit):", "cleanup test envelope")?.trim() ||
+      "";
+    if (!reason) return;
 
+    setErr(null);
     try {
-      const r = reason.trim();
-      if (!r) throw new Error("Reason is required.");
-
-      // RPC signature: owner_delete_signature_envelope(envelope_id uuid, reason text)
-      const { data, error } = await supabase.rpc("owner_delete_signature_envelope", {
-        envelope_id: envelopeId,
-        reason: r,
+      const { data, error } = await supabase.rpc("owner_delete_signature_envelope" as any, {
+        p_envelope_id: selected.envelope_id,
+        p_reason: reason,
       } as any);
-
       if (error) throw error;
 
-      setActionMsg(`Envelope delete attempted: ${JSON.stringify(data ?? { ok: true })}`);
-      setShowDeleteEnvelope(false);
+      // eslint-disable-next-line no-console
+      console.log("owner_delete_signature_envelope:", data);
+
       await load();
     } catch (e: any) {
-      setActionMsg(e?.message ?? "Delete envelope failed.");
-    } finally {
-      setBusy(null);
+      setErr(e?.message ?? "Envelope delete failed.");
     }
   }
+
+  // Ceremony portal links (from view)
+  const signerUrl = selected?.signer_url || null;
+  const viewerUrl = selected?.viewer_url || null;
+  const verifyUrl = selected?.verify_url || null;
+  const certificateUrl = selected?.certificate_url || null;
 
   return (
     <div className="h-full flex flex-col px-8 pt-6 pb-6">
+      {/* Header under OS bar */}
       <div className="mb-4 shrink-0">
         <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI-ARCHIVE</div>
         <p className="mt-1 text-[11px] text-slate-400">
-          Drafts &amp; Approvals • <span className="font-semibold text-slate-200">Lifecycle surface</span> • Scoped
-          via OS selector
+          Drafts &amp; Approvals • <span className="font-semibold text-slate-200">Lifecycle surface</span> • Entity-scoped via OS selector
         </p>
       </div>
 
+      {/* Main window */}
       <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
         <div className="w-full max-w-[1600px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-6 py-5 flex flex-col overflow-hidden">
+          {/* Title bar */}
           <div className="flex items-start justify-between mb-4 shrink-0">
             <div className="min-w-0">
               <h1 className="text-lg font-semibold text-slate-50 truncate">Drafts &amp; Approvals</h1>
               <p className="mt-1 text-xs text-slate-400">
-                Council decides execution mode. Forge is signature-only. Archive is registry of record.
+                Council decides execution mode. Forge is signature-only. Archive remains the registry of record.
               </p>
             </div>
 
@@ -460,12 +396,7 @@ export default function DraftsApprovalsClient() {
             </div>
           </div>
 
-          {actionMsg && (
-            <div className="mb-4 shrink-0 rounded-2xl border border-slate-900 bg-black/30 px-4 py-3 text-sm text-slate-200">
-              {actionMsg}
-            </div>
-          )}
-
+          {/* Body grid */}
           <div className="flex-1 min-h-0 grid grid-cols-12 gap-4 overflow-hidden">
             {/* Queue */}
             <div className="col-span-12 lg:col-span-4 min-h-0 rounded-3xl border border-slate-900 bg-slate-950/30 overflow-hidden flex flex-col">
@@ -478,7 +409,7 @@ export default function DraftsApprovalsClient() {
                     </div>
                     {!scopedEntityId && (
                       <div className="mt-2 text-[11px] text-amber-200/90">
-                        Note: no entity_id found in OS selector context — loading unscoped.
+                        No entity_id found in OS selector context — loading unscoped.
                       </div>
                     )}
                   </div>
@@ -493,42 +424,12 @@ export default function DraftsApprovalsClient() {
 
                 <div className="mt-3 flex flex-wrap gap-2">
                   <TabButton active={tab === "all"} label="All" count={counts.all} onClick={() => setTab("all")} />
-                  <TabButton
-                    active={tab === "drafted"}
-                    label="Drafted"
-                    count={counts.drafted}
-                    onClick={() => setTab("drafted")}
-                  />
-                  <TabButton
-                    active={tab === "pending"}
-                    label="Pending"
-                    count={counts.pending}
-                    onClick={() => setTab("pending")}
-                  />
-                  <TabButton
-                    active={tab === "approved"}
-                    label="Approved"
-                    count={counts.approved}
-                    onClick={() => setTab("approved")}
-                  />
-                  <TabButton
-                    active={tab === "signing"}
-                    label="Signing"
-                    count={counts.signing}
-                    onClick={() => setTab("signing")}
-                  />
-                  <TabButton
-                    active={tab === "signed"}
-                    label="Signed"
-                    count={counts.signed}
-                    onClick={() => setTab("signed")}
-                  />
-                  <TabButton
-                    active={tab === "archived"}
-                    label="Archived"
-                    count={counts.archived}
-                    onClick={() => setTab("archived")}
-                  />
+                  <TabButton active={tab === "drafted"} label="Drafted" count={counts.drafted} onClick={() => setTab("drafted")} />
+                  <TabButton active={tab === "pending"} label="Pending" count={counts.pending} onClick={() => setTab("pending")} />
+                  <TabButton active={tab === "approved"} label="Approved" count={counts.approved} onClick={() => setTab("approved")} />
+                  <TabButton active={tab === "signing"} label="Signing" count={counts.signing} onClick={() => setTab("signing")} />
+                  <TabButton active={tab === "signed"} label="Signed" count={counts.signed} onClick={() => setTab("signed")} />
+                  <TabButton active={tab === "archived"} label="Archived" count={counts.archived} onClick={() => setTab("archived")} />
                 </div>
 
                 <div className="mt-3">
@@ -576,11 +477,6 @@ export default function DraftsApprovalsClient() {
                               <div className="mt-1 text-[11px] text-slate-500">
                                 Created: <span className="text-slate-300">{formatDate(r.created_at)}</span>
                               </div>
-                              {!!r.entity_key && (
-                                <div className="mt-1 text-[11px] text-slate-600">
-                                  Entity: <span className="text-slate-300">{r.entity_key}</span>
-                                </div>
-                              )}
                             </div>
 
                             <div
@@ -627,11 +523,6 @@ export default function DraftsApprovalsClient() {
                             <span>
                               Created: <span className="text-slate-200">{formatDate(selected.created_at)}</span>
                             </span>
-                            {!!selected.entity_key && (
-                              <span>
-                                Entity: <span className="text-slate-200">{selected.entity_key}</span>
-                              </span>
-                            )}
                             {selected.record_type && (
                               <span>
                                 Type: <span className="text-slate-200">{selected.record_type}</span>
@@ -679,60 +570,62 @@ export default function DraftsApprovalsClient() {
                       </div>
                     </div>
 
-                    {(selected.signer_url || selected.verify_url || selected.certificate_url) && (
-                      <div className="rounded-3xl border border-slate-900 bg-black/20 p-4">
-                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Portal links</div>
-                        <div className="mt-3 grid grid-cols-1 gap-2 text-sm">
-                          {selected.signer_url && (
-                            <a
-                              href={selected.signer_url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="inline-flex items-center justify-between gap-3 rounded-2xl border border-slate-900 bg-black/30 px-3 py-2 text-slate-200 hover:border-amber-500/30"
-                            >
-                              <span className="inline-flex items-center gap-2">
-                                <ExternalLink className="h-4 w-4" />
-                                Signer URL
-                              </span>
-                              <ArrowRight className="h-4 w-4" />
-                            </a>
-                          )}
-                          {selected.verify_url && (
-                            <a
-                              href={selected.verify_url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="inline-flex items-center justify-between gap-3 rounded-2xl border border-slate-900 bg-black/30 px-3 py-2 text-slate-200 hover:border-amber-500/30"
-                            >
-                              <span className="inline-flex items-center gap-2">
-                                <ExternalLink className="h-4 w-4" />
-                                Verify URL
-                              </span>
-                              <ArrowRight className="h-4 w-4" />
-                            </a>
-                          )}
-                          {selected.certificate_url && (
-                            <a
-                              href={selected.certificate_url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="inline-flex items-center justify-between gap-3 rounded-2xl border border-slate-900 bg-black/30 px-3 py-2 text-slate-200 hover:border-amber-500/30"
-                            >
-                              <span className="inline-flex items-center gap-2">
-                                <ExternalLink className="h-4 w-4" />
-                                Certificate URL
-                              </span>
-                              <ArrowRight className="h-4 w-4" />
-                            </a>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
                     {selected.description && (
                       <div className="rounded-3xl border border-slate-900 bg-black/20 p-4 text-sm text-slate-200">
                         <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Description</div>
                         <div className="mt-2 whitespace-pre-wrap">{selected.description}</div>
+                      </div>
+                    )}
+
+                    {(signerUrl || viewerUrl || verifyUrl || certificateUrl) && (
+                      <div className="rounded-3xl border border-slate-900 bg-black/20 p-4">
+                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Ceremony portals</div>
+                        <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+                          {signerUrl && (
+                            <a
+                              href={signerUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center justify-between gap-2 rounded-2xl border border-slate-800 bg-black/40 px-3 py-2 text-slate-100 hover:border-amber-500/30"
+                            >
+                              Sign (Signer)
+                              <ExternalLink className="h-4 w-4" />
+                            </a>
+                          )}
+                          {viewerUrl && (
+                            <a
+                              href={viewerUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center justify-between gap-2 rounded-2xl border border-slate-800 bg-black/40 px-3 py-2 text-slate-100 hover:border-amber-500/30"
+                            >
+                              View (Viewer)
+                              <ExternalLink className="h-4 w-4" />
+                            </a>
+                          )}
+                          {verifyUrl && (
+                            <a
+                              href={verifyUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center justify-between gap-2 rounded-2xl border border-slate-800 bg-black/40 px-3 py-2 text-slate-100 hover:border-emerald-500/30"
+                            >
+                              Verify
+                              <ExternalLink className="h-4 w-4" />
+                            </a>
+                          )}
+                          {certificateUrl && (
+                            <a
+                              href={certificateUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center justify-between gap-2 rounded-2xl border border-slate-800 bg-black/40 px-3 py-2 text-slate-100 hover:border-amber-500/30"
+                            >
+                              Certificate
+                              <ExternalLink className="h-4 w-4" />
+                            </a>
+                          )}
+                        </div>
                       </div>
                     )}
                   </div>
@@ -805,24 +698,20 @@ export default function DraftsApprovalsClient() {
                     <ArrowRight className="h-4 w-4" />
                   </Link>
 
-                  {/* Cleanup section */}
+                  {/* Cleanup (no governance_ledger deletes) */}
                   <div className="mt-3 rounded-2xl border border-slate-900 bg-black/20 p-3">
                     <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Cleanup</div>
                     <div className="mt-2 space-y-2">
                       <button
-                        onClick={() => setShowDeleteDraft(true)}
-                        disabled={!selected || !canDeleteDraft}
+                        onClick={deleteDraft}
+                        disabled={!canDeleteDraft}
                         className={cx(
                           "w-full inline-flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-sm transition",
-                          selected && canDeleteDraft
-                            ? "border-red-900/50 bg-red-950/20 text-red-200 hover:border-red-700/60"
+                          canDeleteDraft
+                            ? "border-slate-800 bg-black/40 text-slate-100 hover:border-red-500/30"
                             : "border-slate-900 bg-black/20 text-slate-600 cursor-not-allowed"
                         )}
-                        title={
-                          selected && canDeleteDraft
-                            ? "Delete upstream CI-Alchemy draft (ledger row remains immutable)"
-                            : "No draft linkage found on this record."
-                        }
+                        title={canDeleteDraft ? "Delete linked draft (test cleanup)" : "No draft_id on this record."}
                       >
                         <span className="inline-flex items-center gap-2">
                           <Trash2 className="h-4 w-4" />
@@ -832,19 +721,15 @@ export default function DraftsApprovalsClient() {
                       </button>
 
                       <button
-                        onClick={() => setShowDeleteEnvelope(true)}
-                        disabled={!selected || !canDeleteEnvelope}
+                        onClick={deleteEnvelope}
+                        disabled={!canDeleteEnvelope}
                         className={cx(
                           "w-full inline-flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-sm transition",
-                          selected && canDeleteEnvelope
-                            ? "border-red-900/50 bg-red-950/20 text-red-200 hover:border-red-700/60"
+                          canDeleteEnvelope
+                            ? "border-slate-800 bg-black/40 text-slate-100 hover:border-red-500/30"
                             : "border-slate-900 bg-black/20 text-slate-600 cursor-not-allowed"
                         )}
-                        title={
-                          selected && canDeleteEnvelope
-                            ? "Delete signature envelope (test cleanup). Ledger row remains."
-                            : "No envelope on this record."
-                        }
+                        title={canDeleteEnvelope ? "Delete signature envelope (test cleanup)" : "No envelope_id on this record."}
                       >
                         <span className="inline-flex items-center gap-2">
                           <Trash2 className="h-4 w-4" />
@@ -852,10 +737,10 @@ export default function DraftsApprovalsClient() {
                         </span>
                         <ArrowRight className="h-4 w-4" />
                       </button>
+                    </div>
 
-                      <div className="text-[11px] text-slate-500">
-                        No governance_ledger deletes — constitutional memory.
-                      </div>
+                    <div className="mt-3 text-xs text-slate-400">
+                      Ledger rows are immutable. Cleanup happens via drafts + envelopes (and Archive hard-delete is separate).
                     </div>
                   </div>
                 </div>
@@ -889,7 +774,7 @@ export default function DraftsApprovalsClient() {
                   </div>
 
                   <div className="mt-3 rounded-2xl border border-slate-900 bg-black/20 p-3 text-xs text-slate-400">
-                    This is where summaries / risk notes / compliance cautions render once AXIOM is wired for the selected record.
+                    This panel is where your record-linked advice/summaries land (Council + Forge first, later PDF metadata).
                   </div>
                 </div>
               </div>
@@ -906,108 +791,6 @@ export default function DraftsApprovalsClient() {
           </div>
         </div>
       </div>
-
-      {/* Delete Draft Modal */}
-      {showDeleteDraft && (
-        <Modal
-          title="Delete linked draft?"
-          subtitle="Deletes the CI-Alchemy draft (upstream). governance_ledger record remains immutable."
-          onClose={() => setShowDeleteDraft(false)}
-        >
-          <div className="space-y-3">
-            <div className="text-[11px] text-slate-400">
-              Draft ID: <span className="text-slate-200">{draftId ?? "—"}</span>
-            </div>
-
-            <div>
-              <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Reason (required)</div>
-              <textarea
-                value={reason}
-                onChange={(e) => setReason(e.target.value)}
-                rows={4}
-                className="mt-2 w-full rounded-2xl border border-slate-800 bg-black/40 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 outline-none focus:border-amber-500/30"
-              />
-            </div>
-
-            <div className="flex items-center justify-end gap-2 pt-2">
-              <button
-                onClick={() => setShowDeleteDraft(false)}
-                className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/40 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:border-slate-700"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={doDeleteDraft}
-                disabled={busy === "draft" || !draftId || !reason.trim()}
-                className={cx(
-                  "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
-                  busy === "draft" || !draftId || !reason.trim()
-                    ? "border-slate-900 bg-black/20 text-slate-600 cursor-not-allowed"
-                    : "border-red-900/50 bg-red-950/30 text-red-200 hover:border-red-700/60"
-                )}
-              >
-                <Trash2 className="h-4 w-4" />
-                {busy === "draft" ? "Deleting…" : "Delete Draft"}
-              </button>
-            </div>
-
-            <div className="text-[11px] text-slate-500">
-              If the draft is already finalized/linked, the SECURITY DEFINER function may refuse — that’s expected.
-            </div>
-          </div>
-        </Modal>
-      )}
-
-      {/* Delete Envelope Modal */}
-      {showDeleteEnvelope && (
-        <Modal
-          title="Delete signature envelope?"
-          subtitle="Deletes the envelope (test cleanup). governance_ledger record remains immutable."
-          onClose={() => setShowDeleteEnvelope(false)}
-        >
-          <div className="space-y-3">
-            <div className="text-[11px] text-slate-400">
-              Envelope ID: <span className="text-slate-200">{selected?.envelope_id ?? "—"}</span>
-            </div>
-
-            <div>
-              <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Reason (required)</div>
-              <textarea
-                value={reason}
-                onChange={(e) => setReason(e.target.value)}
-                rows={4}
-                className="mt-2 w-full rounded-2xl border border-slate-800 bg-black/40 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 outline-none focus:border-amber-500/30"
-              />
-            </div>
-
-            <div className="flex items-center justify-end gap-2 pt-2">
-              <button
-                onClick={() => setShowDeleteEnvelope(false)}
-                className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/40 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:border-slate-700"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={doDeleteEnvelope}
-                disabled={busy === "envelope" || !selected?.envelope_id || !reason.trim()}
-                className={cx(
-                  "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
-                  busy === "envelope" || !selected?.envelope_id || !reason.trim()
-                    ? "border-slate-900 bg-black/20 text-slate-600 cursor-not-allowed"
-                    : "border-red-900/50 bg-red-950/30 text-red-200 hover:border-red-700/60"
-                )}
-              >
-                <Trash2 className="h-4 w-4" />
-                {busy === "envelope" ? "Deleting…" : "Delete Envelope"}
-              </button>
-            </div>
-
-            <div className="text-[11px] text-slate-500">
-              Uses owner_delete_signature_envelope (SECURITY DEFINER). Completed envelopes may be protected by immutability rules.
-            </div>
-          </div>
-        </Modal>
-      )}
     </div>
   );
 }
