@@ -1,586 +1,762 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 
-/**
- * CI-Forge (Signature-only execution queue)
- * - MUST follow OS selector (no Holdings hard-default)
- * - Active vs Completed tabs
- * - 3-column enterprise layout: Queue / Evidence + Actions / Metadata
- * - No in-module auth redirects
- * - No useSearchParams
- */
+type ForgeQueueItem = {
+  ledger_id: string;
+  title: string;
+  ledger_status: string;
+  created_at: string;
+  entity_id: string;
+  entity_name: string;
+  entity_slug: string;
 
-type ForgeTab = "active" | "completed";
+  envelope_id: string | null;
+  envelope_status: string | null;
 
-type Severity = "ok" | "warn" | "risk";
+  parties_total: number | null;
+  parties_signed: number | null;
+  last_signed_at: string | null;
+  days_since_last_signature: number | null;
 
-type ForgeEnvelope = {
-  id: string;
-  created_at?: string | null;
-  updated_at?: string | null;
-
-  // common envelope fields (schema may vary)
-  status?: string | null; // e.g. pending, sent, signing, signed, completed, archived
-  title?: string | null;
-  record_id?: string | null; // governance_ledger id sometimes stored here
-  source_record_id?: string | null;
-  entity_slug?: string | null;
-  entity_key?: string | null;
-
-  // artifact links / paths (optional)
-  signed_pdf_path?: string | null;
-  archived_entry_id?: string | null;
-  envelope_url?: string | null;
-
-  // catch-all
-  [key: string]: any;
+  // Optional: if your view adds later
+  body?: string | null;
 };
 
-function cx(...parts: Array<string | false | null | undefined>) {
-  return parts.filter(Boolean).join(" ");
-}
+type StartSignatureResponse = {
+  ok: boolean;
+  envelope_id?: string;
+  record_id?: string;
+  entity_slug?: string;
+  reused?: boolean;
+  error?: string;
+};
 
-function fmtTime(ts?: string | null) {
-  if (!ts) return "—";
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return ts;
-  return d.toLocaleString();
-}
+type SendInviteResponse = {
+  ok: boolean;
+  message?: string;
+  error?: string;
+};
 
-function norm(s?: string | null) {
-  return (s ?? "").toString().trim().toLowerCase();
-}
+type ArchiveSignedResolutionResponse = {
+  ok: boolean;
+  minute_book_entry_id?: string;
+  governance_document_id?: string;
+  already_archived?: boolean;
+  error?: string;
+};
 
-function pickEntitySlug(entityCtx: unknown): string | null {
-  const c: any = entityCtx as any;
-  // Support a few likely shapes without relying on any single one
-  return (
-    c?.entitySlug ??
-    c?.entity_slug ??
-    c?.slug ??
-    c?.selectedEntity?.slug ??
-    c?.selected?.slug ??
-    c?.current?.slug ??
-    null
-  );
-}
+type RiskLevel = "GREEN" | "AMBER" | "RED" | "IDLE";
+type TabKey = "active" | "completed";
 
-function pickEntityLabel(entityCtx: unknown): string | null {
-  const c: any = entityCtx as any;
-  return (
-    c?.entityLabel ??
-    c?.entity_label ??
-    c?.label ??
-    c?.selectedEntity?.label ??
-    c?.selectedEntity?.name ??
-    c?.selected?.label ??
-    c?.selected?.name ??
-    c?.current?.label ??
-    c?.current?.name ??
-    null
-  );
-}
-
-function isCompletedStatus(status?: string | null) {
-  const s = norm(status);
-  return (
-    s === "signed" ||
-    s === "completed" ||
-    s === "done" ||
-    s === "archived" ||
-    s === "complete"
-  );
-}
-
-function isActiveStatus(status?: string | null) {
-  const s = norm(status);
-  if (!s) return true; // treat unknown as active so it doesn't disappear
-  return !isCompletedStatus(s);
-}
-
-function deriveTitle(row: ForgeEnvelope) {
-  return (
-    row.title ||
-    row.record_title ||
-    row.resolution_title ||
-    row.document_title ||
-    row.name ||
-    `Envelope ${row.id.slice(0, 8)}`
-  );
-}
-
-function deriveStatusLabel(row: ForgeEnvelope) {
-  const s = row.status ?? row.envelope_status ?? row.state ?? "unknown";
-  return String(s);
-}
-
-function deriveRecordId(row: ForgeEnvelope): string | null {
-  return (
-    row.record_id ||
-    row.source_record_id ||
-    row.governance_record_id ||
-    row.resolution_id ||
-    row.ledger_id ||
-    null
-  );
-}
-
-function deriveEntitySlugFromRow(row: ForgeEnvelope): string | null {
-  return row.entity_slug || row.entity_key || row.entity || row.entityId || null;
-}
-
-function axiomAdvisoryFor(row: ForgeEnvelope): { severity: Severity; title: string; body: string } {
-  // Advisory-only: never blocks, never changes wiring.
-  const status = norm(row.status);
-  if (status.includes("signed") || status.includes("completed") || status.includes("archived")) {
-    return {
-      severity: "ok",
-      title: "AXIOM: Execution complete",
-      body: "This envelope is complete. Next step is registry verification and lifecycle traceability (Archive link + hash evidence).",
-    };
+function fmt(iso: string | null | undefined) {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString();
+  } catch {
+    return iso;
   }
-  if (status.includes("sign") || status.includes("sent")) {
-    return {
-      severity: "warn",
-      title: "AXIOM: Signature in progress",
-      body: "Keep Forge signature-only discipline. After completion, ensure the signed PDF is archived to CI-Archive (minute book registry) with hash evidence.",
-    };
-  }
-  return {
-    severity: "risk",
-    title: "AXIOM: Pending execution",
-    body: "Confirm Council intent: signature-required execution only. Do not bypass PDF + archive discipline. Once signatures start, track completion then archive.",
-  };
+}
+
+function clamp(s: string, n: number) {
+  const t = (s ?? "").trim();
+  if (!t) return "";
+  return t.length > n ? `${t.slice(0, n)}…` : t;
 }
 
 export default function ForgeClient() {
-  const entityCtx = useEntity(); // <- DO NOT destructure { entity } (your TS error)
-  const entitySlug = pickEntitySlug(entityCtx);
-  const entityLabel = pickEntityLabel(entityCtx) ?? entitySlug ?? "—";
+  const { activeEntity } = useEntity();
 
-  const [tab, setTab] = useState<ForgeTab>("active");
-  const [loading, setLoading] = useState(false);
-  const [rows, setRows] = useState<ForgeEnvelope[]>([]);
+  const [tab, setTab] = useState<TabKey>("active");
+
+  const [queue, setQueue] = useState<ForgeQueueItem[]>([]);
+  const [loadingQueue, setLoadingQueue] = useState(false);
+
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  const [primarySignerName, setPrimarySignerName] = useState("");
+  const [primarySignerEmail, setPrimarySignerEmail] = useState("");
+  const [ccEmails, setCcEmails] = useState("");
+
+  const [isStarting, setIsStarting] = useState(false);
+  const [isSendingInvite, setIsSendingInvite] = useState(false);
+  const [isArchiving, setIsArchiving] = useState(false);
+
   const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
 
-  const selected = useMemo(
-    () => rows.find((r) => r.id === selectedId) ?? null,
-    [rows, selectedId]
-  );
+  // --------------------------
+  // Load Forge queue (entity-scoped, OS selector)
+  // --------------------------
+  useEffect(() => {
+    let cancelled = false;
 
-  const filtered = useMemo(() => {
-    const scoped = rows.filter((r) => {
-      // OS scope: if row has an entity marker, it must match the OS selector.
-      // If row has no entity marker, keep it (prevents accidental hiding due to schema mismatch).
-      if (!entitySlug) return true;
-      const rowSlug = norm(deriveEntitySlugFromRow(r));
-      if (!rowSlug) return true;
-      return rowSlug === norm(entitySlug);
-    });
+    async function fetchQueue() {
+      setLoadingQueue(true);
+      setError(null);
+      setInfo(null);
 
-    return scoped.filter((r) => {
-      const st = r.status ?? r.envelope_status ?? r.state ?? null;
-      return tab === "active" ? isActiveStatus(st) : isCompletedStatus(st);
-    });
-  }, [rows, tab, entitySlug]);
+      try {
+        const { data, error } = await supabase
+          .from("v_forge_queue_latest")
+          .select(
+            [
+              "ledger_id",
+              "title",
+              "ledger_status",
+              "created_at",
+              "entity_id",
+              "entity_name",
+              "entity_slug",
+              "envelope_id",
+              "envelope_status",
+              "parties_total",
+              "parties_signed",
+              "last_signed_at",
+              "days_since_last_signature",
+            ].join(", "),
+          )
+          .eq("entity_slug", activeEntity)
+          .order("created_at", { ascending: false });
 
-  async function load() {
-    setLoading(true);
-    setError(null);
+        if (cancelled) return;
 
+        if (error) {
+          console.error("CI-Forge queue error:", error);
+          setQueue([]);
+          setSelectedId(null);
+          setError("Unable to load Forge queue for this entity.");
+          return;
+        }
+
+        const rows = ((data ?? []) as unknown as ForgeQueueItem[]) ?? [];
+        setQueue(rows);
+        setSelectedId(rows[0]?.ledger_id ?? null);
+      } catch (err) {
+        console.error("CI-Forge queue exception:", err);
+        if (cancelled) return;
+        setQueue([]);
+        setSelectedId(null);
+        setError("Unable to load Forge queue for this entity.");
+      } finally {
+        if (!cancelled) setLoadingQueue(false);
+      }
+    }
+
+    fetchQueue();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeEntity]);
+
+  // --------------------------
+  // Split queue into Active vs Completed
+  // --------------------------
+  const isCompleted = (item: ForgeQueueItem) => item.envelope_status === "completed";
+
+  const activeQueue = useMemo(() => queue.filter((q) => !isCompleted(q)), [queue]);
+  const completedQueue = useMemo(() => queue.filter((q) => isCompleted(q)), [queue]);
+
+  const visibleQueue = tab === "active" ? activeQueue : completedQueue;
+
+  useEffect(() => {
+    // When switching tabs, auto-select first item in that tab
+    setSelectedId(visibleQueue[0]?.ledger_id ?? null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
+
+  const selected =
+    visibleQueue.find((q) => q.ledger_id === selectedId) ??
+    visibleQueue[0] ??
+    null;
+
+  const envelopeLocked =
+    !!selected?.envelope_status &&
+    selected.envelope_status !== "cancelled" &&
+    selected.envelope_status !== "expired";
+
+  const envelopeSigned = selected?.envelope_status === "completed";
+
+  // --------------------------
+  // Risk engine (advisory-only)
+  // --------------------------
+  const computeRiskLevel = (item: ForgeQueueItem): RiskLevel => {
+    const days = item.days_since_last_signature ?? null;
+    const status = item.envelope_status;
+
+    if (!status || status === "draft" || status === "pending") {
+      if (days == null) return "IDLE";
+      if (days >= 7) return "RED";
+      if (days >= 3) return "AMBER";
+      return "GREEN";
+    }
+
+    if (status === "completed") {
+      if (days != null && days >= 7) return "AMBER";
+      return "GREEN";
+    }
+
+    if (status === "cancelled" || status === "expired") return "IDLE";
+    return "IDLE";
+  };
+
+  const riskLightClasses = (risk: RiskLevel) => {
+    switch (risk) {
+      case "GREEN":
+        return "bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.9)]";
+      case "AMBER":
+        return "bg-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.9)]";
+      case "RED":
+        return "bg-rose-500 shadow-[0_0_10px_rgba(248,113,113,0.9)]";
+      default:
+        return "bg-slate-500 shadow-[0_0_8px_rgba(148,163,184,0.9)]";
+    }
+  };
+
+  const riskLabel = (risk: RiskLevel) => {
+    if (risk === "RED") return "Dormant";
+    if (risk === "AMBER") return "Delayed";
+    if (risk === "GREEN") return "Healthy";
+    return "Idle";
+  };
+
+  function flashError(msg: string) {
+    console.error(msg);
+    setError(msg);
+    setTimeout(() => setError(null), 6000);
+  }
+
+  function flashInfo(msg: string) {
+    setInfo(msg);
+    setTimeout(() => setInfo(null), 4500);
+  }
+
+  // --------------------------
+  // Actions (keep existing wiring)
+  // --------------------------
+  async function refreshQueueKeepSelection(keepLedgerId?: string | null) {
     try {
-      /**
-       * IMPORTANT:
-       * We don’t assume a brittle view name.
-       * We read from signature_envelopes (most likely table) and keep the code schema-tolerant.
-       */
-      const { data, error: qErr } = await supabase
-        .from("signature_envelopes")
-        .select("*")
+      const { data, error } = await supabase
+        .from("v_forge_queue_latest")
+        .select(
+          [
+            "ledger_id",
+            "title",
+            "ledger_status",
+            "created_at",
+            "entity_id",
+            "entity_name",
+            "entity_slug",
+            "envelope_id",
+            "envelope_status",
+            "parties_total",
+            "parties_signed",
+            "last_signed_at",
+            "days_since_last_signature",
+          ].join(", "),
+        )
+        .eq("entity_slug", activeEntity)
         .order("created_at", { ascending: false });
 
-      if (qErr) throw qErr;
+      if (error) throw error;
 
-      const list = (data ?? []) as ForgeEnvelope[];
-      setRows(list);
+      const rows = ((data ?? []) as unknown as ForgeQueueItem[]) ?? [];
+      setQueue(rows);
 
-      // keep selection stable if possible
-      if (selectedId && !list.some((r) => r.id === selectedId)) {
-        setSelectedId(null);
-      }
-    } catch (e: any) {
-      setError(e?.message ?? "Failed to load envelopes.");
-    } finally {
-      setLoading(false);
+      const nextVisible = tab === "active" ? rows.filter((r) => !isCompleted(r)) : rows.filter((r) => isCompleted(r));
+      const fallback = nextVisible[0]?.ledger_id ?? null;
+      const desired = keepLedgerId && nextVisible.some((x) => x.ledger_id === keepLedgerId) ? keepLedgerId : fallback;
+      setSelectedId(desired);
+    } catch (e) {
+      console.error("refreshQueue error", e);
     }
   }
 
-  useEffect(() => {
-    load();
-    // reload when entity scope changes (OS selector)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entitySlug]);
+  async function onStartEnvelope(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setInfo(null);
 
-  const showingCount = filtered.length;
-  const totalCount = useMemo(() => {
-    // total in this entity scope (for header)
-    const scoped = rows.filter((r) => {
-      if (!entitySlug) return true;
-      const rowSlug = norm(deriveEntitySlugFromRow(r));
-      if (!rowSlug) return true;
-      return rowSlug === norm(entitySlug);
-    });
-    return scoped.length;
-  }, [rows, entitySlug]);
-
-  // ---- Actions (safe / wiring-neutral) ----
-
-  async function openEnvelopeInNewTab() {
     if (!selected) return;
-    const url =
-      selected.envelope_url ||
-      selected.sign_url ||
-      selected.url ||
-      selected.public_url ||
-      null;
-
-    if (url) {
-      window.open(url, "_blank", "noopener,noreferrer");
+    if (envelopeLocked) {
+      flashInfo("Envelope already exists for this record.");
+      return;
+    }
+    if (!primarySignerEmail.trim() || !primarySignerName.trim()) {
+      flashError("Signer name + email are required.");
       return;
     }
 
-    // fallback: if you have a hosted sign page that takes envelope id
-    // adjust path if needed, but keep it non-breaking if absent
-    window.open(`/sign?envelope=${selected.id}`, "_blank", "noopener,noreferrer");
+    setIsStarting(true);
+    try {
+      const { data, error } = await supabase.functions.invoke("start-signature", {
+        body: {
+          record_id: selected.ledger_id,
+          entity_slug: selected.entity_slug,
+          signer_name: primarySignerName.trim(),
+          signer_email: primarySignerEmail.trim(),
+          cc_emails: ccEmails
+            .split(",")
+            .map((x) => x.trim())
+            .filter(Boolean),
+        },
+      });
+
+      if (error) throw error;
+      const res = data as StartSignatureResponse;
+
+      if (!res?.ok) {
+        flashError(res?.error ?? "Unable to start envelope.");
+        return;
+      }
+
+      flashInfo(res.reused ? "Existing envelope reused." : "Envelope started.");
+      await refreshQueueKeepSelection(selected.ledger_id);
+    } catch (err) {
+      console.error("start-signature error", err);
+      flashError("Unable to start envelope.");
+    } finally {
+      setIsStarting(false);
+    }
   }
 
-  async function openSignedPdfIfPresent() {
-    if (!selected) return;
-    const path =
-      selected.signed_pdf_path ||
-      selected.signed_storage_path ||
-      selected.signed_file_path ||
-      selected.storage_path ||
-      null;
+  async function onSendInvite() {
+    setError(null);
+    setInfo(null);
 
-    if (!path) return;
+    if (!selected?.envelope_id) {
+      flashError("No envelope found for this record.");
+      return;
+    }
 
-    // If your signed PDF lives in a bucket and you have a download edge function,
-    // you likely already have a route for it. We keep it generic:
-    window.open(`/api/signed-pdf?path=${encodeURIComponent(path)}`, "_blank", "noopener,noreferrer");
+    setIsSendingInvite(true);
+    try {
+      const { data, error } = await supabase.functions.invoke("send-signature-invite", {
+        body: { envelope_id: selected.envelope_id },
+      });
+
+      if (error) throw error;
+      const res = data as SendInviteResponse;
+
+      if (!res?.ok) {
+        flashError(res?.error ?? "Unable to send invite.");
+        return;
+      }
+
+      flashInfo(res.message ?? "Invite sent.");
+      await refreshQueueKeepSelection(selected.ledger_id);
+    } catch (err) {
+      console.error("send-signature-invite error", err);
+      flashError("Unable to send invite.");
+    } finally {
+      setIsSendingInvite(false);
+    }
   }
 
-  async function openArchiveEntryIfPresent() {
-    if (!selected) return;
-    const entryId =
-      selected.archived_entry_id ||
-      selected.minute_book_entry_id ||
-      selected.archive_entry_id ||
-      null;
+  async function onArchiveSigned() {
+    setError(null);
+    setInfo(null);
 
-    if (!entryId) return;
+    if (!selected?.envelope_id) {
+      flashError("No envelope found for this record.");
+      return;
+    }
+    if (!envelopeSigned) {
+      flashError("Envelope is not completed yet.");
+      return;
+    }
 
-    // Keep consistent with CI-Archive Minute Book deep-linking style
-    window.open(`/ci-archive/minute-book?entry=${encodeURIComponent(entryId)}`, "_blank", "noopener,noreferrer");
+    setIsArchiving(true);
+    try {
+      const { data, error } = await supabase.functions.invoke("archive-signed-resolution", {
+        body: { envelope_id: selected.envelope_id },
+      });
+
+      if (error) throw error;
+      const res = data as ArchiveSignedResolutionResponse;
+
+      if (!res?.ok) {
+        flashError(res?.error ?? "Unable to archive signed resolution.");
+        return;
+      }
+
+      if (res.already_archived) flashInfo("Already archived.");
+      else flashInfo("Archived into CI-Archive Minute Book.");
+
+      await refreshQueueKeepSelection(selected.ledger_id);
+    } catch (err) {
+      console.error("archive-signed-resolution error", err);
+      flashError("Unable to archive signed resolution.");
+    } finally {
+      setIsArchiving(false);
+    }
   }
 
-  // ---- UI ----
+  // --------------------------
+  // AXIOM advisory (UI only, never blocking)
+  // --------------------------
+  const axiomAdvisory = useMemo(() => {
+    if (!selected) return { severity: "IDLE" as RiskLevel, bullets: ["Select an execution record to view intelligence."] };
 
-  const ax = selected ? axiomAdvisoryFor(selected) : null;
+    const risk = computeRiskLevel(selected);
+    const bullets: string[] = [];
+
+    if (!selected.envelope_id) bullets.push("No envelope exists yet. If Council approved signature-required execution, start the envelope.");
+    if (selected.envelope_id && !envelopeSigned) bullets.push("Envelope is active. Monitor signer progress; resend invite if stalled.");
+    if (envelopeSigned) bullets.push("Envelope completed. Next action is Archive Now to generate archive-grade artifacts + registry entry.");
+
+    if (!primarySignerEmail.trim() || !primarySignerName.trim()) {
+      bullets.push("Signer identity fields are empty in UI. Ensure signer name + email are correct before starting execution.");
+    }
+
+    bullets.push("AXIOM is advisory-only: it never blocks human authority.");
+
+    return { severity: risk, bullets };
+  }, [selected, envelopeSigned, primarySignerEmail, primarySignerName]);
+
+  // --------------------------
+  // UI helpers
+  // --------------------------
+  const tabBtn = (k: TabKey, label: string, count: number) => (
+    <button
+      type="button"
+      onClick={() => setTab(k)}
+      className={[
+        "rounded-full px-3 py-1.5 text-[11px] font-semibold transition border",
+        tab === k
+          ? "bg-slate-100 text-slate-950 border-white/20 shadow-md shadow-white/10"
+          : "bg-slate-950/40 text-slate-300 border-slate-800 hover:border-slate-700 hover:text-slate-100",
+      ].join(" ")}
+    >
+      {label} <span className="ml-1 text-[10px] opacity-70">({count})</span>
+    </button>
+  );
 
   return (
-    <div className="w-full">
+    <div className="flex h-full flex-col px-8 pt-6 pb-6">
       {/* Header */}
-      <div className="mb-5 rounded-2xl border border-white/10 bg-black/30 p-5 shadow-[0_0_0_1px_rgba(255,215,128,0.06)]">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <div className="text-lg font-semibold tracking-tight text-white">CI-Forge</div>
-            <div className="text-sm text-white/60">
-              Signature execution queue • OS-scoped • Archive discipline preserved
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <div className="rounded-full border border-white/10 bg-black/30 px-3 py-1 text-xs text-white/70">
-              Entity: <span className="text-white/90">{entitySlug ?? "—"}</span>
-            </div>
-
-            <button
-              onClick={load}
-              className={cx(
-                "rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/90",
-                "hover:border-[rgba(255,215,128,0.35)] hover:bg-white/10",
-                loading && "opacity-60"
-              )}
-              disabled={loading}
-            >
-              {loading ? "Refreshing…" : "Refresh"}
-            </button>
-          </div>
-        </div>
-
-        {/* Tabs + counts */}
-        <div className="mt-4 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-black/20 p-1">
-            <button
-              onClick={() => setTab("active")}
-              className={cx(
-                "rounded-xl px-4 py-2 text-sm",
-                tab === "active"
-                  ? "bg-white/10 text-white shadow-[0_0_0_1px_rgba(255,215,128,0.22)]"
-                  : "text-white/60 hover:text-white/85"
-              )}
-            >
-              Active
-            </button>
-            <button
-              onClick={() => setTab("completed")}
-              className={cx(
-                "rounded-xl px-4 py-2 text-sm",
-                tab === "completed"
-                  ? "bg-[rgba(255,215,128,0.12)] text-[rgb(255,215,128)] shadow-[0_0_0_1px_rgba(255,215,128,0.30)]"
-                  : "text-white/60 hover:text-white/85"
-              )}
-            >
-              Completed
-            </button>
-          </div>
-
-          <div className="text-xs text-white/55">
-            Showing <span className="text-white/85">{showingCount}</span> of{" "}
-            <span className="text-white/85">{totalCount}</span>
-          </div>
-        </div>
-
-        {error ? (
-          <div className="mt-3 rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-200">
-            {error}
-          </div>
-        ) : null}
+      <div className="mb-4 shrink-0">
+        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI-FORGE</div>
+        <h1 className="mt-1 text-lg font-semibold text-amber-300">Execution — Signature-required</h1>
+        <p className="mt-1 text-[11px] text-slate-400">
+          Entity-scoped via OS selector. Forge is signature-only. Archive quality artifacts are produced after completion.
+        </p>
       </div>
 
-      {/* 3-column grid */}
-      <div className="grid grid-cols-12 gap-4">
-        {/* Column 1: Queue */}
-        <div className="col-span-12 lg:col-span-5">
-          <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
-            <div className="mb-3 text-sm font-medium text-white/85">
-              Envelopes
+      {/* Main frame */}
+      <div className="flex min-h-0 flex-1 justify-center overflow-hidden">
+        <div className="flex h-full w-full max-w-[1400px] flex-col overflow-hidden rounded-3xl border border-slate-900 bg-black/60 px-6 py-5 shadow-[0_0_60px_rgba(15,23,42,0.9)]">
+          {/* Title bar */}
+          <div className="mb-4 flex shrink-0 items-start justify-between gap-4">
+            <div className="flex flex-col gap-1">
+              <div className="text-[11px] text-slate-400">
+                Active Entity: <span className="font-semibold text-slate-100">{activeEntity}</span>
+              </div>
+              <div className="text-[11px] text-slate-500">
+                Queue is sourced from <span className="text-slate-300">v_forge_queue_latest</span>.
+              </div>
             </div>
 
-            <div className="max-h-[62vh] overflow-auto pr-1">
-              {filtered.length === 0 ? (
-                <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-white/55">
-                  {tab === "active" ? "No active envelopes." : "No completed envelopes."}
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {filtered.map((r) => {
-                    const isSel = r.id === selectedId;
-                    const status = deriveStatusLabel(r);
-                    const title = deriveTitle(r);
-                    return (
-                      <button
-                        key={r.id}
-                        onClick={() => setSelectedId(r.id)}
-                        className={cx(
-                          "w-full rounded-xl border p-3 text-left transition",
-                          isSel
-                            ? "border-[rgba(255,215,128,0.35)] bg-[rgba(255,215,128,0.08)]"
-                            : "border-white/10 bg-black/20 hover:border-white/20 hover:bg-black/30"
-                        )}
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="truncate text-sm font-medium text-white/90">
-                              {title}
-                            </div>
-                            <div className="mt-0.5 truncate text-xs text-white/55">
-                              {fmtTime(r.created_at ?? r.updated_at)}
-                            </div>
-                          </div>
-
-                          <div className="shrink-0 rounded-full border border-white/10 bg-black/30 px-2 py-1 text-[11px] text-white/70">
-                            {status}
-                          </div>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
+            <div className="flex items-center gap-2">
+              {tabBtn("active", "Active", activeQueue.length)}
+              {tabBtn("completed", "Completed", completedQueue.length)}
+              <button
+                type="button"
+                onClick={() => refreshQueueKeepSelection(selected?.ledger_id ?? null)}
+                className="rounded-full border border-slate-800 bg-slate-950/50 px-3 py-1.5 text-[11px] font-semibold text-slate-200 hover:border-slate-700 hover:text-slate-100 transition"
+              >
+                Refresh
+              </button>
             </div>
           </div>
-        </div>
 
-        {/* Column 2: Evidence + Actions */}
-        <div className="col-span-12 lg:col-span-7">
-          <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <div className="text-sm font-medium text-white/85">Evidence • Actions</div>
-              {selected ? (
-                <div className="text-xs text-white/50">
-                  Selected: <span className="text-white/75">{selected.id.slice(0, 8)}</span>
+          <div className="flex min-h-0 flex-1 gap-5 overflow-hidden">
+            {/* Left column: queue */}
+            <section className="w-[320px] shrink-0 overflow-hidden rounded-2xl border border-slate-900 bg-slate-950/40">
+              <div className="border-b border-slate-900 px-4 py-3">
+                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">
+                  {tab === "active" ? "Active Execution Queue" : "Completed Envelopes"}
                 </div>
-              ) : null}
-            </div>
-
-            {!selected ? (
-              <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-white/55">
-                Select an envelope to view details.
+                <div className="mt-1 text-[11px] text-slate-400">
+                  {loadingQueue ? "Loading…" : `${visibleQueue.length} record(s)`}
+                </div>
               </div>
-            ) : (
-              <div className="grid grid-cols-12 gap-4">
-                {/* Actions */}
-                <div className="col-span-12 xl:col-span-6">
-                  <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                    <div className="mb-3 text-xs font-semibold tracking-wide text-white/70">
-                      Actions
-                    </div>
 
-                    <div className="space-y-2">
-                      <button
-                        onClick={openEnvelopeInNewTab}
-                        className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-left text-sm text-white/90 hover:border-[rgba(255,215,128,0.35)] hover:bg-white/10"
-                      >
-                        Open Envelope
-                        <div className="text-xs text-white/50">
-                          View signer status / execution context
-                        </div>
-                      </button>
+              <div className="h-full overflow-y-auto px-2 py-2">
+                {!visibleQueue.length && !loadingQueue ? (
+                  <div className="px-3 py-3 text-[11px] text-slate-500">
+                    Nothing here yet. When Council approves signature-required execution, it will appear in Forge.
+                  </div>
+                ) : null}
 
-                      <button
-                        onClick={openSignedPdfIfPresent}
-                        className={cx(
-                          "w-full rounded-xl border px-3 py-2 text-left text-sm",
-                          "border-white/10 bg-white/5 text-white/90 hover:border-[rgba(255,215,128,0.35)] hover:bg-white/10"
-                        )}
-                      >
-                        Download / Open Signed PDF
-                        <div className="text-xs text-white/50">
-                          Uses existing signed artifact path if present
-                        </div>
-                      </button>
+                {visibleQueue.map((q) => {
+                  const risk = computeRiskLevel(q);
+                  const selectedRow = q.ledger_id === selected?.ledger_id;
 
-                      <button
-                        onClick={openArchiveEntryIfPresent}
-                        className={cx(
-                          "w-full rounded-xl border px-3 py-2 text-left text-sm",
-                          "border-white/10 bg-white/5 text-white/90 hover:border-[rgba(255,215,128,0.35)] hover:bg-white/10"
-                        )}
-                      >
-                        Open in CI-Archive
-                        <div className="text-xs text-white/50">
-                          Deep-link to archived minute book entry (if linked)
+                  return (
+                    <button
+                      key={q.ledger_id}
+                      type="button"
+                      onClick={() => setSelectedId(q.ledger_id)}
+                      className={[
+                        "w-full text-left rounded-xl border px-3 py-2 mb-2 transition",
+                        selectedRow
+                          ? "border-amber-500/50 bg-amber-500/10"
+                          : "border-slate-900 bg-black/30 hover:border-slate-800 hover:bg-black/40",
+                      ].join(" ")}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="text-[12px] font-semibold text-slate-100">
+                            {clamp(q.title || "Untitled", 52)}
+                          </div>
+                          <div className="mt-1 text-[10px] text-slate-500">
+                            {q.envelope_status ? `Envelope: ${q.envelope_status}` : "No envelope yet"}
+                          </div>
                         </div>
-                      </button>
-                    </div>
 
-                    {/* AXIOM advisory (non-blocking) */}
-                    <div className="mt-4 rounded-2xl border border-white/10 bg-black/30 p-4">
-                      <div className="mb-2 flex items-center justify-between">
-                        <div className="text-xs font-semibold tracking-wide text-white/70">
-                          AXIOM Advisory
-                        </div>
-                        <div
-                          className={cx(
-                            "rounded-full border px-2 py-0.5 text-[11px]",
-                            ax?.severity === "ok" &&
-                              "border-emerald-400/20 bg-emerald-400/10 text-emerald-200",
-                            ax?.severity === "warn" &&
-                              "border-[rgba(255,215,128,0.35)] bg-[rgba(255,215,128,0.10)] text-[rgb(255,215,128)]",
-                            ax?.severity === "risk" &&
-                              "border-red-400/20 bg-red-400/10 text-red-200"
-                          )}
-                        >
-                          {ax?.severity?.toUpperCase() ?? "—"}
+                        <div className="flex flex-col items-end gap-2">
+                          <div className={["h-2.5 w-2.5 rounded-full", riskLightClasses(risk)].join(" ")} title={riskLabel(risk)} />
+                          <div className="text-[10px] text-slate-500">
+                            {q.parties_signed ?? 0}/{q.parties_total ?? 0}
+                          </div>
                         </div>
                       </div>
-                      <div className="text-sm font-medium text-white/90">{ax?.title}</div>
-                      <div className="mt-1 text-sm text-white/60">{ax?.body}</div>
+
+                      <div className="mt-2 flex items-center justify-between text-[10px] text-slate-500">
+                        <span>{q.ledger_status}</span>
+                        <span>{fmt(q.created_at)}</span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+
+            {/* Middle column: execution */}
+            <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-900 bg-slate-950/30">
+              <div className="border-b border-slate-900 px-5 py-4">
+                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Execution</div>
+                <div className="mt-1 text-sm font-semibold text-slate-100">
+                  {selected ? selected.title : "No record selected"}
+                </div>
+                <div className="mt-1 text-[11px] text-slate-500">
+                  Ledger Status: <span className="text-slate-300">{selected?.ledger_status ?? "—"}</span>{" "}
+                  • Envelope: <span className="text-slate-300">{selected?.envelope_status ?? "—"}</span>
+                </div>
+              </div>
+
+              <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+                {!selected ? (
+                  <div className="text-[11px] text-slate-500">Select a record from the queue.</div>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
+                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500 mb-2">
+                          Signer
+                        </div>
+
+                        <div className="space-y-2">
+                          <div>
+                            <div className="text-[10px] text-slate-500 mb-1">Full name</div>
+                            <input
+                              value={primarySignerName}
+                              onChange={(e) => setPrimarySignerName(e.target.value)}
+                              className="w-full rounded-xl bg-slate-950/70 border border-slate-800 px-3 py-2 text-sm text-slate-100 outline-none focus:border-amber-500/50"
+                              placeholder="Signer name"
+                            />
+                          </div>
+
+                          <div>
+                            <div className="text-[10px] text-slate-500 mb-1">Email</div>
+                            <input
+                              value={primarySignerEmail}
+                              onChange={(e) => setPrimarySignerEmail(e.target.value)}
+                              className="w-full rounded-xl bg-slate-950/70 border border-slate-800 px-3 py-2 text-sm text-slate-100 outline-none focus:border-amber-500/50"
+                              placeholder="signer@email.com"
+                            />
+                          </div>
+
+                          <div>
+                            <div className="text-[10px] text-slate-500 mb-1">CC (comma-separated)</div>
+                            <input
+                              value={ccEmails}
+                              onChange={(e) => setCcEmails(e.target.value)}
+                              className="w-full rounded-xl bg-slate-950/70 border border-slate-800 px-3 py-2 text-sm text-slate-100 outline-none focus:border-amber-500/50"
+                              placeholder="cc1@email.com, cc2@email.com"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
+                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500 mb-2">
+                          Actions
+                        </div>
+
+                        <div className="flex flex-col gap-2">
+                          <form onSubmit={onStartEnvelope}>
+                            <button
+                              type="submit"
+                              disabled={isStarting || envelopeLocked}
+                              className={[
+                                "w-full rounded-xl px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
+                                isStarting || envelopeLocked
+                                  ? "bg-emerald-500/20 text-emerald-200/60 cursor-not-allowed"
+                                  : "bg-emerald-500 text-black hover:bg-emerald-400",
+                              ].join(" ")}
+                            >
+                              {envelopeLocked ? "Envelope already created" : isStarting ? "Starting…" : "Start envelope"}
+                            </button>
+                          </form>
+
+                          <button
+                            type="button"
+                            onClick={onSendInvite}
+                            disabled={isSendingInvite || !selected.envelope_id}
+                            className={[
+                              "w-full rounded-xl px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
+                              isSendingInvite || !selected.envelope_id
+                                ? "border-slate-800 bg-slate-950/30 text-slate-500 cursor-not-allowed"
+                                : "border-slate-700 bg-slate-950/60 text-slate-200 hover:border-amber-500/40 hover:text-slate-100",
+                            ].join(" ")}
+                          >
+                            {isSendingInvite ? "Sending…" : "Send invite"}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={onArchiveSigned}
+                            disabled={isArchiving || !envelopeSigned}
+                            className={[
+                              "w-full rounded-xl px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
+                              isArchiving || !envelopeSigned
+                                ? "border-slate-800 bg-slate-950/30 text-slate-500 cursor-not-allowed"
+                                : "border-amber-500/60 bg-amber-500/10 text-amber-200 hover:bg-amber-500/15",
+                            ].join(" ")}
+                          >
+                            {isArchiving ? "Archiving…" : "Archive now"}
+                          </button>
+                        </div>
+
+                        <div className="mt-3 text-[11px] text-slate-500">
+                          Forge does not bypass archive discipline. Both paths must produce archive-quality PDF + hash.
+                        </div>
+                      </div>
+                    </div>
+
+                    {error && (
+                      <div className="mt-3 text-[11px] text-red-400 bg-red-950/40 border border-red-800/60 rounded-xl px-3 py-2">
+                        {error}
+                      </div>
+                    )}
+
+                    {info && !error && (
+                      <div className="mt-3 text-[11px] text-emerald-300 bg-emerald-950/40 border border-emerald-700/60 rounded-xl px-3 py-2">
+                        {info}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+
+              <div className="border-t border-slate-900 px-5 py-3 text-[10px] text-slate-500 flex items-center justify-between">
+                <span>CI-Forge · Oasis Digital Parliament Ledger</span>
+                <span>{tab === "active" ? "Active tab" : "Completed tab"}</span>
+              </div>
+            </section>
+
+            {/* Right column: AXIOM + artifacts */}
+            <section className="w-[360px] shrink-0 overflow-hidden rounded-2xl border border-slate-900 bg-slate-950/35">
+              <div className="border-b border-slate-900 px-4 py-3">
+                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Intelligence + Artifacts</div>
+                <div className="mt-1 text-[11px] text-slate-400">
+                  AXIOM is advisory-only. Humans execute.
+                </div>
+              </div>
+
+              <div className="h-full overflow-y-auto px-4 py-4 space-y-3">
+                {/* AXIOM panel */}
+                <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">AXIOM Advisory</div>
+                    <div className="flex items-center gap-2">
+                      <div className={["h-2.5 w-2.5 rounded-full", riskLightClasses(axiomAdvisory.severity)].join(" ")} />
+                      <div className="text-[10px] text-slate-400">{riskLabel(axiomAdvisory.severity)}</div>
+                    </div>
+                  </div>
+
+                  <ul className="mt-2 space-y-2 text-[11px] text-slate-300 list-disc pl-4">
+                    {axiomAdvisory.bullets.map((b) => (
+                      <li key={b}>{b}</li>
+                    ))}
+                  </ul>
+
+                  <div className="mt-3 text-[10px] text-slate-500">
+                    Later: “Run review” can generate summaries/analysis/advice into AXIOM timeline for this ledger_id.
+                  </div>
+                </div>
+
+                {/* Artifacts panel (minimal, no guessing fields) */}
+                <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
+                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Artifacts</div>
+
+                  <div className="mt-2 grid grid-cols-1 gap-2 text-[11px] text-slate-300">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-500">Envelope ID</span>
+                      <span className="font-mono text-[10px] text-slate-300">
+                        {selected?.envelope_id ? clamp(selected.envelope_id, 12) : "—"}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-500">Envelope Status</span>
+                      <span className="text-slate-200">{selected?.envelope_status ?? "—"}</span>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-500">Last Signed</span>
+                      <span className="text-slate-200">{fmt(selected?.last_signed_at)}</span>
+                    </div>
+
+                    <div className="mt-2 flex gap-2">
+                      <a
+                        href="/ci-archive/minute-book"
+                        className="flex-1 text-center rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-2 text-[11px] font-semibold text-slate-200 hover:border-amber-500/40 hover:text-slate-100 transition"
+                      >
+                        Open CI-Archive
+                      </a>
+
+                      <a
+                        href="/ci-sign"
+                        className="flex-1 text-center rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-2 text-[11px] font-semibold text-slate-200 hover:border-amber-500/40 hover:text-slate-100 transition"
+                      >
+                        Open CI-Sign
+                      </a>
+                    </div>
+
+                    <div className="text-[10px] text-slate-500 mt-1">
+                      Signed PDF + certificate deep-links can be surfaced here once your view exposes storage paths / IDs.
                     </div>
                   </div>
                 </div>
 
-                {/* Metadata */}
-                <div className="col-span-12 xl:col-span-6">
-                  <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                    <div className="mb-3 text-xs font-semibold tracking-wide text-white/70">
-                      Metadata
-                    </div>
-
-                    <div className="space-y-3 text-sm">
-                      <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-                        <div className="text-xs text-white/50">Title</div>
-                        <div className="mt-0.5 text-white/90">{deriveTitle(selected)}</div>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-2">
-                        <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-                          <div className="text-xs text-white/50">Status</div>
-                          <div className="mt-0.5 text-white/90">{deriveStatusLabel(selected)}</div>
-                        </div>
-                        <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-                          <div className="text-xs text-white/50">Entity</div>
-                          <div className="mt-0.5 text-white/90">{entityLabel}</div>
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-2">
-                        <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-                          <div className="text-xs text-white/50">Created</div>
-                          <div className="mt-0.5 text-white/90">{fmtTime(selected.created_at)}</div>
-                        </div>
-                        <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-                          <div className="text-xs text-white/50">Updated</div>
-                          <div className="mt-0.5 text-white/90">{fmtTime(selected.updated_at)}</div>
-                        </div>
-                      </div>
-
-                      <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-                        <div className="text-xs text-white/50">Ledger Record</div>
-                        <div className="mt-0.5 text-white/90">
-                          {deriveRecordId(selected) ? (
-                            <span className="break-all">{deriveRecordId(selected)}</span>
-                          ) : (
-                            "—"
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-                        <div className="text-xs text-white/50">Signed PDF Path</div>
-                        <div className="mt-0.5 break-all text-white/90">
-                          {selected.signed_pdf_path ||
-                            selected.signed_storage_path ||
-                            selected.signed_file_path ||
-                            selected.storage_path ||
-                            "—"}
-                        </div>
-                      </div>
-
-                      <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-                        <div className="text-xs text-white/50">Archive Entry</div>
-                        <div className="mt-0.5 break-all text-white/90">
-                          {selected.archived_entry_id ||
-                            selected.minute_book_entry_id ||
-                            selected.archive_entry_id ||
-                            "—"}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="mt-4 text-xs text-white/45">
-                      Forge remains signature-only. Council determines signature intent; both paths must still generate PDF + archive-quality artifacts.
-                    </div>
+                {/* Notes */}
+                <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Forge Notes</div>
+                    <div className="text-[10px] text-slate-500">(Local-only)</div>
                   </div>
+                  <textarea
+                    className="mt-2 w-full min-h-[160px] rounded-xl bg-slate-950/70 border border-slate-800 px-3 py-2 text-sm text-slate-100 resize-none"
+                    placeholder="Track execution conditions, signer confirmations, and archiving notes."
+                  />
                 </div>
               </div>
-            )}
+            </section>
           </div>
         </div>
       </div>
