@@ -22,13 +22,17 @@ type DraftRecord = {
   finalized_record_id: string | null;
 };
 
-type StatusFilter = "all" | "draft" | "reviewed" | "finalized";
+type StatusFilter = "all" | "draft" | "reviewed" | "finalized" | "discarded";
 
 const ENTITY_LABELS: Record<string, string> = {
   holdings: "Oasis International Holdings Inc.",
   lounge: "Oasis International Lounge Inc.",
   "real-estate": "Oasis International Real Estate Inc.",
 };
+
+function cx(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(" ");
+}
 
 export default function CIAlchemyPage() {
   const { activeEntity } = useEntity();
@@ -44,13 +48,19 @@ export default function CIAlchemyPage() {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
 
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  // Default: don’t shove finalized/test clutter in your face
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("draft");
+  const [query, setQuery] = useState("");
+
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
-  // ---------------------------------------------------------------------------
-  // Helpers
-  // ---------------------------------------------------------------------------
+  // Delete / Discard modal
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmMode, setConfirmMode] = useState<"discard" | "delete">("discard");
+  const [confirmText, setConfirmText] = useState("");
+  const [confirmBusy, setConfirmBusy] = useState(false);
+
   const activeEntityLabel = useMemo(
     () => ENTITY_LABELS[activeEntity] ?? activeEntity,
     [activeEntity]
@@ -61,78 +71,118 @@ export default function CIAlchemyPage() {
     [drafts, selectedId]
   );
 
+  const canMutateSelected = useMemo(() => {
+    if (!selectedDraft) return false;
+    // Once it left Alchemy (finalized -> Council/Ledger), Alchemy can’t delete it.
+    return !selectedDraft.finalized_record_id && selectedDraft.status !== "finalized";
+  }, [selectedDraft]);
+
   const filteredDrafts = useMemo(() => {
-    if (statusFilter === "all") return drafts;
-    return drafts.filter((d) => d.status === statusFilter);
-  }, [drafts, statusFilter]);
+    let list = drafts;
+
+    if (statusFilter !== "all") list = list.filter((d) => d.status === statusFilter);
+
+    const q = query.trim().toLowerCase();
+    if (q) {
+      list = list.filter((d) => {
+        const hay = `${d.title ?? ""}\n${d.draft_text ?? ""}`.toLowerCase();
+        return hay.includes(q);
+      });
+    }
+
+    return list;
+  }, [drafts, statusFilter, query]);
 
   function flashError(msg: string) {
     console.error(msg);
     setError(msg);
-    setTimeout(() => setError(null), 6000);
+    setTimeout(() => setError(null), 5000);
   }
 
   function flashInfo(msg: string) {
     setInfo(msg);
-    setTimeout(() => setInfo(null), 4000);
+    setTimeout(() => setInfo(null), 3500);
   }
 
-  // ---------------------------------------------------------------------------
+  function pickDefaultSelection(data: DraftRecord[]) {
+    if (!data || data.length === 0) return null;
+    const preferred =
+      data.find((d) => d.status === "draft" && !d.finalized_record_id) ||
+      data.find((d) => d.status === "reviewed" && !d.finalized_record_id) ||
+      data.find((d) => !d.finalized_record_id && d.status !== "discarded") ||
+      data[0];
+    return preferred ?? null;
+  }
+
+  async function reloadDrafts(preserveSelected = true) {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const { data, error } = await supabase
+        .from("governance_drafts")
+        .select(
+          `
+            id,
+            entity_id,
+            entity_slug,
+            entity_name,
+            title,
+            record_type,
+            draft_text,
+            status,
+            created_at,
+            updated_at,
+            finalized_record_id
+          `
+        )
+        .eq("entity_slug", activeEntity)
+        .order("created_at", { ascending: false });
+
+      if (error) throw error;
+
+      const rows = (data ?? []) as DraftRecord[];
+      setDrafts(rows);
+
+      if (preserveSelected && selectedId) {
+        const stillThere = rows.find((r) => r.id === selectedId);
+        if (stillThere) {
+          setTitle(stillThere.title ?? "");
+          setBody(stillThere.draft_text ?? "");
+          return;
+        }
+      }
+
+      const chosen = pickDefaultSelection(rows);
+      if (chosen) {
+        setSelectedId(chosen.id);
+        setTitle(chosen.title ?? "");
+        setBody(chosen.draft_text ?? "");
+      } else {
+        setSelectedId(null);
+        setTitle("");
+        setBody("");
+      }
+    } catch (err: any) {
+      flashError(err?.message ?? "Failed to load drafts");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   // Load drafts for the active entity
-  // ---------------------------------------------------------------------------
   useEffect(() => {
     let cancelled = false;
-    async function load() {
-      setLoading(true);
-      setError(null);
-      setSelectedId(null);
-      try {
-        const { data, error } = await supabase
-          .from("governance_drafts")
-          .select(
-            `
-              id,
-              entity_id,
-              entity_slug,
-              entity_name,
-              title,
-              record_type,
-              draft_text,
-              status,
-              created_at,
-              updated_at,
-              finalized_record_id
-            `
-          )
-          .eq("entity_slug", activeEntity)
-          .order("created_at", { ascending: false });
 
-        if (error) throw error;
-        if (cancelled) return;
+    (async () => {
+      if (cancelled) return;
+      await reloadDrafts(false);
+    })();
 
-        setDrafts((data ?? []) as DraftRecord[]);
-
-        if (data && data.length > 0) {
-          const first = data[0] as DraftRecord;
-          setSelectedId(first.id);
-          setTitle(first.title ?? "");
-          setBody(first.draft_text ?? "");
-        } else {
-          setSelectedId(null);
-          setTitle("");
-          setBody("");
-        }
-      } catch (err: any) {
-        flashError(err.message ?? "Failed to load drafts");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-
-    load();
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeEntity]);
 
   function handleSelectDraft(draft: DraftRecord) {
@@ -143,14 +193,10 @@ export default function CIAlchemyPage() {
     setError(null);
   }
 
-  // ---------------------------------------------------------------------------
   // Run CI-Alchemy (Edge Function "scribe") via direct fetch
-  // ---------------------------------------------------------------------------
   async function handleRunAlchemy() {
     if (!title.trim() && !body.trim()) {
-      flashError(
-        "Add at least a title or some body/context before running CI-Alchemy."
-      );
+      flashError("Add a title or some context before running CI-Alchemy.");
       return;
     }
 
@@ -167,6 +213,16 @@ export default function CIAlchemyPage() {
     setInfo(null);
 
     try {
+      // ✅ Use the signed-in user token (NOT the anon key) so RLS/audit work.
+      const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
+      if (sessionErr) throw sessionErr;
+
+      const accessToken = sessionData?.session?.access_token;
+      if (!accessToken) {
+        flashError("Not authenticated. Please log in (OS auth gate).");
+        return;
+      }
+
       const hasBody = body.trim().length > 0;
 
       const instructions = hasBody
@@ -177,7 +233,7 @@ export default function CIAlchemyPage() {
 Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for directors.`;
 
       const payload = {
-        type: "board_resolution", // matches scribe's type mapping
+        type: "board_resolution",
         entity_slug: activeEntity,
         entity_name: activeEntityLabel,
         title: title.trim() || "(untitled)",
@@ -191,7 +247,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         headers: {
           "Content-Type": "application/json",
           apikey: anonKey,
-          Authorization: `Bearer ${anonKey}`, // required by Supabase edge gateway
+          Authorization: `Bearer ${accessToken}`,
         },
         body: JSON.stringify(payload),
       });
@@ -199,24 +255,15 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       if (!res.ok) {
         const text = await res.text();
         console.error("scribe HTTP error", res.status, text);
-        flashError(
-          `CI-Alchemy HTTP ${res.status}. Check console for details.`
-        );
+        flashError(`CI-Alchemy HTTP ${res.status}. See console for details.`);
         return;
       }
 
       const data = await res.json();
-      console.log("scribe response", data);
-
-      if (!data || typeof data !== "object") {
-        flashError("Unexpected response from CI-Alchemy (scribe).");
-        return;
-      }
-
       const asAny = data as any;
 
-      if (!asAny.ok) {
-        const detail = asAny.error || asAny.stage || "Unknown error.";
+      if (!asAny?.ok) {
+        const detail = asAny?.error || asAny?.stage || "Unknown error.";
         flashError(`CI-Alchemy failed: ${detail}`);
         return;
       }
@@ -225,13 +272,12 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       const draftText: string =
         asAny.draft_text || asAny.draft || asAny.content || asAny.text || "";
 
-      if (!draftText || draftText.trim().length === 0) {
-        flashError(
-          "CI-Alchemy responded but did not include a usable draft body."
-        );
+      if (!draftText?.trim()) {
+        flashError("CI-Alchemy returned no usable draft body.");
         return;
       }
 
+      // Optimistic insert into UI (fast), then reload to match DB truth.
       const newDraft: DraftRecord = {
         id: draftId || crypto.randomUUID(),
         entity_id: asAny.entity_id ?? null,
@@ -246,36 +292,28 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         finalized_record_id: asAny.finalized_record_id ?? null,
       };
 
-      // Update editor with AI draft
       setTitle(newDraft.title);
       setBody(newDraft.draft_text);
-
-      // Select this draft
       setSelectedId(newDraft.id);
 
-      // Merge into list (dedupe by id)
       setDrafts((prev) => {
         const without = prev.filter((d) => d.id !== newDraft.id);
         return [newDraft, ...without];
       });
 
-      flashInfo(
-        "CI-Alchemy draft created and saved. Review or edit, then Save if you change anything."
-      );
+      flashInfo("Draft created. Review, edit, then Save.");
+
+      // ✅ Re-sync list with DB (prevents phantom rows if server wrote different fields)
+      await reloadDrafts(true);
     } catch (err: any) {
       console.error("scribe invoke exception", err);
-      flashError(
-        err?.message ??
-          "Unexpected network error while calling CI-Alchemy (scribe)."
-      );
+      flashError(err?.message ?? "Network error calling CI-Alchemy (scribe).");
     } finally {
       setAlchemyRunning(false);
     }
   }
 
-  // ---------------------------------------------------------------------------
   // Save / status actions
-  // ---------------------------------------------------------------------------
   async function handleSaveDraft() {
     if (!title.trim() || !body.trim()) {
       flashError("Title and body are required to save a draft.");
@@ -293,8 +331,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         .eq("slug", activeEntity)
         .single();
 
-      if (entityErr || !entityRow)
-        throw entityErr ?? new Error("Entity not found.");
+      if (entityErr || !entityRow) throw entityErr ?? new Error("Entity not found.");
 
       const basePayload = {
         entity_id: entityRow.id as string,
@@ -314,18 +351,18 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           })
           .select(
             `
-            id,
-            entity_id,
-            entity_slug,
-            entity_name,
-            title,
-            record_type,
-            draft_text,
-            status,
-            created_at,
-            updated_at,
-            finalized_record_id
-          `
+              id,
+              entity_id,
+              entity_slug,
+              entity_name,
+              title,
+              record_type,
+              draft_text,
+              status,
+              created_at,
+              updated_at,
+              finalized_record_id
+            `
           )
           .single();
 
@@ -345,56 +382,41 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           .eq("id", selectedId)
           .select(
             `
-            id,
-            entity_id,
-            entity_slug,
-            entity_name,
-            title,
-            record_type,
-            draft_text,
-            status,
-            created_at,
-            updated_at,
-            finalized_record_id
-          `
+              id,
+              entity_id,
+              entity_slug,
+              entity_name,
+              title,
+              record_type,
+              draft_text,
+              status,
+              created_at,
+              updated_at,
+              finalized_record_id
+            `
           )
           .single();
 
         if (error) throw error;
 
         const updated = data as DraftRecord;
-        setDrafts((prev) =>
-          prev.map((d) => (d.id === updated.id ? updated : d))
-        );
+        setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
         flashInfo("Draft saved.");
       }
     } catch (err: any) {
-      flashError(err.message ?? "Failed to save draft.");
+      flashError(err?.message ?? "Failed to save draft.");
     } finally {
       setSaving(false);
     }
   }
 
   async function handleMarkReviewed() {
-    if (!selectedId) {
-      flashError("Select a draft first.");
-      return;
-    }
+    if (!selectedId) return flashError("Select a draft first.");
+    if (!canMutateSelected) return flashError("This draft has left Alchemy and can’t be changed here.");
 
     const draft = drafts.find((d) => d.id === selectedId);
-    if (!draft) {
-      flashError("Draft not found in local state.");
-      return;
-    }
-
-    if (draft.status === "reviewed") {
-      flashInfo("Already marked as reviewed.");
-      return;
-    }
-    if (draft.status === "finalized") {
-      flashInfo("Already finalized; cannot go back to reviewed.");
-      return;
-    }
+    if (!draft) return flashError("Draft not found.");
+    if (draft.status === "reviewed") return flashInfo("Already reviewed.");
 
     setSaving(true);
     setError(null);
@@ -410,56 +432,42 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         .eq("id", selectedId)
         .select(
           `
-          id,
-          entity_id,
-          entity_slug,
-          entity_name,
-          title,
-          record_type,
-          draft_text,
-          status,
-          created_at,
-          updated_at,
-          finalized_record_id
-        `
+            id,
+            entity_id,
+            entity_slug,
+            entity_name,
+            title,
+            record_type,
+            draft_text,
+            status,
+            created_at,
+            updated_at,
+            finalized_record_id
+          `
         )
         .single();
 
       if (error) throw error;
 
       const updated = data as DraftRecord;
-      setDrafts((prev) =>
-        prev.map((d) => (d.id === updated.id ? updated : d))
-      );
-      flashInfo("Draft marked as reviewed.");
+      setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
+      flashInfo("Marked as reviewed.");
     } catch (err: any) {
-      flashError(err.message ?? "Failed to mark as reviewed.");
+      flashError(err?.message ?? "Failed to mark as reviewed.");
     } finally {
       setSaving(false);
     }
   }
 
   async function handleFinalize() {
-    if (!selectedId) {
-      flashError("Select a draft first.");
-      return;
-    }
+    if (!selectedId) return flashError("Select a draft first.");
 
     const draft = drafts.find((d) => d.id === selectedId);
-    if (!draft) {
-      flashError("Draft not found in local state.");
-      return;
-    }
+    if (!draft) return flashError("Draft not found.");
 
-    if (!title.trim() || !body.trim()) {
-      flashError("Title and body are required before finalizing.");
-      return;
-    }
-
-    if (draft.status === "finalized") {
-      flashInfo("Draft already finalized.");
-      return;
-    }
+    if (!title.trim() || !body.trim()) return flashError("Title and body are required before finalizing.");
+    if (draft.status === "finalized") return flashInfo("Already finalized.");
+    if (draft.finalized_record_id) return flashError("This draft is already linked to a ledger record.");
 
     setFinalizing(true);
     setError(null);
@@ -472,8 +480,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         .eq("slug", activeEntity)
         .single();
 
-      if (entityErr || !entityRow)
-        throw entityErr ?? new Error("Entity not found.");
+      if (entityErr || !entityRow) throw entityErr ?? new Error("Entity not found.");
 
       const { data: ledgerRow, error: ledgerErr } = await supabase
         .from("governance_ledger")
@@ -485,17 +492,12 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           record_no: null,
           body,
           source: "ci-alchemy",
-          status: "PENDING", // CI-Council queue
+          status: "PENDING",
         })
         .select("id")
         .single();
 
-      console.log("🔎 governance_ledger insert result:", { ledgerRow, ledgerErr });
-
-      if (ledgerErr || !ledgerRow) {
-        console.error("❌ LEDGER INSERT FAILED:", ledgerErr);
-        throw ledgerErr ?? new Error("Ledger insert failed with no details.");
-      }
+      if (ledgerErr || !ledgerRow) throw ledgerErr ?? new Error("Ledger insert failed.");
 
       const ledgerId = (ledgerRow as { id: string }).id;
 
@@ -510,165 +512,289 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         .eq("id", selectedId)
         .select(
           `
-          id,
-          entity_id,
-          entity_slug,
-          entity_name,
-          title,
-          record_type,
-          draft_text,
-          status,
-          created_at,
-          updated_at,
-          finalized_record_id
-        `
+            id,
+            entity_id,
+            entity_slug,
+            entity_name,
+            title,
+            record_type,
+            draft_text,
+            status,
+            created_at,
+            updated_at,
+            finalized_record_id
+          `
         )
         .single();
 
       if (draftErr) throw draftErr;
 
       const updated = updatedDraft as DraftRecord;
-      setDrafts((prev) =>
-        prev.map((d) => (d.id === updated.id ? updated : d))
-      );
+      setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
 
-      flashInfo("Finalized and sent into governance ledger / council queue.");
+      flashInfo("Finalized → Council queue.");
     } catch (err: any) {
-      flashError(
-        err.message ??
-          "Failed to finalize. (Check constraint or RLS may be blocking the insert.)"
-      );
+      flashError(err?.message ?? "Failed to finalize.");
     } finally {
       setFinalizing(false);
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // RENDER
-  // ---------------------------------------------------------------------------
+  // Discard / Delete (enterprise guardrails)
+  function openConfirm(mode: "discard" | "delete") {
+    if (!selectedDraft) return flashError("Select a draft first.");
+    if (!canMutateSelected) return flashError("Can’t remove a draft that already left Alchemy.");
+    setConfirmMode(mode);
+    setConfirmText("");
+    setConfirmOpen(true);
+  }
+
+  async function performDiscardOrDelete() {
+    if (!selectedDraft || !selectedId) return;
+    if (!canMutateSelected) return;
+
+    const required = confirmMode === "delete" ? "DELETE" : "DISCARD";
+    if (confirmText.trim().toUpperCase() !== required) {
+      flashError(`Type ${required} to confirm.`);
+      return;
+    }
+
+    setConfirmBusy(true);
+    setError(null);
+    setInfo(null);
+
+    try {
+      if (confirmMode === "discard") {
+        const { data, error } = await supabase
+          .from("governance_drafts")
+          .update({
+            status: "discarded" as DraftStatus,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", selectedId)
+          .select(
+            `
+              id,
+              entity_id,
+              entity_slug,
+              entity_name,
+              title,
+              record_type,
+              draft_text,
+              status,
+              created_at,
+              updated_at,
+              finalized_record_id
+            `
+          )
+          .single();
+
+        if (error) throw error;
+
+        const updated = data as DraftRecord;
+        setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
+        flashInfo("Draft discarded.");
+        setConfirmOpen(false);
+        return;
+      }
+
+      // HARD DELETE: SECURITY DEFINER function (do NOT delete ledger)
+      // ✅ IMPORTANT: Match this to your actual SQL signature.
+      //
+      // Variant A (simple):
+      const tryA = await supabase.rpc("owner_delete_governance_draft", {
+        p_draft_id: selectedId,
+      });
+
+      // If your function requires reason/confirm instead, comment Variant A and use Variant B:
+      // const tryB = await supabase.rpc("owner_delete_governance_draft", {
+      //   p_draft_id: selectedId,
+      //   p_reason: "Deleted in CI-Alchemy UI",
+      //   p_confirm: "DELETE",
+      // });
+
+      const rpcError = tryA.error;
+      if (rpcError) throw rpcError;
+
+      setDrafts((prev) => {
+        const nextList = prev.filter((d) => d.id !== selectedId);
+        const next = pickDefaultSelection(nextList);
+
+        if (next) {
+          setSelectedId(next.id);
+          setTitle(next.title ?? "");
+          setBody(next.draft_text ?? "");
+        } else {
+          setSelectedId(null);
+          setTitle("");
+          setBody("");
+        }
+
+        return nextList;
+      });
+
+      flashInfo("Draft permanently deleted.");
+      setConfirmOpen(false);
+    } catch (err: any) {
+      flashError(err?.message ?? "Delete/discard failed.");
+    } finally {
+      setConfirmBusy(false);
+    }
+  }
+
   return (
     <div className="flex h-[calc(100vh-80px)] w-full flex-col px-6 pb-6 pt-4 text-slate-100 overflow-hidden">
       {/* Header */}
-      <div className="mb-4 flex items-baseline justify-between gap-4">
-        <div>
-          <div className="text-xs font-semibold tracking-[0.2em] text-emerald-300">
-            CI-ALCHEMY • LIVE
+      <div className="mb-4 flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="text-[11px] font-semibold tracking-[0.22em] text-emerald-300">
+            CI-ALCHEMY • GENESIS
           </div>
-          <h1 className="text-xl font-semibold tracking-wide">
-            AI Scribe — Governance Drafting Console
+          <h1 className="mt-1 text-[22px] font-semibold tracking-wide">
+            Drafting Console
           </h1>
-          <p className="mt-1 text-xs text-slate-400">
-            Left: run CI-Alchemy, edit &amp; save drafts for{" "}
-            <span className="text-emerald-300">{activeEntityLabel}</span>. Right:
-            queue &amp; preview feeding CI-Council / CI-Forge and the governance
-            ledger.
-          </p>
+          <div className="mt-1 text-[13px] text-slate-400">
+            Entity: <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
+            <span className="mx-2 text-slate-700">•</span>
+            Drafts here are editable + deletable until they leave Alchemy.
+          </div>
         </div>
 
-        <div className="hidden text-right text-xs text-slate-400 md:block">
-          <div>Active entity</div>
-          <div className="font-medium text-slate-200">{activeEntityLabel}</div>
+        {/* Axiom shell (read-only) */}
+        <div className="hidden md:block w-[360px] shrink-0">
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 shadow-lg shadow-black/40">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+              AXIOM Advisory
+            </div>
+            <div className="mt-2 text-[13px] text-slate-300 leading-relaxed">
+              Draft support (non-blocking): clarity checks, risk flags, missing clauses.
+            </div>
+            <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-200">
+              Advisory only. Authority remains Evidence-Bound.
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* Main layout */}
+      {/* Main layout: 3 columns (OS registry feel) */}
       <div className="flex flex-1 gap-4 overflow-hidden">
-        {/* LEFT: Editor */}
-        <div className="flex h-full w-[60%] flex-col rounded-2xl bg-slate-950/70 p-4 shadow-lg shadow-black/40">
-          <div className="mb-3 flex items-center justify-between">
-            <div className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-400">
-              Draft editor
+        {/* LEFT: Tools + Editor */}
+        <div className="flex h-full w-[56%] flex-col rounded-2xl bg-slate-950/70 p-4 shadow-lg shadow-black/40 overflow-hidden">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+              Editor
             </div>
+
             {selectedDraft && (
-              <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">
-                Status:{" "}
+              <div className="flex items-center gap-2">
                 <span
-                  className={
+                  className={cx(
+                    "rounded-full px-3 py-[6px] text-[10px] uppercase tracking-[0.18em] border",
                     selectedDraft.status === "finalized"
-                      ? "text-emerald-300"
+                      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
                       : selectedDraft.status === "reviewed"
-                      ? "text-amber-300"
-                      : "text-sky-300"
-                  }
+                      ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+                      : selectedDraft.status === "discarded"
+                      ? "border-slate-600/50 bg-slate-800/40 text-slate-300"
+                      : "border-sky-500/40 bg-sky-500/10 text-sky-200"
+                  )}
                 >
                   {selectedDraft.status}
                 </span>
+
+                {!canMutateSelected && (
+                  <span className="rounded-full border border-slate-700 bg-slate-900/60 px-3 py-[6px] text-[10px] uppercase tracking-[0.18em] text-slate-300">
+                    Locked (left Alchemy)
+                  </span>
+                )}
               </div>
             )}
           </div>
 
           {/* Title */}
           <input
-            className="mb-3 rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm outline-none ring-0 transition focus:border-emerald-400"
+            className="mb-3 rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-3 text-[15px] outline-none transition focus:border-emerald-400"
             placeholder="Resolution title"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
+            disabled={!!selectedDraft && !canMutateSelected}
           />
 
           {/* Body */}
           <div className="relative flex-1 overflow-hidden">
             <textarea
-              className="h-full w-full resize-none rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-3 text-xs leading-relaxed text-slate-100 outline-none ring-0 focus:border-emerald-400"
-              placeholder="Draft body… (or run CI-Alchemy to generate a first draft)"
+              className="h-full w-full resize-none rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-4 text-[13px] leading-[1.65] text-slate-100 outline-none transition focus:border-emerald-400"
+              placeholder="Draft body… (or Run Alchemy)"
               value={body}
               onChange={(e) => setBody(e.target.value)}
+              disabled={!!selectedDraft && !canMutateSelected}
             />
           </div>
 
-          {/* Buttons */}
-          <div className="mt-3 flex flex-wrap gap-2 text-xs">
+          {/* Actions */}
+          <div className="mt-3 flex flex-wrap gap-2 text-[13px]">
             <button
               onClick={handleRunAlchemy}
               disabled={alchemyRunning || saving || finalizing}
-              className="inline-flex flex-[1.1] items-center justify-center rounded-full border border-emerald-400/80 bg-emerald-500/10 px-4 py-2 font-semibold text-emerald-200 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
+              className="inline-flex items-center justify-center rounded-full border border-emerald-400/70 bg-emerald-500/10 px-5 py-3 font-semibold text-emerald-200 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
             >
-              {alchemyRunning ? "Running CI-Alchemy…" : "Run Alchemy (AI draft)"}
+              {alchemyRunning ? "Running…" : "Run Alchemy"}
             </button>
 
             <button
               onClick={handleSaveDraft}
-              disabled={saving || finalizing}
-              className="inline-flex flex-1 items-center justify-center rounded-full bg-emerald-500 px-4 py-2 font-semibold text-slate-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:bg-emerald-900/60"
+              disabled={saving || finalizing || (!!selectedDraft && !canMutateSelected)}
+              className="inline-flex items-center justify-center rounded-full bg-emerald-500 px-5 py-3 font-semibold text-slate-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:bg-emerald-900/50"
             >
-              {saving ? "Saving…" : "Save draft"}
+              {saving ? "Saving…" : "Save"}
             </button>
 
             <button
               onClick={handleMarkReviewed}
-              disabled={
-                !selectedDraft ||
-                saving ||
-                finalizing ||
-                selectedDraft?.status === "finalized"
-              }
-              className="inline-flex flex-[0.8] items-center justify-center rounded-full border border-amber-400/70 bg-slate-900/80 px-4 py-2 font-semibold text-amber-200 transition hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
+              disabled={!selectedDraft || saving || finalizing || !canMutateSelected}
+              className="inline-flex items-center justify-center rounded-full border border-amber-400/60 bg-slate-900/70 px-5 py-3 font-semibold text-amber-200 transition hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
             >
-              Mark as reviewed
+              Mark reviewed
             </button>
 
             <button
               onClick={handleFinalize}
-              disabled={
-                !selectedDraft ||
-                saving ||
-                finalizing ||
-                selectedDraft?.status === "finalized"
-              }
-              className="inline-flex flex-[1.1] items-center justify-center rounded-full border border-emerald-500/70 bg-slate-950 px-4 py-2 font-semibold text-emerald-300 transition hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
+              disabled={!selectedDraft || saving || finalizing || !canMutateSelected}
+              className="inline-flex items-center justify-center rounded-full border border-emerald-500/60 bg-slate-950 px-5 py-3 font-semibold text-emerald-300 transition hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
             >
-              {finalizing ? "Finalizing…" : "Finalize → Ledger / Council"}
+              {finalizing ? "Finalizing…" : "Finalize → Council"}
+            </button>
+
+            <div className="flex-1" />
+
+            <button
+              onClick={() => openConfirm("discard")}
+              disabled={!selectedDraft || !canMutateSelected || saving || finalizing}
+              className="inline-flex items-center justify-center rounded-full border border-slate-600/60 bg-slate-900/60 px-5 py-3 font-semibold text-slate-200 transition hover:bg-slate-800/60 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
+              title="Soft remove (keeps row, marks discarded)"
+            >
+              Discard
+            </button>
+
+            <button
+              onClick={() => openConfirm("delete")}
+              disabled={!selectedDraft || !canMutateSelected || saving || finalizing}
+              className="inline-flex items-center justify-center rounded-full border border-red-500/50 bg-red-500/10 px-5 py-3 font-semibold text-red-200 transition hover:bg-red-500/15 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
+              title="Hard delete (permanent)"
+            >
+              Delete
             </button>
           </div>
 
           {(error || info) && (
-            <div className="mt-3 text-[11px]">
+            <div className="mt-3 text-[13px]">
               {error && (
-                <div className="rounded-lg border border-red-500/70 bg-red-500/10 px-3 py-2 text-red-200">
+                <div className="rounded-2xl border border-red-500/60 bg-red-500/10 px-4 py-3 text-red-200">
                   {error}
                 </div>
               )}
               {info && !error && (
-                <div className="rounded-lg border border-emerald-500/70 bg-emerald-500/10 px-3 py-2 text-emerald-200">
+                <div className="rounded-2xl border border-emerald-500/60 bg-emerald-500/10 px-4 py-3 text-emerald-200">
                   {info}
                 </div>
               )}
@@ -676,117 +802,221 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           )}
         </div>
 
-        {/* RIGHT: Queue + Preview */}
-        <div className="flex h-full w-[40%] flex-col gap-3 overflow-hidden">
-          {/* Queue */}
-          <div className="flex h-[40%] flex-col rounded-2xl bg-slate-950/70 p-4 shadow-lg shadow-black/40 overflow-hidden">
-            <div className="mb-3 flex items-center justify-between">
-              <div className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-400">
-                Recent drafts
-              </div>
-              <div className="flex flex-wrap gap-1 text-[10px]">
-                {(["all", "draft", "reviewed", "finalized"] as StatusFilter[]).map(
-                  (key) => (
-                    <button
-                      key={key}
-                      onClick={() => setStatusFilter(key)}
-                      className={`rounded-full px-2 py-1 uppercase tracking-[0.16em] ${
-                        statusFilter === key
-                          ? "bg-emerald-500 text-slate-950"
-                          : "bg-slate-900/80 text-slate-400 hover:bg-slate-800"
-                      }`}
-                    >
-                      {key}
-                    </button>
-                  )
-                )}
-              </div>
+        {/* MIDDLE: Drafts registry */}
+        <div className="flex h-full w-[26%] flex-col rounded-2xl bg-slate-950/70 p-4 shadow-lg shadow-black/40 overflow-hidden">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+              Drafts
             </div>
-
-            <div className="flex-1 overflow-y-auto rounded-xl border border-slate-800 bg-slate-950/60">
-              {loading ? (
-                <div className="p-3 text-xs text-slate-400">Loading drafts…</div>
-              ) : filteredDrafts.length === 0 ? (
-                <div className="p-3 text-xs text-slate-500">
-                  No drafts yet for this entity. Run CI-Alchemy or write and save
-                  your first draft on the left.
-                </div>
-              ) : (
-                <ul className="divide-y divide-slate-800 text-xs">
-                  {filteredDrafts.map((d) => (
-                    <li
-                      key={d.id}
-                      onClick={() => handleSelectDraft(d)}
-                      className={`cursor-pointer px-3 py-2 transition hover:bg-slate-800/70 ${
-                        d.id === selectedId ? "bg-slate-800/90" : ""
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="min-w-0 flex-1 font-medium text-slate-100">
-                          <span className="block truncate">
-                            {d.title || "(untitled)"}
-                          </span>
-                        </div>
-                        <span
-                          className={`shrink-0 rounded-full px-2 py-[2px] text-[9px] uppercase tracking-[0.18em] ${
-                            d.status === "finalized"
-                              ? "bg-emerald-500/20 text-emerald-300"
-                              : d.status === "reviewed"
-                              ? "bg-amber-500/20 text-amber-300"
-                              : "bg-sky-500/20 text-sky-300"
-                          }`}
-                        >
-                          {d.status}
-                        </span>
-                      </div>
-                      <div className="mt-1 line-clamp-1 text-[11px] text-slate-400">
-                        {d.draft_text}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
+            <span className="text-[11px] text-slate-500">
+              {filteredDrafts.length}/{drafts.length}
+            </span>
           </div>
 
-          {/* Preview */}
-          <div className="flex h-[60%] flex-col rounded-2xl bg-slate-950/70 p-4 shadow-lg shadow-black/40 overflow-hidden">
-            <div className="mb-3 flex items-center justify-between">
-              <div className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-400">
-                Preview
+          <input
+            className="mb-3 rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[13px] outline-none focus:border-emerald-400"
+            placeholder="Search drafts…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+
+          <div className="mb-3 flex flex-wrap gap-1">
+            {(["draft", "reviewed", "finalized", "discarded", "all"] as StatusFilter[]).map((key) => (
+              <button
+                key={key}
+                onClick={() => setStatusFilter(key)}
+                className={cx(
+                  "rounded-full px-3 py-2 text-[10px] uppercase tracking-[0.18em] transition",
+                  statusFilter === key
+                    ? "bg-emerald-500 text-slate-950"
+                    : "bg-slate-900/70 text-slate-400 hover:bg-slate-800/70"
+                )}
+              >
+                {key}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex-1 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-950/55">
+            {loading ? (
+              <div className="p-4 text-[13px] text-slate-400">Loading…</div>
+            ) : filteredDrafts.length === 0 ? (
+              <div className="p-4 text-[13px] text-slate-500">
+                No drafts for this filter.
               </div>
-              {selectedDraft && (
-                <div className="text-[10px] text-slate-500">
-                  {selectedDraft.record_type || "Resolution"}
-                </div>
-              )}
-            </div>
+            ) : (
+              <ul className="divide-y divide-slate-800">
+                {filteredDrafts.map((d) => (
+                  <li
+                    key={d.id}
+                    onClick={() => handleSelectDraft(d)}
+                    className={cx(
+                      "cursor-pointer px-4 py-3 transition hover:bg-slate-800/60",
+                      d.id === selectedId && "bg-slate-800/80"
+                    )}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[13px] font-semibold text-slate-100">
+                          {d.title || "(untitled)"}
+                        </div>
+                        <div className="mt-1 line-clamp-2 text-[12px] leading-relaxed text-slate-400">
+                          {d.draft_text}
+                        </div>
+                      </div>
 
-            <div className="flex-1 overflow-y-auto rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-xs leading-relaxed">
-              {selectedDraft ? (
-                <>
-                  <h2 className="mb-2 text-[13px] font-semibold text-slate-50">
-                    {title || selectedDraft.title}
-                  </h2>
-                  <pre className="whitespace-pre-wrap font-sans text-[11px] text-slate-200">
-                    {body || selectedDraft.draft_text}
-                  </pre>
-                </>
-              ) : (
-                <div className="text-[11px] text-slate-500">
-                  Select a draft from the queue to preview it here.
-                </div>
-              )}
-            </div>
+                      <span
+                        className={cx(
+                          "shrink-0 rounded-full px-2 py-1 text-[9px] uppercase tracking-[0.18em]",
+                          d.status === "finalized"
+                            ? "bg-emerald-500/15 text-emerald-200"
+                            : d.status === "reviewed"
+                            ? "bg-amber-500/15 text-amber-200"
+                            : d.status === "discarded"
+                            ? "bg-slate-700/40 text-slate-300"
+                            : "bg-sky-500/15 text-sky-200"
+                        )}
+                      >
+                        {d.status}
+                      </span>
+                    </div>
 
-            <div className="mt-2 text-[10px] text-slate-500">
-              CI-Alchemy drafts live here until they are finalized into the{" "}
-              <span className="text-emerald-300">governance ledger</span> and
-              picked up by CI-Council / CI-Forge.
+                    {d.finalized_record_id && (
+                      <div className="mt-2 rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-[11px] text-slate-400">
+                        Linked to Ledger (locked)
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+
+        {/* RIGHT: Preview */}
+        <div className="flex h-full w-[18%] flex-col rounded-2xl bg-slate-950/70 p-4 shadow-lg shadow-black/40 overflow-hidden">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+              Preview
             </div>
+            {selectedDraft && (
+              <div className="text-[11px] text-slate-500">
+                {selectedDraft.record_type || "resolution"}
+              </div>
+            )}
+          </div>
+
+          <div className="flex-1 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-950/55 px-4 py-4">
+            {selectedDraft ? (
+              <>
+                <div className="text-[13px] font-semibold text-slate-100">
+                  {title || selectedDraft.title || "(untitled)"}
+                </div>
+                <div className="mt-3 whitespace-pre-wrap text-[12px] leading-[1.65] text-slate-200">
+                  {body || selectedDraft.draft_text || ""}
+                </div>
+              </>
+            ) : (
+              <div className="text-[13px] text-slate-500">Select a draft.</div>
+            )}
+          </div>
+
+          <div className="mt-3 text-[11px] text-slate-500 leading-relaxed">
+            Finalize promotes to Council queue. Drafts linked to Ledger are locked here.
           </div>
         </div>
       </div>
+
+      {/* Confirm modal (Discard/Delete) */}
+      {confirmOpen && selectedDraft && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6">
+          <div className="w-full max-w-[560px] rounded-3xl border border-slate-800 bg-slate-950/95 shadow-2xl shadow-black/60">
+            <div className="p-6">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                    Confirm {confirmMode === "delete" ? "Hard Delete" : "Discard"}
+                  </div>
+                  <div className="mt-2 text-[18px] font-semibold text-slate-100">
+                    {selectedDraft.title || "(untitled)"}
+                  </div>
+                  <div className="mt-2 text-[13px] text-slate-400 leading-relaxed">
+                    {confirmMode === "delete"
+                      ? "Permanent removal. This is only allowed while the draft is still in Alchemy."
+                      : "Soft remove: marks this draft as discarded (kept for audit / recovery)."}
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => setConfirmOpen(false)}
+                  disabled={confirmBusy}
+                  className="rounded-full border border-slate-700 bg-slate-900/60 px-4 py-2 text-[12px] text-slate-200 hover:bg-slate-800/60 disabled:opacity-50"
+                >
+                  Close
+                </button>
+              </div>
+
+              <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+                <div className="text-[12px] text-slate-300">
+                  Type{" "}
+                  <span
+                    className={cx(
+                      "font-semibold",
+                      confirmMode === "delete" ? "text-red-200" : "text-slate-100"
+                    )}
+                  >
+                    {confirmMode === "delete" ? "DELETE" : "DISCARD"}
+                  </span>{" "}
+                  to confirm.
+                </div>
+
+                <input
+                  value={confirmText}
+                  onChange={(e) => setConfirmText(e.target.value)}
+                  className="mt-3 w-full rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-emerald-400"
+                  placeholder={confirmMode === "delete" ? "DELETE" : "DISCARD"}
+                  disabled={confirmBusy}
+                />
+
+                <div className="mt-4 flex items-center justify-end gap-2">
+                  <button
+                    onClick={() => setConfirmOpen(false)}
+                    disabled={confirmBusy}
+                    className="rounded-full border border-slate-700 bg-slate-900/60 px-5 py-3 text-[13px] font-semibold text-slate-200 hover:bg-slate-800/60 disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+
+                  <button
+                    onClick={performDiscardOrDelete}
+                    disabled={confirmBusy}
+                    className={cx(
+                      "rounded-full px-5 py-3 text-[13px] font-semibold transition disabled:opacity-50",
+                      confirmMode === "delete"
+                        ? "border border-red-500/50 bg-red-500/15 text-red-200 hover:bg-red-500/20"
+                        : "border border-slate-600/60 bg-slate-900/60 text-slate-100 hover:bg-slate-800/60"
+                    )}
+                  >
+                    {confirmBusy
+                      ? confirmMode === "delete"
+                        ? "Deleting…"
+                        : "Discarding…"
+                      : confirmMode === "delete"
+                      ? "Hard Delete"
+                      : "Discard Draft"}
+                  </button>
+                </div>
+              </div>
+
+              {!canMutateSelected && (
+                <div className="mx-6 mb-6 mt-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[13px] text-amber-200">
+                  This draft is linked to the Ledger (left Alchemy). It can’t be discarded or deleted here.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

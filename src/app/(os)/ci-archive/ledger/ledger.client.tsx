@@ -25,39 +25,8 @@ type LedgerStatus =
   | "signing"
   | "signed"
   | "archived"
+  | "rejected"
   | string;
-
-type LedgerRecord = {
-  id: string;
-  entity_id: string | null;
-
-  // from view
-  entity_key?: string | null;
-
-  title: string | null;
-  description?: string | null;
-  record_type?: string | null;
-  record_no?: string | null;
-  status: LedgerStatus | null;
-
-  approved?: boolean | null;
-  archived?: boolean | null;
-
-  created_at: string | null;
-
-  // view adds these
-  draft_id?: string | null;
-
-  envelope_id?: string | null;
-  envelope_status?: string | null;
-  envelope_created_at?: string | null;
-  envelope_completed_at?: string | null;
-
-  signer_url?: string | null;
-  viewer_url?: string | null;
-  verify_url?: string | null;
-  certificate_url?: string | null;
-};
 
 type TabKey =
   | "all"
@@ -68,16 +37,43 @@ type TabKey =
   | "signed"
   | "archived";
 
+type LedgerRecord = {
+  id: string;
+
+  entity_id: string | null;
+  entity_key?: string | null;
+
+  title: string | null;
+  description?: string | null;
+
+  record_type?: string | null;
+  record_no?: string | null;
+
+  status: LedgerStatus | null;
+  approved?: boolean | null;
+  archived?: boolean | null;
+
+  created_at: string | null;
+
+  // from v_governance_ledger_scoped_v3
+  draft_id?: string | null;
+  envelope_id?: string | null;
+  signer_url?: string | null;
+  viewer_url?: string | null;
+  verify_url?: string | null;
+  certificate_url?: string | null;
+};
+
 function cx(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(" ");
 }
 
-function formatDate(d: string | null | undefined) {
+function formatDate(d: string | null) {
   if (!d) return "—";
   try {
     return new Date(d).toLocaleString();
   } catch {
-    return String(d);
+    return d;
   }
 }
 
@@ -174,6 +170,7 @@ export default function DraftsApprovalsClient() {
 
   const filtered = useMemo(() => {
     const term = q.trim().toLowerCase();
+
     return records.filter((r) => {
       const st = normalizedStatus(r);
       if (tab !== "all" && st !== tab) return false;
@@ -196,7 +193,11 @@ export default function DraftsApprovalsClient() {
       signed: 0,
       archived: 0,
     };
-    for (const r of records) c[normalizedStatus(r)] += 1;
+
+    for (const r of records) {
+      const st = normalizedStatus(r);
+      c[st] += 1;
+    }
     return c;
   }, [records]);
 
@@ -209,22 +210,24 @@ export default function DraftsApprovalsClient() {
     setErr(null);
 
     try {
+      // pull everything; view already hides SANDBOX/TEST and is_test
       let query = supabase
         .from("v_governance_ledger_scoped_v3")
         .select("*")
         .order("created_at", { ascending: false });
 
+      // entity scope
       if (scopedEntityId) query = query.eq("entity_id", scopedEntityId);
 
       const { data, error } = await query;
       if (error) throw error;
 
-      const list: LedgerRecord[] = Array.isArray(data) ? (data as any) : [];
+      const list = (data ?? []) as unknown as LedgerRecord[];
       setRecords(list);
 
       if (!selectedId && list.length) setSelectedId(list[0]!.id);
     } catch (e: any) {
-      setErr(e?.message ?? "Failed to load ledger view.");
+      setErr(e?.message ?? "Failed to load v_governance_ledger_scoped_v3.");
       setRecords([]);
     } finally {
       setLoading(false);
@@ -244,8 +247,14 @@ export default function DraftsApprovalsClient() {
   const openInForgeHref = selected ? `/ci-forge?record_id=${encodeURIComponent(selected.id)}` : "#";
   const openInArchiveHref = selected ? `/ci-archive/minute-book${scopeQuery}` : "#";
 
-  const hasDraftToDelete = !!selected?.draft_id;
-  const hasEnvelopeToDelete = !!selected?.envelope_id;
+  const portal = selected?.envelope_id
+    ? {
+        view: selected.viewer_url || null,
+        sign: selected.signer_url || null,
+        verify: selected.verify_url || null,
+        certificate: selected.certificate_url || null,
+      }
+    : null;
 
   return (
     <div className="h-full flex flex-col px-8 pt-6 pb-6">
@@ -262,7 +271,7 @@ export default function DraftsApprovalsClient() {
             <div className="min-w-0">
               <h1 className="text-lg font-semibold text-slate-50 truncate">Drafts &amp; Approvals</h1>
               <p className="mt-1 text-xs text-slate-400">
-                Council decides execution mode. Forge is signature-only. Archive is registry of record.
+                Council decides execution mode. Forge is signature-only. Archive remains the registry of record.
               </p>
             </div>
 
@@ -416,9 +425,6 @@ export default function DraftsApprovalsClient() {
                             <span>
                               Created: <span className="text-slate-200">{formatDate(selected.created_at)}</span>
                             </span>
-                            <span>
-                              Entity: <span className="text-slate-200">{selected.entity_key || "—"}</span>
-                            </span>
                             {selected.record_type && (
                               <span>
                                 Type: <span className="text-slate-200">{selected.record_type}</span>
@@ -427,6 +433,11 @@ export default function DraftsApprovalsClient() {
                             {selected.record_no && (
                               <span>
                                 No: <span className="text-slate-200">{selected.record_no}</span>
+                              </span>
+                            )}
+                            {selected.entity_key && (
+                              <span>
+                                Entity: <span className="text-slate-200">{selected.entity_key}</span>
                               </span>
                             )}
                           </div>
@@ -458,74 +469,70 @@ export default function DraftsApprovalsClient() {
                         </div>
 
                         <div className="col-span-2 rounded-2xl border border-slate-900 bg-black/20 p-3">
-                          <div className="text-[11px] text-slate-500">Portal</div>
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            <a
-                              href={selected.viewer_url || "#"}
-                              target="_blank"
-                              rel="noreferrer"
-                              className={cx(
-                                "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-semibold",
-                                selected.viewer_url
-                                  ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
-                                  : "border-slate-900 bg-black/20 text-slate-600 pointer-events-none"
-                              )}
-                            >
-                              <ExternalLink className="h-4 w-4" />
-                              View
-                            </a>
-
-                            <a
-                              href={selected.signer_url || "#"}
-                              target="_blank"
-                              rel="noreferrer"
-                              className={cx(
-                                "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-semibold",
-                                selected.signer_url
-                                  ? "border-amber-500/30 bg-amber-500/10 text-amber-200 hover:border-amber-500/50"
-                                  : "border-slate-900 bg-black/20 text-slate-600 pointer-events-none"
-                              )}
-                            >
-                              <ExternalLink className="h-4 w-4" />
-                              Sign
-                            </a>
-
-                            <a
-                              href={selected.verify_url || "#"}
-                              target="_blank"
-                              rel="noreferrer"
-                              className={cx(
-                                "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-semibold",
-                                selected.verify_url
-                                  ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
-                                  : "border-slate-900 bg-black/20 text-slate-600 pointer-events-none"
-                              )}
-                            >
-                              <ExternalLink className="h-4 w-4" />
-                              Verify
-                            </a>
-
-                            <a
-                              href={selected.certificate_url || "#"}
-                              target="_blank"
-                              rel="noreferrer"
-                              className={cx(
-                                "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-semibold",
-                                selected.certificate_url
-                                  ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
-                                  : "border-slate-900 bg-black/20 text-slate-600 pointer-events-none"
-                              )}
-                            >
-                              <ExternalLink className="h-4 w-4" />
-                              Certificate
-                            </a>
+                          <div className="text-[11px] text-slate-500">Discipline</div>
+                          <div className="mt-1 text-slate-200">
+                            Approval ≠ archived. Execution creates archive-quality artifacts (PDF + hash + registry entry).
                           </div>
                         </div>
 
                         <div className="col-span-2 rounded-2xl border border-slate-900 bg-black/20 p-3">
-                          <div className="text-[11px] text-slate-500">Discipline</div>
-                          <div className="mt-1 text-slate-200">
-                            Approval ≠ archived. Both execution paths must produce archive-quality artifacts (PDF + hash + registry entry).
+                          <div className="text-[11px] text-slate-500">Portal</div>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            <a
+                              href={portal?.view ?? "#"}
+                              target="_blank"
+                              rel="noreferrer"
+                              className={cx(
+                                "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold tracking-[0.16em] uppercase transition",
+                                portal?.view
+                                  ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
+                                  : "border-slate-900 bg-black/20 text-slate-600 pointer-events-none"
+                              )}
+                            >
+                              <ExternalLink className="h-4 w-4" /> View
+                            </a>
+
+                            <a
+                              href={portal?.sign ?? "#"}
+                              target="_blank"
+                              rel="noreferrer"
+                              className={cx(
+                                "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold tracking-[0.16em] uppercase transition",
+                                portal?.sign
+                                  ? "border-amber-500/30 bg-amber-500/10 text-amber-200 hover:bg-amber-500/15"
+                                  : "border-slate-900 bg-black/20 text-slate-600 pointer-events-none"
+                              )}
+                            >
+                              <ExternalLink className="h-4 w-4" /> Sign
+                            </a>
+
+                            <a
+                              href={portal?.verify ?? "#"}
+                              target="_blank"
+                              rel="noreferrer"
+                              className={cx(
+                                "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold tracking-[0.16em] uppercase transition",
+                                portal?.verify
+                                  ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
+                                  : "border-slate-900 bg-black/20 text-slate-600 pointer-events-none"
+                              )}
+                            >
+                              <ExternalLink className="h-4 w-4" /> Verify
+                            </a>
+
+                            <a
+                              href={portal?.certificate ?? "#"}
+                              target="_blank"
+                              rel="noreferrer"
+                              className={cx(
+                                "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold tracking-[0.16em] uppercase transition",
+                                portal?.certificate
+                                  ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
+                                  : "border-slate-900 bg-black/20 text-slate-600 pointer-events-none"
+                              )}
+                            >
+                              <ExternalLink className="h-4 w-4" /> Certificate
+                            </a>
                           </div>
                         </div>
                       </div>
@@ -581,7 +588,7 @@ export default function DraftsApprovalsClient() {
                         ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
                         : "border-slate-900 bg-black/20 text-slate-600 cursor-not-allowed"
                     )}
-                    title={canArchiveNow ? "Archive signed artifact (wire next)." : "Archive is available once signed."}
+                    title={canArchiveNow ? "Archive signed artifact (wiring next)." : "Archive is available once signed."}
                   >
                     <span className="inline-flex items-center gap-2">
                       <ArchiveIcon className="h-4 w-4" />
@@ -607,18 +614,17 @@ export default function DraftsApprovalsClient() {
                     <ArrowRight className="h-4 w-4" />
                   </Link>
 
+                  <div className="mt-3 rounded-2xl border border-slate-900 bg-black/20 p-3 text-xs text-slate-400">
+                    No governance_ledger deletes (constitutional memory). Cleanup happens in drafts + envelopes, and SANDBOX/TEST is hidden by the scoped view.
+                  </div>
+
                   <div className="mt-3 border-t border-slate-900 pt-3">
-                    <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Cleanup</div>
+                    <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500 mb-2">Cleanup</div>
 
                     <button
-                      disabled={!hasDraftToDelete}
-                      className={cx(
-                        "mt-2 w-full inline-flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-sm transition",
-                        hasDraftToDelete
-                          ? "border-red-900/50 bg-red-950/20 text-red-200 hover:border-red-700/60"
-                          : "border-slate-900 bg-black/20 text-slate-600 cursor-not-allowed"
-                      )}
-                      title={hasDraftToDelete ? "Delete linked CI-Alchemy draft (ledger remains immutable)" : "No draft linked."}
+                      className="w-full inline-flex items-center justify-between gap-3 rounded-2xl border border-red-900/60 bg-red-950/30 px-3 py-2 text-sm text-red-200 opacity-70 cursor-not-allowed"
+                      disabled
+                      title="Draft deletion remains in CI-Alchemy (and is blocked here when draft is linked)."
                     >
                       <span className="inline-flex items-center gap-2">
                         <Trash2 className="h-4 w-4" />
@@ -628,14 +634,9 @@ export default function DraftsApprovalsClient() {
                     </button>
 
                     <button
-                      disabled={!hasEnvelopeToDelete}
-                      className={cx(
-                        "mt-2 w-full inline-flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-sm transition",
-                        hasEnvelopeToDelete
-                          ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
-                          : "border-slate-900 bg-black/20 text-slate-600 cursor-not-allowed"
-                      )}
-                      title={hasEnvelopeToDelete ? "Delete signature envelope (only if allowed by policy)" : "No envelope linked."}
+                      className="mt-2 w-full inline-flex items-center justify-between gap-3 rounded-2xl border border-slate-900 bg-black/20 px-3 py-2 text-sm text-slate-600 opacity-70 cursor-not-allowed"
+                      disabled
+                      title="Envelope deletion is controlled in Forge; completed envelopes are immutable."
                     >
                       <span className="inline-flex items-center gap-2">
                         <Trash2 className="h-4 w-4" />
@@ -643,10 +644,6 @@ export default function DraftsApprovalsClient() {
                       </span>
                       <ArrowRight className="h-4 w-4" />
                     </button>
-
-                    <div className="mt-2 text-xs text-slate-500">
-                      No governance_ledger deletes — constitutional memory. Cleanup is drafts + envelopes.
-                    </div>
                   </div>
                 </div>
               </div>
