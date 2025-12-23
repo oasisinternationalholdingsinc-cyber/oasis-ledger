@@ -34,6 +34,24 @@ function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
 
+function fmtShort(iso: string | null) {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString(undefined, {
+      month: "short",
+      day: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return iso;
+  }
+}
+
+type ReaderTone = "standard" | "ink" | "paper";
+
 export default function CIAlchemyPage() {
   const { activeEntity } = useEntity();
 
@@ -48,7 +66,7 @@ export default function CIAlchemyPage() {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
 
-  // Default: don’t shove finalized clutter in your face
+  // Default: keep clutter off by default
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("draft");
   const [query, setQuery] = useState("");
 
@@ -61,9 +79,9 @@ export default function CIAlchemyPage() {
   const [confirmText, setConfirmText] = useState("");
   const [confirmBusy, setConfirmBusy] = useState(false);
 
-  // Preview (Reader-style overlay) — replaces the always-on right column
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const [previewTone, setPreviewTone] = useState<"evidence" | "reader">("evidence");
+  // Reader overlay (Preview should NOT be always-on)
+  const [readerOpen, setReaderOpen] = useState(false);
+  const [readerTone, setReaderTone] = useState<ReaderTone>("standard");
 
   const activeEntityLabel = useMemo(
     () => ENTITY_LABELS[activeEntity] ?? activeEntity,
@@ -77,7 +95,7 @@ export default function CIAlchemyPage() {
 
   const canMutateSelected = useMemo(() => {
     if (!selectedDraft) return false;
-    // Once it left Alchemy (finalized -> Council/Ledger), Alchemy can’t mutate it.
+    // Once it left Alchemy (finalized -> Council/Ledger), Alchemy can’t delete it.
     return !selectedDraft.finalized_record_id && selectedDraft.status !== "finalized";
   }, [selectedDraft]);
 
@@ -96,6 +114,15 @@ export default function CIAlchemyPage() {
 
     return list;
   }, [drafts, statusFilter, query]);
+
+  const readerTitle = useMemo(() => {
+    return (title || selectedDraft?.title || "(untitled)").trim();
+  }, [title, selectedDraft]);
+
+  const readerBody = useMemo(() => {
+    const raw = (body || selectedDraft?.draft_text || "").trim();
+    return raw.length ? raw : "—";
+  }, [body, selectedDraft]);
 
   function flashError(msg: string) {
     console.error(msg);
@@ -189,6 +216,16 @@ export default function CIAlchemyPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeEntity]);
 
+  // ESC closes Reader
+  useEffect(() => {
+    if (!readerOpen) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setReaderOpen(false);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [readerOpen]);
+
   function handleSelectDraft(draft: DraftRecord) {
     setSelectedId(draft.id);
     setTitle(draft.title ?? "");
@@ -217,7 +254,7 @@ export default function CIAlchemyPage() {
     setInfo(null);
 
     try {
-      // Use signed-in user token for RLS/audit
+      // ✅ Use the signed-in user token (NOT the anon key) so RLS/audit work.
       const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
       if (sessionErr) throw sessionErr;
 
@@ -305,8 +342,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       });
 
       flashInfo("Draft created. Review, edit, then Save.");
-
-      // Re-sync list with DB truth
       await reloadDrafts(true);
     } catch (err: any) {
       console.error("scribe invoke exception", err);
@@ -542,7 +577,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
     }
   }
 
-  // Discard / Delete (enterprise guardrails)
   function openConfirm(mode: "discard" | "delete") {
     if (!selectedDraft) return flashError("Select a draft first.");
     if (!canMutateSelected) return flashError("Can’t remove a draft that already left Alchemy.");
@@ -572,7 +606,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           .update({
             status: "discarded" as DraftStatus,
             updated_at: new Date().toISOString(),
-          } as any)
+          })
           .eq("id", selectedId)
           .select(
             `
@@ -633,16 +667,33 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
     }
   }
 
-  const previewTitle = (title || selectedDraft?.title || "(untitled)").trim();
-  const previewBody = (body || selectedDraft?.draft_text || "").trim();
-
-  function openPreview() {
-    if (!selectedDraft && !previewBody && !previewTitle) {
-      flashError("Select a draft (or write something) before preview.");
-      return;
+  const toneStyles = useMemo(() => {
+    if (readerTone === "ink") {
+      return {
+        shell: "bg-slate-950/95",
+        paper: "bg-slate-950/60",
+        text: "text-slate-100",
+        pre: "text-slate-100",
+        border: "border-slate-800",
+      };
     }
-    setPreviewOpen(true);
-  }
+    if (readerTone === "paper") {
+      return {
+        shell: "bg-slate-950/95",
+        paper: "bg-slate-100",
+        text: "text-slate-950",
+        pre: "text-slate-900",
+        border: "border-slate-200/80",
+      };
+    }
+    return {
+      shell: "bg-slate-950/95",
+      paper: "bg-slate-950/55",
+      text: "text-slate-100",
+      pre: "text-slate-200",
+      border: "border-slate-800",
+    };
+  }, [readerTone]);
 
   return (
     <div className="flex h-[calc(100vh-80px)] w-full flex-col px-6 pb-6 pt-4 text-slate-100 overflow-hidden">
@@ -654,15 +705,14 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           </div>
           <h1 className="mt-1 text-[22px] font-semibold tracking-wide">Drafting Console</h1>
           <div className="mt-1 text-[13px] text-slate-400">
-            Entity:{" "}
-            <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
+            Entity: <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
             <span className="mx-2 text-slate-700">•</span>
-            Drafts here are editable + deletable until they leave Alchemy.
+            Drafts are editable + deletable until they leave Alchemy.
           </div>
         </div>
 
-        {/* AXIOM shell (read-only) */}
-        <div className="hidden md:block w-[360px] shrink-0">
+        {/* Right: Axiom shell + Reader trigger (OS-native) */}
+        <div className="hidden md:flex w-[420px] shrink-0 flex-col gap-3">
           <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 shadow-lg shadow-black/40">
             <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
               AXIOM Advisory
@@ -674,10 +724,36 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
               Advisory only. Authority remains Evidence-Bound.
             </div>
           </div>
+
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 shadow-lg shadow-black/40">
+            <div className="flex items-center justify-between">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Reader
+              </div>
+              <div className="text-[11px] text-slate-500">
+                {selectedDraft ? fmtShort(selectedDraft.created_at) : "—"}
+              </div>
+            </div>
+            <div className="mt-2 text-[12px] text-slate-400 leading-relaxed line-clamp-2">
+              Preview is intentional (OS Reader). No permanent sidebar clutter.
+            </div>
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                onClick={() => setReaderOpen(true)}
+                disabled={!selectedDraft && !title.trim() && !body.trim()}
+                className="inline-flex items-center justify-center rounded-full border border-emerald-500/60 bg-emerald-500/10 px-4 py-2 text-[12px] font-semibold text-emerald-200 transition hover:bg-emerald-500/15 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
+              >
+                Open Reader
+              </button>
+              <div className="text-[11px] text-slate-500">
+                {selectedDraft?.record_type || "resolution"}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* Main layout: 2 columns (OS registry feel + breathing room) */}
+      {/* Main layout: 2 columns (OS breathe) */}
       <div className="flex flex-1 gap-4 overflow-hidden">
         {/* LEFT: Editor */}
         <div className="flex h-full w-[62%] flex-col rounded-2xl bg-slate-950/70 p-4 shadow-lg shadow-black/40 overflow-hidden">
@@ -712,40 +788,28 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                 </>
               )}
 
-              {/* Preview opener (Reader-style) */}
               <button
-                onClick={openPreview}
-                className="rounded-full border border-slate-700 bg-slate-950 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
-                title="Open Reader preview"
+                onClick={() => setReaderOpen(true)}
+                disabled={!selectedDraft && !title.trim() && !body.trim()}
+                className="rounded-full border border-slate-700 bg-slate-950/40 px-3 py-[6px] text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-200 hover:bg-slate-900/60 disabled:cursor-not-allowed disabled:text-slate-500"
+                title="Open OS Reader overlay"
               >
-                Preview
+                Reader
               </button>
             </div>
           </div>
 
-          {/* Title */}
           <input
-            className={cx(
-              "mb-3 rounded-2xl border bg-slate-900/80 px-4 py-3 text-[15px] outline-none transition",
-              !!selectedDraft && !canMutateSelected
-                ? "border-slate-800 text-slate-400 cursor-not-allowed"
-                : "border-slate-700 focus:border-emerald-400"
-            )}
+            className="mb-3 rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-3 text-[15px] outline-none transition focus:border-emerald-400"
             placeholder="Resolution title"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             disabled={!!selectedDraft && !canMutateSelected}
           />
 
-          {/* Body */}
           <div className="relative flex-1 overflow-hidden">
             <textarea
-              className={cx(
-                "h-full w-full resize-none rounded-2xl border bg-slate-900/80 px-4 py-4 text-[13px] leading-[1.65] outline-none transition",
-                !!selectedDraft && !canMutateSelected
-                  ? "border-slate-800 text-slate-400 cursor-not-allowed"
-                  : "border-slate-700 text-slate-100 focus:border-emerald-400"
-              )}
+              className="h-full w-full resize-none rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-4 text-[13px] leading-[1.65] text-slate-100 outline-none transition focus:border-emerald-400"
               placeholder="Draft body… (or Run Alchemy)"
               value={body}
               onChange={(e) => setBody(e.target.value)}
@@ -753,7 +817,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
             />
           </div>
 
-          {/* Actions */}
           <div className="mt-3 flex flex-wrap gap-2 text-[13px]">
             <button
               onClick={handleRunAlchemy}
@@ -822,17 +885,13 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
               )}
             </div>
           )}
-
-          <div className="mt-3 text-[11px] text-slate-500">
-            Preview opens as a Reader overlay (OS style) — no cramped right column.
-          </div>
         </div>
 
         {/* RIGHT: Drafts registry */}
         <div className="flex h-full w-[38%] flex-col rounded-2xl bg-slate-950/70 p-4 shadow-lg shadow-black/40 overflow-hidden">
           <div className="mb-3 flex items-center justify-between gap-2">
             <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-              Drafts
+              Drafts Registry
             </div>
             <span className="text-[11px] text-slate-500">
               {filteredDrafts.length}/{drafts.length}
@@ -884,7 +943,12 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                         <div className="truncate text-[13px] font-semibold text-slate-100">
                           {d.title || "(untitled)"}
                         </div>
-                        <div className="mt-1 line-clamp-2 text-[12px] leading-relaxed text-slate-400">
+                        <div className="mt-1 flex items-center gap-2 text-[11px] text-slate-500">
+                          <span>{fmtShort(d.created_at)}</span>
+                          <span className="h-1 w-1 rounded-full bg-slate-700" />
+                          <span className="uppercase tracking-[0.18em]">{d.record_type || "resolution"}</span>
+                        </div>
+                        <div className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-slate-400">
                           {d.draft_text}
                         </div>
                       </div>
@@ -916,76 +980,64 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
             )}
           </div>
 
-          <div className="mt-3 flex items-center justify-between text-[11px] text-slate-500">
-            <span>OS Registry view — clean + scoped.</span>
+          {/* Mobile Reader trigger */}
+          <div className="mt-3 flex items-center justify-between gap-2 md:hidden">
+            <div className="text-[11px] text-slate-500">Preview uses OS Reader.</div>
             <button
-              onClick={() => reloadDrafts(true)}
-              className="rounded-full border border-slate-700 bg-slate-950 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-200 hover:bg-slate-900/60"
-              title="Refresh list"
+              onClick={() => setReaderOpen(true)}
+              disabled={!selectedDraft && !title.trim() && !body.trim()}
+              className="rounded-full border border-emerald-500/60 bg-emerald-500/10 px-4 py-2 text-[12px] font-semibold text-emerald-200 hover:bg-emerald-500/15 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
             >
-              Refresh
+              Open Reader
             </button>
           </div>
         </div>
       </div>
 
-      {/* Reader Preview Overlay */}
-      {previewOpen && (
-        <div className="fixed inset-0 z-[80] bg-black/65">
-          <div className="absolute inset-0" onClick={() => setPreviewOpen(false)} />
-
-          <div className="absolute left-1/2 top-1/2 w-[min(1100px,92vw)] h-[min(86vh,860px)] -translate-x-1/2 -translate-y-1/2">
-            <div className="h-full rounded-3xl border border-slate-800 bg-slate-950/95 shadow-2xl shadow-black/60 overflow-hidden">
-              {/* Header */}
-              <div className="flex items-center justify-between gap-3 border-b border-slate-800 px-6 py-4">
+      {/* Reader Overlay */}
+      {readerOpen && (
+        <div className="fixed inset-0 z-[80] bg-black/70">
+          <div className="absolute inset-0 px-4 py-4 md:px-8 md:py-8">
+            <div className={cx("mx-auto h-full max-w-[1100px] rounded-3xl border shadow-2xl shadow-black/70", toneStyles.shell, "border-slate-800")}>
+              {/* Top bar */}
+              <div className="flex items-center justify-between gap-3 border-b border-slate-800 px-5 py-4">
                 <div className="min-w-0">
-                  <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">
-                    Reader • Preview
+                  <div className="text-[10px] font-semibold uppercase tracking-[0.22em] text-emerald-300">
+                    OS READER • CI-ALCHEMY
                   </div>
                   <div className="mt-1 truncate text-[16px] font-semibold text-slate-100">
-                    {previewTitle || "(untitled)"}
+                    {readerTitle}
                   </div>
-                  <div className="mt-1 text-[12px] text-slate-400">
-                    {selectedDraft?.record_type || "resolution"}
-                    <span className="mx-2 text-slate-700">•</span>
-                    {selectedDraft?.finalized_record_id ? (
-                      <span className="text-emerald-300">ledger-linked (locked)</span>
+                  <div className="mt-1 text-[11px] text-slate-500">
+                    {selectedDraft ? (
+                      <>
+                        {selectedDraft.record_type || "resolution"} • {fmtShort(selectedDraft.created_at)}
+                      </>
                     ) : (
-                      <span className="text-slate-300">draft (editable)</span>
+                      <>Local draft preview</>
                     )}
                   </div>
                 </div>
 
                 <div className="flex items-center gap-2">
-                  {/* Tone toggle (optional, OS-style) */}
                   <div className="hidden sm:flex rounded-full border border-slate-800 bg-slate-950/60 p-1 text-[10px] uppercase tracking-[0.18em]">
-                    <button
-                      onClick={() => setPreviewTone("evidence")}
-                      className={cx(
-                        "rounded-full px-3 py-1 transition",
-                        previewTone === "evidence"
-                          ? "bg-emerald-500 text-slate-950"
-                          : "text-slate-400 hover:bg-slate-900/60"
-                      )}
-                    >
-                      Evidence
-                    </button>
-                    <button
-                      onClick={() => setPreviewTone("reader")}
-                      className={cx(
-                        "rounded-full px-3 py-1 transition",
-                        previewTone === "reader"
-                          ? "bg-slate-200 text-slate-950"
-                          : "text-slate-400 hover:bg-slate-900/60"
-                      )}
-                    >
-                      Reader
-                    </button>
+                    {(["standard", "ink", "paper"] as ReaderTone[]).map((t) => (
+                      <button
+                        key={t}
+                        onClick={() => setReaderTone(t)}
+                        className={cx(
+                          "rounded-full px-3 py-1 transition",
+                          readerTone === t ? "bg-emerald-500 text-slate-950" : "text-slate-400 hover:bg-slate-900/70"
+                        )}
+                      >
+                        {t}
+                      </button>
+                    ))}
                   </div>
 
                   <button
-                    onClick={() => setPreviewOpen(false)}
-                    className="rounded-full border border-slate-700 bg-slate-950 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-200 hover:bg-slate-900/60"
+                    onClick={() => setReaderOpen(false)}
+                    className="rounded-full border border-slate-700 bg-slate-950/40 px-4 py-2 text-[12px] font-semibold text-slate-200 hover:bg-slate-900/60"
                   >
                     Close
                   </button>
@@ -993,26 +1045,17 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
               </div>
 
               {/* Body */}
-              <div className="h-[calc(100%-64px)] px-6 py-5 overflow-y-auto">
+              <div className="h-[calc(100%-72px)] overflow-hidden p-5 md:p-6">
                 <div
                   className={cx(
-                    "rounded-3xl border bg-slate-950/60 px-6 py-6",
-                    previewTone === "evidence"
-                      ? "border-emerald-500/20"
-                      : "border-slate-800"
+                    "h-full overflow-y-auto rounded-2xl border px-5 py-5 md:px-7 md:py-6",
+                    toneStyles.border,
+                    toneStyles.paper
                   )}
                 >
-                  {/* “Reader breathing room” typography */}
-                  <div className="text-[12px] uppercase tracking-[0.22em] text-slate-500">
-                    Document body
-                  </div>
-                  <div className="mt-4 whitespace-pre-wrap text-[13px] leading-[1.85] text-slate-100">
-                    {previewBody || "—"}
-                  </div>
-                </div>
-
-                <div className="mt-4 text-[11px] text-slate-500">
-                  Preview is non-mutating. Save/Finalize happens in the editor panel.
+                  <pre className={cx("whitespace-pre-wrap font-sans text-[13px] leading-[1.75]", toneStyles.pre)}>
+                    {readerBody}
+                  </pre>
                 </div>
               </div>
             </div>
@@ -1035,7 +1078,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                   </div>
                   <div className="mt-2 text-[13px] text-slate-400 leading-relaxed">
                     {confirmMode === "delete"
-                      ? "Permanent removal. Allowed only while the draft is still in Alchemy."
+                      ? "Permanent removal. Only allowed while the draft is still in Alchemy."
                       : "Soft remove: marks this draft as discarded (kept for audit / recovery)."}
                   </div>
                 </div>
@@ -1052,12 +1095,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
               <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
                 <div className="text-[12px] text-slate-300">
                   Type{" "}
-                  <span
-                    className={cx(
-                      "font-semibold",
-                      confirmMode === "delete" ? "text-red-200" : "text-slate-100"
-                    )}
-                  >
+                  <span className={cx("font-semibold", confirmMode === "delete" ? "text-red-200" : "text-slate-100")}>
                     {confirmMode === "delete" ? "DELETE" : "DISCARD"}
                   </span>{" "}
                   to confirm.
