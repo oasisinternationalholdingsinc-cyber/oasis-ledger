@@ -13,7 +13,6 @@ import {
   Archive as ArchiveIcon,
   FileCheck2,
   Trash2,
-  AlertTriangle,
 } from "lucide-react";
 
 import { supabaseBrowser } from "@/lib/supabase/browser";
@@ -28,6 +27,38 @@ type LedgerStatus =
   | "archived"
   | string;
 
+type LedgerRecord = {
+  id: string;
+  entity_id: string | null;
+
+  // from view
+  entity_key?: string | null;
+
+  title: string | null;
+  description?: string | null;
+  record_type?: string | null;
+  record_no?: string | null;
+  status: LedgerStatus | null;
+
+  approved?: boolean | null;
+  archived?: boolean | null;
+
+  created_at: string | null;
+
+  // view adds these
+  draft_id?: string | null;
+
+  envelope_id?: string | null;
+  envelope_status?: string | null;
+  envelope_created_at?: string | null;
+  envelope_completed_at?: string | null;
+
+  signer_url?: string | null;
+  viewer_url?: string | null;
+  verify_url?: string | null;
+  certificate_url?: string | null;
+};
+
 type TabKey =
   | "all"
   | "drafted"
@@ -37,51 +68,23 @@ type TabKey =
   | "signed"
   | "archived";
 
-type LedgerRow = {
-  id: string;
-  entity_id: string | null;
-
-  entity_key?: string | null;
-
-  title: string | null;
-  description?: string | null;
-  record_type?: string | null;
-  record_no?: string | null;
-
-  status: LedgerStatus | null;
-  approved?: boolean | null;
-  archived?: boolean | null;
-
-  created_at: string | null;
-
-  // from v2 view
-  draft_id?: string | null;
-  envelope_id?: string | null;
-
-  signer_url?: string | null;
-  viewer_url?: string | null;
-  verify_url?: string | null;
-  certificate_url?: string | null;
-};
-
 function cx(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(" ");
 }
 
-function formatDate(d: string | null) {
+function formatDate(d: string | null | undefined) {
   if (!d) return "—";
   try {
-    const dt = new Date(d);
-    return dt.toLocaleString();
+    return new Date(d).toLocaleString();
   } catch {
-    return d;
+    return String(d);
   }
 }
 
-function normalizedStatus(r: LedgerRow): TabKey {
+function normalizedStatus(r: LedgerRecord): TabKey {
   if (r.archived) return "archived";
-  const s = (r.status || "").toString().toLowerCase().trim();
 
+  const s = (r.status || "").toString().toLowerCase().trim();
   if (s === "draft") return "drafted";
   if (s === "drafted") return "drafted";
   if (s === "pending") return "pending";
@@ -138,8 +141,6 @@ function TabButton({
   );
 }
 
-type ConfirmMode = "draft" | "envelope";
-
 export default function DraftsApprovalsClient() {
   const supabase = useMemo(() => supabaseBrowser(), []);
 
@@ -160,18 +161,11 @@ export default function DraftsApprovalsClient() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  const [records, setRecords] = useState<LedgerRow[]>([]);
+  const [records, setRecords] = useState<LedgerRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const [tab, setTab] = useState<TabKey>("all");
   const [q, setQ] = useState("");
-
-  // confirm modal
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [confirmMode, setConfirmMode] = useState<ConfirmMode>("draft");
-  const [confirmReason, setConfirmReason] = useState("SANDBOX CLEANUP");
-  const [confirmBusy, setConfirmBusy] = useState(false);
-  const [confirmMsg, setConfirmMsg] = useState<string | null>(null);
 
   const selected = useMemo(
     () => records.find((r) => r.id === selectedId) ?? null,
@@ -180,7 +174,6 @@ export default function DraftsApprovalsClient() {
 
   const filtered = useMemo(() => {
     const term = q.trim().toLowerCase();
-
     return records.filter((r) => {
       const st = normalizedStatus(r);
       if (tab !== "all" && st !== tab) return false;
@@ -189,14 +182,7 @@ export default function DraftsApprovalsClient() {
       const title = (r.title || "").toLowerCase();
       const type = ((r.record_type as any) || "").toString().toLowerCase();
       const desc = ((r.description as any) || "").toString().toLowerCase();
-      const ek = ((r.entity_key as any) || "").toString().toLowerCase();
-      return (
-        title.includes(term) ||
-        type.includes(term) ||
-        desc.includes(term) ||
-        st.includes(term) ||
-        ek.includes(term)
-      );
+      return title.includes(term) || type.includes(term) || desc.includes(term) || st.includes(term);
     });
   }, [records, tab, q]);
 
@@ -224,28 +210,8 @@ export default function DraftsApprovalsClient() {
 
     try {
       let query = supabase
-        .from("v_governance_ledger_scoped_v2")
-        .select(
-          [
-            "id",
-            "entity_id",
-            "entity_key",
-            "title",
-            "description",
-            "record_type",
-            "record_no",
-            "status",
-            "approved",
-            "archived",
-            "created_at",
-            "draft_id",
-            "envelope_id",
-            "signer_url",
-            "viewer_url",
-            "verify_url",
-            "certificate_url",
-          ].join(",")
-        )
+        .from("v_governance_ledger_scoped_v3")
+        .select("*")
         .order("created_at", { ascending: false });
 
       if (scopedEntityId) query = query.eq("entity_id", scopedEntityId);
@@ -253,11 +219,12 @@ export default function DraftsApprovalsClient() {
       const { data, error } = await query;
       if (error) throw error;
 
-      const list = (data ?? []) as unknown as LedgerRow[];
+      const list: LedgerRecord[] = Array.isArray(data) ? (data as any) : [];
       setRecords(list);
+
       if (!selectedId && list.length) setSelectedId(list[0]!.id);
     } catch (e: any) {
-      setErr(e?.message ?? "Failed to load v_governance_ledger_scoped_v2.");
+      setErr(e?.message ?? "Failed to load ledger view.");
       setRecords([]);
     } finally {
       setLoading(false);
@@ -277,55 +244,8 @@ export default function DraftsApprovalsClient() {
   const openInForgeHref = selected ? `/ci-forge?record_id=${encodeURIComponent(selected.id)}` : "#";
   const openInArchiveHref = selected ? `/ci-archive/minute-book${scopeQuery}` : "#";
 
-  const canDeleteDraft = !!selected?.draft_id;
-  const canDeleteEnvelope = !!selected?.envelope_id;
-
-  function openConfirm(mode: ConfirmMode) {
-    setConfirmMode(mode);
-    setConfirmMsg(null);
-    setConfirmReason("SANDBOX CLEANUP");
-    setConfirmOpen(true);
-  }
-
-  async function runDelete() {
-    if (!selected) return;
-    const reason = confirmReason.trim();
-    if (!reason) {
-      setConfirmMsg("Reason is required.");
-      return;
-    }
-
-    setConfirmBusy(true);
-    setConfirmMsg(null);
-
-    try {
-      if (confirmMode === "draft") {
-        if (!selected.draft_id) throw new Error("No draft_id found for this record.");
-        const { data, error } = await supabase.rpc("owner_delete_governance_draft", {
-          p_draft_id: selected.draft_id,
-          p_reason: reason,
-        } as any);
-        if (error) throw error;
-
-        setConfirmMsg("Draft deleted (ledger row remains immutable).");
-      } else {
-        if (!selected.envelope_id) throw new Error("No envelope_id found for this record.");
-        const { data, error } = await supabase.rpc("owner_delete_signature_envelope", {
-          p_envelope_id: selected.envelope_id,
-          p_reason: reason,
-        } as any);
-        if (error) throw error;
-
-        setConfirmMsg("Envelope deleted (if not completed).");
-      }
-
-      await load();
-    } catch (e: any) {
-      setConfirmMsg(e?.message ?? "Delete failed.");
-    } finally {
-      setConfirmBusy(false);
-    }
-  }
+  const hasDraftToDelete = !!selected?.draft_id;
+  const hasEnvelopeToDelete = !!selected?.envelope_id;
 
   return (
     <div className="h-full flex flex-col px-8 pt-6 pb-6">
@@ -342,13 +262,13 @@ export default function DraftsApprovalsClient() {
             <div className="min-w-0">
               <h1 className="text-lg font-semibold text-slate-50 truncate">Drafts &amp; Approvals</h1>
               <p className="mt-1 text-xs text-slate-400">
-                Council decides execution mode. Forge is signature-only. Archive remains the registry of record.
+                Council decides execution mode. Forge is signature-only. Archive is registry of record.
               </p>
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
               <div className="hidden md:block text-[10px] uppercase tracking-[0.22em] text-slate-500">
-                Source • <span className="text-slate-300">v_governance_ledger_scoped_v2</span>
+                Source • <span className="text-slate-300">v_governance_ledger_scoped_v3</span>
               </div>
 
               <button
@@ -430,7 +350,7 @@ export default function DraftsApprovalsClient() {
                   <div className="space-y-2">
                     {filtered.map((r) => {
                       const isSel = r.id === selectedId;
-                      const st2 = normalizedStatus(r);
+                      const stt = normalizedStatus(r);
                       return (
                         <button
                           key={r.id}
@@ -455,10 +375,10 @@ export default function DraftsApprovalsClient() {
                             <div
                               className={cx(
                                 "shrink-0 rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.22em]",
-                                statusPillClass(st2)
+                                statusPillClass(stt)
                               )}
                             >
-                              {st2}
+                              {stt}
                             </div>
                           </div>
                         </button>
@@ -496,6 +416,9 @@ export default function DraftsApprovalsClient() {
                             <span>
                               Created: <span className="text-slate-200">{formatDate(selected.created_at)}</span>
                             </span>
+                            <span>
+                              Entity: <span className="text-slate-200">{selected.entity_key || "—"}</span>
+                            </span>
                             {selected.record_type && (
                               <span>
                                 Type: <span className="text-slate-200">{selected.record_type}</span>
@@ -504,11 +427,6 @@ export default function DraftsApprovalsClient() {
                             {selected.record_no && (
                               <span>
                                 No: <span className="text-slate-200">{selected.record_no}</span>
-                              </span>
-                            )}
-                            {selected.entity_key && (
-                              <span>
-                                Entity: <span className="text-slate-200">{selected.entity_key}</span>
                               </span>
                             )}
                           </div>
@@ -525,52 +443,93 @@ export default function DraftsApprovalsClient() {
                       </div>
                     </div>
 
-                    {(selected.signer_url || selected.verify_url || selected.certificate_url) && (
-                      <div className="rounded-3xl border border-slate-900 bg-black/30 p-4">
-                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Portal links</div>
-                        <div className="mt-3 grid grid-cols-1 gap-2 text-sm">
-                          {selected.signer_url && (
+                    <div className="rounded-3xl border border-slate-900 bg-black/30 p-4">
+                      <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Execution posture</div>
+
+                      <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
+                        <div className="rounded-2xl border border-slate-900 bg-black/20 p-3">
+                          <div className="text-[11px] text-slate-500">Approved</div>
+                          <div className="mt-1 text-slate-200">{selected.approved ? "Yes" : "No"}</div>
+                        </div>
+
+                        <div className="rounded-2xl border border-slate-900 bg-black/20 p-3">
+                          <div className="text-[11px] text-slate-500">Archived</div>
+                          <div className="mt-1 text-slate-200">{selected.archived ? "Yes" : "No"}</div>
+                        </div>
+
+                        <div className="col-span-2 rounded-2xl border border-slate-900 bg-black/20 p-3">
+                          <div className="text-[11px] text-slate-500">Portal</div>
+                          <div className="mt-2 flex flex-wrap gap-2">
                             <a
-                              href={selected.signer_url}
+                              href={selected.viewer_url || "#"}
                               target="_blank"
                               rel="noreferrer"
-                              className="inline-flex items-center justify-between rounded-2xl border border-slate-800 bg-black/40 px-3 py-2 text-slate-100 hover:border-amber-500/30"
+                              className={cx(
+                                "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-semibold",
+                                selected.viewer_url
+                                  ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
+                                  : "border-slate-900 bg-black/20 text-slate-600 pointer-events-none"
+                              )}
                             >
-                              <span className="inline-flex items-center gap-2">
-                                <ExternalLink className="h-4 w-4" /> Sign (Signer)
-                              </span>
-                              <ArrowRight className="h-4 w-4" />
+                              <ExternalLink className="h-4 w-4" />
+                              View
                             </a>
-                          )}
-                          {selected.verify_url && (
+
                             <a
-                              href={selected.verify_url}
+                              href={selected.signer_url || "#"}
                               target="_blank"
                               rel="noreferrer"
-                              className="inline-flex items-center justify-between rounded-2xl border border-slate-800 bg-black/40 px-3 py-2 text-slate-100 hover:border-amber-500/30"
+                              className={cx(
+                                "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-semibold",
+                                selected.signer_url
+                                  ? "border-amber-500/30 bg-amber-500/10 text-amber-200 hover:border-amber-500/50"
+                                  : "border-slate-900 bg-black/20 text-slate-600 pointer-events-none"
+                              )}
                             >
-                              <span className="inline-flex items-center gap-2">
-                                <ExternalLink className="h-4 w-4" /> Verify
-                              </span>
-                              <ArrowRight className="h-4 w-4" />
+                              <ExternalLink className="h-4 w-4" />
+                              Sign
                             </a>
-                          )}
-                          {selected.certificate_url && (
+
                             <a
-                              href={selected.certificate_url}
+                              href={selected.verify_url || "#"}
                               target="_blank"
                               rel="noreferrer"
-                              className="inline-flex items-center justify-between rounded-2xl border border-slate-800 bg-black/40 px-3 py-2 text-slate-100 hover:border-amber-500/30"
+                              className={cx(
+                                "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-semibold",
+                                selected.verify_url
+                                  ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
+                                  : "border-slate-900 bg-black/20 text-slate-600 pointer-events-none"
+                              )}
                             >
-                              <span className="inline-flex items-center gap-2">
-                                <ExternalLink className="h-4 w-4" /> Certificate
-                              </span>
-                              <ArrowRight className="h-4 w-4" />
+                              <ExternalLink className="h-4 w-4" />
+                              Verify
                             </a>
-                          )}
+
+                            <a
+                              href={selected.certificate_url || "#"}
+                              target="_blank"
+                              rel="noreferrer"
+                              className={cx(
+                                "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-semibold",
+                                selected.certificate_url
+                                  ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
+                                  : "border-slate-900 bg-black/20 text-slate-600 pointer-events-none"
+                              )}
+                            >
+                              <ExternalLink className="h-4 w-4" />
+                              Certificate
+                            </a>
+                          </div>
+                        </div>
+
+                        <div className="col-span-2 rounded-2xl border border-slate-900 bg-black/20 p-3">
+                          <div className="text-[11px] text-slate-500">Discipline</div>
+                          <div className="mt-1 text-slate-200">
+                            Approval ≠ archived. Both execution paths must produce archive-quality artifacts (PDF + hash + registry entry).
+                          </div>
                         </div>
                       </div>
-                    )}
+                    </div>
 
                     {selected.description && (
                       <div className="rounded-3xl border border-slate-900 bg-black/20 p-4 text-sm text-slate-200">
@@ -622,7 +581,7 @@ export default function DraftsApprovalsClient() {
                         ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
                         : "border-slate-900 bg-black/20 text-slate-600 cursor-not-allowed"
                     )}
-                    title={canArchiveNow ? "Archive signed artifact (wiring later)." : "Archive is available once signed."}
+                    title={canArchiveNow ? "Archive signed artifact (wire next)." : "Archive is available once signed."}
                   >
                     <span className="inline-flex items-center gap-2">
                       <ArchiveIcon className="h-4 w-4" />
@@ -648,19 +607,18 @@ export default function DraftsApprovalsClient() {
                     <ArrowRight className="h-4 w-4" />
                   </Link>
 
-                  <div className="mt-3 pt-3 border-t border-slate-900/80">
-                    <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500 mb-2">Cleanup</div>
+                  <div className="mt-3 border-t border-slate-900 pt-3">
+                    <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Cleanup</div>
 
                     <button
-                      onClick={() => openConfirm("draft")}
-                      disabled={!canDeleteDraft}
+                      disabled={!hasDraftToDelete}
                       className={cx(
-                        "w-full inline-flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-sm transition",
-                        canDeleteDraft
-                          ? "border-red-900/60 bg-red-950/20 text-red-200 hover:border-red-500/40"
+                        "mt-2 w-full inline-flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-sm transition",
+                        hasDraftToDelete
+                          ? "border-red-900/50 bg-red-950/20 text-red-200 hover:border-red-700/60"
                           : "border-slate-900 bg-black/20 text-slate-600 cursor-not-allowed"
                       )}
-                      title={canDeleteDraft ? "Delete linked CI-Alchemy draft (ledger row remains)" : "No linked draft_id found."}
+                      title={hasDraftToDelete ? "Delete linked CI-Alchemy draft (ledger remains immutable)" : "No draft linked."}
                     >
                       <span className="inline-flex items-center gap-2">
                         <Trash2 className="h-4 w-4" />
@@ -670,19 +628,14 @@ export default function DraftsApprovalsClient() {
                     </button>
 
                     <button
-                      onClick={() => openConfirm("envelope")}
-                      disabled={!canDeleteEnvelope}
+                      disabled={!hasEnvelopeToDelete}
                       className={cx(
                         "mt-2 w-full inline-flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-sm transition",
-                        canDeleteEnvelope
-                          ? "border-red-900/60 bg-red-950/20 text-red-200 hover:border-red-500/40"
+                        hasEnvelopeToDelete
+                          ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
                           : "border-slate-900 bg-black/20 text-slate-600 cursor-not-allowed"
                       )}
-                      title={
-                        canDeleteEnvelope
-                          ? "Delete signature envelope (will refuse if completed; immutability)"
-                          : "No linked envelope_id found."
-                      }
+                      title={hasEnvelopeToDelete ? "Delete signature envelope (only if allowed by policy)" : "No envelope linked."}
                     >
                       <span className="inline-flex items-center gap-2">
                         <Trash2 className="h-4 w-4" />
@@ -691,7 +644,7 @@ export default function DraftsApprovalsClient() {
                       <ArrowRight className="h-4 w-4" />
                     </button>
 
-                    <div className="mt-2 text-[11px] text-slate-500">
+                    <div className="mt-2 text-xs text-slate-500">
                       No governance_ledger deletes — constitutional memory. Cleanup is drafts + envelopes.
                     </div>
                   </div>
@@ -743,71 +696,6 @@ export default function DraftsApprovalsClient() {
           </div>
         </div>
       </div>
-
-      {/* Confirm modal */}
-      {confirmOpen && (
-        <div className="fixed inset-0 z-[9999] bg-black/70 backdrop-blur-sm flex items-center justify-center px-4">
-          <div className="w-full max-w-[640px] rounded-3xl border border-slate-800 bg-black/80 shadow-[0_0_60px_rgba(0,0,0,0.7)] overflow-hidden">
-            <div className="p-5 border-b border-slate-800">
-              <div className="flex items-start gap-3">
-                <div className="mt-0.5 rounded-full border border-amber-500/30 bg-amber-500/10 p-2">
-                  <AlertTriangle className="h-5 w-5 text-amber-200" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-sm font-semibold text-slate-50">
-                    {confirmMode === "draft" ? "Delete linked draft?" : "Delete signature envelope?"}
-                  </div>
-                  <div className="mt-1 text-xs text-slate-400">
-                    {confirmMode === "draft"
-                      ? "Deletes the CI-Alchemy draft linked to this ledger record. Ledger row remains immutable."
-                      : "Deletes the envelope using your SECURITY DEFINER function. Completed envelopes may refuse (immutability)."}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="p-5 space-y-3">
-              <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Reason (required)</div>
-              <textarea
-                value={confirmReason}
-                onChange={(e) => setConfirmReason(e.target.value)}
-                className="w-full h-28 rounded-2xl border border-slate-800 bg-black/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-amber-500/30"
-                placeholder="Why are you deleting this?"
-              />
-
-              {confirmMsg && (
-                <div className="rounded-2xl border border-slate-800 bg-black/40 px-3 py-2 text-sm text-slate-200">
-                  {confirmMsg}
-                </div>
-              )}
-
-              <div className="flex items-center justify-end gap-2 pt-2">
-                <button
-                  onClick={() => {
-                    if (!confirmBusy) setConfirmOpen(false);
-                  }}
-                  className="rounded-full border border-slate-700 bg-black/30 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:border-slate-600"
-                  disabled={confirmBusy}
-                >
-                  Cancel
-                </button>
-
-                <button
-                  onClick={runDelete}
-                  disabled={confirmBusy}
-                  className="rounded-full border border-red-500/30 bg-red-600/90 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-white hover:bg-red-600 disabled:opacity-60"
-                >
-                  {confirmBusy ? "Deleting…" : confirmMode === "draft" ? "Delete Draft" : "Delete Envelope"}
-                </button>
-              </div>
-
-              <div className="text-[11px] text-slate-500">
-                Ledger rows are immutable. This action only deletes related drafts/envelopes using your existing SECURITY DEFINER functions.
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
