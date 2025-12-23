@@ -48,18 +48,22 @@ export default function CIAlchemyPage() {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
 
-  // Default: don’t shove finalized/test clutter in your face
+  // Default: don’t shove finalized clutter in your face
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("draft");
   const [query, setQuery] = useState("");
 
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
-  // Delete / Discard modal
+  // Discard / Delete modal
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmMode, setConfirmMode] = useState<"discard" | "delete">("discard");
   const [confirmText, setConfirmText] = useState("");
   const [confirmBusy, setConfirmBusy] = useState(false);
+
+  // Preview (Reader-style overlay) — replaces the always-on right column
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewTone, setPreviewTone] = useState<"evidence" | "reader">("evidence");
 
   const activeEntityLabel = useMemo(
     () => ENTITY_LABELS[activeEntity] ?? activeEntity,
@@ -73,7 +77,7 @@ export default function CIAlchemyPage() {
 
   const canMutateSelected = useMemo(() => {
     if (!selectedDraft) return false;
-    // Once it left Alchemy (finalized -> Council/Ledger), Alchemy can’t delete it.
+    // Once it left Alchemy (finalized -> Council/Ledger), Alchemy can’t mutate it.
     return !selectedDraft.finalized_record_id && selectedDraft.status !== "finalized";
   }, [selectedDraft]);
 
@@ -213,7 +217,7 @@ export default function CIAlchemyPage() {
     setInfo(null);
 
     try {
-      // ✅ Use the signed-in user token (NOT the anon key) so RLS/audit work.
+      // Use signed-in user token for RLS/audit
       const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
       if (sessionErr) throw sessionErr;
 
@@ -277,7 +281,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         return;
       }
 
-      // Optimistic insert into UI (fast), then reload to match DB truth.
       const newDraft: DraftRecord = {
         id: draftId || crypto.randomUUID(),
         entity_id: asAny.entity_id ?? null,
@@ -303,7 +306,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
       flashInfo("Draft created. Review, edit, then Save.");
 
-      // ✅ Re-sync list with DB (prevents phantom rows if server wrote different fields)
+      // Re-sync list with DB truth
       await reloadDrafts(true);
     } catch (err: any) {
       console.error("scribe invoke exception", err);
@@ -313,7 +316,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
     }
   }
 
-  // Save / status actions
   async function handleSaveDraft() {
     if (!title.trim() || !body.trim()) {
       flashError("Title and body are required to save a draft.");
@@ -508,7 +510,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           finalized_record_id: ledgerId,
           finalized_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
-        })
+        } as any)
         .eq("id", selectedId)
         .select(
           `
@@ -570,7 +572,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           .update({
             status: "discarded" as DraftStatus,
             updated_at: new Date().toISOString(),
-          })
+          } as any)
           .eq("id", selectedId)
           .select(
             `
@@ -598,23 +600,12 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         return;
       }
 
-      // HARD DELETE: SECURITY DEFINER function (do NOT delete ledger)
-      // ✅ IMPORTANT: Match this to your actual SQL signature.
-      //
-      // Variant A (simple):
+      // HARD DELETE: SECURITY DEFINER function (no ledger deletes)
       const tryA = await supabase.rpc("owner_delete_governance_draft", {
         p_draft_id: selectedId,
-      });
+      } as any);
 
-      // If your function requires reason/confirm instead, comment Variant A and use Variant B:
-      // const tryB = await supabase.rpc("owner_delete_governance_draft", {
-      //   p_draft_id: selectedId,
-      //   p_reason: "Deleted in CI-Alchemy UI",
-      //   p_confirm: "DELETE",
-      // });
-
-      const rpcError = tryA.error;
-      if (rpcError) throw rpcError;
+      if (tryA.error) throw tryA.error;
 
       setDrafts((prev) => {
         const nextList = prev.filter((d) => d.id !== selectedId);
@@ -642,6 +633,17 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
     }
   }
 
+  const previewTitle = (title || selectedDraft?.title || "(untitled)").trim();
+  const previewBody = (body || selectedDraft?.draft_text || "").trim();
+
+  function openPreview() {
+    if (!selectedDraft && !previewBody && !previewTitle) {
+      flashError("Select a draft (or write something) before preview.");
+      return;
+    }
+    setPreviewOpen(true);
+  }
+
   return (
     <div className="flex h-[calc(100vh-80px)] w-full flex-col px-6 pb-6 pt-4 text-slate-100 overflow-hidden">
       {/* Header */}
@@ -650,17 +652,16 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           <div className="text-[11px] font-semibold tracking-[0.22em] text-emerald-300">
             CI-ALCHEMY • GENESIS
           </div>
-          <h1 className="mt-1 text-[22px] font-semibold tracking-wide">
-            Drafting Console
-          </h1>
+          <h1 className="mt-1 text-[22px] font-semibold tracking-wide">Drafting Console</h1>
           <div className="mt-1 text-[13px] text-slate-400">
-            Entity: <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
+            Entity:{" "}
+            <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
             <span className="mx-2 text-slate-700">•</span>
             Drafts here are editable + deletable until they leave Alchemy.
           </div>
         </div>
 
-        {/* Axiom shell (read-only) */}
+        {/* AXIOM shell (read-only) */}
         <div className="hidden md:block w-[360px] shrink-0">
           <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 shadow-lg shadow-black/40">
             <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
@@ -676,44 +677,60 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         </div>
       </div>
 
-      {/* Main layout: 3 columns (OS registry feel) */}
+      {/* Main layout: 2 columns (OS registry feel + breathing room) */}
       <div className="flex flex-1 gap-4 overflow-hidden">
-        {/* LEFT: Tools + Editor */}
-        <div className="flex h-full w-[56%] flex-col rounded-2xl bg-slate-950/70 p-4 shadow-lg shadow-black/40 overflow-hidden">
+        {/* LEFT: Editor */}
+        <div className="flex h-full w-[62%] flex-col rounded-2xl bg-slate-950/70 p-4 shadow-lg shadow-black/40 overflow-hidden">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
               Editor
             </div>
 
-            {selectedDraft && (
-              <div className="flex items-center gap-2">
-                <span
-                  className={cx(
-                    "rounded-full px-3 py-[6px] text-[10px] uppercase tracking-[0.18em] border",
-                    selectedDraft.status === "finalized"
-                      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
-                      : selectedDraft.status === "reviewed"
-                      ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
-                      : selectedDraft.status === "discarded"
-                      ? "border-slate-600/50 bg-slate-800/40 text-slate-300"
-                      : "border-sky-500/40 bg-sky-500/10 text-sky-200"
-                  )}
-                >
-                  {selectedDraft.status}
-                </span>
-
-                {!canMutateSelected && (
-                  <span className="rounded-full border border-slate-700 bg-slate-900/60 px-3 py-[6px] text-[10px] uppercase tracking-[0.18em] text-slate-300">
-                    Locked (left Alchemy)
+            <div className="flex items-center gap-2">
+              {selectedDraft && (
+                <>
+                  <span
+                    className={cx(
+                      "rounded-full px-3 py-[6px] text-[10px] uppercase tracking-[0.18em] border",
+                      selectedDraft.status === "finalized"
+                        ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+                        : selectedDraft.status === "reviewed"
+                        ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+                        : selectedDraft.status === "discarded"
+                        ? "border-slate-600/50 bg-slate-800/40 text-slate-300"
+                        : "border-sky-500/40 bg-sky-500/10 text-sky-200"
+                    )}
+                  >
+                    {selectedDraft.status}
                   </span>
-                )}
-              </div>
-            )}
+
+                  {!canMutateSelected && (
+                    <span className="rounded-full border border-slate-700 bg-slate-900/60 px-3 py-[6px] text-[10px] uppercase tracking-[0.18em] text-slate-300">
+                      Locked (left Alchemy)
+                    </span>
+                  )}
+                </>
+              )}
+
+              {/* Preview opener (Reader-style) */}
+              <button
+                onClick={openPreview}
+                className="rounded-full border border-slate-700 bg-slate-950 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
+                title="Open Reader preview"
+              >
+                Preview
+              </button>
+            </div>
           </div>
 
           {/* Title */}
           <input
-            className="mb-3 rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-3 text-[15px] outline-none transition focus:border-emerald-400"
+            className={cx(
+              "mb-3 rounded-2xl border bg-slate-900/80 px-4 py-3 text-[15px] outline-none transition",
+              !!selectedDraft && !canMutateSelected
+                ? "border-slate-800 text-slate-400 cursor-not-allowed"
+                : "border-slate-700 focus:border-emerald-400"
+            )}
             placeholder="Resolution title"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
@@ -723,7 +740,12 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           {/* Body */}
           <div className="relative flex-1 overflow-hidden">
             <textarea
-              className="h-full w-full resize-none rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-4 text-[13px] leading-[1.65] text-slate-100 outline-none transition focus:border-emerald-400"
+              className={cx(
+                "h-full w-full resize-none rounded-2xl border bg-slate-900/80 px-4 py-4 text-[13px] leading-[1.65] outline-none transition",
+                !!selectedDraft && !canMutateSelected
+                  ? "border-slate-800 text-slate-400 cursor-not-allowed"
+                  : "border-slate-700 text-slate-100 focus:border-emerald-400"
+              )}
               placeholder="Draft body… (or Run Alchemy)"
               value={body}
               onChange={(e) => setBody(e.target.value)}
@@ -800,10 +822,14 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
               )}
             </div>
           )}
+
+          <div className="mt-3 text-[11px] text-slate-500">
+            Preview opens as a Reader overlay (OS style) — no cramped right column.
+          </div>
         </div>
 
-        {/* MIDDLE: Drafts registry */}
-        <div className="flex h-full w-[26%] flex-col rounded-2xl bg-slate-950/70 p-4 shadow-lg shadow-black/40 overflow-hidden">
+        {/* RIGHT: Drafts registry */}
+        <div className="flex h-full w-[38%] flex-col rounded-2xl bg-slate-950/70 p-4 shadow-lg shadow-black/40 overflow-hidden">
           <div className="mb-3 flex items-center justify-between gap-2">
             <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
               Drafts
@@ -841,9 +867,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
             {loading ? (
               <div className="p-4 text-[13px] text-slate-400">Loading…</div>
             ) : filteredDrafts.length === 0 ? (
-              <div className="p-4 text-[13px] text-slate-500">
-                No drafts for this filter.
-              </div>
+              <div className="p-4 text-[13px] text-slate-500">No drafts for this filter.</div>
             ) : (
               <ul className="divide-y divide-slate-800">
                 {filteredDrafts.map((d) => (
@@ -891,45 +915,114 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
               </ul>
             )}
           </div>
-        </div>
 
-        {/* RIGHT: Preview */}
-        <div className="flex h-full w-[18%] flex-col rounded-2xl bg-slate-950/70 p-4 shadow-lg shadow-black/40 overflow-hidden">
-          <div className="mb-3 flex items-center justify-between gap-2">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-              Preview
-            </div>
-            {selectedDraft && (
-              <div className="text-[11px] text-slate-500">
-                {selectedDraft.record_type || "resolution"}
-              </div>
-            )}
-          </div>
-
-          <div className="flex-1 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-950/55 px-4 py-4">
-            {selectedDraft ? (
-              <>
-                <div className="text-[13px] font-semibold text-slate-100">
-                  {title || selectedDraft.title || "(untitled)"}
-                </div>
-                <div className="mt-3 whitespace-pre-wrap text-[12px] leading-[1.65] text-slate-200">
-                  {body || selectedDraft.draft_text || ""}
-                </div>
-              </>
-            ) : (
-              <div className="text-[13px] text-slate-500">Select a draft.</div>
-            )}
-          </div>
-
-          <div className="mt-3 text-[11px] text-slate-500 leading-relaxed">
-            Finalize promotes to Council queue. Drafts linked to Ledger are locked here.
+          <div className="mt-3 flex items-center justify-between text-[11px] text-slate-500">
+            <span>OS Registry view — clean + scoped.</span>
+            <button
+              onClick={() => reloadDrafts(true)}
+              className="rounded-full border border-slate-700 bg-slate-950 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-200 hover:bg-slate-900/60"
+              title="Refresh list"
+            >
+              Refresh
+            </button>
           </div>
         </div>
       </div>
 
+      {/* Reader Preview Overlay */}
+      {previewOpen && (
+        <div className="fixed inset-0 z-[80] bg-black/65">
+          <div className="absolute inset-0" onClick={() => setPreviewOpen(false)} />
+
+          <div className="absolute left-1/2 top-1/2 w-[min(1100px,92vw)] h-[min(86vh,860px)] -translate-x-1/2 -translate-y-1/2">
+            <div className="h-full rounded-3xl border border-slate-800 bg-slate-950/95 shadow-2xl shadow-black/60 overflow-hidden">
+              {/* Header */}
+              <div className="flex items-center justify-between gap-3 border-b border-slate-800 px-6 py-4">
+                <div className="min-w-0">
+                  <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">
+                    Reader • Preview
+                  </div>
+                  <div className="mt-1 truncate text-[16px] font-semibold text-slate-100">
+                    {previewTitle || "(untitled)"}
+                  </div>
+                  <div className="mt-1 text-[12px] text-slate-400">
+                    {selectedDraft?.record_type || "resolution"}
+                    <span className="mx-2 text-slate-700">•</span>
+                    {selectedDraft?.finalized_record_id ? (
+                      <span className="text-emerald-300">ledger-linked (locked)</span>
+                    ) : (
+                      <span className="text-slate-300">draft (editable)</span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {/* Tone toggle (optional, OS-style) */}
+                  <div className="hidden sm:flex rounded-full border border-slate-800 bg-slate-950/60 p-1 text-[10px] uppercase tracking-[0.18em]">
+                    <button
+                      onClick={() => setPreviewTone("evidence")}
+                      className={cx(
+                        "rounded-full px-3 py-1 transition",
+                        previewTone === "evidence"
+                          ? "bg-emerald-500 text-slate-950"
+                          : "text-slate-400 hover:bg-slate-900/60"
+                      )}
+                    >
+                      Evidence
+                    </button>
+                    <button
+                      onClick={() => setPreviewTone("reader")}
+                      className={cx(
+                        "rounded-full px-3 py-1 transition",
+                        previewTone === "reader"
+                          ? "bg-slate-200 text-slate-950"
+                          : "text-slate-400 hover:bg-slate-900/60"
+                      )}
+                    >
+                      Reader
+                    </button>
+                  </div>
+
+                  <button
+                    onClick={() => setPreviewOpen(false)}
+                    className="rounded-full border border-slate-700 bg-slate-950 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-200 hover:bg-slate-900/60"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+
+              {/* Body */}
+              <div className="h-[calc(100%-64px)] px-6 py-5 overflow-y-auto">
+                <div
+                  className={cx(
+                    "rounded-3xl border bg-slate-950/60 px-6 py-6",
+                    previewTone === "evidence"
+                      ? "border-emerald-500/20"
+                      : "border-slate-800"
+                  )}
+                >
+                  {/* “Reader breathing room” typography */}
+                  <div className="text-[12px] uppercase tracking-[0.22em] text-slate-500">
+                    Document body
+                  </div>
+                  <div className="mt-4 whitespace-pre-wrap text-[13px] leading-[1.85] text-slate-100">
+                    {previewBody || "—"}
+                  </div>
+                </div>
+
+                <div className="mt-4 text-[11px] text-slate-500">
+                  Preview is non-mutating. Save/Finalize happens in the editor panel.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Confirm modal (Discard/Delete) */}
       {confirmOpen && selectedDraft && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6">
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/60 p-6">
           <div className="w-full max-w-[560px] rounded-3xl border border-slate-800 bg-slate-950/95 shadow-2xl shadow-black/60">
             <div className="p-6">
               <div className="flex items-start justify-between gap-3">
@@ -942,7 +1035,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                   </div>
                   <div className="mt-2 text-[13px] text-slate-400 leading-relaxed">
                     {confirmMode === "delete"
-                      ? "Permanent removal. This is only allowed while the draft is still in Alchemy."
+                      ? "Permanent removal. Allowed only while the draft is still in Alchemy."
                       : "Soft remove: marks this draft as discarded (kept for audit / recovery)."}
                   </div>
                 </div>
@@ -1009,7 +1102,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
               </div>
 
               {!canMutateSelected && (
-                <div className="mx-6 mb-6 mt-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[13px] text-amber-200">
+                <div className="mt-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[13px] text-amber-200">
                   This draft is linked to the Ledger (left Alchemy). It can’t be discarded or deleted here.
                 </div>
               )}
