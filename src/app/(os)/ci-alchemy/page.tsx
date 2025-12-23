@@ -7,7 +7,6 @@ import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 
 type DraftStatus = "draft" | "reviewed" | "finalized" | "discarded";
-type StatusFilter = "all" | "draft" | "reviewed" | "finalized" | "discarded";
 
 type DraftRecord = {
   id: string;
@@ -23,8 +22,7 @@ type DraftRecord = {
   finalized_record_id: string | null;
 };
 
-type SideTab = "drafts" | "axiom";
-type Tone = "dark" | "light";
+type StatusTab = "draft" | "reviewed" | "finalized" | "discarded" | "all";
 
 const ENTITY_LABELS: Record<string, string> = {
   holdings: "Oasis International Holdings Inc.",
@@ -52,43 +50,41 @@ function fmtShort(iso: string | null) {
   }
 }
 
+type DeleteMode = "soft" | "hard";
+
 export default function CIAlchemyPage() {
   const { activeEntity } = useEntity();
 
-  // Data
+  // Core state
   const [loading, setLoading] = useState(true);
-  const [alchemyRunning, setAlchemyRunning] = useState(false);
   const [saving, setSaving] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
+  const [alchemyRunning, setAlchemyRunning] = useState(false);
 
   const [drafts, setDrafts] = useState<DraftRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  // Editor
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
 
-  // UI controls
-  const [sideTab, setSideTab] = useState<SideTab>("drafts");
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("draft");
+  // OS UX controls
+  const [statusTab, setStatusTab] = useState<StatusTab>("draft");
   const [query, setQuery] = useState("");
-  const [tone, setTone] = useState<Tone>("light"); // ✅ white paper by default
+  const [drawerOpen, setDrawerOpen] = useState(true); // registry drawer
+  const [readerOpen, setReaderOpen] = useState(false); // preview modal
+  const [editorTheme, setEditorTheme] = useState<"light" | "dark">("light");
 
-  // Reader modal
-  const [readerOpen, setReaderOpen] = useState(false);
-  const [readerTone, setReaderTone] = useState<Tone>("light");
-
-  // Alerts
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
-  // Delete / Discard confirm
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [confirmMode, setConfirmMode] = useState<"discard" | "delete">("discard");
-  const [confirmText, setConfirmText] = useState("");
-  const [confirmBusy, setConfirmBusy] = useState(false);
+  // Delete modal
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteMode, setDeleteMode] = useState<DeleteMode>("soft");
+  const [deleteReason, setDeleteReason] = useState("");
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
+  const [deleteBusy, setDeleteBusy] = useState(false);
 
-  // Unsaved guard
+  // Unsaved changes guard
   const [dirty, setDirty] = useState(false);
   const lastLoadedRef = useRef<{ id: string | null; title: string; body: string } | null>(null);
 
@@ -102,19 +98,17 @@ export default function CIAlchemyPage() {
     [drafts, selectedId]
   );
 
+  // Mutations allowed only while still inside Alchemy (not finalized / not ledger-linked)
   const canMutateSelected = useMemo(() => {
-    if (!selectedDraft) return true; // new draft composing is allowed
-    // Once it left Alchemy (finalized -> ledger linked), lock edits + deletes here.
+    if (!selectedDraft) return true; // new unsaved draft in editor
     return !selectedDraft.finalized_record_id && selectedDraft.status !== "finalized";
   }, [selectedDraft]);
 
   const filteredDrafts = useMemo(() => {
     let list = drafts;
 
-    // Filter lane
-    if (statusFilter !== "all") list = list.filter((d) => d.status === statusFilter);
+    if (statusTab !== "all") list = list.filter((d) => d.status === statusTab);
 
-    // Search
     const q = query.trim().toLowerCase();
     if (q) {
       list = list.filter((d) => {
@@ -124,7 +118,7 @@ export default function CIAlchemyPage() {
     }
 
     return list;
-  }, [drafts, statusFilter, query]);
+  }, [drafts, statusTab, query]);
 
   function flashError(msg: string) {
     console.error(msg);
@@ -134,7 +128,7 @@ export default function CIAlchemyPage() {
 
   function flashInfo(msg: string) {
     setInfo(msg);
-    setTimeout(() => setInfo(null), 4000);
+    setTimeout(() => setInfo(null), 3500);
   }
 
   function markLoadedSnapshot(id: string | null, t: string, b: string) {
@@ -155,14 +149,12 @@ export default function CIAlchemyPage() {
   }
 
   function pickDefaultSelection(rows: DraftRecord[]) {
-    if (!rows.length) return null;
-    return (
+    const preferred =
       rows.find((d) => d.status === "draft" && !d.finalized_record_id) ||
       rows.find((d) => d.status === "reviewed" && !d.finalized_record_id) ||
       rows.find((d) => !d.finalized_record_id && d.status !== "discarded") ||
-      rows[0] ||
-      null
-    );
+      rows[0];
+    return preferred ?? null;
   }
 
   async function reloadDrafts(preserveSelected = true) {
@@ -217,19 +209,19 @@ export default function CIAlchemyPage() {
         setBody("");
         markLoadedSnapshot(null, "", "");
       }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Failed to load drafts";
-      flashError(msg);
+    } catch (err: any) {
+      flashError(err?.message ?? "Failed to load drafts");
     } finally {
       setLoading(false);
     }
   }
 
-  // Initial load per entity
   useEffect(() => {
     let cancelled = false;
     (async () => {
       if (cancelled) return;
+      setStatusTab("draft");
+      setQuery("");
       await reloadDrafts(false);
     })();
     return () => {
@@ -240,6 +232,7 @@ export default function CIAlchemyPage() {
 
   function handleSelectDraft(draft: DraftRecord) {
     if (!confirmNavigateAwayIfDirty()) return;
+
     setSelectedId(draft.id);
     setTitle(draft.title ?? "");
     setBody(draft.draft_text ?? "");
@@ -250,6 +243,7 @@ export default function CIAlchemyPage() {
 
   function handleNewDraft() {
     if (!confirmNavigateAwayIfDirty()) return;
+
     setSelectedId(null);
     setTitle("");
     setBody("");
@@ -258,9 +252,7 @@ export default function CIAlchemyPage() {
     markLoadedSnapshot(null, "", "");
   }
 
-  // ---------------------------------------------------------------------------
-  // Run CI-Alchemy (Edge Function "scribe") using signed-in token (RLS-safe)
-  // ---------------------------------------------------------------------------
+  // Run CI-Alchemy (Edge Function "scribe")
   async function handleRunAlchemy() {
     if (!title.trim() && !body.trim()) {
       flashError("Add a title or some context before running CI-Alchemy.");
@@ -269,6 +261,7 @@ export default function CIAlchemyPage() {
 
     const baseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
     if (!baseUrl || !anonKey) {
       flashError("Missing Supabase URL or anon key in environment.");
       return;
@@ -289,9 +282,12 @@ export default function CIAlchemyPage() {
       }
 
       const hasBody = body.trim().length > 0;
+
       const instructions = hasBody
         ? body.trim()
-        : `Draft a formal corporate resolution for ${activeEntityLabel} about: "${title.trim() || "a governance matter"}".
+        : `Draft a formal corporate resolution for ${activeEntityLabel} about: "${
+            title.trim() || "a governance matter"
+          }".
 Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for directors.`;
 
       const payload = {
@@ -321,70 +317,67 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         return;
       }
 
-      const data = (await res.json()) as Record<string, unknown>;
-      const ok = Boolean(data?.ok);
-      if (!ok) {
-        const detail = (data?.error as string) || (data?.stage as string) || "Unknown error.";
+      const data = await res.json();
+      const asAny = data as any;
+
+      if (!asAny?.ok) {
+        const detail = asAny?.error || asAny?.stage || "Unknown error.";
         flashError(`CI-Alchemy failed: ${detail}`);
         return;
       }
 
-      const draftText =
-        (data?.draft_text as string) ||
-        (data?.draft as string) ||
-        (data?.content as string) ||
-        (data?.text as string) ||
-        "";
+      const draftId: string | undefined = asAny.draft_id;
+      const draftText: string =
+        asAny.draft_text || asAny.draft || asAny.content || asAny.text || "";
 
       if (!draftText?.trim()) {
         flashError("CI-Alchemy returned no usable draft body.");
         return;
       }
 
-      // Optimistic UI update, then hard re-sync from DB
-      const draftId = (data?.draft_id as string) || crypto.randomUUID();
-
       const newDraft: DraftRecord = {
-        id: draftId,
-        entity_id: (data?.entity_id as string) ?? null,
-        entity_slug: (data?.entity_slug as string) ?? activeEntity,
-        entity_name: (data?.entity_name as string) ?? activeEntityLabel,
-        title: ((data?.title as string) || title.trim() || "(untitled)") as string,
-        record_type: ((data?.record_type as string) || "resolution") as string,
+        id: draftId || crypto.randomUUID(),
+        entity_id: asAny.entity_id ?? null,
+        entity_slug: asAny.entity_slug ?? activeEntity,
+        entity_name: asAny.entity_name ?? activeEntityLabel,
+        title: asAny.title || title.trim() || "(untitled)",
+        record_type: asAny.record_type || "resolution",
         draft_text: draftText,
-        status: ((data?.draft_status as DraftStatus) || "draft") as DraftStatus,
-        created_at: (data?.draft_created_at as string) ?? new Date().toISOString(),
+        status: (asAny.draft_status || "draft") as DraftStatus,
+        created_at: asAny.draft_created_at ?? new Date().toISOString(),
         updated_at: null,
-        finalized_record_id: (data?.finalized_record_id as string) ?? null,
+        finalized_record_id: asAny.finalized_record_id ?? null,
       };
 
-      setSelectedId(newDraft.id);
       setTitle(newDraft.title);
       setBody(newDraft.draft_text);
-      setDrafts((prev) => [newDraft, ...prev.filter((d) => d.id !== newDraft.id)]);
+      setSelectedId(newDraft.id);
+
+      setDrafts((prev) => {
+        const without = prev.filter((d) => d.id !== newDraft.id);
+        return [newDraft, ...without];
+      });
+
       markLoadedSnapshot(newDraft.id, newDraft.title, newDraft.draft_text);
 
       flashInfo("Draft created. Review, edit, then Save.");
       await reloadDrafts(true);
-    } catch (err: unknown) {
+    } catch (err: any) {
       console.error("scribe invoke exception", err);
-      const msg = err instanceof Error ? err.message : "Network error calling CI-Alchemy (scribe).";
-      flashError(msg);
+      flashError(err?.message ?? "Network error calling CI-Alchemy (scribe).");
     } finally {
       setAlchemyRunning(false);
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Save / Review / Finalize
-  // ---------------------------------------------------------------------------
   async function handleSaveDraft() {
     if (!title.trim() || !body.trim()) {
       flashError("Title and body are required to save a draft.");
       return;
     }
-    if (selectedDraft && !canMutateSelected) {
-      flashError("This draft has left Alchemy and is locked.");
+
+    if (selectedDraft?.status === "finalized") {
+      flashError("This draft is finalized. Create a new revision instead.");
       return;
     }
 
@@ -413,11 +406,23 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       if (!selectedId) {
         const { data, error } = await supabase
           .from("governance_drafts")
-          .insert({ ...basePayload, status: "draft" as DraftStatus })
+          .insert({
+            ...basePayload,
+            status: "draft" as DraftStatus,
+          })
           .select(
             `
-              id, entity_id, entity_slug, entity_name, title, record_type, draft_text,
-              status, created_at, updated_at, finalized_record_id
+              id,
+              entity_id,
+              entity_slug,
+              entity_name,
+              title,
+              record_type,
+              draft_text,
+              status,
+              created_at,
+              updated_at,
+              finalized_record_id
             `
           )
           .single();
@@ -432,12 +437,24 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       } else {
         const { data, error } = await supabase
           .from("governance_drafts")
-          .update({ ...basePayload, updated_at: new Date().toISOString() })
+          .update({
+            ...basePayload,
+            updated_at: new Date().toISOString(),
+          })
           .eq("id", selectedId)
           .select(
             `
-              id, entity_id, entity_slug, entity_name, title, record_type, draft_text,
-              status, created_at, updated_at, finalized_record_id
+              id,
+              entity_id,
+              entity_slug,
+              entity_name,
+              title,
+              record_type,
+              draft_text,
+              status,
+              created_at,
+              updated_at,
+              finalized_record_id
             `
           )
           .single();
@@ -449,18 +466,20 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         markLoadedSnapshot(updated.id, updated.title ?? "", updated.draft_text ?? "");
         flashInfo("Draft saved.");
       }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Failed to save draft.";
-      flashError(msg);
+    } catch (err: any) {
+      flashError(err?.message ?? "Failed to save draft.");
     } finally {
       setSaving(false);
     }
   }
 
   async function handleMarkReviewed() {
-    if (!selectedId || !selectedDraft) return flashError("Select a draft first.");
+    if (!selectedId) return flashError("Select a draft first.");
     if (!canMutateSelected) return flashError("This draft has left Alchemy and can’t be changed here.");
-    if (selectedDraft.status === "reviewed") return flashInfo("Already reviewed.");
+
+    const draft = drafts.find((d) => d.id === selectedId);
+    if (!draft) return flashError("Draft not found.");
+    if (draft.status === "reviewed") return flashInfo("Already reviewed.");
 
     setSaving(true);
     setError(null);
@@ -469,12 +488,24 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
     try {
       const { data, error } = await supabase
         .from("governance_drafts")
-        .update({ status: "reviewed" as DraftStatus, updated_at: new Date().toISOString() })
+        .update({
+          status: "reviewed" as DraftStatus,
+          updated_at: new Date().toISOString(),
+        })
         .eq("id", selectedId)
         .select(
           `
-            id, entity_id, entity_slug, entity_name, title, record_type, draft_text,
-            status, created_at, updated_at, finalized_record_id
+            id,
+            entity_id,
+            entity_slug,
+            entity_name,
+            title,
+            record_type,
+            draft_text,
+            status,
+            created_at,
+            updated_at,
+            finalized_record_id
           `
         )
         .single();
@@ -485,19 +516,22 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
       markLoadedSnapshot(updated.id, updated.title ?? "", updated.draft_text ?? "");
       flashInfo("Marked as reviewed.");
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Failed to mark as reviewed.";
-      flashError(msg);
+    } catch (err: any) {
+      flashError(err?.message ?? "Failed to mark as reviewed.");
     } finally {
       setSaving(false);
     }
   }
 
   async function handleFinalize() {
-    if (!selectedId || !selectedDraft) return flashError("Select a draft first.");
-    if (!canMutateSelected) return flashError("This draft already left Alchemy.");
+    if (!selectedId) return flashError("Select a draft first.");
+
+    const draft = drafts.find((d) => d.id === selectedId);
+    if (!draft) return flashError("Draft not found.");
+
     if (!title.trim() || !body.trim()) return flashError("Title and body are required before finalizing.");
-    if (selectedDraft.finalized_record_id) return flashError("This draft is already linked to a ledger record.");
+    if (draft.status === "finalized") return flashInfo("Already finalized.");
+    if (draft.finalized_record_id) return flashError("This draft is already linked to a ledger record.");
 
     setFinalizing(true);
     setError(null);
@@ -538,12 +572,21 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           finalized_record_id: ledgerId,
           finalized_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
-        } as unknown as Record<string, unknown>)
+        } as any)
         .eq("id", selectedId)
         .select(
           `
-            id, entity_id, entity_slug, entity_name, title, record_type, draft_text,
-            status, created_at, updated_at, finalized_record_id
+            id,
+            entity_id,
+            entity_slug,
+            entity_name,
+            title,
+            record_type,
+            draft_text,
+            status,
+            created_at,
+            updated_at,
+            finalized_record_id
           `
         )
         .single();
@@ -554,79 +597,103 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
       markLoadedSnapshot(updated.id, updated.title ?? "", updated.draft_text ?? "");
       flashInfo("Finalized → Council queue.");
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Failed to finalize.";
-      flashError(msg);
+    } catch (err: any) {
+      flashError(err?.message ?? "Failed to finalize.");
     } finally {
       setFinalizing(false);
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Discard / Hard delete (Alchemy-only)
-  // ---------------------------------------------------------------------------
-  function openConfirm(mode: "discard" | "delete") {
-    if (!selectedDraft || !selectedId) return flashError("Select a draft first.");
+  // Delete controls (soft + hard), only pre-finalize
+  function openDelete() {
+    if (!selectedDraft) return flashError("Select a draft first.");
     if (!canMutateSelected) return flashError("Can’t remove a draft that already left Alchemy.");
-    setConfirmMode(mode);
-    setConfirmText("");
-    setConfirmOpen(true);
+    setDeleteMode("soft");
+    setDeleteReason("");
+    setDeleteConfirmText("");
+    setDeleteBusy(false);
+    setDeleteOpen(true);
   }
 
-  async function performDiscardOrDelete() {
+  async function softDeleteDraft(draftId: string, reason: string) {
+    const { data, error } = await supabase
+      .from("governance_drafts")
+      .update({
+        status: "discarded" as DraftStatus,
+        updated_at: new Date().toISOString(),
+        discard_reason: reason || null,
+        discarded_at: new Date().toISOString(),
+      } as any)
+      .eq("id", draftId)
+      .select(
+        `
+          id,
+          entity_id,
+          entity_slug,
+          entity_name,
+          title,
+          record_type,
+          draft_text,
+          status,
+          created_at,
+          updated_at,
+          finalized_record_id
+        `
+      )
+      .single();
+    if (error) throw error;
+    return data as DraftRecord;
+  }
+
+  async function hardDeleteDraft(draftId: string, reason: string) {
+    // Try 2-arg then 1-arg then alt param names (safe, no guessing)
+    const tryTwo = await supabase.rpc("owner_delete_governance_draft", {
+      p_draft_id: draftId,
+      p_reason: reason || null,
+    } as any);
+    if (!tryTwo.error) return;
+
+    const tryOne = await supabase.rpc("owner_delete_governance_draft", {
+      p_draft_id: draftId,
+    } as any);
+    if (!tryOne.error) return;
+
+    const tryAlt = await supabase.rpc("owner_delete_governance_draft", {
+      draft_id: draftId,
+      reason: reason || null,
+    } as any);
+    if (tryAlt.error) throw tryAlt.error;
+  }
+
+  async function confirmDelete() {
     if (!selectedDraft || !selectedId) return;
     if (!canMutateSelected) return;
 
-    const required = confirmMode === "delete" ? "DELETE" : "DISCARD";
-    if (confirmText.trim().toUpperCase() !== required) {
-      flashError(`Type ${required} to confirm.`);
+    if (deleteMode === "hard" && deleteConfirmText.trim().toUpperCase() !== "DELETE") {
+      flashError('Type "DELETE" to confirm hard deletion.');
       return;
     }
 
-    setConfirmBusy(true);
+    setDeleteBusy(true);
     setError(null);
     setInfo(null);
 
     try {
-      if (confirmMode === "discard") {
-        const { data, error } = await supabase
-          .from("governance_drafts")
-          .update({ status: "discarded" as DraftStatus, updated_at: new Date().toISOString() })
-          .eq("id", selectedId)
-          .select(
-            `
-              id, entity_id, entity_slug, entity_name, title, record_type, draft_text,
-              status, created_at, updated_at, finalized_record_id
-            `
-          )
-          .single();
-
-        if (error) throw error;
-
-        const updated = data as DraftRecord;
+      if (deleteMode === "soft") {
+        const updated = await softDeleteDraft(selectedId, deleteReason.trim());
         setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
         flashInfo("Draft discarded.");
-        setConfirmOpen(false);
-        return;
+      } else {
+        await hardDeleteDraft(selectedId, deleteReason.trim());
+        setDrafts((prev) => prev.filter((d) => d.id !== selectedId));
+        flashInfo("Draft permanently deleted.");
       }
 
-      // Hard delete: SECURITY DEFINER RPC exists in prod (try common signatures safely)
-      const tryTwo = await supabase.rpc("owner_delete_governance_draft", {
-        p_draft_id: selectedId,
-        p_reason: "Deleted in CI-Alchemy UI",
-      } as unknown as Record<string, unknown>);
+      setDeleteOpen(false);
 
-      if (tryTwo.error) {
-        const tryOne = await supabase.rpc("owner_delete_governance_draft", {
-          p_draft_id: selectedId,
-        } as unknown as Record<string, unknown>);
-        if (tryOne.error) throw tryOne.error;
-      }
-
-      const nextList = drafts.filter((d) => d.id !== selectedId);
-      setDrafts(nextList);
-
-      const next = pickDefaultSelection(nextList);
+      // re-select something sane
+      const nextRows = drafts.filter((d) => d.id !== selectedId);
+      const next = pickDefaultSelection(nextRows);
       if (next) {
         setSelectedId(next.id);
         setTitle(next.title ?? "");
@@ -638,20 +705,14 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         setBody("");
         markLoadedSnapshot(null, "", "");
       }
-
-      flashInfo("Draft permanently deleted.");
-      setConfirmOpen(false);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Delete/discard failed.";
-      flashError(msg);
+    } catch (err: any) {
+      flashError(err?.message ?? "Delete failed.");
     } finally {
-      setConfirmBusy(false);
+      setDeleteBusy(false);
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Editor dirty tracking
-  // ---------------------------------------------------------------------------
+  // Dirty tracking
   function onTitleChange(v: string) {
     setTitle(v);
     setDirty(computeDirty(v, body, selectedId));
@@ -661,332 +722,118 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
     setDirty(computeDirty(title, v, selectedId));
   }
 
-  // ---------------------------------------------------------------------------
-  // UI theme classes
-  // ---------------------------------------------------------------------------
-  const editorShell = tone === "light"
+  // Styles for editor theme
+  const editorCard = editorTheme === "light"
     ? "bg-white text-slate-900 border-slate-200"
     : "bg-slate-950/70 text-slate-100 border-slate-800";
 
-  const editorInput = tone === "light"
-    ? "bg-white text-slate-900 border-slate-200 focus:border-emerald-500"
-    : "bg-slate-900/80 text-slate-100 border-slate-700 focus:border-emerald-400";
+  const inputBase = editorTheme === "light"
+    ? "bg-white border-slate-200 text-slate-900 placeholder:text-slate-400 focus:border-emerald-500"
+    : "bg-slate-900/80 border-slate-700 text-slate-100 placeholder:text-slate-500 focus:border-emerald-400";
 
-  const editorTextarea = tone === "light"
-    ? "bg-white text-slate-900 border-slate-200 focus:border-emerald-500"
-    : "bg-slate-900/80 text-slate-100 border-slate-700 focus:border-emerald-400";
+  const textareaBase = editorTheme === "light"
+    ? "bg-white border-slate-200 text-slate-900 focus:border-emerald-500"
+    : "bg-slate-900/80 border-slate-700 text-slate-100 focus:border-emerald-400";
 
   return (
-    <div className="h-[calc(100vh-80px)] w-full px-6 pb-6 pt-4 overflow-hidden text-slate-100">
-      {/* Header row (tight, OS-like) */}
-      <div className="mb-4 flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <div className="text-[11px] font-semibold tracking-[0.24em] text-emerald-300">
-            CI-ALCHEMY • GENESIS
-          </div>
-          <h1 className="mt-1 text-[22px] font-semibold tracking-wide text-slate-100">
-            Drafting Console
-          </h1>
-          <div className="mt-1 text-[13px] text-slate-400">
-            Entity: <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
-            <span className="mx-2 text-slate-700">•</span>
-            Finalize promotes to Council (ledger-linked & locked here).
-          </div>
-        </div>
-
-        {/* Compact right controls */}
-        <div className="hidden md:flex items-center gap-2">
-          <button
-            onClick={handleNewDraft}
-            className="rounded-full border border-slate-800 bg-slate-950/70 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/70"
-            title="New draft canvas"
-          >
-            New
-          </button>
-
-          <div className="rounded-full border border-slate-800 bg-slate-950/70 p-1">
-            <button
-              onClick={() => setTone("light")}
-              className={cx(
-                "rounded-full px-3 py-2 text-[10px] uppercase tracking-[0.18em] transition",
-                tone === "light" ? "bg-slate-200 text-slate-950" : "text-slate-400 hover:bg-slate-900/70"
-              )}
-            >
-              Paper
-            </button>
-            <button
-              onClick={() => setTone("dark")}
-              className={cx(
-                "rounded-full px-3 py-2 text-[10px] uppercase tracking-[0.18em] transition",
-                tone === "dark" ? "bg-emerald-500 text-slate-950" : "text-slate-400 hover:bg-slate-900/70"
-              )}
-            >
-              Noir
-            </button>
-          </div>
-        </div>
+    <div className="h-full flex flex-col px-8 pt-6 pb-6">
+      {/* Header under OS bar */}
+      <div className="mb-4 shrink-0">
+        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI • Alchemy</div>
+        <h1 className="mt-1 text-xl font-semibold text-slate-50">
+          Drafting Console · AI Scribe
+        </h1>
+        <p className="mt-1 text-xs text-slate-400 max-w-3xl">
+          Draft safely inside Alchemy. <span className="text-emerald-300 font-semibold">Finalize</span> promotes into Council (governance_ledger status=PENDING).
+        </p>
       </div>
 
-      {/* OS Card (single surface, no page scroll) */}
-      <div className="h-[calc(100%-72px)] w-full overflow-hidden rounded-[28px] border border-slate-800 bg-slate-950/55 shadow-2xl shadow-black/50">
-        {/* Card top bar (OS feel) */}
-        <div className="flex items-center justify-between gap-3 border-b border-slate-800 px-5 py-4">
-          <div className="flex items-center gap-2 min-w-0">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">
-              Draft workspace
+      {/* Main OS window frame (Parliament-style) */}
+      <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
+        <div className="w-full max-w-[1500px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-6 py-5 flex flex-col overflow-hidden">
+          {/* Top strip: tabs + controls */}
+          <div className="shrink-0 mb-4 flex items-center justify-between gap-4">
+            {/* Tabs (registry-as-tabs) */}
+            <div className="inline-flex rounded-full bg-slate-950/70 border border-slate-800 p-1 overflow-hidden">
+              <StatusTabButton label="Drafts" value="draft" active={statusTab === "draft"} onClick={() => setStatusTab("draft")} />
+              <StatusTabButton label="Reviewed" value="reviewed" active={statusTab === "reviewed"} onClick={() => setStatusTab("reviewed")} />
+              <StatusTabButton label="Finalized" value="finalized" active={statusTab === "finalized"} onClick={() => setStatusTab("finalized")} />
+              <StatusTabButton label="Discarded" value="discarded" active={statusTab === "discarded"} onClick={() => setStatusTab("discarded")} />
+              <StatusTabButton label="All" value="all" active={statusTab === "all"} onClick={() => setStatusTab("all")} />
             </div>
-            {dirty && (
-              <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-[3px] text-[10px] uppercase tracking-[0.18em] text-amber-200">
-                Unsaved
-              </span>
-            )}
-            {selectedDraft && (
-              <span
-                className={cx(
-                  "rounded-full border px-2 py-[3px] text-[10px] uppercase tracking-[0.18em]",
-                  selectedDraft.status === "finalized"
-                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
-                    : selectedDraft.status === "reviewed"
-                    ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
-                    : selectedDraft.status === "discarded"
-                    ? "border-slate-700 bg-slate-900/50 text-slate-300"
-                    : "border-sky-500/40 bg-sky-500/10 text-sky-200"
-                )}
+
+            <div className="flex items-center gap-2">
+              {/* Drawer toggle */}
+              <button
+                onClick={() => setDrawerOpen((v) => !v)}
+                className="rounded-full border border-slate-800 bg-slate-950/60 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
+                title="Toggle drafts drawer"
               >
-                {selectedDraft.status}
-              </span>
-            )}
-            {selectedDraft?.finalized_record_id && (
-              <span className="rounded-full border border-slate-700 bg-slate-900/50 px-2 py-[3px] text-[10px] uppercase tracking-[0.18em] text-slate-300">
-                Ledger-linked (locked)
-              </span>
-            )}
-          </div>
+                {drawerOpen ? "Hide Drafts" : "Show Drafts"}
+              </button>
 
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setReaderOpen(true)}
-              disabled={!selectedDraft}
-              className="rounded-full border border-slate-800 bg-slate-950/70 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/70 disabled:cursor-not-allowed disabled:text-slate-500"
-              title="Open Reader overlay"
-            >
-              Open Reader
-            </button>
-
-            <button
-              onClick={() => reloadDrafts(true)}
-              className="rounded-full border border-slate-800 bg-slate-950/70 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/70"
-              title="Refresh"
-            >
-              Sync
-            </button>
-          </div>
-        </div>
-
-        {/* Main grid (editor + side panel). No page scrolling; only inner panes scroll. */}
-        <div className="flex h-[calc(100%-64px)] w-full overflow-hidden">
-          {/* Editor zone (dominant) */}
-          <div className="flex h-full flex-1 flex-col overflow-hidden p-5">
-            <div className={cx("h-full w-full rounded-[22px] border overflow-hidden", editorShell)}>
-              {/* Editor header */}
-              <div className={cx("flex items-center justify-between gap-3 border-b px-4 py-3", tone === "light" ? "border-slate-200" : "border-slate-800")}>
-                <div className="min-w-0">
-                  <div className={cx("text-[11px] font-semibold uppercase tracking-[0.2em]", tone === "light" ? "text-slate-500" : "text-slate-400")}>
-                    Resolution editor
-                  </div>
-                  <div className={cx("text-[11px]", tone === "light" ? "text-slate-500" : "text-slate-500")}>
-                    {selectedDraft ? `Created ${fmtShort(selectedDraft.created_at)}` : "New draft"}
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={handleRunAlchemy}
-                    disabled={alchemyRunning || saving || finalizing}
-                    className="rounded-full border border-emerald-500/60 bg-emerald-500/10 px-4 py-2 text-[11px] font-semibold tracking-[0.16em] uppercase text-emerald-200 hover:bg-emerald-500/15 disabled:cursor-not-allowed disabled:border-slate-300/30 disabled:text-slate-400"
-                    title="Generate a first draft"
-                  >
-                    {alchemyRunning ? "Running…" : "Run Alchemy"}
-                  </button>
-
-                  <button
-                    onClick={handleSaveDraft}
-                    disabled={saving || finalizing || (selectedDraft ? !canMutateSelected : false)}
-                    className={cx(
-                      "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.16em] uppercase transition disabled:cursor-not-allowed",
-                      "bg-emerald-500 text-slate-950 hover:bg-emerald-400 disabled:bg-emerald-900/30 disabled:text-slate-400"
-                    )}
-                    title="Save draft"
-                  >
-                    {saving ? "Saving…" : "Save"}
-                  </button>
-
-                  <button
-                    onClick={handleMarkReviewed}
-                    disabled={!selectedDraft || saving || finalizing || !canMutateSelected}
-                    className={cx(
-                      "rounded-full border px-4 py-2 text-[11px] font-semibold tracking-[0.16em] uppercase transition disabled:cursor-not-allowed",
-                      "border-amber-500/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/15 disabled:border-slate-300/30 disabled:text-slate-400"
-                    )}
-                  >
-                    Reviewed
-                  </button>
-
-                  <button
-                    onClick={handleFinalize}
-                    disabled={!selectedDraft || saving || finalizing || !canMutateSelected}
-                    className={cx(
-                      "rounded-full border px-4 py-2 text-[11px] font-semibold tracking-[0.16em] uppercase transition disabled:cursor-not-allowed",
-                      "border-emerald-500/50 bg-transparent text-emerald-300 hover:bg-emerald-500/10 disabled:border-slate-300/30 disabled:text-slate-400"
-                    )}
-                    title="Finalize → governance_ledger (status=PENDING)"
-                  >
-                    {finalizing ? "Finalizing…" : "Finalize → Council"}
-                  </button>
-                </div>
-              </div>
-
-              {/* Title + Body */}
-              <div className="flex h-[calc(100%-56px)] flex-col overflow-hidden">
-                <div className={cx("px-4 pt-4", tone === "light" ? "bg-white" : "bg-transparent")}>
-                  <input
-                    value={title}
-                    onChange={(e) => onTitleChange(e.target.value)}
-                    placeholder="Resolution title"
-                    disabled={selectedDraft ? !canMutateSelected : false}
-                    className={cx(
-                      "w-full rounded-2xl border px-4 py-3 text-[15px] outline-none transition",
-                      editorInput,
-                      (selectedDraft && !canMutateSelected) && "opacity-70 cursor-not-allowed"
-                    )}
-                  />
-                </div>
-
-                <div className="flex-1 px-4 pb-4 pt-3 overflow-hidden">
-                  <textarea
-                    value={body}
-                    onChange={(e) => onBodyChange(e.target.value)}
-                    placeholder="Draft body… (or run Alchemy)"
-                    disabled={selectedDraft ? !canMutateSelected : false}
-                    className={cx(
-                      "h-full w-full resize-none rounded-2xl border px-4 py-4 text-[13px] leading-[1.75] outline-none transition",
-                      editorTextarea,
-                      (selectedDraft && !canMutateSelected) && "opacity-70 cursor-not-allowed"
-                    )}
-                  />
-                </div>
-              </div>
-            </div>
-
-            {/* Footer (OS-like actions row) */}
-            <div className="mt-3 flex items-center justify-between gap-3 px-1">
-              <div className="min-w-0 text-[12px] text-slate-400">
-                {selectedDraft
-                  ? (selectedDraft.finalized_record_id
-                      ? "This draft is ledger-linked (locked in Alchemy)."
-                      : "Drafts are editable + deletable until they leave Alchemy.")
-                  : "Write a draft or run Alchemy to generate one."}
-              </div>
-
-              <div className="flex items-center gap-2">
+              {/* Editor theme toggle */}
+              <div className="inline-flex rounded-full border border-slate-800 bg-slate-950/60 p-1 text-[10px] uppercase tracking-[0.18em]">
                 <button
-                  onClick={() => openConfirm("discard")}
-                  disabled={!selectedDraft || !canMutateSelected || saving || finalizing}
-                  className="rounded-full border border-slate-700 bg-slate-950/60 px-4 py-2 text-[11px] font-semibold tracking-[0.16em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:cursor-not-allowed disabled:text-slate-500"
-                  title="Soft remove (status=discarded)"
-                >
-                  Discard
-                </button>
-
-                <button
-                  onClick={() => openConfirm("delete")}
-                  disabled={!selectedDraft || !canMutateSelected || saving || finalizing}
-                  className="rounded-full border border-rose-500/40 bg-rose-500/10 px-4 py-2 text-[11px] font-semibold tracking-[0.16em] uppercase text-rose-200 hover:bg-rose-500/15 disabled:cursor-not-allowed disabled:text-slate-500"
-                  title="Hard delete via SECURITY DEFINER RPC (Alchemy only)"
-                >
-                  Delete
-                </button>
-              </div>
-            </div>
-
-            {(error || info) && (
-              <div className="mt-3">
-                {error && (
-                  <div className="rounded-2xl border border-rose-500/50 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-200">
-                    {error}
-                  </div>
-                )}
-                {info && !error && (
-                  <div className="rounded-2xl border border-emerald-500/50 bg-emerald-500/10 px-4 py-3 text-[12px] text-emerald-200">
-                    {info}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* Side panel: compact tabs (Drafts / AXIOM). No “taking over the page”. */}
-          <div className="h-full w-[380px] shrink-0 border-l border-slate-800 bg-slate-950/50 overflow-hidden">
-            {/* Tabs */}
-            <div className="flex items-center justify-between gap-2 border-b border-slate-800 px-4 py-3">
-              <div className="flex rounded-full border border-slate-800 bg-slate-950/70 p-1">
-                <button
-                  onClick={() => setSideTab("drafts")}
+                  onClick={() => setEditorTheme("light")}
                   className={cx(
-                    "rounded-full px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] transition",
-                    sideTab === "drafts"
-                      ? "bg-emerald-500 text-slate-950"
-                      : "text-slate-400 hover:bg-slate-900/70"
+                    "rounded-full px-3 py-1 transition",
+                    editorTheme === "light" ? "bg-white text-black" : "text-slate-400 hover:bg-slate-900/60"
                   )}
                 >
-                  Drafts
+                  Paper
                 </button>
                 <button
-                  onClick={() => setSideTab("axiom")}
+                  onClick={() => setEditorTheme("dark")}
                   className={cx(
-                    "rounded-full px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] transition",
-                    sideTab === "axiom"
-                      ? "bg-slate-200 text-slate-950"
-                      : "text-slate-400 hover:bg-slate-900/70"
+                    "rounded-full px-3 py-1 transition",
+                    editorTheme === "dark" ? "bg-emerald-500 text-black" : "text-slate-400 hover:bg-slate-900/60"
                   )}
                 >
-                  AXIOM
+                  Noir
                 </button>
               </div>
 
-              <div className="text-[11px] text-slate-500">
-                {loading ? "…" : `${filteredDrafts.length}/${drafts.length}`}
-              </div>
+              {/* Reader button */}
+              <button
+                onClick={() => {
+                  if (!selectedDraft) return flashError("Select a draft first.");
+                  setReaderOpen(true);
+                }}
+                className="rounded-full border border-emerald-400/60 bg-emerald-500/10 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/15"
+              >
+                Open Reader
+              </button>
             </div>
+          </div>
 
-            {/* Content */}
-            {sideTab === "drafts" ? (
-              <div className="flex h-[calc(100%-52px)] flex-col overflow-hidden p-4">
-                <input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search drafts…"
-                  className="mb-3 rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-emerald-400"
-                />
-
-                <div className="mb-3 flex gap-1 overflow-x-auto pb-1">
-                  {(["draft", "reviewed", "finalized", "discarded", "all"] as StatusFilter[]).map((k) => (
+          {/* Workspace body (NO page scroll) */}
+          <div className="flex-1 min-h-0 flex gap-4 overflow-hidden">
+            {/* Draft drawer (compact, optional) */}
+            {drawerOpen && (
+              <aside className="w-[360px] shrink-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
+                <div className="shrink-0 p-4 border-b border-slate-800">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                      Drafts · {filteredDrafts.length}/{drafts.length}
+                    </div>
                     <button
-                      key={k}
-                      onClick={() => setStatusFilter(k)}
-                      className={cx(
-                        "shrink-0 rounded-full px-3 py-2 text-[10px] uppercase tracking-[0.18em] transition",
-                        statusFilter === k
-                          ? "bg-emerald-500 text-slate-950"
-                          : "bg-slate-900/70 text-slate-400 hover:bg-slate-800/70"
-                      )}
+                      onClick={() => reloadDrafts(true)}
+                      className="rounded-full border border-slate-800 bg-slate-950/60 px-3 py-1.5 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
                     >
-                      {k}
+                      Refresh
                     </button>
-                  ))}
+                  </div>
+
+                  <input
+                    className="mt-3 w-full rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-emerald-400"
+                    placeholder="Search… title or body"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                  />
                 </div>
 
-                <div className="flex-1 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-950/55">
+                <div className="flex-1 min-h-0 overflow-y-auto">
                   {loading ? (
                     <div className="p-4 text-[13px] text-slate-400">Loading…</div>
                   ) : filteredDrafts.length === 0 ? (
@@ -1008,13 +855,12 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                                 {d.title || "(untitled)"}
                               </div>
                               <div className="mt-1 text-[11px] text-slate-500">
-                                {fmtShort(d.created_at)} • {d.record_type || "resolution"}
+                                {fmtShort(d.created_at)} · {d.record_type || "resolution"}
                               </div>
                               <div className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-slate-400">
                                 {d.draft_text}
                               </div>
                             </div>
-
                             <span
                               className={cx(
                                 "shrink-0 rounded-full px-2 py-1 text-[9px] uppercase tracking-[0.18em]",
@@ -1041,193 +887,342 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                     </ul>
                   )}
                 </div>
+              </aside>
+            )}
 
-                <div className="mt-3 flex items-center justify-between gap-2">
+            {/* Main editor surface (contained, “OS card”, not webpage) */}
+            <section className="flex-1 min-w-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
+              {/* Header row */}
+              <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
+                    Workspace
+                  </div>
+                  <div className="mt-1 text-[13px] text-slate-400">
+                    Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
+                    {selectedDraft?.finalized_record_id && (
+                      <>
+                        <span className="mx-2 text-slate-700">•</span>
+                        <span className="text-emerald-200">Ledger-linked</span>
+                      </>
+                    )}
+                    {dirty && (
+                      <>
+                        <span className="mx-2 text-slate-700">•</span>
+                        <span className="text-amber-200">Unsaved</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
                   <button
                     onClick={handleNewDraft}
-                    className="rounded-full border border-slate-800 bg-slate-950/70 px-4 py-2 text-[11px] font-semibold tracking-[0.16em] uppercase text-slate-200 hover:bg-slate-900/70"
+                    className="rounded-full border border-slate-800 bg-slate-950/60 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
                   >
                     New
                   </button>
 
-                  <button
-                    onClick={() => setReaderOpen(true)}
-                    disabled={!selectedDraft}
-                    className="rounded-full border border-slate-800 bg-slate-950/70 px-4 py-2 text-[11px] font-semibold tracking-[0.16em] uppercase text-slate-200 hover:bg-slate-900/70 disabled:cursor-not-allowed disabled:text-slate-500"
-                  >
-                    Reader
-                  </button>
+                  {selectedDraft && (
+                    <span
+                      className={cx(
+                        "rounded-full px-3 py-2 text-[10px] uppercase tracking-[0.18em] border",
+                        selectedDraft.status === "finalized"
+                          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+                          : selectedDraft.status === "reviewed"
+                          ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+                          : selectedDraft.status === "discarded"
+                          ? "border-slate-600/50 bg-slate-800/40 text-slate-300"
+                          : "border-sky-500/40 bg-sky-500/10 text-sky-200"
+                      )}
+                    >
+                      {selectedDraft.status}
+                    </span>
+                  )}
+
+                  {!canMutateSelected && selectedDraft && (
+                    <span className="rounded-full border border-slate-700 bg-slate-900/60 px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-slate-300">
+                      Locked
+                    </span>
+                  )}
                 </div>
               </div>
-            ) : (
-              <div className="h-[calc(100%-52px)] overflow-hidden p-4">
-                <div className="h-full rounded-2xl border border-slate-800 bg-slate-950/55 p-4 overflow-hidden">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-                    AXIOM Advisory
-                  </div>
 
-                  <div className="mt-3 text-[13px] leading-relaxed text-slate-300">
-                    Advisory only (non-blocking). Clarity checks, missing clauses, risk flags,
-                    ISO-aligned phrasing suggestions.
-                  </div>
+              {/* Editor body (no page scroll; internal scroll only) */}
+              <div className="flex-1 min-h-0 overflow-hidden p-5">
+                <div className={cx("h-full w-full rounded-2xl border overflow-hidden", editorCard)}>
+                  {/* editor inner */}
+                  <div className="h-full flex flex-col">
+                    <div className={cx("shrink-0 px-5 py-4 border-b", editorTheme === "light" ? "border-slate-200" : "border-slate-800")}>
+                      <input
+                        className={cx(
+                          "w-full rounded-2xl border px-4 py-3 text-[15px] outline-none transition",
+                          inputBase,
+                          (!canMutateSelected || saving || finalizing || alchemyRunning) && "opacity-70 cursor-not-allowed"
+                        )}
+                        placeholder="Resolution title"
+                        value={title}
+                        onChange={(e) => onTitleChange(e.target.value)}
+                        disabled={!canMutateSelected || saving || finalizing || alchemyRunning}
+                      />
+                    </div>
 
-                  <div className="mt-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[12px] text-amber-200">
-                    Authority remains Evidence-Bound.
-                  </div>
+                    <div className="flex-1 min-h-0 overflow-hidden px-5 py-4">
+                      <textarea
+                        className={cx(
+                          "h-full w-full resize-none rounded-2xl border px-4 py-4 text-[13px] leading-[1.75] outline-none transition",
+                          textareaBase,
+                          (!canMutateSelected || saving || finalizing || alchemyRunning) && "opacity-70 cursor-not-allowed"
+                        )}
+                        placeholder="Draft body… (or Run Alchemy)"
+                        value={body}
+                        onChange={(e) => onBodyChange(e.target.value)}
+                        disabled={!canMutateSelected || saving || finalizing || alchemyRunning}
+                      />
+                    </div>
 
-                  <div className="mt-4 text-[12px] text-slate-400">
-                    (Next step: wire real advisory output to your AI tables/views — but UI stays non-blocking.)
+                    {/* Actions row */}
+                    <div className={cx("shrink-0 px-5 py-4 border-t flex flex-wrap gap-2",
+                      editorTheme === "light" ? "border-slate-200" : "border-slate-800"
+                    )}>
+                      <button
+                        onClick={handleRunAlchemy}
+                        disabled={alchemyRunning || saving || finalizing}
+                        className="rounded-full border border-emerald-400/70 bg-emerald-500/10 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {alchemyRunning ? "Running…" : "Run Alchemy"}
+                      </button>
+
+                      <button
+                        onClick={handleSaveDraft}
+                        disabled={saving || finalizing || !canMutateSelected}
+                        className="rounded-full bg-emerald-500 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-black hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {saving ? "Saving…" : "Save"}
+                      </button>
+
+                      <button
+                        onClick={handleMarkReviewed}
+                        disabled={!selectedDraft || saving || finalizing || !canMutateSelected}
+                        className="rounded-full border border-amber-400/60 bg-slate-950/60 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        Mark reviewed
+                      </button>
+
+                      <button
+                        onClick={handleFinalize}
+                        disabled={!selectedDraft || saving || finalizing || !canMutateSelected}
+                        className="rounded-full border border-emerald-500/60 bg-black/40 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {finalizing ? "Finalizing…" : "Finalize → Council"}
+                      </button>
+
+                      <div className="flex-1" />
+
+                      <button
+                        onClick={openDelete}
+                        disabled={!selectedDraft || !canMutateSelected || saving || finalizing || alchemyRunning}
+                        className="rounded-full border border-rose-500/50 bg-rose-500/10 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-rose-200 hover:bg-rose-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        Delete
+                      </button>
+                    </div>
                   </div>
                 </div>
+
+                {(error || info) && (
+                  <div className="mt-4 text-[13px]">
+                    {error && (
+                      <div className="rounded-2xl border border-red-500/60 bg-red-500/10 px-4 py-3 text-red-200">
+                        {error}
+                      </div>
+                    )}
+                    {info && !error && (
+                      <div className="rounded-2xl border border-emerald-500/60 bg-emerald-500/10 px-4 py-3 text-emerald-200">
+                        {info}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
-            )}
+
+              {/* Footer strip (OS-contained) */}
+              <div className="shrink-0 px-5 py-3 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
+                <span>CI-Alchemy · Draft factory (governance_drafts)</span>
+                <span>Finalize → governance_ledger (PENDING) → Council authority</span>
+              </div>
+            </section>
           </div>
         </div>
       </div>
 
-      {/* Reader Overlay (CI-Archive style: opens when you want it, not always eating space) */}
+      {/* Reader Modal */}
       {readerOpen && (
-        <div className="fixed inset-0 z-[80] bg-black/70 p-6">
-          <div className="mx-auto flex h-full max-w-[1100px] flex-col overflow-hidden rounded-[28px] border border-slate-800 bg-slate-950 shadow-2xl shadow-black/60">
-            <div className="flex items-center justify-between gap-3 border-b border-slate-800 px-5 py-4">
+        <div className="fixed inset-0 z-[90] bg-black/70 px-6 py-6 flex items-center justify-center">
+          <div className="w-full max-w-[980px] h-[85vh] rounded-3xl border border-slate-800 bg-slate-950/95 shadow-2xl shadow-black/70 overflow-hidden flex flex-col">
+            <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
               <div className="min-w-0">
-                <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
-                  Reader
+                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Reader</div>
+                <div className="mt-1 text-[15px] font-semibold text-slate-100 truncate">
+                  {(selectedDraft?.title || title || "(untitled)") as string}
                 </div>
-                <div className="mt-1 truncate text-[16px] font-semibold text-slate-100">
-                  {selectedDraft?.title || title || "(untitled)"}
+                <div className="mt-1 text-[11px] text-slate-500">
+                  {selectedDraft ? `${selectedDraft.status.toUpperCase()} • ${fmtShort(selectedDraft.created_at)}` : "—"}
                 </div>
               </div>
 
-              <div className="flex items-center gap-2">
-                <div className="rounded-full border border-slate-800 bg-slate-950/70 p-1">
-                  <button
-                    onClick={() => setReaderTone("light")}
-                    className={cx(
-                      "rounded-full px-3 py-2 text-[10px] uppercase tracking-[0.18em] transition",
-                      readerTone === "light" ? "bg-slate-200 text-slate-950" : "text-slate-400 hover:bg-slate-900/70"
-                    )}
-                  >
-                    Paper
-                  </button>
-                  <button
-                    onClick={() => setReaderTone("dark")}
-                    className={cx(
-                      "rounded-full px-3 py-2 text-[10px] uppercase tracking-[0.18em] transition",
-                      readerTone === "dark" ? "bg-emerald-500 text-slate-950" : "text-slate-400 hover:bg-slate-900/70"
-                    )}
-                  >
-                    Noir
-                  </button>
-                </div>
-
-                <button
-                  onClick={() => setReaderOpen(false)}
-                  className="rounded-full border border-slate-800 bg-slate-950/70 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/70"
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-
-            <div className="flex-1 overflow-hidden p-5">
-              <div
-                className={cx(
-                  "h-full overflow-y-auto rounded-[22px] border p-6",
-                  readerTone === "light"
-                    ? "border-slate-200 bg-white text-slate-900"
-                    : "border-slate-800 bg-slate-950 text-slate-100"
-                )}
+              <button
+                onClick={() => setReaderOpen(false)}
+                className="rounded-full border border-slate-700 bg-slate-900/60 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-800/60"
               >
-                <div className={cx("text-[12px] uppercase tracking-[0.18em]", readerTone === "light" ? "text-slate-500" : "text-slate-400")}>
-                  {selectedDraft?.record_type || "resolution"} • {fmtShort(selectedDraft?.created_at ?? null)}
-                </div>
+                Close
+              </button>
+            </div>
 
-                <h2 className={cx("mt-2 text-[20px] font-semibold", readerTone === "light" ? "text-slate-900" : "text-slate-100")}>
-                  {selectedDraft?.title || title || "(untitled)"}
-                </h2>
-
-                <div className={cx("mt-5 whitespace-pre-wrap text-[14px] leading-[1.85]", readerTone === "light" ? "text-slate-800" : "text-slate-200")}>
-                  {selectedDraft ? (selectedDraft.draft_text || "") : (body || "")}
-                </div>
+            <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5">
+              <div className="rounded-2xl border border-slate-800 bg-black/40 px-5 py-5">
+                <pre className="whitespace-pre-wrap font-sans text-[13px] leading-[1.8] text-slate-100">
+                  {selectedDraft ? (selectedDraft.draft_text ?? "") : (body ?? "")}
+                </pre>
               </div>
             </div>
 
-            <div className="border-t border-slate-800 px-5 py-4 text-[12px] text-slate-400">
-              Finalize promotes to Council queue. Ledger-linked drafts remain immutable inside Alchemy.
+            <div className="shrink-0 px-5 py-4 border-t border-slate-800 flex items-center justify-between text-[10px] text-slate-500">
+              <span>Reader is non-mutating. Edit in the Paper/Noir editor.</span>
+              <span>Oasis OS · Evidence-Bound Drafting</span>
             </div>
           </div>
         </div>
       )}
 
-      {/* Confirm modal (Discard / Delete) */}
-      {confirmOpen && selectedDraft && (
-        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/60 p-6">
-          <div className="w-full max-w-[620px] overflow-hidden rounded-[28px] border border-slate-800 bg-slate-950 shadow-2xl shadow-black/60">
-            <div className="border-b border-slate-800 px-6 py-5">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
-                Confirm {confirmMode === "delete" ? "Hard Delete" : "Discard"}
+      {/* Delete Modal (soft + hard) */}
+      {deleteOpen && selectedDraft && (
+        <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/70 px-4">
+          <div className="w-full max-w-[620px] rounded-3xl border border-slate-800 bg-slate-950 shadow-2xl shadow-black/60 overflow-hidden">
+            <div className="px-6 py-5 border-b border-slate-800">
+              <div className="text-[11px] uppercase tracking-[0.22em] text-rose-300">Delete draft</div>
+              <div className="mt-1 text-[16px] font-semibold text-slate-100">
+                Discard vs Permanent Delete
               </div>
-              <div className="mt-2 text-[18px] font-semibold text-slate-100">
-                {selectedDraft.title || "(untitled)"}
-              </div>
-              <div className="mt-2 text-[13px] text-slate-400">
-                {confirmMode === "delete"
-                  ? "Permanent removal (Alchemy-only). This does not delete governance_ledger."
-                  : "Soft remove: marks this draft as discarded (kept for audit / recovery)."}
+              <div className="mt-2 text-[12px] text-slate-400">
+                Allowed only before finalize. Ledger-linked drafts are locked.
               </div>
             </div>
 
-            <div className="px-6 py-5">
-              <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
-                <div className="text-[12px] text-slate-300">
-                  Type{" "}
-                  <span className={cx("font-semibold", confirmMode === "delete" ? "text-rose-200" : "text-slate-100")}>
-                    {confirmMode === "delete" ? "DELETE" : "DISCARD"}
-                  </span>{" "}
-                  to confirm.
-                </div>
-                <input
-                  value={confirmText}
-                  onChange={(e) => setConfirmText(e.target.value)}
-                  className="mt-3 w-full rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-emerald-400"
-                  placeholder={confirmMode === "delete" ? "DELETE" : "DISCARD"}
-                  disabled={confirmBusy}
-                />
+            <div className="px-6 py-5 space-y-4">
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setDeleteMode("soft")}
+                  className={cx(
+                    "rounded-2xl border px-4 py-3 text-left transition",
+                    deleteMode === "soft"
+                      ? "border-emerald-500/60 bg-emerald-500/10"
+                      : "border-slate-800 bg-slate-950 hover:bg-slate-900/60"
+                  )}
+                  disabled={deleteBusy}
+                >
+                  <div className="text-[11px] uppercase tracking-[0.2em] text-emerald-300">Soft</div>
+                  <div className="mt-1 text-sm font-semibold text-slate-100">Discard</div>
+                  <div className="mt-1 text-[11px] text-slate-400">Marks status = discarded.</div>
+                </button>
 
-                <div className="mt-4 flex items-center justify-end gap-2">
-                  <button
-                    onClick={() => setConfirmOpen(false)}
-                    disabled={confirmBusy}
-                    className="rounded-full border border-slate-800 bg-slate-950/70 px-5 py-3 text-[12px] font-semibold tracking-[0.16em] uppercase text-slate-200 hover:bg-slate-900/70 disabled:opacity-50"
-                  >
-                    Cancel
-                  </button>
-
-                  <button
-                    onClick={performDiscardOrDelete}
-                    disabled={confirmBusy}
-                    className={cx(
-                      "rounded-full px-5 py-3 text-[12px] font-semibold tracking-[0.16em] uppercase transition disabled:opacity-50",
-                      confirmMode === "delete"
-                        ? "border border-rose-500/40 bg-rose-500/10 text-rose-200 hover:bg-rose-500/15"
-                        : "border border-slate-700 bg-slate-950/60 text-slate-100 hover:bg-slate-900/60"
-                    )}
-                  >
-                    {confirmBusy ? (confirmMode === "delete" ? "Deleting…" : "Discarding…") : (confirmMode === "delete" ? "Hard Delete" : "Discard")}
-                  </button>
-                </div>
+                <button
+                  onClick={() => setDeleteMode("hard")}
+                  className={cx(
+                    "rounded-2xl border px-4 py-3 text-left transition",
+                    deleteMode === "hard"
+                      ? "border-rose-500/60 bg-rose-500/10"
+                      : "border-slate-800 bg-slate-950 hover:bg-slate-900/60"
+                  )}
+                  disabled={deleteBusy}
+                >
+                  <div className="text-[11px] uppercase tracking-[0.2em] text-rose-300">Hard</div>
+                  <div className="mt-1 text-sm font-semibold text-slate-100">Permanent</div>
+                  <div className="mt-1 text-[11px] text-slate-400">Calls owner_delete_governance_draft.</div>
+                </button>
               </div>
 
-              {!canMutateSelected && (
-                <div className="mt-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[13px] text-amber-200">
-                  This draft is ledger-linked (left Alchemy). It can’t be discarded or deleted here.
+              <div>
+                <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 mb-2">Reason (optional)</div>
+                <textarea
+                  className="w-full min-h-[96px] rounded-2xl border border-slate-800 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 resize-none outline-none focus:border-slate-600"
+                  value={deleteReason}
+                  onChange={(e) => setDeleteReason(e.target.value)}
+                  placeholder="e.g., test run / duplicate / wrong entity…"
+                  disabled={deleteBusy}
+                />
+              </div>
+
+              {deleteMode === "hard" && (
+                <div className="rounded-2xl border border-rose-500/30 bg-rose-500/5 px-4 py-3">
+                  <div className="text-[11px] uppercase tracking-[0.2em] text-rose-300">Confirm hard delete</div>
+                  <div className="mt-1 text-[11px] text-slate-400">
+                    Type <span className="text-slate-200 font-semibold">DELETE</span> to confirm.
+                  </div>
+                  <input
+                    className="mt-3 w-full rounded-2xl border border-slate-800 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none focus:border-rose-500/50"
+                    value={deleteConfirmText}
+                    onChange={(e) => setDeleteConfirmText(e.target.value)}
+                    placeholder='Type "DELETE"'
+                    disabled={deleteBusy}
+                  />
                 </div>
               )}
+            </div>
+
+            <div className="px-6 py-5 border-t border-slate-800 flex items-center justify-between gap-2">
+              <button
+                onClick={() => (deleteBusy ? null : setDeleteOpen(false))}
+                disabled={deleteBusy}
+                className="rounded-full border border-slate-800 bg-slate-950 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+
+              <button
+                onClick={confirmDelete}
+                disabled={deleteBusy || !canMutateSelected}
+                className={cx(
+                  "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition disabled:opacity-50 disabled:cursor-not-allowed",
+                  deleteMode === "soft"
+                    ? "bg-emerald-500 text-black hover:bg-emerald-400"
+                    : "bg-rose-500 text-black hover:bg-rose-400"
+                )}
+              >
+                {deleteBusy ? "Deleting…" : deleteMode === "soft" ? "Discard" : "Hard Delete"}
+              </button>
             </div>
           </div>
         </div>
       )}
     </div>
+  );
+}
+
+function StatusTabButton({
+  label,
+  value,
+  active,
+  onClick,
+}: {
+  label: string;
+  value: StatusTab;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cx(
+        "px-4 py-2 rounded-full text-left transition min-w-[110px]",
+        active
+          ? "bg-emerald-500/15 border border-emerald-400/70 text-slate-50"
+          : "bg-transparent border border-transparent hover:bg-slate-900/60 text-slate-300"
+      )}
+    >
+      <div className="text-xs font-semibold">{label}</div>
+      <div className="text-[10px] text-slate-400 uppercase tracking-[0.18em]">{value}</div>
+    </button>
   );
 }
