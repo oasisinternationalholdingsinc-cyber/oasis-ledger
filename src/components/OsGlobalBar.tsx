@@ -28,25 +28,27 @@ function setEnv(next: OsEnv) {
 
 function useClockLabel24h() {
   const [label, setLabel] = useState<string>("—");
+
   useEffect(() => {
     const tick = () => {
       try {
         const d = new Date();
-        setLabel(
-          d.toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-            hour12: false,
-          })
-        );
+        const s = d.toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        });
+        setLabel(s);
       } catch {
         setLabel("—");
       }
     };
+
     tick();
     const t = setInterval(tick, 10_000);
     return () => clearInterval(t);
   }, []);
+
   return label;
 }
 
@@ -54,46 +56,44 @@ export function OsGlobalBar() {
   const { activeEntity, setActiveEntity } = useEntity();
 
   const [env, setEnvState] = useState<OsEnv>(() => getInitialEnv());
-  const [operatorLabel, setOperatorLabel] = useState<string>("—");
+  const [operatorEmail, setOperatorEmail] = useState<string>("—");
 
   const [envMenuOpen, setEnvMenuOpen] = useState(false);
   const [entityMenuOpen, setEntityMenuOpen] = useState(false);
 
   const clock = useClockLabel24h();
 
-  // keep env in sync across tabs + modules
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key === ENV_KEY) setEnvState(getInitialEnv());
     };
-    const onEnv = (e: any) => setEnvState((e?.detail?.env as OsEnv) ?? getInitialEnv());
+    const onEnv = (e: Event) => {
+      const anyE = e as any;
+      const next = (anyE?.detail?.env as OsEnv) ?? getInitialEnv();
+      setEnvState(next);
+    };
+
     window.addEventListener("storage", onStorage);
-    window.addEventListener("oasis:env" as any, onEnv);
+    window.addEventListener("oasis:env", onEnv as EventListener);
     return () => {
       window.removeEventListener("storage", onStorage);
-      window.removeEventListener("oasis:env" as any, onEnv);
+      window.removeEventListener("oasis:env", onEnv as EventListener);
     };
   }, []);
 
-  // operator label
   useEffect(() => {
     let mounted = true;
     (async () => {
       const { data } = await supabase.auth.getUser();
       if (!mounted) return;
-      const u = data?.user;
-      const full =
-        (u?.user_metadata as any)?.full_name ||
-        (u?.user_metadata as any)?.name ||
-        (u?.user_metadata as any)?.display_name;
-      setOperatorLabel(full || u?.email || "—");
+      setOperatorEmail(data?.user?.email ?? "—");
     })();
     return () => {
       mounted = false;
     };
   }, []);
 
-  // close menus on outside click / ESC
+  // Close menus on outside click / ESC
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -134,7 +134,7 @@ export function OsGlobalBar() {
 
   const activeEntityLabel = useMemo(() => {
     const hit = ENTITY_OPTIONS.find((e) => e.key === activeEntity);
-    return hit?.label ?? ENTITY_OPTIONS[0].label;
+    return hit?.label ?? "Oasis International Holdings Inc.";
   }, [activeEntity]);
 
   const onSignOut = async () => {
@@ -165,37 +165,38 @@ export function OsGlobalBar() {
             <div className="ml-3 hidden items-center gap-2 rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[12px] text-white/75 shadow-[0_0_18px_rgba(0,0,0,0.22)] lg:flex">
               <span className="text-white/50">Operator</span>
               <span className="h-1 w-1 rounded-full bg-white/25" />
-              <span className="max-w-[240px] truncate text-white/90">{operatorLabel}</span>
+              <span className="max-w-[220px] truncate text-white/90">{operatorEmail}</span>
             </div>
           </div>
 
-          {/* CENTER (true centered) */}
+          {/* CENTER clock */}
           <div className="flex w-1/3 items-center justify-center">
-            <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-4 py-2 text-[12px] text-white/85 shadow-[0_0_30px_rgba(201,162,39,0.14)]">
+            <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-4 py-2 text-[12px] text-white/85 shadow-[0_0_26px_rgba(201,162,39,0.08)]">
               <Clock3 className="h-4 w-4 text-[#c9a227]/80" />
-              <span className="min-w-[72px] text-center tracking-[0.16em]">{clock}</span>
+              <span className="min-w-[72px] text-center tracking-[0.12em]">{clock}</span>
+              <span className="ml-1 h-1.5 w-1.5 rounded-full bg-[#c9a227]/80 shadow-[0_0_12px_rgba(201,162,39,0.55)]" />
             </div>
           </div>
 
           {/* RIGHT */}
           <div className="flex w-1/3 items-center justify-end gap-3">
-            {/* Entity dropdown (same OS menu language as env) */}
+            {/* Entity dropdown */}
             <div className="relative" onClick={(e) => e.stopPropagation()}>
               <button
                 onClick={() => {
                   setEntityMenuOpen((v) => !v);
                   setEnvMenuOpen(false);
                 }}
-                className="flex items-center gap-2 rounded-full border border-white/10 bg-black/25 px-4 py-2 text-[12px] text-white/85 shadow-[0_0_18px_rgba(0,0,0,0.22)] hover:bg-white/5 hover:shadow-[0_0_24px_rgba(201,162,39,0.10)]"
+                className="flex items-center gap-2 rounded-full border border-white/10 bg-black/25 px-4 py-2 text-[12px] text-white/85 shadow-[0_0_18px_rgba(0,0,0,0.22)] hover:bg-white/5"
               >
                 <span className="text-white/55">Entity</span>
                 <span className="h-1 w-1 rounded-full bg-white/25" />
-                <span className="max-w-[280px] truncate text-white/90">{activeEntityLabel}</span>
-                <ChevronDown className="h-4 w-4 text-white/60" />
+                <span className="max-w-[260px] truncate text-white/90">{activeEntityLabel}</span>
+                <ChevronDown className="h-4 w-4 text-white/55" />
               </button>
 
               {entityMenuOpen && (
-                <div className="absolute right-0 mt-2 w-[380px] rounded-2xl border border-white/10 bg-black/85 p-2 shadow-[0_14px_50px_rgba(0,0,0,0.62)] backdrop-blur-xl z-[80]">
+                <div className="absolute right-0 mt-2 w-[360px] rounded-2xl border border-white/10 bg-black/85 p-2 shadow-[0_14px_50px_rgba(0,0,0,0.62)] backdrop-blur-xl z-[80]">
                   <div className="px-3 py-2 text-[11px] text-white/55">Switch entity</div>
                   {ENTITY_OPTIONS.map((opt) => {
                     const selected = opt.key === activeEntity;
@@ -216,6 +217,9 @@ export function OsGlobalBar() {
                       </button>
                     );
                   })}
+                  <div className="mt-2 rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-[11px] text-white/55">
+                    Entity scoping is enforced across CI modules (Archive, Forge, Council).
+                  </div>
                 </div>
               )}
             </div>
@@ -235,7 +239,7 @@ export function OsGlobalBar() {
               </button>
 
               {envMenuOpen && (
-                <div className="absolute right-0 mt-2 w-[330px] rounded-2xl border border-white/10 bg-black/85 p-2 shadow-[0_14px_50px_rgba(0,0,0,0.62)] backdrop-blur-xl z-[80]">
+                <div className="absolute right-0 mt-2 w-[320px] rounded-2xl border border-white/10 bg-black/85 p-2 shadow-[0_14px_50px_rgba(0,0,0,0.62)] backdrop-blur-xl z-[80]">
                   <div className="px-3 py-2 text-[11px] text-white/55">Switch environment</div>
 
                   <button
@@ -295,7 +299,7 @@ export function OsGlobalBar() {
               )}
             </div>
 
-            {/* Sign out pill */}
+            {/* Sign out */}
             <button
               onClick={onSignOut}
               className="flex items-center gap-2 rounded-full border border-white/10 bg-black/25 px-4 py-2 text-[12px] text-white/85 shadow-[0_0_18px_rgba(0,0,0,0.22)] hover:bg-white/5 hover:shadow-[0_0_24px_rgba(201,162,39,0.10)]"
@@ -310,7 +314,4 @@ export function OsGlobalBar() {
   );
 }
 
-export function OsGlobalBar() {
-  // ...
-}
-
+export default OsGlobalBar;
