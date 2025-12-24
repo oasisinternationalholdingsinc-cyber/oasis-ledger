@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   LogOut,
@@ -8,26 +8,19 @@ import {
   ChevronDown,
   User,
   Clock,
-  Beaker,
-  BadgeCheck,
+  FlaskConical,
+  Database,
 } from "lucide-react";
 import { supabaseBrowser } from "@/lib/supabase/browser";
 import { useEntity, type EntityKey } from "@/components/OsEntityContext";
 
-type EnvKey = "RoT" | "SANDBOX";
+type OsEnv = "RoT" | "SANDBOX";
 
 const ENTITY_LABEL: Record<EntityKey, string> = {
   holdings: "Holdings",
   "real-estate": "Real Estate",
   lounge: "Lounge",
 };
-
-const ENV_LABEL: Record<EnvKey, string> = {
-  RoT: "RoT",
-  SANDBOX: "SANDBOX",
-};
-
-const ENV_STORAGE_KEY = "oasis_os_env"; // used by modules to pick *_rot vs *_sandbox views
 
 function cls(...p: Array<string | false | null | undefined>) {
   return p.filter(Boolean).join(" ");
@@ -42,16 +35,19 @@ function useClock() {
   return now;
 }
 
-function readEnvFromStorage(): EnvKey {
+const LS_ENV_KEY = "oasis_os_env";
+
+function readEnv(): OsEnv {
   if (typeof window === "undefined") return "SANDBOX";
-  const v = (window.localStorage.getItem(ENV_STORAGE_KEY) || "").toUpperCase();
-  return v === "ROT" ? "RoT" : "SANDBOX";
+  const v = window.localStorage.getItem(LS_ENV_KEY);
+  return v === "RoT" || v === "SANDBOX" ? v : "SANDBOX";
 }
 
-function writeEnvToStorage(env: EnvKey) {
+function writeEnv(next: OsEnv) {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(ENV_STORAGE_KEY, env);
-  window.dispatchEvent(new CustomEvent("oasis:env-changed", { detail: { env } }));
+  window.localStorage.setItem(LS_ENV_KEY, next);
+  document.documentElement.dataset.oasisEnv = next; // optional global hook
+  window.dispatchEvent(new CustomEvent("oasis:env", { detail: next }));
 }
 
 export function OsGlobalBar() {
@@ -61,39 +57,45 @@ export function OsGlobalBar() {
 
   const [entityOpen, setEntityOpen] = useState(false);
   const [envOpen, setEnvOpen] = useState(false);
-
-  const [env, setEnv] = useState<EnvKey>("SANDBOX");
-  const [operatorLabel, setOperatorLabel] = useState("Operator");
+  const [env, setEnv] = useState<OsEnv>(() => readEnv());
 
   const now = useClock();
+
+  // TODO: wire to profiles later (kept as you had)
+  const operatorLabel = "abbas1167@hotmail.com";
   const clockText = now.toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
   });
 
-  useEffect(() => {
-    // initialize env from localStorage (default SANDBOX)
-    setEnv(readEnvFromStorage());
-  }, []);
+  const rootRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    // operator label from current session (email), fallback to "Operator"
-    let alive = true;
-    (async () => {
-      try {
-        const { data } = await supabase.auth.getUser();
-        const email = data?.user?.email || "";
-        if (!alive) return;
-        setOperatorLabel(email ? email : "Operator");
-      } catch {
-        if (!alive) return;
-        setOperatorLabel("Operator");
-      }
-    })();
-    return () => {
-      alive = false;
+    // Ensure DOM hook is set on load
+    writeEnv(env);
+
+    const onEnv = (e: Event) => {
+      const ce = e as CustomEvent;
+      const next = ce?.detail;
+      if (next === "RoT" || next === "SANDBOX") setEnv(next);
     };
-  }, [supabase]);
+    window.addEventListener("oasis:env", onEnv as any);
+
+    const onDoc = (ev: MouseEvent) => {
+      if (!rootRef.current) return;
+      if (!rootRef.current.contains(ev.target as Node)) {
+        setEntityOpen(false);
+        setEnvOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDoc);
+
+    return () => {
+      window.removeEventListener("oasis:env", onEnv as any);
+      document.removeEventListener("mousedown", onDoc);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function signOut(e?: React.MouseEvent) {
     e?.preventDefault();
@@ -107,18 +109,18 @@ export function OsGlobalBar() {
   const isSandbox = env === "SANDBOX";
 
   return (
-    <div className="sticky top-0 z-50">
-      {/* MAIN BAR */}
-      <div className="border-b border-slate-900/60 bg-black/70 backdrop-blur-xl">
-        <div className="mx-auto max-w-[1600px] px-5 py-3 flex items-center justify-between gap-4">
-          {/* LEFT: Brand + Operator + Entity + Env */}
-          <div className="flex items-center gap-3 min-w-0">
+    <div ref={rootRef} className="sticky top-0 z-[80]">
+      {/* GLOBAL BAR */}
+      <div className="relative border-b border-amber-500/20 bg-black/70 backdrop-blur-xl">
+        <div className="mx-auto max-w-[1600px] px-5 h-16 flex items-center">
+          {/* LEFT */}
+          <div className="flex items-center gap-3 min-w-0 flex-1">
             <div className="h-9 w-9 rounded-2xl border border-amber-500/25 bg-amber-500/10 flex items-center justify-center">
               <Shield className="h-4 w-4 text-amber-300" />
             </div>
 
             <div className="min-w-0">
-              <div className="text-[11px] uppercase tracking-[0.28em] text-slate-500">
+              <div className="text-[10px] uppercase tracking-[0.32em] text-slate-500">
                 Oasis Digital Parliament
               </div>
               <div className="text-sm font-semibold text-slate-100 truncate">
@@ -126,16 +128,24 @@ export function OsGlobalBar() {
                 <span className="text-slate-500 font-medium">ODP.AI</span>
               </div>
             </div>
+          </div>
 
-            <span className="hidden md:inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/50 px-3 py-1 text-[11px] text-slate-300">
+          {/* CENTER (true centered) */}
+          <div className="absolute left-1/2 -translate-x-1/2 hidden md:flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/40 px-4 py-2 text-xs text-slate-200">
+            <Clock className="h-4 w-4 text-amber-300/80" />
+            <span className="font-semibold tracking-wide">{clockText}</span>
+          </div>
+
+          {/* RIGHT */}
+          <div className="flex items-center justify-end gap-2 flex-1">
+            {/* Operator */}
+            <span className="hidden lg:inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/50 px-3 py-1 text-[11px] text-slate-300">
               <User className="h-3.5 w-3.5 text-slate-400" />
               <span className="text-slate-400">Operator:</span>
-              <span className="text-slate-100 truncate max-w-[260px]">
-                {operatorLabel}
-              </span>
+              <span className="text-slate-100">{operatorLabel}</span>
             </span>
 
-            {/* ENTITY SELECT */}
+            {/* Entity */}
             <div className="relative">
               <button
                 type="button"
@@ -143,7 +153,7 @@ export function OsGlobalBar() {
                   setEntityOpen((v) => !v);
                   setEnvOpen(false);
                 }}
-                className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/50 px-3 py-1 text-[11px] text-slate-300 hover:bg-slate-950/70"
+                className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/50 px-3 py-1 text-[11px] text-slate-200 hover:bg-slate-950/70"
                 title="Switch entity"
               >
                 <span className="text-slate-400">Entity:</span>
@@ -152,10 +162,7 @@ export function OsGlobalBar() {
               </button>
 
               {entityOpen && (
-                <div
-                  className="absolute left-0 mt-2 w-52 overflow-hidden rounded-2xl border border-slate-800 bg-black/95 shadow-xl"
-                  onMouseLeave={() => setEntityOpen(false)}
-                >
+                <div className="absolute right-0 mt-2 w-56 overflow-hidden rounded-2xl border border-slate-800 bg-black/95 shadow-2xl z-[120]">
                   {(Object.keys(ENTITY_LABEL) as EntityKey[]).map((k) => (
                     <button
                       key={k}
@@ -176,7 +183,7 @@ export function OsGlobalBar() {
               )}
             </div>
 
-            {/* ENV SELECT (Style B driver: modules choose *_rot vs *_sandbox views) */}
+            {/* ENV (Style B toggle driver) */}
             <div className="relative">
               <button
                 type="button"
@@ -185,59 +192,70 @@ export function OsGlobalBar() {
                   setEntityOpen(false);
                 }}
                 className={cls(
-                  "inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] hover:bg-slate-950/70",
+                  "inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] hover:brightness-110",
                   isSandbox
                     ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
-                    : "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+                    : "border-emerald-400/40 bg-emerald-400/10 text-emerald-200"
                 )}
                 title="Switch environment"
               >
                 {isSandbox ? (
-                  <Beaker className="h-3.5 w-3.5 text-amber-300" />
+                  <FlaskConical className="h-3.5 w-3.5" />
                 ) : (
-                  <BadgeCheck className="h-3.5 w-3.5 text-emerald-300" />
+                  <Database className="h-3.5 w-3.5" />
                 )}
-                <span className={cls(isSandbox ? "text-amber-200" : "text-emerald-200")}>
-                  {ENV_LABEL[env]}
-                </span>
+                <span className="font-semibold tracking-wide">{env}</span>
                 <ChevronDown className="h-3.5 w-3.5 opacity-80" />
               </button>
 
               {envOpen && (
-                <div
-                  className="absolute left-0 mt-2 w-52 overflow-hidden rounded-2xl border border-slate-800 bg-black/95 shadow-xl"
-                  onMouseLeave={() => setEnvOpen(false)}
-                >
-                  {(["RoT", "SANDBOX"] as EnvKey[]).map((k) => (
-                    <button
-                      key={k}
-                      type="button"
-                      onClick={() => {
-                        setEnv(k);
-                        writeEnvToStorage(k);
-                        setEnvOpen(false);
-                      }}
-                      className={cls(
-                        "w-full text-left px-3 py-2 text-xs hover:bg-slate-950/70",
-                        k === env ? "text-amber-200" : "text-slate-200"
-                      )}
-                    >
-                      {k === "RoT" ? "RoT (System of Record)" : "SANDBOX (Test Artifacts)"}
-                    </button>
-                  ))}
+                <div className="absolute right-0 mt-2 w-64 overflow-hidden rounded-2xl border border-slate-800 bg-black/95 shadow-2xl z-[120]">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEnv("RoT");
+                      writeEnv("RoT");
+                      setEnvOpen(false);
+                    }}
+                    className={cls(
+                      "w-full text-left px-3 py-2 text-xs hover:bg-slate-950/70",
+                      env === "RoT" ? "text-emerald-200" : "text-slate-200"
+                    )}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold">RoT</span>
+                      <span className="text-[10px] text-slate-500">System of Record</span>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEnv("SANDBOX");
+                      writeEnv("SANDBOX");
+                      setEnvOpen(false);
+                    }}
+                    className={cls(
+                      "w-full text-left px-3 py-2 text-xs hover:bg-slate-950/70",
+                      env === "SANDBOX" ? "text-amber-200" : "text-slate-200"
+                    )}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold">SANDBOX</span>
+                      <span className="text-[10px] text-slate-500">Test artifacts only</span>
+                    </div>
+                  </button>
+
+                  <div className="px-3 py-2 border-t border-slate-800 text-[10px] text-slate-500">
+                    Modules should read <span className="text-slate-300">oasis_os_env</span> to select{" "}
+                    <span className="text-slate-300">*_rot</span> vs{" "}
+                    <span className="text-slate-300">*_sandbox</span> views.
+                  </div>
                 </div>
               )}
             </div>
-          </div>
 
-          {/* CENTER: Clock */}
-          <div className="hidden md:flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/40 px-4 py-2 text-xs text-slate-200">
-            <Clock className="h-4 w-4 text-amber-300/80" />
-            <span className="font-semibold tracking-wide">{clockText}</span>
-          </div>
-
-          {/* RIGHT: Sign out */}
-          <div className="flex items-center gap-2">
+            {/* Sign out */}
             <button
               type="button"
               onClick={signOut}
@@ -251,38 +269,23 @@ export function OsGlobalBar() {
         </div>
       </div>
 
-      {/* LOUD ENV BANNER (cannot miss) */}
-      {isSandbox ? (
-        <div className="border-b border-amber-500/25 bg-gradient-to-r from-amber-500/20 via-black/70 to-amber-500/20 backdrop-blur-xl">
-          <div className="mx-auto max-w-[1600px] px-5 py-2 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2 text-xs">
-              <span className="inline-flex items-center gap-2 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] uppercase tracking-[0.22em] text-amber-200">
-                <Beaker className="h-4 w-4 text-amber-300" />
-                SANDBOX ENVIRONMENT
-              </span>
-              <span className="text-[11px] text-slate-300">
-                Test artifacts only • Not the system of record
-              </span>
-            </div>
-
-            <span className="hidden md:inline-flex text-[11px] text-slate-400">
-              Modules should read{" "}
-              <span className="mx-1 font-mono text-slate-200">{ENV_STORAGE_KEY}</span>
-              to select *_sandbox views
-            </span>
-          </div>
-        </div>
-      ) : (
-        <div className="border-b border-emerald-500/20 bg-gradient-to-r from-emerald-500/15 via-black/70 to-emerald-500/15 backdrop-blur-xl">
-          <div className="mx-auto max-w-[1600px] px-5 py-2 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2 text-xs">
-              <span className="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-[11px] uppercase tracking-[0.22em] text-emerald-200">
-                <BadgeCheck className="h-4 w-4 text-emerald-300" />
-                RoT • SYSTEM OF RECORD
-              </span>
-              <span className="text-[11px] text-slate-300">
-                Canonical ledger artifacts • Archive discipline enforced
-              </span>
+      {/* LOUD SANDBOX BANNER (never blocks clicks) */}
+      {isSandbox && (
+        <div className="relative z-[10] pointer-events-none">
+          <div className="mx-auto max-w-[1600px] px-5">
+            <div className="mt-2 mb-2 rounded-full border border-amber-500/30 bg-amber-500/10 backdrop-blur px-4 py-2 text-[11px] text-amber-200 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <FlaskConical className="h-4 w-4" />
+                <span className="font-semibold tracking-[0.2em] uppercase">
+                  SANDBOX ENVIRONMENT
+                </span>
+                <span className="text-slate-400 ml-2">
+                  Test artifacts only • Not the system of record
+                </span>
+              </div>
+              <div className="hidden lg:block text-slate-500">
+                Style B: modules select <span className="text-slate-300">*_sandbox</span> views
+              </div>
             </div>
           </div>
         </div>
