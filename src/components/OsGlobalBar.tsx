@@ -1,3 +1,4 @@
+// src/components/OsGlobalBar.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -6,8 +7,8 @@ import { useEntity } from "@/components/OsEntityContext";
 import type { EntityKey } from "@/components/OsEntityContext";
 import { Shield, ChevronDown, LogOut, Clock3 } from "lucide-react";
 
-type OsEnv = "RoT" | "SANDBOX";
-const ENV_KEY = "oasis_os_env";
+export type OsEnv = "RoT" | "SANDBOX";
+export const ENV_KEY = "oasis_os_env";
 
 const ENTITY_OPTIONS: Array<{ key: EntityKey; label: string }> = [
   { key: "holdings" as EntityKey, label: "Oasis International Holdings Inc." },
@@ -15,13 +16,14 @@ const ENTITY_OPTIONS: Array<{ key: EntityKey; label: string }> = [
   { key: "real-estate" as EntityKey, label: "Oasis International Real Estate Inc." },
 ];
 
-function getInitialEnv(): OsEnv {
+export function getInitialEnv(): OsEnv {
   if (typeof window === "undefined") return "RoT";
   const v = window.localStorage.getItem(ENV_KEY);
   return v === "SANDBOX" ? "SANDBOX" : "RoT";
 }
 
-function setEnv(next: OsEnv) {
+export function writeEnv(next: OsEnv) {
+  if (typeof window === "undefined") return;
   window.localStorage.setItem(ENV_KEY, next);
   window.dispatchEvent(new CustomEvent("oasis:env", { detail: { env: next } }));
 }
@@ -32,7 +34,6 @@ function useClockLabel24h() {
     const tick = () => {
       try {
         const d = new Date();
-        // 24h HH:MM
         const s = d.toLocaleTimeString([], {
           hour: "2-digit",
           minute: "2-digit",
@@ -61,12 +62,12 @@ export function OsGlobalBar() {
 
   const clock = useClockLabel24h();
 
+  // keep env state synced
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key === ENV_KEY) setEnvState(getInitialEnv());
     };
     const onEnv = (e: any) => setEnvState((e?.detail?.env as OsEnv) ?? getInitialEnv());
-
     window.addEventListener("storage", onStorage);
     window.addEventListener("oasis:env" as any, onEnv);
     return () => {
@@ -75,6 +76,7 @@ export function OsGlobalBar() {
     };
   }, []);
 
+  // operator
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -87,7 +89,7 @@ export function OsGlobalBar() {
     };
   }, []);
 
-  // Close menus on outside click / ESC
+  // close menus on ESC / outside click
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -111,7 +113,6 @@ export function OsGlobalBar() {
     if (env === "SANDBOX") {
       return {
         label: "SANDBOX",
-        subtitle: "Test artifacts only • Not the system of record",
         pillClass:
           "bg-[#2a1e0b]/60 border-[#7a5a1a]/55 text-[#f5d47a] shadow-[0_0_28px_rgba(245,212,122,0.12)] hover:shadow-[0_0_34px_rgba(245,212,122,0.16)]",
         dotClass: "bg-[#f5d47a]",
@@ -119,7 +120,6 @@ export function OsGlobalBar() {
     }
     return {
       label: "RoT",
-      subtitle: "System of Record",
       pillClass:
         "bg-[#0b1f14]/60 border-[#1f6f48]/45 text-[#92f7c6] shadow-[0_0_24px_rgba(146,247,198,0.12)] hover:shadow-[0_0_30px_rgba(146,247,198,0.16)]",
       dotClass: "bg-[#92f7c6]",
@@ -155,7 +155,6 @@ export function OsGlobalBar() {
               </div>
             </div>
 
-            {/* Operator pill (left side) */}
             <div className="ml-3 hidden items-center gap-2 rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[12px] text-white/75 shadow-[0_0_18px_rgba(0,0,0,0.22)] lg:flex">
               <span className="text-white/50">Operator</span>
               <span className="h-1 w-1 rounded-full bg-white/25" />
@@ -163,7 +162,7 @@ export function OsGlobalBar() {
             </div>
           </div>
 
-          {/* CENTER (true centered) */}
+          {/* CENTER */}
           <div className="flex w-1/3 items-center justify-center">
             <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-4 py-2 text-[12px] text-white/85 shadow-[0_0_26px_rgba(201,162,39,0.08)]">
               <Clock3 className="h-4 w-4 text-[#c9a227]/80" />
@@ -173,7 +172,7 @@ export function OsGlobalBar() {
 
           {/* RIGHT */}
           <div className="flex w-1/3 items-center justify-end gap-3">
-            {/* Entity dropdown (OS style) */}
+            {/* Entity */}
             <div className="relative" onClick={(e) => e.stopPropagation()}>
               <button
                 onClick={() => {
@@ -202,26 +201,22 @@ export function OsGlobalBar() {
                         }}
                         className={[
                           "flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[13px] transition",
-                          selected
-                            ? "bg-white/10 text-white"
-                            : "hover:bg-white/5 text-white/85",
+                          selected ? "bg-white/10 text-white" : "hover:bg-white/5 text-white/85",
                         ].join(" ")}
                       >
                         <span className="truncate pr-4">{opt.label}</span>
-                        {selected && (
-                          <span className="text-[11px] text-[#c9a227]/85">Active</span>
-                        )}
+                        {selected && <span className="text-[11px] text-[#c9a227]/85">Active</span>}
                       </button>
                     );
                   })}
                   <div className="mt-2 rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-[11px] text-white/55">
-                    Entity scoping is enforced across CI modules (Archive, Forge, Council).
+                    Entity scoping is enforced across CI modules.
                   </div>
                 </div>
               )}
             </div>
 
-            {/* Env dropdown (OS style) */}
+            {/* Env */}
             <div className="relative" onClick={(e) => e.stopPropagation()}>
               <button
                 onClick={() => {
@@ -241,7 +236,7 @@ export function OsGlobalBar() {
 
                   <button
                     onClick={() => {
-                      setEnv("RoT");
+                      writeEnv("RoT");
                       setEnvState("RoT");
                       setEnvMenuOpen(false);
                     }}
@@ -258,7 +253,7 @@ export function OsGlobalBar() {
 
                   <button
                     onClick={() => {
-                      setEnv("SANDBOX");
+                      writeEnv("SANDBOX");
                       setEnvState("SANDBOX");
                       setEnvMenuOpen(false);
                     }}
@@ -285,7 +280,7 @@ export function OsGlobalBar() {
                     <button
                       onClick={() => {
                         const next: OsEnv = env === "SANDBOX" ? "RoT" : "SANDBOX";
-                        setEnv(next);
+                        writeEnv(next);
                         setEnvState(next);
                         setEnvMenuOpen(false);
                       }}
@@ -298,7 +293,7 @@ export function OsGlobalBar() {
               )}
             </div>
 
-            {/* Sign out pill */}
+            {/* Sign out */}
             <button
               onClick={onSignOut}
               className="flex items-center gap-2 rounded-full border border-white/10 bg-black/25 px-4 py-2 text-[12px] text-white/85 shadow-[0_0_18px_rgba(0,0,0,0.22)] hover:bg-white/5 hover:shadow-[0_0_24px_rgba(201,162,39,0.10)]"
@@ -309,5 +304,8 @@ export function OsGlobalBar() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
 
 export default OsGlobalBar;
