@@ -310,25 +310,4 @@ export function OsGlobalBar() {
         </div>
       </div>
 
-      {/* Optional thin ribbon (non-blocking) */}
-      {env === "SANDBOX" && (
-        <div
-          className="relative z-[10] border-b border-[#7a5a1a]/35 bg-gradient-to-r from-[#201607] via-[#2a1e0b] to-[#201607]"
-          style={{ pointerEvents: "none" }}
-        >
-          <div className="mx-auto flex max-w-[1500px] items-center justify-between px-6 py-2 text-[11px]">
-            <div className="flex items-center gap-3">
-              <span className="font-semibold tracking-[0.16em] text-[#f5d47a]">
-                SANDBOX ENVIRONMENT
-              </span>
-              <span className="text-white/55">Test artifacts only • Not the system of record</span>
-            </div>
-            <div className="text-white/45">Style B active</div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default OsGlobalBar;
