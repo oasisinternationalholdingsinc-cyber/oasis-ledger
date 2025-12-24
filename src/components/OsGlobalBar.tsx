@@ -310,4 +310,7 @@ export function OsGlobalBar() {
   );
 }
 
-export default OsGlobalBar;
+export function OsGlobalBar() {
+  // ...
+}
+

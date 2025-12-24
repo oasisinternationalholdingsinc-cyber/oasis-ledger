@@ -1,3 +1,4 @@
+// src/app/(os)/layout.tsx
 import type { ReactNode } from "react";
 import { OsHeader } from "@/components/OsHeader";
 import { OsDock } from "@/components/OsDock";
@@ -18,7 +19,7 @@ export default function OsLayout({ children }: { children: ReactNode }) {
           </OsAuthGate>
         </div>
 
-        {/* Footer (fixed) owns SANDBOX ribbon + Operational strip */}
+        {/* ✅ Footer owns SANDBOX ribbon + identity */}
         <OsFooter />
 
         <div className="os-orb-slot">ORB</div>

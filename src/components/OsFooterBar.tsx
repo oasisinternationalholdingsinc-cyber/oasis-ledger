@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type OsEnv = "RoT" | "SANDBOX";
 const ENV_KEY = "oasis_os_env";
@@ -28,24 +28,65 @@ export function OsFooterBar() {
     };
   }, []);
 
-  if (env !== "SANDBOX") return null;
+  const meta = useMemo(() => {
+    if (env === "SANDBOX") {
+      return {
+        ribbonLeft: "SANDBOX ENVIRONMENT",
+        ribbonRight: "Test artifacts only • Not the system of record",
+        ribbonGlow: "shadow-[0_-10px_36px_rgba(245,212,122,0.10)]",
+        envCode: "oasis_os_env = SANDBOX",
+      };
+    }
+    return {
+      ribbonLeft: "SYSTEM OF RECORD",
+      ribbonRight: "RoT • Production ledger environment",
+      ribbonGlow: "shadow-[0_-10px_36px_rgba(146,247,198,0.08)]",
+      envCode: "oasis_os_env = RoT",
+    };
+  }, [env]);
 
   return (
-    <div
-      className="border-t border-[#7a5a1a]/35 bg-gradient-to-r from-[#201607] via-[#2a1e0b] to-[#201607]"
-      style={{ pointerEvents: "none" }}
-    >
-      <div className="mx-auto flex max-w-[1500px] items-center justify-between px-6 py-2 text-[11px]">
-        <div className="flex items-center gap-3">
-          <span className="font-semibold tracking-[0.16em] text-[#f5d47a]">
-            SANDBOX ENVIRONMENT
-          </span>
-          <span className="text-white/55">Test artifacts only • Not the system of record</span>
+    <div className="pointer-events-none fixed bottom-0 left-0 right-0 z-[60]">
+      {/* Ribbon */}
+      <div
+        className={[
+          "pointer-events-none h-[42px] border-t border-white/5 bg-black/55 backdrop-blur-xl",
+          meta.ribbonGlow,
+        ].join(" ")}
+      >
+        <div className="mx-auto grid h-full max-w-[1500px] grid-cols-[1fr_auto_1fr] items-center px-6">
+          <div className="text-[11px] tracking-[0.28em] text-[#c9a227]/85">
+            {meta.ribbonLeft}
+          </div>
+
+          <div className="text-[11px] text-white/55">{meta.ribbonRight}</div>
+
+          <div className="text-right text-[11px] text-white/40">
+            {meta.envCode}
+          </div>
         </div>
-        <div className="text-white/45">oasis_os_env = SANDBOX</div>
+      </div>
+
+      {/* Identity footer (centered, green accent like you wanted) */}
+      <div className="pointer-events-none h-[44px] border-t border-white/5 bg-black/45 backdrop-blur-xl">
+        <div className="mx-auto grid h-full max-w-[1500px] grid-cols-[1fr_auto_1fr] items-center px-6">
+          <div className="text-[11px] tracking-[0.22em] text-white/35">
+            OASIS DIGITAL PARLIAMENT
+          </div>
+
+          <div className="text-center text-[11px] tracking-[0.20em] text-white/55">
+            <span className="text-white/45">OPERATIONAL</span>{" "}
+            <span className="text-[#92f7c6]/85">•</span>{" "}
+            <span className="text-white/70">GOVERNANCE FIRMWARE</span>{" "}
+            <span className="text-[#92f7c6]/85">•</span>{" "}
+            <span className="text-[#c9a227]/75">ODP.AI</span>
+          </div>
+
+          <div className="text-right text-[11px] tracking-[0.16em] text-white/30">
+            {/* keep right side subtle (or leave empty) */}
+          </div>
+        </div>
       </div>
     </div>
   );
 }
-
-export default OsFooterBar;
