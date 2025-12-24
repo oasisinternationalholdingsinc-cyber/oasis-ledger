@@ -3,30 +3,30 @@ import type { ReactNode } from "react";
 import { OsHeader } from "@/components/OsHeader";
 import { OsDock } from "@/components/OsDock";
 import { OsEntityProvider } from "@/components/OsEntityContext";
-import OsAuthGate from "./os-auth-gate"; // ✅ default import
+import OsAuthGate from "./os-auth-gate";
+import { OsFooter } from "@/components/OsFooter";
 
 export default function OsLayout({ children }: { children: ReactNode }) {
   return (
     <OsEntityProvider>
       <div className="os-root">
-        {/* Global cockpit bar */}
+        {/* Global OS header (NO sandbox ribbon here) */}
         <OsHeader />
 
         {/* Shell: dock + workspace */}
         <div className="os-shell">
           <OsDock />
 
-          {/* ✅ Auth guard lives here (client) */}
+          {/* Auth gate lives inside OS shell */}
           <OsAuthGate>
             <div className="os-workspace">{children}</div>
           </OsAuthGate>
         </div>
 
-        {/* Footer + Orb */}
-        <div className="os-footer">
-          OASIS DIGITAL PARLIAMENT • <span>GOVERNANCE FIRMWARE</span>
-        </div>
+        {/* Footer owns SANDBOX environment banner */}
+        <OsFooter />
 
+        {/* Orb slot (visual / future hook) */}
         <div className="os-orb-slot">ORB</div>
       </div>
     </OsEntityProvider>

@@ -308,4 +308,7 @@ export function OsGlobalBar() {
   );
 }
 
+export function OsGlobalBar() {
+  // ...your component body
+}
 export default OsGlobalBar;
