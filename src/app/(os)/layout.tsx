@@ -1,4 +1,3 @@
-// src/app/(os)/layout.tsx
 import type { ReactNode } from "react";
 import { OsHeader } from "@/components/OsHeader";
 import { OsDock } from "@/components/OsDock";
@@ -10,23 +9,18 @@ export default function OsLayout({ children }: { children: ReactNode }) {
   return (
     <OsEntityProvider>
       <div className="os-root">
-        {/* Global OS header (NO sandbox ribbon here) */}
         <OsHeader />
 
-        {/* Shell: dock + workspace */}
         <div className="os-shell">
           <OsDock />
-
-          {/* Auth gate lives inside OS shell */}
           <OsAuthGate>
             <div className="os-workspace">{children}</div>
           </OsAuthGate>
         </div>
 
-        {/* Footer owns SANDBOX environment banner */}
+        {/* Footer (fixed) owns SANDBOX ribbon + Operational strip */}
         <OsFooter />
 
-        {/* Orb slot (visual / future hook) */}
         <div className="os-orb-slot">ORB</div>
       </div>
     </OsEntityProvider>
