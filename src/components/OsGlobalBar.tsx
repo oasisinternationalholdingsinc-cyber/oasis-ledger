@@ -1,3 +1,4 @@
+// src/components/OsGlobalBar.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -5,7 +6,8 @@ import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 
 export type OsEnv = "RoT" | "SANDBOX";
-const ENV_KEY = "oasis_os_env";
+
+export const ENV_KEY = "oasis_os_env";
 
 function getInitialEnv(): OsEnv {
   if (typeof window === "undefined") return "RoT";
@@ -13,7 +15,7 @@ function getInitialEnv(): OsEnv {
   return v === "SANDBOX" ? "SANDBOX" : "RoT";
 }
 
-function setEnv(next: OsEnv) {
+function persistEnv(next: OsEnv) {
   window.localStorage.setItem(ENV_KEY, next);
   window.dispatchEvent(new CustomEvent("oasis:env", { detail: { env: next } }));
 }
@@ -42,20 +44,20 @@ function useClockLabel() {
   return label;
 }
 
-/** ✅ Named export (so OsHeader can import { OsGlobalBar }) */
 export function OsGlobalBar() {
   const { activeEntity, setActiveEntity, entities } = useEntity();
 
-  const [env, setEnvState] = useState<OsEnv>(() => getInitialEnv());
+  const [env, setEnv] = useState<OsEnv>(() => getInitialEnv());
   const [operatorEmail, setOperatorEmail] = useState<string>("—");
   const [menuOpen, setMenuOpen] = useState(false);
+
   const clock = useClockLabel();
 
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
-      if (e.key === ENV_KEY) setEnvState(getInitialEnv());
+      if (e.key === ENV_KEY) setEnv(getInitialEnv());
     };
-    const onEnv = (e: any) => setEnvState((e?.detail?.env as OsEnv) ?? getInitialEnv());
+    const onEnv = (e: any) => setEnv((e?.detail?.env as OsEnv) ?? getInitialEnv());
     window.addEventListener("storage", onStorage);
     window.addEventListener("oasis:env" as any, onEnv);
     return () => {
@@ -100,13 +102,6 @@ export function OsGlobalBar() {
     return hit?.label ?? activeEntity ?? "—";
   }, [entities, activeEntity]);
 
-  const toggleEnv = () => {
-    const next: OsEnv = env === "SANDBOX" ? "RoT" : "SANDBOX";
-    setEnv(next);
-    setEnvState(next);
-    setMenuOpen(false);
-  };
-
   const onSignOut = async () => {
     await supabase.auth.signOut();
     window.location.href = "/login";
@@ -114,8 +109,10 @@ export function OsGlobalBar() {
 
   return (
     <div className="sticky top-0 z-[40]">
+      {/* Top Global Bar */}
       <div className="relative h-[64px] w-full border-b border-white/5 bg-black/55 backdrop-blur-xl">
         <div className="mx-auto flex h-full max-w-[1400px] items-center px-5">
+          {/* Left */}
           <div className="flex w-1/3 items-center gap-3">
             <div className="h-8 w-8 rounded-full border border-[#c9a227]/40 bg-black/30 shadow-[0_0_20px_rgba(201,162,39,0.12)]" />
             <div className="leading-tight">
@@ -126,19 +123,22 @@ export function OsGlobalBar() {
             </div>
           </div>
 
+          {/* Center (true center) */}
           <div className="flex w-1/3 items-center justify-center">
             <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-4 py-2 text-[12px] text-white/80 shadow-[0_0_24px_rgba(0,0,0,0.25)]">
               <span className="text-[#c9a227]/80">🕒</span>
-              <span className="min-w-[80px] text-center">{clock}</span>
+              <span className="min-w-[84px] text-center">{clock}</span>
             </div>
           </div>
 
+          {/* Right */}
           <div className="flex w-1/3 items-center justify-end gap-3">
             <div className="hidden items-center gap-2 rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[12px] text-white/70 md:flex">
               <span className="text-white/50">Operator:</span>
               <span className="text-white/85">{operatorEmail}</span>
             </div>
 
+            {/* Entity */}
             <div className="rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[12px] text-white/80">
               <span className="text-white/50">Entity:</span>{" "}
               <select
@@ -155,6 +155,7 @@ export function OsGlobalBar() {
               </select>
             </div>
 
+            {/* Env (Style B) */}
             <div className="relative">
               <button
                 onClick={() => setMenuOpen((v) => !v)}
@@ -171,8 +172,8 @@ export function OsGlobalBar() {
 
                   <button
                     onClick={() => {
+                      persistEnv("RoT");
                       setEnv("RoT");
-                      setEnvState("RoT");
                       setMenuOpen(false);
                     }}
                     className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-[13px] ${
@@ -185,8 +186,8 @@ export function OsGlobalBar() {
 
                   <button
                     onClick={() => {
+                      persistEnv("SANDBOX");
                       setEnv("SANDBOX");
-                      setEnvState("SANDBOX");
                       setMenuOpen(false);
                     }}
                     className={`mt-1 flex w-full items-center justify-between rounded-xl px-3 py-2 text-[13px] ${
@@ -200,15 +201,6 @@ export function OsGlobalBar() {
                   <div className="mt-2 rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-[11px] text-white/55">
                     Modules should read <span className="text-white/80">oasis_os_env</span> to select{" "}
                     <span className="text-white/80">*_rot</span> vs <span className="text-white/80">*_sandbox</span> views.
-                  </div>
-
-                  <div className="mt-2 flex justify-end">
-                    <button
-                      onClick={toggleEnv}
-                      className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] text-white/70 hover:bg-white/10"
-                    >
-                      Quick toggle
-                    </button>
                   </div>
                 </div>
               )}
@@ -224,11 +216,11 @@ export function OsGlobalBar() {
         </div>
       </div>
 
-      {/* ✅ Ribbon: visually strong, but NEVER steals clicks */}
+      {/* SANDBOX RIBBON — NON-BLOCKING (never steals clicks) */}
       {env === "SANDBOX" && (
         <div
           className="relative z-[10] border-b border-[#7a5a1a]/35 bg-gradient-to-r from-[#201607] via-[#2a1e0b] to-[#201607]"
-          style={{ pointerEvents: "none" }} // critical
+          style={{ pointerEvents: "none" }}
         >
           <div className="mx-auto flex max-w-[1400px] items-center justify-between px-5 py-2 text-[11px]">
             <div className="flex items-center gap-3">
@@ -243,5 +235,4 @@ export function OsGlobalBar() {
   );
 }
 
-/** ✅ Default export too (so `import OsGlobalBar from ...` also works) */
 export default OsGlobalBar;
