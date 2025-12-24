@@ -1,303 +1,252 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
-import {
-  LogOut,
-  Shield,
-  ChevronDown,
-  User,
-  Clock,
-  FlaskConical,
-  BadgeCheck,
-} from "lucide-react";
-import { supabaseBrowser } from "@/lib/supabase/browser";
-import { useEntity, type EntityKey } from "@/components/OsEntityContext";
-
-const ENTITY_LABEL: Record<EntityKey, string> = {
-  holdings: "Holdings",
-  "real-estate": "Real Estate",
-  lounge: "Lounge",
-};
+import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
+import { useEntity } from "@/components/OsEntityContext";
 
 type OsEnv = "RoT" | "SANDBOX";
 
-function cls(...p: Array<string | false | null | undefined>) {
-  return p.filter(Boolean).join(" ");
-}
+const ENV_KEY = "oasis_os_env";
 
-function useClock() {
-  const [now, setNow] = useState<Date>(() => new Date());
-  useEffect(() => {
-    const t = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(t);
-  }, []);
-  return now;
-}
-
-function readEnv(): OsEnv {
+function getInitialEnv(): OsEnv {
   if (typeof window === "undefined") return "RoT";
-  const v = (localStorage.getItem("oasis_os_env") || "").toUpperCase();
+  const v = window.localStorage.getItem(ENV_KEY);
   return v === "SANDBOX" ? "SANDBOX" : "RoT";
 }
 
-function writeEnv(env: OsEnv) {
-  if (typeof window === "undefined") return;
-  localStorage.setItem("oasis_os_env", env);
-  document.documentElement.dataset.oasisEnv = env; // CSS hooks if you want them later
-  // Broadcast for any module listeners (no per-module wiring required)
-  window.dispatchEvent(new CustomEvent("oasis:env", { detail: { env } }));
+function setEnv(next: OsEnv) {
+  window.localStorage.setItem(ENV_KEY, next);
+  window.dispatchEvent(new CustomEvent("oasis:env", { detail: { env: next } }));
 }
 
-export function OsGlobalBar() {
-  const router = useRouter();
-  const supabase = useMemo(() => supabaseBrowser(), []);
-  const { activeEntity, setActiveEntity } = useEntity();
-
-  const [entityOpen, setEntityOpen] = useState(false);
-  const [envOpen, setEnvOpen] = useState(false);
-  const [env, setEnv] = useState<OsEnv>(() => readEnv());
-  const [operatorLabel, setOperatorLabel] = useState<string>("Operator");
-
-  const now = useClock();
-  const clockText = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-
+function useClockLabel() {
+  const [label, setLabel] = useState<string>("—");
   useEffect(() => {
-    // ensure html data attr is set on load
-    if (typeof window !== "undefined") document.documentElement.dataset.oasisEnv = env;
-  }, []);
-
-  useEffect(() => {
-    // keep in sync if another tab changes it
-    function onStorage(e: StorageEvent) {
-      if (e.key === "oasis_os_env") {
-        const next = readEnv();
-        setEnv(next);
-        document.documentElement.dataset.oasisEnv = next;
-      }
-    }
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, []);
-
-  useEffect(() => {
-    // operator label
-    let alive = true;
-    (async () => {
+    const tick = () => {
       try {
-        const { data } = await supabase.auth.getUser();
-        const email = data?.user?.email;
-        if (!alive) return;
-        if (email) setOperatorLabel(email);
+        const d = new Date();
+        // Your screenshot shows “10:52 p.m.” style.
+        const s = d
+          .toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+          .replace("AM", "a.m.")
+          .replace("PM", "p.m.")
+          .replace("am", "a.m.")
+          .replace("pm", "p.m.");
+        setLabel(s);
       } catch {
-        // ignore
+        setLabel("—");
       }
+    };
+    tick();
+    const t = setInterval(tick, 15_000);
+    return () => clearInterval(t);
+  }, []);
+  return label;
+}
+
+export default function OsGlobalBar() {
+  const { activeEntity, setActiveEntity, entities } = useEntity();
+
+  const [env, setEnvState] = useState<OsEnv>(() => getInitialEnv());
+  const [operatorEmail, setOperatorEmail] = useState<string>("—");
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  const clock = useClockLabel();
+
+  useEffect(() => {
+    // Keep in sync if another tab changes env
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === ENV_KEY) setEnvState(getInitialEnv());
+    };
+    const onEnv = (e: any) => setEnvState((e?.detail?.env as OsEnv) ?? getInitialEnv());
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("oasis:env" as any, onEnv);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("oasis:env" as any, onEnv);
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const { data } = await supabase.auth.getUser();
+      if (!mounted) return;
+      setOperatorEmail(data?.user?.email ?? "—");
     })();
     return () => {
-      alive = false;
+      mounted = false;
     };
-  }, [supabase]);
+  }, []);
 
-  async function signOut(e?: React.MouseEvent) {
-    e?.preventDefault();
-    e?.stopPropagation();
-    try {
-      await supabase.auth.signOut();
-    } catch {}
-    router.replace("/login");
-  }
+  const envMeta = useMemo(() => {
+    if (env === "SANDBOX") {
+      return {
+        label: "SANDBOX",
+        subtitle: "Test artifacts only • Not the system of record",
+        pillClass:
+          "bg-[#2a1e0b]/60 border-[#7a5a1a]/50 text-[#f5d47a] shadow-[0_0_30px_rgba(245,212,122,0.10)]",
+        icon: "⚗",
+      };
+    }
+    return {
+      label: "RoT",
+      subtitle: "System of Record",
+      pillClass:
+        "bg-[#0b1f14]/60 border-[#1f6f48]/40 text-[#92f7c6] shadow-[0_0_24px_rgba(146,247,198,0.10)]",
+      icon: "⛨",
+    };
+  }, [env]);
 
-  function setEnvAndClose(next: OsEnv) {
+  const entityLabel = useMemo(() => {
+    const hit = entities?.find((e: any) => e.slug === activeEntity);
+    return hit?.label ?? activeEntity ?? "—";
+  }, [entities, activeEntity]);
+
+  const toggleEnv = () => {
+    const next: OsEnv = env === "SANDBOX" ? "RoT" : "SANDBOX";
     setEnv(next);
-    writeEnv(next);
-    setEnvOpen(false);
-  }
+    setEnvState(next);
+    setMenuOpen(false);
+  };
+
+  const onSignOut = async () => {
+    await supabase.auth.signOut();
+    window.location.href = "/login";
+  };
 
   return (
-    <div className="sticky top-0 z-50">
-      {/* TOP BAR */}
-      <div className="border-b border-slate-900/60 bg-black/70 backdrop-blur-xl">
-        <div className="relative mx-auto max-w-[1600px] px-5 py-3">
-          {/* LEFT ZONE */}
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="h-9 w-9 rounded-2xl border border-amber-500/25 bg-amber-500/10 flex items-center justify-center">
-              <Shield className="h-4 w-4 text-amber-300" />
-            </div>
-
-            <div className="min-w-0">
-              <div className="text-[11px] uppercase tracking-[0.28em] text-slate-500">
-                Oasis Digital Parliament
-              </div>
-              <div className="text-sm font-semibold text-slate-100 truncate">
-                Governance Console <span className="text-slate-500 font-medium">ODP.AI</span>
+    <div className="sticky top-0 z-[40]">
+      {/* Top Global Bar */}
+      <div className="relative h-[64px] w-full border-b border-white/5 bg-black/55 backdrop-blur-xl">
+        {/* 3-column symmetric frame */}
+        <div className="mx-auto flex h-full max-w-[1400px] items-center px-5">
+          {/* Left: Brand */}
+          <div className="flex w-1/3 items-center gap-3">
+            <div className="h-8 w-8 rounded-full border border-[#c9a227]/40 bg-black/30 shadow-[0_0_20px_rgba(201,162,39,0.12)]" />
+            <div className="leading-tight">
+              <div className="text-[10px] tracking-[0.22em] text-white/55">OASIS DIGITAL PARLIAMENT</div>
+              <div className="text-[13px] font-medium text-white/85">
+                Governance Console <span className="text-[#c9a227]/80">ODP.AI</span>
               </div>
             </div>
           </div>
 
-          {/* CENTER CLOCK (true center, independent of left/right width) */}
-          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 hidden md:flex">
-            <div className="flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/40 px-4 py-2 text-xs text-slate-200">
-              <Clock className="h-4 w-4 text-amber-300/80" />
-              <span className="font-semibold tracking-wide tabular-nums">{clockText}</span>
+          {/* Center: Clock (true centered) */}
+          <div className="flex w-1/3 items-center justify-center">
+            <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-4 py-2 text-[12px] text-white/80 shadow-[0_0_24px_rgba(0,0,0,0.25)]">
+              <span className="text-[#c9a227]/80">🕒</span>
+              <span className="min-w-[80px] text-center">{clock}</span>
             </div>
           </div>
 
-          {/* RIGHT ZONE */}
-          <div className="absolute right-5 top-1/2 -translate-y-1/2 flex items-center gap-2">
-            {/* Operator */}
-            <div className="hidden lg:inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/50 px-3 py-2 text-[11px] text-slate-300">
-              <User className="h-3.5 w-3.5 text-slate-400" />
-              <span className="text-slate-400">Operator:</span>
-              <span className="text-slate-100">{operatorLabel}</span>
+          {/* Right: Operator / Entity / Env / Sign out */}
+          <div className="flex w-1/3 items-center justify-end gap-3">
+            <div className="hidden items-center gap-2 rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[12px] text-white/70 md:flex">
+              <span className="text-white/50">Operator:</span>
+              <span className="text-white/85">{operatorEmail}</span>
             </div>
 
-            {/* Entity */}
+            {/* Entity selector */}
+            <div className="rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[12px] text-white/80">
+              <span className="text-white/50">Entity:</span>{" "}
+              <select
+                className="ml-2 bg-transparent text-white/85 outline-none"
+                value={activeEntity ?? ""}
+                onChange={(e) => setActiveEntity(e.target.value)}
+              >
+                {(entities ?? []).map((e: any) => (
+                  <option key={e.slug} value={e.slug}>
+                    {e.label ?? e.slug}
+                  </option>
+                ))}
+                {!entities?.length && <option value="holdings">{entityLabel}</option>}
+              </select>
+            </div>
+
+            {/* Env selector (Style B) */}
             <div className="relative">
               <button
-                type="button"
-                onClick={() => setEntityOpen((v) => !v)}
-                className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/50 px-3 py-2 text-[11px] text-slate-200 hover:bg-slate-950/70"
-                title="Switch entity"
+                onClick={() => setMenuOpen((v) => !v)}
+                className={`flex items-center gap-2 rounded-full border px-3 py-2 text-[12px] ${envMeta.pillClass}`}
               >
-                <span className="text-slate-400">Entity:</span>
-                <span className="text-slate-100">{ENTITY_LABEL[activeEntity]}</span>
-                <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+                <span>{envMeta.icon}</span>
+                <span className="font-semibold tracking-wide">{envMeta.label}</span>
+                <span className="text-white/55">▾</span>
               </button>
 
-              {entityOpen && (
-                <div
-                  className="absolute right-0 mt-2 w-56 overflow-hidden rounded-2xl border border-slate-800 bg-black/95 shadow-xl"
-                  onMouseLeave={() => setEntityOpen(false)}
-                >
-                  {(Object.keys(ENTITY_LABEL) as EntityKey[]).map((k) => (
+              {menuOpen && (
+                <div className="absolute right-0 mt-2 w-[290px] rounded-2xl border border-white/10 bg-black/85 p-2 shadow-[0_10px_40px_rgba(0,0,0,0.55)] backdrop-blur-xl z-[60]">
+                  <div className="px-3 py-2 text-[11px] text-white/55">Switch environment</div>
+                  <button
+                    onClick={() => {
+                      setEnv("RoT");
+                      setEnvState("RoT");
+                      setMenuOpen(false);
+                    }}
+                    className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-[13px] ${
+                      env === "RoT" ? "bg-white/10 text-white" : "hover:bg-white/5 text-white/85"
+                    }`}
+                  >
+                    <span>RoT</span>
+                    <span className="text-[11px] text-white/45">System of Record</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setEnv("SANDBOX");
+                      setEnvState("SANDBOX");
+                      setMenuOpen(false);
+                    }}
+                    className={`mt-1 flex w-full items-center justify-between rounded-xl px-3 py-2 text-[13px] ${
+                      env === "SANDBOX" ? "bg-[#2a1e0b]/60 text-[#f5d47a]" : "hover:bg-white/5 text-white/85"
+                    }`}
+                  >
+                    <span>SANDBOX</span>
+                    <span className="text-[11px] text-white/45">Test artifacts only</span>
+                  </button>
+
+                  <div className="mt-2 rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-[11px] text-white/55">
+                    Modules should read <span className="text-white/80">oasis_os_env</span> to select{" "}
+                    <span className="text-white/80">*_rot</span> vs <span className="text-white/80">*_sandbox</span> views.
+                  </div>
+
+                  <div className="mt-2 flex justify-end">
                     <button
-                      key={k}
-                      type="button"
-                      onClick={() => {
-                        setActiveEntity(k);
-                        setEntityOpen(false);
-                      }}
-                      className={cls(
-                        "w-full text-left px-3 py-2 text-xs hover:bg-slate-950/70",
-                        k === activeEntity ? "text-amber-200" : "text-slate-200"
-                      )}
+                      onClick={toggleEnv}
+                      className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] text-white/70 hover:bg-white/10"
                     >
-                      {ENTITY_LABEL[k]}
+                      Quick toggle
                     </button>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* ENV (Style B) */}
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setEnvOpen((v) => !v)}
-                className={cls(
-                  "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[11px] hover:opacity-95",
-                  env === "SANDBOX"
-                    ? "border-amber-600/40 bg-amber-500/10 text-amber-200"
-                    : "border-emerald-600/40 bg-emerald-500/10 text-emerald-200"
-                )}
-                title="Switch environment"
-              >
-                {env === "SANDBOX" ? (
-                  <FlaskConical className="h-4 w-4" />
-                ) : (
-                  <BadgeCheck className="h-4 w-4" />
-                )}
-                <span className="font-semibold tracking-wide">{env}</span>
-                <ChevronDown className="h-3.5 w-3.5 opacity-80" />
-              </button>
-
-              {envOpen && (
-                <div
-                  className="absolute right-0 mt-2 w-[340px] overflow-hidden rounded-2xl border border-slate-800 bg-black/95 shadow-xl"
-                  onMouseLeave={() => setEnvOpen(false)}
-                >
-                  <button
-                    type="button"
-                    onClick={() => setEnvAndClose("RoT")}
-                    className={cls(
-                      "w-full text-left px-3 py-3 hover:bg-slate-950/70",
-                      env === "RoT" ? "text-emerald-200" : "text-slate-200"
-                    )}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="font-semibold">RoT</div>
-                      <div className="text-[11px] text-slate-400">System of Record</div>
-                    </div>
-                    <div className="mt-1 text-[11px] text-slate-400">
-                      Production artifacts. Use <span className="text-slate-300">*_rot</span> views.
-                    </div>
-                  </button>
-
-                  <div className="h-px bg-slate-900/70" />
-
-                  <button
-                    type="button"
-                    onClick={() => setEnvAndClose("SANDBOX")}
-                    className={cls(
-                      "w-full text-left px-3 py-3 hover:bg-slate-950/70",
-                      env === "SANDBOX" ? "text-amber-200" : "text-slate-200"
-                    )}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="font-semibold">SANDBOX</div>
-                      <div className="text-[11px] text-slate-400">Test artifacts only</div>
-                    </div>
-                    <div className="mt-1 text-[11px] text-slate-400">
-                      Non-authoritative. Use <span className="text-slate-300">*_sandbox</span> views.
-                    </div>
-                  </button>
-
-                  <div className="px-3 pb-3 pt-2 text-[11px] text-slate-500">
-                    Modules should read <span className="text-slate-300">localStorage.oasis_os_env</span>{" "}
-                    to select <span className="text-slate-300">*_rot</span> vs{" "}
-                    <span className="text-slate-300">*_sandbox</span> feeds.
                   </div>
                 </div>
               )}
             </div>
 
-            {/* Sign out */}
             <button
-              type="button"
-              onClick={signOut}
-              className="inline-flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs text-slate-200 hover:bg-slate-950/70"
-              title="Sign out"
+              onClick={onSignOut}
+              className="rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[12px] text-white/80 hover:bg-white/5"
             >
-              <LogOut className="h-4 w-4 text-slate-300" />
               Sign out
             </button>
           </div>
         </div>
       </div>
 
-      {/* SANDBOX BANNER (does NOT steal clicks) */}
+      {/* NON-BLOCKING RIBBON (below bar, never steals clicks) */}
       {env === "SANDBOX" && (
-        <div className="relative z-40 pointer-events-none">
-          <div className="border-b border-amber-500/15 bg-gradient-to-r from-amber-500/10 via-black/50 to-amber-500/10">
-            <div className="mx-auto max-w-[1600px] px-5 py-2 flex items-center justify-between gap-3 text-[11px]">
-              <div className="flex items-center gap-2 text-amber-200/90">
-                <FlaskConical className="h-4 w-4" />
-                <span className="font-semibold tracking-[0.22em] uppercase">
-                  SANDBOX ENVIRONMENT
-                </span>
-                <span className="text-slate-400 hidden md:inline">
-                  Test artifacts only • Not the system of record
-                </span>
-              </div>
-              <div className="text-slate-500 hidden md:block">
-                Style B: modules select <span className="text-slate-300">*_sandbox</span> views
-              </div>
+        <div
+          className="relative z-[10] border-b border-[#7a5a1a]/35 bg-gradient-to-r from-[#201607] via-[#2a1e0b] to-[#201607]"
+          style={{ pointerEvents: "none" }}
+        >
+          <div className="mx-auto flex max-w-[1400px] items-center justify-between px-5 py-2 text-[11px]">
+            <div className="flex items-center gap-3">
+              <span className="font-semibold tracking-[0.16em] text-[#f5d47a]">SANDBOX ENVIRONMENT</span>
+              <span className="text-white/55">Test artifacts only • Not the system of record</span>
             </div>
+            <div className="text-white/45">Style B: modules select *_sandbox views</div>
           </div>
         </div>
       )}
     </div>
   );
 }
-
-export default OsGlobalBar;
