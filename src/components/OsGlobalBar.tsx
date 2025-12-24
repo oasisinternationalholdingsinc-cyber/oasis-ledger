@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 
-type OsEnv = "RoT" | "SANDBOX";
+export type OsEnv = "RoT" | "SANDBOX";
 
 const ENV_KEY = "oasis_os_env";
 
@@ -14,7 +14,8 @@ function getInitialEnv(): OsEnv {
   return v === "SANDBOX" ? "SANDBOX" : "RoT";
 }
 
-function setEnv(next: OsEnv) {
+function writeEnv(next: OsEnv) {
+  if (typeof window === "undefined") return;
   window.localStorage.setItem(ENV_KEY, next);
   window.dispatchEvent(new CustomEvent("oasis:env", { detail: { env: next } }));
 }
@@ -43,22 +44,19 @@ function useClockLabel() {
   return label;
 }
 
-/** ✅ Named export (fixes OsHeader importing { OsGlobalBar }) */
 export function OsGlobalBar() {
   const { activeEntity, setActiveEntity, entities } = useEntity();
 
   const [env, setEnvState] = useState<OsEnv>(() => getInitialEnv());
   const [operatorEmail, setOperatorEmail] = useState<string>("—");
   const [menuOpen, setMenuOpen] = useState(false);
-
   const clock = useClockLabel();
 
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key === ENV_KEY) setEnvState(getInitialEnv());
     };
-    const onEnv = (e: any) =>
-      setEnvState((e?.detail?.env as OsEnv) ?? getInitialEnv());
+    const onEnv = (e: any) => setEnvState((e?.detail?.env as OsEnv) ?? getInitialEnv());
 
     window.addEventListener("storage", onStorage);
     window.addEventListener("oasis:env" as any, onEnv);
@@ -79,6 +77,26 @@ export function OsGlobalBar() {
       mounted = false;
     };
   }, []);
+
+  // close env menu on outside click / ESC (enterprise feel)
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (!t) return;
+      if (t.closest?.("[data-os-env-menu]")) return;
+      setMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
 
   const envMeta = useMemo(() => {
     if (env === "SANDBOX") {
@@ -104,6 +122,12 @@ export function OsGlobalBar() {
     return hit?.label ?? activeEntity ?? "—";
   }, [entities, activeEntity]);
 
+  const setEnv = (next: OsEnv) => {
+    writeEnv(next);
+    setEnvState(next);
+    setMenuOpen(false);
+  };
+
   const onSignOut = async () => {
     await supabase.auth.signOut();
     window.location.href = "/login";
@@ -118,17 +142,14 @@ export function OsGlobalBar() {
           <div className="flex w-1/3 items-center gap-3">
             <div className="h-8 w-8 rounded-full border border-[#c9a227]/40 bg-black/30 shadow-[0_0_20px_rgba(201,162,39,0.12)]" />
             <div className="leading-tight">
-              <div className="text-[10px] tracking-[0.22em] text-white/55">
-                OASIS DIGITAL PARLIAMENT
-              </div>
+              <div className="text-[10px] tracking-[0.22em] text-white/55">OASIS DIGITAL PARLIAMENT</div>
               <div className="text-[13px] font-medium text-white/85">
-                Governance Console{" "}
-                <span className="text-[#c9a227]/80">ODP.AI</span>
+                Governance Console <span className="text-[#c9a227]/80">ODP.AI</span>
               </div>
             </div>
           </div>
 
-          {/* Center */}
+          {/* Center (true centered clock) */}
           <div className="flex w-1/3 items-center justify-center">
             <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-4 py-2 text-[12px] text-white/80 shadow-[0_0_24px_rgba(0,0,0,0.25)]">
               <span className="text-[#c9a227]/80">🕒</span>
@@ -143,7 +164,6 @@ export function OsGlobalBar() {
               <span className="text-white/85">{operatorEmail}</span>
             </div>
 
-            {/* Entity */}
             <div className="rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[12px] text-white/80">
               <span className="text-white/50">Entity:</span>{" "}
               <select
@@ -156,72 +176,49 @@ export function OsGlobalBar() {
                     {e.label ?? e.slug}
                   </option>
                 ))}
-                {!entities?.length && (
-                  <option value="holdings">{entityLabel}</option>
-                )}
+                {!entities?.length && <option value="holdings">{entityLabel}</option>}
               </select>
             </div>
 
-            {/* Env menu */}
-            <div className="relative">
+            {/* Env selector (Style B) */}
+            <div className="relative" data-os-env-menu>
               <button
                 onClick={() => setMenuOpen((v) => !v)}
                 className={`flex items-center gap-2 rounded-full border px-3 py-2 text-[12px] ${envMeta.pillClass}`}
+                aria-expanded={menuOpen}
               >
                 <span>{envMeta.icon}</span>
-                <span className="font-semibold tracking-wide">
-                  {envMeta.label}
-                </span>
+                <span className="font-semibold tracking-wide">{envMeta.label}</span>
                 <span className="text-white/55">▾</span>
               </button>
 
               {menuOpen && (
-                <div className="absolute right-0 mt-2 w-[290px] rounded-2xl border border-white/10 bg-black/85 p-2 shadow-[0_10px_40px_rgba(0,0,0,0.55)] backdrop-blur-xl z-[60]">
-                  <div className="px-3 py-2 text-[11px] text-white/55">
-                    Switch environment
-                  </div>
+                <div className="absolute right-0 mt-2 w-[290px] rounded-2xl border border-white/10 bg-black/85 p-2 shadow-[0_10px_40px_rgba(0,0,0,0.55)] backdrop-blur-xl z-[80]">
+                  <div className="px-3 py-2 text-[11px] text-white/55">Switch environment</div>
 
                   <button
-                    onClick={() => {
-                      setEnv("RoT");
-                      setEnvState("RoT");
-                      setMenuOpen(false);
-                    }}
+                    onClick={() => setEnv("RoT")}
                     className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-[13px] ${
-                      env === "RoT"
-                        ? "bg-white/10 text-white"
-                        : "hover:bg-white/5 text-white/85"
+                      env === "RoT" ? "bg-white/10 text-white" : "hover:bg-white/5 text-white/85"
                     }`}
                   >
                     <span>RoT</span>
-                    <span className="text-[11px] text-white/45">
-                      System of Record
-                    </span>
+                    <span className="text-[11px] text-white/45">System of Record</span>
                   </button>
 
                   <button
-                    onClick={() => {
-                      setEnv("SANDBOX");
-                      setEnvState("SANDBOX");
-                      setMenuOpen(false);
-                    }}
+                    onClick={() => setEnv("SANDBOX")}
                     className={`mt-1 flex w-full items-center justify-between rounded-xl px-3 py-2 text-[13px] ${
-                      env === "SANDBOX"
-                        ? "bg-[#2a1e0b]/60 text-[#f5d47a]"
-                        : "hover:bg-white/5 text-white/85"
+                      env === "SANDBOX" ? "bg-[#2a1e0b]/60 text-[#f5d47a]" : "hover:bg-white/5 text-white/85"
                     }`}
                   >
                     <span>SANDBOX</span>
-                    <span className="text-[11px] text-white/45">
-                      Test artifacts only
-                    </span>
+                    <span className="text-[11px] text-white/45">Test artifacts only</span>
                   </button>
 
                   <div className="mt-2 rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-[11px] text-white/55">
-                    Modules should read{" "}
-                    <span className="text-white/80">oasis_os_env</span> to select{" "}
-                    <span className="text-white/80">*_rot</span> vs{" "}
-                    <span className="text-white/80">*_sandbox</span> views.
+                    Modules read <span className="text-white/80">oasis_os_env</span> to select{" "}
+                    <span className="text-white/80">*_rot</span> vs <span className="text-white/80">*_sandbox</span> views.
                   </div>
                 </div>
               )}
@@ -237,7 +234,7 @@ export function OsGlobalBar() {
         </div>
       </div>
 
-      {/* Ribbon (non-blocking) */}
+      {/* Non-blocking SANDBOX banner (never steals clicks) */}
       {env === "SANDBOX" && (
         <div
           className="relative z-[10] border-b border-[#7a5a1a]/35 bg-gradient-to-r from-[#201607] via-[#2a1e0b] to-[#201607]"
@@ -245,16 +242,10 @@ export function OsGlobalBar() {
         >
           <div className="mx-auto flex max-w-[1400px] items-center justify-between px-5 py-2 text-[11px]">
             <div className="flex items-center gap-3">
-              <span className="font-semibold tracking-[0.16em] text-[#f5d47a]">
-                SANDBOX ENVIRONMENT
-              </span>
-              <span className="text-white/55">
-                Test artifacts only • Not the system of record
-              </span>
+              <span className="font-semibold tracking-[0.16em] text-[#f5d47a]">SANDBOX ENVIRONMENT</span>
+              <span className="text-white/55">Test artifacts only • Not the system of record</span>
             </div>
-            <div className="text-white/45">
-              Style B: modules select *_sandbox views
-            </div>
+            <div className="text-white/45">Style B: modules select *_sandbox views</div>
           </div>
         </div>
       )}
@@ -262,5 +253,5 @@ export function OsGlobalBar() {
   );
 }
 
-/** ✅ Default export still exists (safe for “import OsGlobalBar from …”) */
+// keep default export too (so both import styles work)
 export default OsGlobalBar;
