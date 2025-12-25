@@ -5,207 +5,256 @@ import { useEffect, useMemo, useState } from "react";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 
-/* =========================
-   TYPES
-========================= */
-type CouncilTab = "pending" | "approved" | "rejected";
-type ExecMode = "signature_required" | "direct_archive";
+/* ================================
+   Types
+================================ */
 
-type CouncilRecord = {
+type LedgerStatus = "PENDING" | "APPROVED" | "REJECTED" | "DEFERRED";
+type ExecutionMode = "SIGNATURE_REQUIRED" | "DIRECT_ARCHIVE";
+
+type LedgerRecord = {
   id: string;
-  entity_id: string | null;
-  entity_slug: string | null;
-  title: string | null;
-  body: string | null;
-  record_type: string | null;
-  status: string | null;
-  created_at: string | null;
-
-  draft_id?: string | null;
-  envelope_id?: string | null;
-  signer_url?: string | null;
-  viewer_url?: string | null;
-  verify_url?: string | null;
-  certificate_url?: string | null;
+  entity_id: string;
+  title: string;
+  body: string;
+  status: LedgerStatus;
+  is_test?: boolean | null;
+  created_at: string;
 };
 
-/* =========================
-   HELPERS
-========================= */
-function cx(...c: Array<string | false | null | undefined>) {
+function cx(...c: Array<string | false | undefined>) {
   return c.filter(Boolean).join(" ");
 }
 
-function fmtShort(iso: string | null) {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleString(undefined, {
-    month: "short",
-    day: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+/* ================================
+   Env resolver (shared with Alchemy)
+================================ */
+
+function resolveEnv(ctx: any): "ROT" | "SANDBOX" {
+  const raw =
+    (ctx?.oasis_os_env ??
+      ctx?.activeEnv ??
+      ctx?.environment ??
+      ctx?.env ??
+      "ROT") + "";
+  return raw.toUpperCase().includes("SANDBOX") ? "SANDBOX" : "ROT";
 }
 
-function statusPill(status: string | null) {
-  const s = (status ?? "").toUpperCase();
-  if (s === "PENDING") return "bg-amber-500/15 text-amber-200 border-amber-400/40";
-  if (s === "APPROVED") return "bg-emerald-500/15 text-emerald-200 border-emerald-400/40";
-  if (s === "REJECTED") return "bg-rose-500/15 text-rose-200 border-rose-400/40";
-  if (s === "SIGNING") return "bg-sky-500/15 text-sky-200 border-sky-400/40";
-  if (s === "SIGNED") return "bg-emerald-500/10 text-emerald-200 border-emerald-400/30";
-  if (s === "ARCHIVED") return "bg-slate-700/30 text-slate-200 border-slate-500/30";
-  return "bg-slate-800/40 text-slate-200 border-slate-600/40";
-}
+/* ================================
+   Page
+================================ */
 
-/* =========================
-   COMPONENT
-========================= */
 export default function CICouncilPage() {
-  const { activeEntity, activeEnv } = useEntity() as any;
-  const isSandbox = activeEnv === "sandbox";
+  const entityCtx = useEntity() as any;
+  const activeEntity = entityCtx?.activeEntity || "holdings";
+  const env = useMemo(() => resolveEnv(entityCtx), [entityCtx]);
+  const isSandbox = env === "SANDBOX";
 
-  const [records, setRecords] = useState<CouncilRecord[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [tab, setTab] = useState<CouncilTab>("pending");
-  const [execMode, setExecMode] = useState<ExecMode>("signature_required");
-
+  const [records, setRecords] = useState<LedgerRecord[]>([]);
+  const [selected, setSelected] = useState<LedgerRecord | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const [acting, setActing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
 
-  /* =========================
-     LOAD
-  ========================= */
-  async function load() {
+  /* ================================
+     Load Council Queue
+  ================================ */
+
+  async function loadQueue() {
     setLoading(true);
     setError(null);
 
-    const view =
-      activeEnv === "sandbox"
-        ? "v_governance_ledger_scoped_v3_sandbox"
-        : "v_governance_ledger_scoped_v3";
-
     const { data, error } = await supabase
-      .from(view)
-      .select("*")
-      .eq("entity_slug", activeEntity)
+      .from("governance_ledger")
+      .select("id, entity_id, title, body, status, is_test, created_at")
+      .eq("status", "PENDING")
+      .eq("is_test", isSandbox)
       .order("created_at", { ascending: false });
 
     if (error) {
       setError(error.message);
-      setLoading(false);
-      return;
+    } else {
+      setRecords(data || []);
+      setSelected(data?.[0] ?? null);
     }
 
-    setRecords(data ?? []);
-    setSelectedId(data?.[0]?.id ?? null);
     setLoading(false);
   }
 
   useEffect(() => {
-    load();
-  }, [activeEntity, activeEnv]);
+    loadQueue();
+  }, [activeEntity, env]);
 
-  const selected = useMemo(
-    () => records.find(r => r.id === selectedId) ?? null,
-    [records, selectedId]
-  );
+  /* ================================
+     Council Decisions
+  ================================ */
 
-  const filtered = useMemo(() => {
-    const want =
-      tab === "pending" ? "PENDING" :
-      tab === "approved" ? "APPROVED" : "REJECTED";
-
-    return records.filter(r => (r.status ?? "").toUpperCase() === want);
-  }, [records, tab]);
-
-  async function decide(next: "APPROVED" | "REJECTED") {
+  async function decide(
+    decision: LedgerStatus,
+    mode?: ExecutionMode
+  ) {
     if (!selected) return;
-    setBusy(true);
+    setActing(true);
+    setError(null);
+    setInfo(null);
+
+    const payload: any = {
+      status: decision,
+      council_decided_at: new Date().toISOString(),
+    };
+
+    if (decision === "APPROVED") {
+      payload.execution_mode = mode;
+    }
 
     const { error } = await supabase
       .from("governance_ledger")
-      .update({ status: next })
+      .update(payload)
       .eq("id", selected.id);
 
-    if (error) setError(error.message);
-    await load();
-    setBusy(false);
+    if (error) {
+      setError(error.message);
+    } else {
+      setInfo("Council decision recorded.");
+      await loadQueue();
+    }
+
+    setActing(false);
   }
 
-  /* =========================
-     RENDER
-  ========================= */
+  /* ================================
+     Render
+  ================================ */
+
   return (
     <div className="h-full flex flex-col px-8 pt-6 pb-6">
-      <h1 className="text-xl font-semibold text-slate-50">
-        CI-Council · Authority Gate
-      </h1>
-
-      <div className="mt-2 text-xs text-slate-400">
-        Entity: <span className="text-emerald-300">{activeEntity}</span> ·
-        Env:{" "}
-        <span className={isSandbox ? "text-sky-300" : "text-emerald-300"}>
-          {isSandbox ? "SANDBOX" : "RoT"}
-        </span>
+      {/* Header */}
+      <div className="mb-4">
+        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">
+          CI • Council
+        </div>
+        <h1 className="mt-1 text-xl font-semibold text-slate-50">
+          Council Review · Authority Console
+        </h1>
+        <div className="mt-2 text-xs text-slate-400">
+          Lane:{" "}
+          <span className={cx(isSandbox ? "text-amber-300" : "text-sky-300")}>
+            {env}
+          </span>
+        </div>
       </div>
 
-      <div className="mt-6 flex gap-4 flex-1 overflow-hidden">
-        {/* Queue */}
-        <div className="w-[35%] border border-slate-800 rounded-2xl overflow-y-auto">
-          {loading && <div className="p-4 text-slate-400">Loading…</div>}
-          {filtered.map(r => (
-            <div
-              key={r.id}
-              onClick={() => setSelectedId(r.id)}
-              className={cx(
-                "p-4 cursor-pointer border-b border-slate-800",
-                r.id === selectedId && "bg-slate-900/70"
-              )}
-            >
-              <div className="text-sm font-semibold">{r.title}</div>
-              <div className="text-xs text-slate-500">{fmtShort(r.created_at)}</div>
-              <span className={cx("inline-block mt-2 px-2 py-1 text-[10px] border rounded-full", statusPill(r.status))}>
-                {r.status}
-              </span>
-            </div>
-          ))}
-        </div>
+      {/* Main Frame */}
+      <div className="flex-1 min-h-0 flex justify-center">
+        <div className="w-full max-w-[1500px] h-full rounded-3xl border border-slate-900 bg-black/60 px-6 py-5 flex gap-4">
 
-        {/* Decision */}
-        <div className="flex-1 border border-slate-800 rounded-2xl p-6">
-          {selected ? (
-            <>
-              <h2 className="text-lg font-semibold">{selected.title}</h2>
-              <pre className="mt-4 text-sm whitespace-pre-wrap">{selected.body}</pre>
+          {/* Queue */}
+          <aside className="w-[360px] rounded-2xl border border-slate-800 bg-slate-950/40 overflow-y-auto">
+            {loading ? (
+              <div className="p-4 text-slate-400">Loading…</div>
+            ) : records.length === 0 ? (
+              <div className="p-4 text-slate-500">No pending records.</div>
+            ) : (
+              <ul className="divide-y divide-slate-800">
+                {records.map((r) => (
+                  <li
+                    key={r.id}
+                    onClick={() => setSelected(r)}
+                    className={cx(
+                      "px-4 py-3 cursor-pointer hover:bg-slate-800/60",
+                      selected?.id === r.id && "bg-slate-800/80"
+                    )}
+                  >
+                    <div className="text-sm font-semibold text-slate-100 truncate">
+                      {r.title}
+                    </div>
+                    <div className="mt-1 text-xs text-slate-500">
+                      Submitted {new Date(r.created_at).toLocaleString()}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </aside>
 
-              <div className="mt-6 flex gap-2">
-                <button
-                  disabled={busy}
-                  onClick={() => decide("REJECTED")}
-                  className="px-4 py-2 rounded-full border border-rose-400 text-rose-200"
-                >
-                  Reject
-                </button>
-                <button
-                  disabled={busy}
-                  onClick={() => decide("APPROVED")}
-                  className="px-4 py-2 rounded-full bg-emerald-500 text-black"
-                >
-                  Approve
-                </button>
+          {/* Decision Panel */}
+          <section className="flex-1 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col">
+            {selected ? (
+              <>
+                <div className="p-5 border-b border-slate-800">
+                  <div className="text-sm font-semibold text-slate-100">
+                    {selected.title}
+                  </div>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-5">
+                  <pre className="whitespace-pre-wrap text-sm leading-relaxed text-slate-100">
+                    {selected.body}
+                  </pre>
+                </div>
+
+                {/* Council Actions */}
+                <div className="p-5 border-t border-slate-800 flex flex-wrap gap-2">
+                  <button
+                    disabled={acting}
+                    onClick={() =>
+                      decide("APPROVED", "SIGNATURE_REQUIRED")
+                    }
+                    className="rounded-full bg-emerald-500 px-5 py-3 text-black font-semibold uppercase text-xs"
+                  >
+                    Approve → Signature
+                  </button>
+
+                  <button
+                    disabled={acting}
+                    onClick={() =>
+                      decide("APPROVED", "DIRECT_ARCHIVE")
+                    }
+                    className="rounded-full border border-emerald-500/60 px-5 py-3 text-emerald-200 uppercase text-xs"
+                  >
+                    Approve → Direct Archive
+                  </button>
+
+                  <button
+                    disabled={acting}
+                    onClick={() => decide("DEFERRED")}
+                    className="rounded-full border border-amber-500/60 px-5 py-3 text-amber-200 uppercase text-xs"
+                  >
+                    Defer
+                  </button>
+
+                  <button
+                    disabled={acting}
+                    onClick={() => decide("REJECTED")}
+                    className="rounded-full border border-rose-500/60 px-5 py-3 text-rose-200 uppercase text-xs"
+                  >
+                    Reject
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="p-6 text-slate-500">
+                Select a record for review.
               </div>
-            </>
-          ) : (
-            <div className="text-slate-400">Select a record</div>
-          )}
+            )}
+          </section>
         </div>
       </div>
 
-      {error && (
-        <div className="mt-4 text-red-300 border border-red-500/40 rounded-xl p-3">
-          {error}
+      {/* Notices */}
+      {(error || info) && (
+        <div className="mt-4 text-sm">
+          {error && (
+            <div className="border border-red-500/60 bg-red-500/10 p-3 rounded-xl text-red-200">
+              {error}
+            </div>
+          )}
+          {info && (
+            <div className="border border-emerald-500/60 bg-emerald-500/10 p-3 rounded-xl text-emerald-200">
+              {info}
+            </div>
+          )}
         </div>
       )}
     </div>
