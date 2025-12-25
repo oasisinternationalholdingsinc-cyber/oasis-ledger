@@ -21,7 +21,7 @@ type DraftRecord = {
   updated_at: string | null;
   finalized_record_id: string | null;
 
-  // optional env fields (safe)
+  // optional env field (safe)
   is_test?: boolean | null;
 };
 
@@ -978,10 +978,12 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
       setDeleteOpen(false);
 
-      const nextRows = (deleteMode === "hard"
-        ? drafts.filter((d) => d.id !== selectedId)
-        : drafts.map((d) => (d.id === selectedId ? { ...d, status: "discarded" as DraftStatus } : d))
-      ) as DraftRecord[];
+      const nextRows =
+        deleteMode === "hard"
+          ? (drafts.filter((d) => d.id !== selectedId) as DraftRecord[])
+          : (drafts.map((d) =>
+              d.id === selectedId ? { ...d, status: "discarded" as DraftStatus } : d
+            ) as DraftRecord[]);
 
       const next = pickDefaultSelection(nextRows);
       if (next) {
@@ -1036,7 +1038,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         <h1 className="mt-1 text-xl font-semibold text-slate-50">Drafting Console · AI Scribe</h1>
         <p className="mt-1 text-xs text-slate-400 max-w-3xl">
           Draft safely inside Alchemy.{" "}
-          <span className="text-emerald-300 font-semibold">Finalize</span> promotes into Council (governance_ledger status=PENDING).
+          <span className="text-emerald-300 font-semibold">Finalize</span> promotes into Council (governance_ledger
+          status=PENDING).
         </p>
         <div className="mt-2 text-xs text-slate-400">
           Entity: <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
@@ -1052,11 +1055,36 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           {/* Top strip: tabs + controls */}
           <div className="shrink-0 mb-4 flex items-center justify-between gap-4">
             <div className="inline-flex rounded-full bg-slate-950/70 border border-slate-800 p-1 overflow-hidden">
-              <StatusTabButton label="Drafts" value="draft" active={statusTab === "draft"} onClick={() => setStatusTab("draft")} />
-              <StatusTabButton label="Reviewed" value="reviewed" active={statusTab === "reviewed"} onClick={() => setStatusTab("reviewed")} />
-              <StatusTabButton label="Finalized" value="finalized" active={statusTab === "finalized"} onClick={() => setStatusTab("finalized")} />
-              <StatusTabButton label="Discarded" value="discarded" active={statusTab === "discarded"} onClick={() => setStatusTab("discarded")} />
-              <StatusTabButton label="All" value="all" active={statusTab === "all"} onClick={() => setStatusTab("all")} />
+              <StatusTabButton
+                label="Drafts"
+                value="draft"
+                active={statusTab === "draft"}
+                onClick={() => setStatusTab("draft")}
+              />
+              <StatusTabButton
+                label="Reviewed"
+                value="reviewed"
+                active={statusTab === "reviewed"}
+                onClick={() => setStatusTab("reviewed")}
+              />
+              <StatusTabButton
+                label="Finalized"
+                value="finalized"
+                active={statusTab === "finalized"}
+                onClick={() => setStatusTab("finalized")}
+              />
+              <StatusTabButton
+                label="Discarded"
+                value="discarded"
+                active={statusTab === "discarded"}
+                onClick={() => setStatusTab("discarded")}
+              />
+              <StatusTabButton
+                label="All"
+                value="all"
+                active={statusTab === "all"}
+                onClick={() => setStatusTab("all")}
+              />
             </div>
 
             <div className="flex items-center gap-2">
@@ -1073,7 +1101,9 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                   onClick={() => setEditorTheme("light")}
                   className={cx(
                     "rounded-full px-3 py-1 transition",
-                    editorTheme === "light" ? "bg-white text-black" : "text-slate-400 hover:bg-slate-900/60"
+                    editorTheme === "light"
+                      ? "bg-white text-black"
+                      : "text-slate-400 hover:bg-slate-900/60"
                   )}
                 >
                   Paper
@@ -1082,7 +1112,9 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                   onClick={() => setEditorTheme("dark")}
                   className={cx(
                     "rounded-full px-3 py-1 transition",
-                    editorTheme === "dark" ? "bg-emerald-500 text-black" : "text-slate-400 hover:bg-slate-900/60"
+                    editorTheme === "dark"
+                      ? "bg-emerald-500 text-black"
+                      : "text-slate-400 hover:bg-slate-900/60"
                   )}
                 >
                   Noir
@@ -1091,7 +1123,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
               <button
                 onClick={() => {
-                  if (!selectedDraft) return flashError("Select a draft first.");
+                  if (!selectedDraft && !body.trim()) return flashError("Select a draft (or write) first.");
                   setReaderOpen(true);
                 }}
                 className="rounded-full border border-emerald-400/60 bg-emerald-500/10 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/15"
@@ -1189,16 +1221,12 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
             <section className="flex-1 min-w-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
               <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
                 <div className="min-w-0">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
-                    Workspace
-                  </div>
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Workspace</div>
                   <div className="mt-1 text-[13px] text-slate-400">
                     Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
                     <span className="mx-2 text-slate-700">•</span>
                     Lane:{" "}
-                    <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>
-                      {env}
-                    </span>
+                    <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
                     {selectedDraft?.finalized_record_id && (
                       <>
                         <span className="mx-2 text-slate-700">•</span>
@@ -1372,7 +1400,9 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                   {(selectedDraft?.title || title || "(untitled)") as string}
                 </div>
                 <div className="mt-1 text-[11px] text-slate-500">
-                  {selectedDraft ? `${selectedDraft.status.toUpperCase()} • ${fmtShort(selectedDraft.created_at)}` : "—"}
+                  {selectedDraft
+                    ? `${selectedDraft.status.toUpperCase()} • ${fmtShort(selectedDraft.created_at)}`
+                    : "—"}
                   <span className="mx-2 text-slate-700">•</span>
                   <span className={cx(isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
                 </div>
