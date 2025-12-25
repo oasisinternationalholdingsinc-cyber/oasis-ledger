@@ -176,7 +176,9 @@ export default function CIAlchemyPage() {
 
       if (!preserve) return;
 
-      const still = data?.find((d) => d.id === selectedId);
+      const still = (data as DraftRecord[] | null)?.find(
+  (d: DraftRecord) => d.id === selectedId
+);
       if (still) {
         setTitle(still.title);
         setBody(still.draft_text);
