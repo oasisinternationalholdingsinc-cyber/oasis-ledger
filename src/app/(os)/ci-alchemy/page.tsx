@@ -1,4 +1,3 @@
-// src/app/(os)/ci-alchemy/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -106,9 +105,7 @@ export default function CIAlchemyPage() {
 
   // Unsaved changes guard
   const [dirty, setDirty] = useState(false);
-  const lastLoadedRef = useRef<{ id: string | null; title: string; body: string } | null>(
-    null
-  );
+  const lastLoadedRef = useRef<{ id: string | null; title: string; body: string } | null>(null);
 
   const selectedDraft = useMemo(
     () => drafts.find((d) => d.id === selectedId) ?? null,
@@ -121,33 +118,10 @@ export default function CIAlchemyPage() {
     return !selectedDraft.finalized_record_id && selectedDraft.status !== "finalized";
   }, [selectedDraft]);
 
-  // Client-side env filter ONLY when field is actually present as boolean
-  const envFilteredDrafts = useMemo(() => {
-    const hasEnvBool = drafts.some((d) => typeof d.is_test === "boolean");
-    if (!hasEnvBool) return drafts;
-    return drafts.filter((d) => (isSandbox ? d.is_test === true : d.is_test === false));
-  }, [drafts, isSandbox]);
-
-  const filteredDrafts = useMemo(() => {
-    let list = envFilteredDrafts;
-
-    if (statusTab !== "all") list = list.filter((d) => d.status === statusTab);
-
-    const q = query.trim().toLowerCase();
-    if (q) {
-      list = list.filter((d) => {
-        const hay = `${d.title ?? ""}\n${d.draft_text ?? ""}`.toLowerCase();
-        return hay.includes(q);
-      });
-    }
-
-    return list;
-  }, [envFilteredDrafts, statusTab, query]);
-
   function flashError(msg: string) {
     console.error(msg);
     setError(msg);
-    setTimeout(() => setError(null), 6000);
+    setTimeout(() => setError(null), 7000);
   }
 
   function flashInfo(msg: string) {
@@ -185,8 +159,9 @@ export default function CIAlchemyPage() {
     setLoading(true);
     setError(null);
 
-    // STRICT lane query: if is_test exists but query fails for any reason other than "missing column",
-    // we DO NOT fall back (to avoid mixing ROT+SANDBOX like you saw).
+    // STRICT lane query.
+    // We ONLY fall back if the is_test column truly does not exist.
+    // (No silent mixing of ROT+SANDBOX ever.)
     const tryWithIsTest = async () => {
       const q = supabase
         .from("governance_drafts")
@@ -215,7 +190,6 @@ export default function CIAlchemyPage() {
       return (data ?? []) as DraftRecord[];
     };
 
-    // Only used if column truly doesn't exist
     const tryWithoutIsTest = async () => {
       const { data, error } = await supabase
         .from("governance_drafts")
@@ -249,7 +223,6 @@ export default function CIAlchemyPage() {
         if (isMissingColumnErr(e)) {
           rows = await tryWithoutIsTest();
         } else {
-          // IMPORTANT: no silent fallback -> prevents lane drift/mismatch
           throw e;
         }
       }
@@ -321,6 +294,23 @@ export default function CIAlchemyPage() {
     setError(null);
     markLoadedSnapshot(null, "", "");
   }
+
+  // --- FILTERING (already strict lane query; this is for UI search/status only) ---
+  const filteredDrafts = useMemo(() => {
+    let list = drafts;
+
+    if (statusTab !== "all") list = list.filter((d) => d.status === statusTab);
+
+    const q = query.trim().toLowerCase();
+    if (q) {
+      list = list.filter((d) => {
+        const hay = `${d.title ?? ""}\n${d.draft_text ?? ""}`.toLowerCase();
+        return hay.includes(q);
+      });
+    }
+
+    return list;
+  }, [drafts, statusTab, query]);
 
   // Run CI-Alchemy (Edge Function "scribe")
   async function handleRunAlchemy() {
@@ -748,14 +738,22 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         is_test: isSandbox,
       };
 
-      const tryLedger = await supabase.from("governance_ledger").insert(ledgerPayload).select("id").single();
+      const tryLedger = await supabase
+        .from("governance_ledger")
+        .insert(ledgerPayload)
+        .select("id")
+        .single();
 
       let ledgerId: string | null = null;
 
       if (tryLedger.error) {
         if (isMissingColumnErr(tryLedger.error)) {
           delete ledgerPayload.is_test;
-          const retry = await supabase.from("governance_ledger").insert(ledgerPayload).select("id").single();
+          const retry = await supabase
+            .from("governance_ledger")
+            .insert(ledgerPayload)
+            .select("id")
+            .single();
           if (retry.error || !retry.data) throw retry.error ?? new Error("Ledger insert failed.");
           ledgerId = (retry.data as { id: string }).id;
         } else {
@@ -1102,7 +1100,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                 <div className="shrink-0 p-4 border-b border-slate-800">
                   <div className="flex items-center justify-between gap-2">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-                      Drafts · {filteredDrafts.length}/{envFilteredDrafts.length}
+                      Drafts · {filteredDrafts.length}/{drafts.length}
                       <span className="mx-2 text-slate-700">•</span>
                       <span className={cx(isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
                     </div>
@@ -1245,7 +1243,12 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
               <div className="flex-1 min-h-0 overflow-hidden p-5">
                 <div className={cx("h-full w-full rounded-2xl border overflow-hidden", editorCard)}>
                   <div className="h-full flex flex-col">
-                    <div className={cx("shrink-0 px-5 py-4 border-b", editorTheme === "light" ? "border-slate-200" : "border-slate-800")}>
+                    <div
+                      className={cx(
+                        "shrink-0 px-5 py-4 border-b",
+                        editorTheme === "light" ? "border-slate-200" : "border-slate-800"
+                      )}
+                    >
                       <input
                         className={cx(
                           "w-full rounded-2xl border px-4 py-3 text-[15px] outline-none transition",
@@ -1275,7 +1278,12 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                       />
                     </div>
 
-                    <div className={cx("shrink-0 px-5 py-4 border-t flex flex-wrap gap-2", editorTheme === "light" ? "border-slate-200" : "border-slate-800")}>
+                    <div
+                      className={cx(
+                        "shrink-0 px-5 py-4 border-t flex flex-wrap gap-2",
+                        editorTheme === "light" ? "border-slate-200" : "border-slate-800"
+                      )}
+                    >
                       <button
                         onClick={handleRunAlchemy}
                         disabled={alchemyRunning || saving || finalizing}
