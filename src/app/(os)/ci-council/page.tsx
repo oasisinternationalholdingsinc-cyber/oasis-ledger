@@ -1,3 +1,4 @@
+// src/app/(os)/ci-council/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -5,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
+import { useOsEnv } from "@/components/OsEnvContext"; // ✅ CHANGE #1: use global env context (no guessing)
 
 type CouncilStatus = "PENDING" | "APPROVED" | "REJECTED" | "ARCHIVED";
 type StatusTab = "PENDING" | "APPROVED" | "REJECTED" | "ARCHIVED" | "ALL";
@@ -49,25 +51,6 @@ function fmtShort(iso: string | null) {
   }
 }
 
-/**
- * Env resolver:
- * Priority:
- *  1) explicit oasis_os_env (your global toggle)
- *  2) fallback to common keys
- */
-function resolveEnv(entityCtx: any): "ROT" | "SANDBOX" {
-  const raw =
-    (entityCtx?.oasis_os_env ??
-      entityCtx?.activeEnv ??
-      entityCtx?.environment ??
-      entityCtx?.env ??
-      entityCtx?.activeEnvironment ??
-      "ROT") + "";
-  const s = raw.toUpperCase();
-  if (s.includes("SANDBOX") || s === "SBX") return "SANDBOX";
-  return "ROT";
-}
-
 function isMissingColumnErr(err: any) {
   const msg = (err?.message ?? "").toLowerCase();
   return msg.includes("does not exist") && msg.includes("column");
@@ -75,16 +58,23 @@ function isMissingColumnErr(err: any) {
 
 export default function CICouncilPage() {
   const entityCtx = useEntity() as any;
+  const osEnv = useOsEnv(); // ✅ CHANGE #1 (cont.)
 
   // CRITICAL: entity is ALWAYS corp entity (never "sandbox")
   const activeEntitySlug = (entityCtx?.activeEntity as string) || "holdings";
-  const activeEntityId = (entityCtx?.activeEntityId as string) || null;
 
-  const env = useMemo(() => resolveEnv(entityCtx), [entityCtx]);
-  const isSandbox = env === "SANDBOX";
+  // ✅ CHANGE #2: the one-liner that makes Council lane-aware everywhere
+  const isSandbox = !!osEnv?.isSandbox; // env toggle ONLY controls is_test
+  const env: "SANDBOX" | "ROT" = isSandbox ? "SANDBOX" : "ROT"; // no envLabel dependency
+
   const activeEntityLabel = useMemo(
     () => ENTITY_LABELS[activeEntitySlug] ?? activeEntitySlug,
     [activeEntitySlug]
+  );
+
+  // entity_id scoping (robust): prefer context; fallback lookup by slug
+  const [entityId, setEntityId] = useState<string | null>(
+    (entityCtx?.activeEntityId as string) || null
   );
 
   const [loading, setLoading] = useState(true);
@@ -144,24 +134,41 @@ export default function CICouncilPage() {
     return list;
   }, [envFiltered, tab, query]);
 
+  async function ensureEntityId(slug: string) {
+    // Prefer existing
+    if (entityId) return entityId;
+
+    // If context provides it later
+    const ctxId = (entityCtx?.activeEntityId as string) || null;
+    if (ctxId) {
+      setEntityId(ctxId);
+      return ctxId;
+    }
+
+    // Fallback: lookup by slug
+    const { data, error } = await supabase
+      .from("entities")
+      .select("id, slug")
+      .eq("slug", slug)
+      .single();
+
+    if (error || !data?.id) throw error ?? new Error("Entity lookup failed.");
+    setEntityId(data.id);
+    return data.id as string;
+  }
+
   async function reload(preserveSelection = true) {
     setLoading(true);
     setError(null);
 
     try {
-      if (!activeEntityId) {
-        // If entityId isn’t in context, Council can’t scope correctly.
-        // This prevents the “uuid undefined” bug chain.
-        throw new Error(
-          "Missing activeEntityId in OS context. Entity must resolve to a real entities.id (holdings/lounge/real-estate)."
-        );
-      }
+      const eid = await ensureEntityId(activeEntitySlug);
 
       const tryWithIsTest = async () => {
         const { data, error } = await supabase
           .from("governance_ledger")
           .select("id,title,status,entity_id,is_test,created_at,body,record_type,source")
-          .eq("entity_id", activeEntityId)
+          .eq("entity_id", eid)
           .eq("is_test", isSandbox)
           .order("created_at", { ascending: false });
 
@@ -173,7 +180,7 @@ export default function CICouncilPage() {
         const { data, error } = await supabase
           .from("governance_ledger")
           .select("id,title,status,entity_id,created_at,body,record_type,source")
-          .eq("entity_id", activeEntityId)
+          .eq("entity_id", eid)
           .order("created_at", { ascending: false });
 
         if (error) throw error;
@@ -206,7 +213,6 @@ export default function CICouncilPage() {
 
       const pick = inTab[0] ?? rows[0] ?? null;
       if (pick) {
-        // prevent re-picking same thing if user cleared selection
         if (lastAutoPickRef.current !== pick.id) {
           lastAutoPickRef.current = pick.id;
           setSelectedId(pick.id);
@@ -228,7 +234,7 @@ export default function CICouncilPage() {
     setSelectedId(null);
     void reload(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeEntityId, activeEntitySlug, env]);
+  }, [activeEntitySlug, isSandbox]);
 
   function handleSelect(rec: LedgerRecord) {
     if (!rec?.id) return;
@@ -249,7 +255,6 @@ export default function CICouncilPage() {
       return;
     }
 
-    // gate actions
     if (next === "APPROVED") setBusy("approve");
     if (next === "REJECTED") setBusy("reject");
     if (next === "ARCHIVED") setBusy("archive");
@@ -258,76 +263,53 @@ export default function CICouncilPage() {
     setInfo(null);
 
     try {
-      const { error } = await supabase
-        .from("governance_ledger")
-        .update({ status: next })
-        .eq("id", selected.id);
-
+      const { error } = await supabase.from("governance_ledger").update({ status: next }).eq("id", selected.id);
       if (error) throw error;
 
-      setRecords((prev) =>
-        prev.map((r) => (r.id === selected.id ? { ...r, status: next } : r))
-      );
-
+      setRecords((prev) => prev.map((r) => (r.id === selected.id ? { ...r, status: next } : r)));
       flashInfo(`Council: ${next}.`);
     } catch (err: any) {
       flashError(err?.message ?? `Failed to set status ${next}.`);
     } finally {
       setBusy(null);
-      // keep list fresh
       void reload(true);
     }
   }
 
-  // Council “Archive” button is intentionally disciplined:
-  // By default, Council should NOT raw-archive unless you have the deterministic archive pipeline wired to a function.
-  // If you later want direct-archive-from-council, replace this with your RPC (seal/render/hash/store).
   async function handleArchiveDiscipline() {
     flashError(
       "Council does not directly archive by default. Use Forge (signature path) or wire Council to the deterministic seal/archive function for direct-archive mode."
     );
   }
 
-  const lanePill = cx(
-    "font-semibold",
-    isSandbox ? "text-amber-300" : "text-sky-300"
-  );
+  const lanePill = cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300");
 
   const canApprove = !!selected && (selected.status ?? "").toUpperCase() === "PENDING";
   const canReject = !!selected && (selected.status ?? "").toUpperCase() === "PENDING";
 
-  const showNoEntityWarning = !activeEntityId;
+  const showNoEntityWarning = !entityId;
 
   return (
     <div className="h-full flex flex-col px-8 pt-6 pb-6">
       {/* Header under OS bar */}
       <div className="mb-4 shrink-0">
-        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">
-          CI • Council
-        </div>
-        <h1 className="mt-1 text-xl font-semibold text-slate-50">
-          Council Review · Authority Console
-        </h1>
+        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI • Council</div>
+        <h1 className="mt-1 text-xl font-semibold text-slate-50">Council Review · Authority Console</h1>
         <p className="mt-1 text-xs text-slate-400 max-w-3xl">
-          Council is the authority gate.{" "}
-          <span className="text-emerald-300 font-semibold">Approve</span> or{" "}
+          Council is the authority gate. <span className="text-emerald-300 font-semibold">Approve</span> or{" "}
           <span className="text-rose-300 font-semibold">Reject</span>. Execution/archival discipline occurs in Forge
           (signature) or in a direct-archive pipeline (if explicitly wired).
         </p>
         <div className="mt-2 text-xs text-slate-400">
-          Entity:{" "}
-          <span className="text-emerald-300 font-medium">
-            {activeEntityLabel}
-          </span>
+          Entity: <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
           <span className="mx-2 text-slate-700">•</span>
           Lane: <span className={lanePill}>{env}</span>
         </div>
 
         {showNoEntityWarning && (
-          <div className="mt-3 rounded-2xl border border-rose-500/50 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-200">
-            OS Context issue: <b>activeEntityId</b> is missing. Council must scope by <code>entities.id</code> +{" "}
-            <code>is_test</code>. Fix OsEntityContext so the corp entity is always selected and env only flips{" "}
-            <code>is_test</code>.
+          <div className="mt-3 rounded-2xl border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-[12px] text-amber-200">
+            OS Context: <b>activeEntityId</b> was missing, so Council is resolving <code>entities.id</code> by slug
+            automatically. (This preserves the rule: env toggle only flips <code>is_test</code>.)
           </div>
         )}
       </div>
@@ -338,36 +320,11 @@ export default function CICouncilPage() {
           {/* Top strip: tabs + controls */}
           <div className="shrink-0 mb-4 flex items-center justify-between gap-4">
             <div className="inline-flex rounded-full bg-slate-950/70 border border-slate-800 p-1 overflow-hidden">
-              <StatusTabButton
-                label="Pending"
-                value="PENDING"
-                active={tab === "PENDING"}
-                onClick={() => setTab("PENDING")}
-              />
-              <StatusTabButton
-                label="Approved"
-                value="APPROVED"
-                active={tab === "APPROVED"}
-                onClick={() => setTab("APPROVED")}
-              />
-              <StatusTabButton
-                label="Rejected"
-                value="REJECTED"
-                active={tab === "REJECTED"}
-                onClick={() => setTab("REJECTED")}
-              />
-              <StatusTabButton
-                label="Archived"
-                value="ARCHIVED"
-                active={tab === "ARCHIVED"}
-                onClick={() => setTab("ARCHIVED")}
-              />
-              <StatusTabButton
-                label="All"
-                value="ALL"
-                active={tab === "ALL"}
-                onClick={() => setTab("ALL")}
-              />
+              <StatusTabButton label="Pending" value="PENDING" active={tab === "PENDING"} onClick={() => setTab("PENDING")} />
+              <StatusTabButton label="Approved" value="APPROVED" active={tab === "APPROVED"} onClick={() => setTab("APPROVED")} />
+              <StatusTabButton label="Rejected" value="REJECTED" active={tab === "REJECTED"} onClick={() => setTab("REJECTED")} />
+              <StatusTabButton label="Archived" value="ARCHIVED" active={tab === "ARCHIVED"} onClick={() => setTab("ARCHIVED")} />
+              <StatusTabButton label="All" value="ALL" active={tab === "ALL"} onClick={() => setTab("ALL")} />
             </div>
 
             <div className="flex items-center gap-2">
@@ -403,8 +360,7 @@ export default function CICouncilPage() {
                 <div className="shrink-0 p-4 border-b border-slate-800">
                   <div className="flex items-center justify-between gap-2">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-                      Queue · {filtered.length}/{envFiltered.length}{" "}
-                      <span className="mx-2 text-slate-700">•</span>
+                      Queue · {filtered.length}/{envFiltered.length} <span className="mx-2 text-slate-700">•</span>
                       <span className={lanePill}>{env}</span>
                     </div>
                   </div>
@@ -476,12 +432,9 @@ export default function CICouncilPage() {
             <section className="flex-1 min-w-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
               <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
                 <div className="min-w-0">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
-                    Review
-                  </div>
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Review</div>
                   <div className="mt-1 text-[13px] text-slate-400">
-                    Entity:{" "}
-                    <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
+                    Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
                     <span className="mx-2 text-slate-700">•</span>
                     Lane: <span className={lanePill}>{env}</span>
                     {selected && (
@@ -536,9 +489,7 @@ export default function CICouncilPage() {
                 ) : (
                   <div className="h-full w-full rounded-2xl border border-slate-800 bg-black/30 overflow-hidden flex flex-col">
                     <div className="shrink-0 px-5 py-4 border-b border-slate-800">
-                      <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">
-                        Record
-                      </div>
+                      <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Record</div>
                       <div className="mt-1 text-[15px] font-semibold text-slate-100 truncate">
                         {selected.title || "(untitled)"}
                       </div>
@@ -580,23 +531,17 @@ export default function CICouncilPage() {
               </div>
             </section>
 
-            {/* Right authority panel (PANEL, per your preference) */}
+            {/* Right authority panel */}
             <aside className="w-[360px] shrink-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
               <div className="shrink-0 px-5 py-4 border-b border-slate-800">
-                <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
-                  Authority Panel
-                </div>
-                <div className="mt-1 text-[12px] text-slate-500">
-                  No blocking advisories. Council remains the authority.
-                </div>
+                <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Authority Panel</div>
+                <div className="mt-1 text-[12px] text-slate-500">No blocking advisories. Council remains the authority.</div>
               </div>
 
               <div className="flex-1 min-h-0 overflow-y-auto px-5 py-5 space-y-4">
                 {/* AXIOM advisory shell (non-blocking) */}
                 <div className="rounded-2xl border border-slate-800 bg-black/35 px-4 py-4">
-                  <div className="text-[11px] uppercase tracking-[0.22em] text-indigo-200">
-                    AXIOM Advisory
-                  </div>
+                  <div className="text-[11px] uppercase tracking-[0.22em] text-indigo-200">AXIOM Advisory</div>
                   <div className="mt-2 text-[12px] text-slate-400 leading-relaxed">
                     No blocking advisories. (Wire to your AXIOM views when ready.)
                     {selected ? " Record eligible for authority action." : " Select a record to evaluate."}
@@ -620,9 +565,7 @@ export default function CICouncilPage() {
                 </button>
 
                 <div className="rounded-2xl border border-slate-800 bg-black/25 px-4 py-4">
-                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">
-                    Execution & Archive
-                  </div>
+                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Execution & Archive</div>
                   <div className="mt-2 text-[12px] text-slate-500 leading-relaxed">
                     Signature path executes in Forge. Direct-archive requires the deterministic seal pipeline (PDF→hash→verify).
                   </div>
@@ -661,9 +604,7 @@ export default function CICouncilPage() {
           <div className="w-full max-w-[980px] h-[85vh] rounded-3xl border border-slate-800 bg-slate-950/95 shadow-2xl shadow-black/70 overflow-hidden flex flex-col">
             <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
               <div className="min-w-0">
-                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">
-                  Reader
-                </div>
+                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Reader</div>
                 <div className="mt-1 text-[15px] font-semibold text-slate-100 truncate">
                   {(selected?.title || "(untitled)") as string}
                 </div>
