@@ -56,12 +56,14 @@ function fmtShort(iso: string | null) {
 
 /**
  * Env resolver:
- * - We do NOT assume exact context shape.
- * - We read common keys if present, else default RoT.
+ * Priority:
+ *  1) explicit oasis_os_env (your global toggle)
+ *  2) fallback to common keys
  */
 function resolveEnv(entityCtx: any): "ROT" | "SANDBOX" {
   const raw =
-    (entityCtx?.activeEnv ??
+    (entityCtx?.oasis_os_env ??
+      entityCtx?.activeEnv ??
       entityCtx?.environment ??
       entityCtx?.env ??
       entityCtx?.activeEnvironment ??
@@ -73,18 +75,16 @@ function resolveEnv(entityCtx: any): "ROT" | "SANDBOX" {
 
 function isMissingColumnErr(err: any) {
   const msg = (err?.message ?? "").toLowerCase();
-  // PostgREST commonly: "column ... does not exist"
   return msg.includes("does not exist") && msg.includes("column");
-}
-
-function looksSandboxTitle(t?: string | null) {
-  const s = (t ?? "").toUpperCase();
-  return s.startsWith("SANDBOX") || s.includes(" SANDBOX ") || s.includes("• SANDBOX") || s.includes("SANDBOX •");
 }
 
 export default function CIAlchemyPage() {
   const entityCtx = useEntity() as any;
-  const activeEntity = entityCtx?.activeEntity as string;
+
+  // IMPORTANT: entitySlug is ALWAYS holdings/lounge/real-estate (never "sandbox")
+  const activeEntity = (entityCtx?.activeEntity as string) || "holdings";
+
+  // IMPORTANT: env toggle ONLY controls is_test
   const env = useMemo(() => resolveEnv(entityCtx), [entityCtx]);
   const isSandbox = env === "SANDBOX";
 
@@ -137,13 +137,13 @@ export default function CIAlchemyPage() {
     return !selectedDraft.finalized_record_id && selectedDraft.status !== "finalized";
   }, [selectedDraft]);
 
-  // Local safety net filtering by env if DB schema doesn't expose is_test
+  // Strict env filtering:
+  // - If DB returns is_test, filter by it.
+  // - If DB doesn't have is_test, we DO NOT try to guess by title (avoid drift).
   const envFilteredDrafts = useMemo(() => {
-    return drafts.filter((d) => {
-      if (typeof d.is_test === "boolean") return isSandbox ? d.is_test : !d.is_test;
-      // fallback heuristic if schema doesn't have is_test
-      return isSandbox ? looksSandboxTitle(d.title) : !looksSandboxTitle(d.title);
-    });
+    const hasEnv = drafts.some((d) => typeof d.is_test === "boolean");
+    if (!hasEnv) return drafts;
+    return drafts.filter((d) => (isSandbox ? d.is_test === true : d.is_test === false));
   }, [drafts, isSandbox]);
 
   const filteredDrafts = useMemo(() => {
@@ -203,7 +203,6 @@ export default function CIAlchemyPage() {
     setLoading(true);
     setError(null);
 
-    // Try schema WITH is_test (env-respecting at query level)
     const tryWithIsTest = async () => {
       const q = supabase
         .from("governance_drafts")
@@ -232,7 +231,6 @@ export default function CIAlchemyPage() {
       return (data ?? []) as DraftRecord[];
     };
 
-    // Fallback schema WITHOUT is_test (env handled in-memory)
     const tryWithoutIsTest = async () => {
       const { data, error } = await supabase
         .from("governance_drafts")
@@ -263,21 +261,14 @@ export default function CIAlchemyPage() {
       try {
         rows = await tryWithIsTest();
       } catch (e: any) {
-        // If is_test column doesn't exist (or view), fall back cleanly
         if (isMissingColumnErr(e)) rows = await tryWithoutIsTest();
         else rows = await tryWithoutIsTest();
       }
 
-      // If we fell back (no is_test), apply env heuristic right away so selection is correct.
-      const scopedRows =
-        rows.some((r) => typeof r.is_test === "boolean")
-          ? rows
-          : rows.filter((r) => (isSandbox ? looksSandboxTitle(r.title) : !looksSandboxTitle(r.title)));
-
-      setDrafts(scopedRows);
+      setDrafts(rows);
 
       if (preserveSelected && selectedId) {
-        const stillThere = scopedRows.find((r) => r.id === selectedId);
+        const stillThere = rows.find((r) => r.id === selectedId);
         if (stillThere) {
           setTitle(stillThere.title ?? "");
           setBody(stillThere.draft_text ?? "");
@@ -286,7 +277,7 @@ export default function CIAlchemyPage() {
         }
       }
 
-      const chosen = pickDefaultSelection(scopedRows);
+      const chosen = pickDefaultSelection(rows);
       if (chosen) {
         setSelectedId(chosen.id);
         setTitle(chosen.title ?? "");
@@ -305,6 +296,7 @@ export default function CIAlchemyPage() {
     }
   }
 
+  // CRITICAL: env must re-scope Alchemy registry (SANDBOX vs ROT)
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -317,7 +309,7 @@ export default function CIAlchemyPage() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeEntity, env]); // IMPORTANT: env must re-scope Alchemy registry
+  }, [activeEntity, env]);
 
   function handleSelectDraft(draft: DraftRecord) {
     if (!confirmNavigateAwayIfDirty()) return;
@@ -379,6 +371,8 @@ export default function CIAlchemyPage() {
           }".
 Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for directors.`;
 
+      // NOTE: entity_slug must be holdings/lounge/real-estate.
+      // NOTE: env toggle ONLY influences is_test.
       const payload = {
         type: "board_resolution",
         entity_slug: activeEntity,
@@ -387,9 +381,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         instructions,
         tone: "formal",
         language: "English",
-        // env hint for scribe (safe if ignored server-side)
-        lane: isSandbox ? "SANDBOX" : "ROT",
         is_test: isSandbox,
+        lane: isSandbox ? "SANDBOX" : "ROT",
       };
 
       const res = await fetch(`${baseUrl}/functions/v1/scribe`, {
@@ -428,15 +421,13 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       }
 
       const producedTitle = (asAny.title || title.trim() || "(untitled)") as string;
-      const safeTitle =
-        isSandbox && !looksSandboxTitle(producedTitle) ? `SANDBOX • ${producedTitle}` : producedTitle;
 
       const newDraft: DraftRecord = {
         id: draftId || crypto.randomUUID(),
         entity_id: asAny.entity_id ?? null,
         entity_slug: asAny.entity_slug ?? activeEntity,
         entity_name: asAny.entity_name ?? activeEntityLabel,
-        title: safeTitle,
+        title: producedTitle,
         record_type: asAny.record_type || "resolution",
         draft_text: draftText,
         status: (asAny.draft_status || "draft") as DraftStatus,
@@ -491,22 +482,18 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
       if (entityErr || !entityRow) throw entityErr ?? new Error("Entity not found.");
 
-      const safeTitle = isSandbox && !looksSandboxTitle(title.trim()) ? `SANDBOX • ${title.trim()}` : title.trim();
-
+      // IMPORTANT: always store the real entity_id for holdings/lounge/real-estate
       const basePayload: any = {
         entity_id: entityRow.id as string,
         entity_slug: activeEntity,
         entity_name: entityRow.name as string,
-        title: safeTitle,
+        title: title.trim(),
         draft_text: body,
         record_type: "resolution",
+        is_test: isSandbox,
       };
 
-      // Try to persist env if schema supports it
-      basePayload.is_test = isSandbox;
-
       if (!selectedId) {
-        // INSERT (try with is_test, then without)
         const insertTry = await supabase
           .from("governance_drafts")
           .insert({
@@ -533,7 +520,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
         if (insertTry.error) {
           if (isMissingColumnErr(insertTry.error)) {
-            // retry without is_test
             delete basePayload.is_test;
             const retry = await supabase
               .from("governance_drafts")
@@ -576,7 +562,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           flashInfo("Draft created.");
         }
       } else {
-        // UPDATE (try with is_test, then without)
         const updateTry = await supabase
           .from("governance_drafts")
           .update({
@@ -668,10 +653,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       const baseUpdate: any = {
         status: "reviewed" as DraftStatus,
         updated_at: new Date().toISOString(),
+        is_test: isSandbox,
       };
-
-      // (optional) keep env pinned if supported
-      baseUpdate.is_test = isSandbox;
 
       const tryUpd = await supabase
         .from("governance_drafts")
@@ -764,38 +747,29 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
       if (entityErr || !entityRow) throw entityErr ?? new Error("Entity not found.");
 
-      const safeTitle = isSandbox && !looksSandboxTitle(title.trim()) ? `SANDBOX • ${title.trim()}` : title.trim();
-
-      // Insert into ledger (try with is_test, then without)
+      // Insert into ledger:
+      // - entity_id is ALWAYS holdings/lounge/real-estate id
+      // - env toggle ONLY sets is_test
       const ledgerPayload: any = {
         entity_id: entityRow.id as string,
-        title: safeTitle,
+        title: title.trim(),
         description: null,
         record_type: "resolution",
         record_no: null,
-        body,
+        body, // NOTE: your schema uses `body` (not body_text)
         source: "ci-alchemy",
         status: "PENDING",
+        is_test: isSandbox,
       };
-      ledgerPayload.is_test = isSandbox;
 
-      const tryLedger = await supabase
-        .from("governance_ledger")
-        .insert(ledgerPayload)
-        .select("id")
-        .single();
+      const tryLedger = await supabase.from("governance_ledger").insert(ledgerPayload).select("id").single();
 
       let ledgerId: string | null = null;
 
       if (tryLedger.error) {
         if (isMissingColumnErr(tryLedger.error)) {
           delete ledgerPayload.is_test;
-          const retry = await supabase
-            .from("governance_ledger")
-            .insert(ledgerPayload)
-            .select("id")
-            .single();
-
+          const retry = await supabase.from("governance_ledger").insert(ledgerPayload).select("id").single();
           if (retry.error || !retry.data) throw retry.error ?? new Error("Ledger insert failed.");
           ledgerId = (retry.data as { id: string }).id;
         } else {
@@ -807,14 +781,13 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
       if (!ledgerId) throw new Error("Ledger insert failed.");
 
-      // Update draft to finalized + link ledgerId (try with is_test, then without)
       const draftUpdate: any = {
         status: "finalized" as DraftStatus,
         finalized_record_id: ledgerId,
         finalized_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
+        is_test: isSandbox,
       };
-      draftUpdate.is_test = isSandbox;
 
       const tryDraftUpd = await supabase
         .from("governance_drafts")
@@ -902,8 +875,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       updated_at: new Date().toISOString(),
       discard_reason: reason || null,
       discarded_at: new Date().toISOString(),
+      is_test: isSandbox,
     };
-    baseUpdate.is_test = isSandbox;
 
     const tryUpd = await supabase
       .from("governance_drafts")
@@ -961,7 +934,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
   }
 
   async function hardDeleteDraft(draftId: string, reason: string) {
-    // Try 2-arg then 1-arg then alt param names (safe, no guessing)
     const tryTwo = await supabase.rpc("owner_delete_governance_draft", {
       p_draft_id: draftId,
       p_reason: reason || null,
@@ -1006,24 +978,12 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
       setDeleteOpen(false);
 
-      // re-select something sane (use latest drafts state post-mutation)
       const nextRows = (deleteMode === "hard"
         ? drafts.filter((d) => d.id !== selectedId)
         : drafts.map((d) => (d.id === selectedId ? { ...d, status: "discarded" as DraftStatus } : d))
       ) as DraftRecord[];
 
-      const nextScoped =
-        nextRows.filter((r) =>
-          typeof r.is_test === "boolean"
-            ? isSandbox
-              ? r.is_test
-              : !r.is_test
-            : isSandbox
-            ? looksSandboxTitle(r.title)
-            : !looksSandboxTitle(r.title)
-        ) ?? [];
-
-      const next = pickDefaultSelection(nextScoped);
+      const next = pickDefaultSelection(nextRows);
       if (next) {
         setSelectedId(next.id);
         setTitle(next.title ?? "");
@@ -1082,9 +1042,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           Entity: <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
           <span className="mx-2 text-slate-700">•</span>
           Lane:{" "}
-          <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>
-            {env}
-          </span>
+          <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
         </div>
       </div>
 
@@ -1093,7 +1051,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         <div className="w-full max-w-[1500px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-6 py-5 flex flex-col overflow-hidden">
           {/* Top strip: tabs + controls */}
           <div className="shrink-0 mb-4 flex items-center justify-between gap-4">
-            {/* Tabs (registry-as-tabs) */}
             <div className="inline-flex rounded-full bg-slate-950/70 border border-slate-800 p-1 overflow-hidden">
               <StatusTabButton label="Drafts" value="draft" active={statusTab === "draft"} onClick={() => setStatusTab("draft")} />
               <StatusTabButton label="Reviewed" value="reviewed" active={statusTab === "reviewed"} onClick={() => setStatusTab("reviewed")} />
@@ -1103,7 +1060,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
             </div>
 
             <div className="flex items-center gap-2">
-              {/* Drawer toggle */}
               <button
                 onClick={() => setDrawerOpen((v) => !v)}
                 className="rounded-full border border-slate-800 bg-slate-950/60 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
@@ -1112,7 +1068,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                 {drawerOpen ? "Hide Drafts" : "Show Drafts"}
               </button>
 
-              {/* Editor theme toggle */}
               <div className="inline-flex rounded-full border border-slate-800 bg-slate-950/60 p-1 text-[10px] uppercase tracking-[0.18em]">
                 <button
                   onClick={() => setEditorTheme("light")}
@@ -1134,7 +1089,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                 </button>
               </div>
 
-              {/* Reader button */}
               <button
                 onClick={() => {
                   if (!selectedDraft) return flashError("Select a draft first.");
@@ -1149,7 +1103,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
           {/* Workspace body (NO page scroll) */}
           <div className="flex-1 min-h-0 flex gap-4 overflow-hidden">
-            {/* Draft drawer (compact, optional) */}
             {drawerOpen && (
               <aside className="w-[360px] shrink-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
                 <div className="shrink-0 p-4 border-b border-slate-800">
@@ -1232,9 +1185,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
               </aside>
             )}
 
-            {/* Main editor surface (contained, “OS card”, not webpage) */}
+            {/* Main editor surface */}
             <section className="flex-1 min-w-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
-              {/* Header row */}
               <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
                 <div className="min-w-0">
                   <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
@@ -1295,10 +1247,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                 </div>
               </div>
 
-              {/* Editor body (no page scroll; internal scroll only) */}
               <div className="flex-1 min-h-0 overflow-hidden p-5">
                 <div className={cx("h-full w-full rounded-2xl border overflow-hidden", editorCard)}>
-                  {/* editor inner */}
                   <div className="h-full flex flex-col">
                     <div
                       className={cx(
@@ -1313,7 +1263,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                           (!canMutateSelected || saving || finalizing || alchemyRunning) &&
                             "opacity-70 cursor-not-allowed"
                         )}
-                        placeholder={isSandbox ? 'Resolution title (SANDBOX auto-tag)' : "Resolution title"}
+                        placeholder="Resolution title"
                         value={title}
                         onChange={(e) => onTitleChange(e.target.value)}
                         disabled={!canMutateSelected || saving || finalizing || alchemyRunning}
@@ -1335,7 +1285,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                       />
                     </div>
 
-                    {/* Actions row */}
                     <div
                       className={cx(
                         "shrink-0 px-5 py-4 border-t flex flex-wrap gap-2",
@@ -1403,12 +1352,9 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                 )}
               </div>
 
-              {/* Footer strip (OS-contained) */}
               <div className="shrink-0 px-5 py-3 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
                 <span>CI-Alchemy · Draft factory (governance_drafts)</span>
-                <span>
-                  Lane-aware · Finalize → governance_ledger (PENDING) → Council authority
-                </span>
+                <span>Lane-aware · Finalize → governance_ledger (PENDING) → Council authority</span>
               </div>
             </section>
           </div>
@@ -1543,7 +1489,9 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                 disabled={deleteBusy || !canMutateSelected}
                 className={cx(
                   "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition disabled:opacity-50 disabled:cursor-not-allowed",
-                  deleteMode === "soft" ? "bg-emerald-500 text-black hover:bg-emerald-400" : "bg-rose-500 text-black hover:bg-rose-400"
+                  deleteMode === "soft"
+                    ? "bg-emerald-500 text-black hover:bg-emerald-400"
+                    : "bg-rose-500 text-black hover:bg-rose-400"
                 )}
               >
                 {deleteBusy ? "Deleting…" : deleteMode === "soft" ? "Discard" : "Hard Delete"}
@@ -1573,7 +1521,9 @@ function StatusTabButton({
       onClick={onClick}
       className={cx(
         "px-4 py-2 rounded-full text-left transition min-w-[110px]",
-        active ? "bg-emerald-500/15 border border-emerald-400/70 text-slate-50" : "bg-transparent border border-transparent hover:bg-slate-900/60 text-slate-300"
+        active
+          ? "bg-emerald-500/15 border border-emerald-400/70 text-slate-50"
+          : "bg-transparent border border-transparent hover:bg-slate-900/60 text-slate-300"
       )}
     >
       <div className="text-xs font-semibold">{label}</div>
