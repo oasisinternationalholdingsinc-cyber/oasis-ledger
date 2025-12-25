@@ -20,9 +20,13 @@ type DraftRecord = {
   created_at: string | null;
   updated_at: string | null;
   finalized_record_id: string | null;
+
+  // optional env fields (safe)
+  is_test?: boolean | null;
 };
 
 type StatusTab = "draft" | "reviewed" | "finalized" | "discarded" | "all";
+type DeleteMode = "soft" | "hard";
 
 const ENTITY_LABELS: Record<string, string> = {
   holdings: "Oasis International Holdings Inc.",
@@ -50,10 +54,39 @@ function fmtShort(iso: string | null) {
   }
 }
 
-type DeleteMode = "soft" | "hard";
+/**
+ * Env resolver:
+ * - We do NOT assume exact context shape.
+ * - We read common keys if present, else default RoT.
+ */
+function resolveEnv(entityCtx: any): "ROT" | "SANDBOX" {
+  const raw =
+    (entityCtx?.activeEnv ??
+      entityCtx?.environment ??
+      entityCtx?.env ??
+      entityCtx?.activeEnvironment ??
+      "ROT") + "";
+  const s = raw.toUpperCase();
+  if (s.includes("SANDBOX") || s === "SBX") return "SANDBOX";
+  return "ROT";
+}
+
+function isMissingColumnErr(err: any) {
+  const msg = (err?.message ?? "").toLowerCase();
+  // PostgREST commonly: "column ... does not exist"
+  return msg.includes("does not exist") && msg.includes("column");
+}
+
+function looksSandboxTitle(t?: string | null) {
+  const s = (t ?? "").toUpperCase();
+  return s.startsWith("SANDBOX") || s.includes(" SANDBOX ") || s.includes("• SANDBOX") || s.includes("SANDBOX •");
+}
 
 export default function CIAlchemyPage() {
-  const { activeEntity } = useEntity();
+  const entityCtx = useEntity() as any;
+  const activeEntity = entityCtx?.activeEntity as string;
+  const env = useMemo(() => resolveEnv(entityCtx), [entityCtx]);
+  const isSandbox = env === "SANDBOX";
 
   // Core state
   const [loading, setLoading] = useState(true);
@@ -104,8 +137,17 @@ export default function CIAlchemyPage() {
     return !selectedDraft.finalized_record_id && selectedDraft.status !== "finalized";
   }, [selectedDraft]);
 
+  // Local safety net filtering by env if DB schema doesn't expose is_test
+  const envFilteredDrafts = useMemo(() => {
+    return drafts.filter((d) => {
+      if (typeof d.is_test === "boolean") return isSandbox ? d.is_test : !d.is_test;
+      // fallback heuristic if schema doesn't have is_test
+      return isSandbox ? looksSandboxTitle(d.title) : !looksSandboxTitle(d.title);
+    });
+  }, [drafts, isSandbox]);
+
   const filteredDrafts = useMemo(() => {
-    let list = drafts;
+    let list = envFilteredDrafts;
 
     if (statusTab !== "all") list = list.filter((d) => d.status === statusTab);
 
@@ -118,7 +160,7 @@ export default function CIAlchemyPage() {
     }
 
     return list;
-  }, [drafts, statusTab, query]);
+  }, [envFilteredDrafts, statusTab, query]);
 
   function flashError(msg: string) {
     console.error(msg);
@@ -161,7 +203,37 @@ export default function CIAlchemyPage() {
     setLoading(true);
     setError(null);
 
-    try {
+    // Try schema WITH is_test (env-respecting at query level)
+    const tryWithIsTest = async () => {
+      const q = supabase
+        .from("governance_drafts")
+        .select(
+          `
+            id,
+            entity_id,
+            entity_slug,
+            entity_name,
+            title,
+            record_type,
+            draft_text,
+            status,
+            created_at,
+            updated_at,
+            finalized_record_id,
+            is_test
+          `
+        )
+        .eq("entity_slug", activeEntity)
+        .eq("is_test", isSandbox)
+        .order("created_at", { ascending: false });
+
+      const { data, error } = await q;
+      if (error) throw error;
+      return (data ?? []) as DraftRecord[];
+    };
+
+    // Fallback schema WITHOUT is_test (env handled in-memory)
+    const tryWithoutIsTest = async () => {
       const { data, error } = await supabase
         .from("governance_drafts")
         .select(
@@ -183,12 +255,29 @@ export default function CIAlchemyPage() {
         .order("created_at", { ascending: false });
 
       if (error) throw error;
+      return (data ?? []) as DraftRecord[];
+    };
 
-      const rows = (data ?? []) as DraftRecord[];
-      setDrafts(rows);
+    try {
+      let rows: DraftRecord[] = [];
+      try {
+        rows = await tryWithIsTest();
+      } catch (e: any) {
+        // If is_test column doesn't exist (or view), fall back cleanly
+        if (isMissingColumnErr(e)) rows = await tryWithoutIsTest();
+        else rows = await tryWithoutIsTest();
+      }
+
+      // If we fell back (no is_test), apply env heuristic right away so selection is correct.
+      const scopedRows =
+        rows.some((r) => typeof r.is_test === "boolean")
+          ? rows
+          : rows.filter((r) => (isSandbox ? looksSandboxTitle(r.title) : !looksSandboxTitle(r.title)));
+
+      setDrafts(scopedRows);
 
       if (preserveSelected && selectedId) {
-        const stillThere = rows.find((r) => r.id === selectedId);
+        const stillThere = scopedRows.find((r) => r.id === selectedId);
         if (stillThere) {
           setTitle(stillThere.title ?? "");
           setBody(stillThere.draft_text ?? "");
@@ -197,7 +286,7 @@ export default function CIAlchemyPage() {
         }
       }
 
-      const chosen = pickDefaultSelection(rows);
+      const chosen = pickDefaultSelection(scopedRows);
       if (chosen) {
         setSelectedId(chosen.id);
         setTitle(chosen.title ?? "");
@@ -228,7 +317,7 @@ export default function CIAlchemyPage() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeEntity]);
+  }, [activeEntity, env]); // IMPORTANT: env must re-scope Alchemy registry
 
   function handleSelectDraft(draft: DraftRecord) {
     if (!confirmNavigateAwayIfDirty()) return;
@@ -298,6 +387,9 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         instructions,
         tone: "formal",
         language: "English",
+        // env hint for scribe (safe if ignored server-side)
+        lane: isSandbox ? "SANDBOX" : "ROT",
+        is_test: isSandbox,
       };
 
       const res = await fetch(`${baseUrl}/functions/v1/scribe`, {
@@ -335,18 +427,23 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         return;
       }
 
+      const producedTitle = (asAny.title || title.trim() || "(untitled)") as string;
+      const safeTitle =
+        isSandbox && !looksSandboxTitle(producedTitle) ? `SANDBOX • ${producedTitle}` : producedTitle;
+
       const newDraft: DraftRecord = {
         id: draftId || crypto.randomUUID(),
         entity_id: asAny.entity_id ?? null,
         entity_slug: asAny.entity_slug ?? activeEntity,
         entity_name: asAny.entity_name ?? activeEntityLabel,
-        title: asAny.title || title.trim() || "(untitled)",
+        title: safeTitle,
         record_type: asAny.record_type || "resolution",
         draft_text: draftText,
         status: (asAny.draft_status || "draft") as DraftStatus,
         created_at: asAny.draft_created_at ?? new Date().toISOString(),
         updated_at: null,
         finalized_record_id: asAny.finalized_record_id ?? null,
+        is_test: typeof asAny.is_test === "boolean" ? asAny.is_test : isSandbox,
       };
 
       setTitle(newDraft.title);
@@ -394,17 +491,23 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
       if (entityErr || !entityRow) throw entityErr ?? new Error("Entity not found.");
 
-      const basePayload = {
+      const safeTitle = isSandbox && !looksSandboxTitle(title.trim()) ? `SANDBOX • ${title.trim()}` : title.trim();
+
+      const basePayload: any = {
         entity_id: entityRow.id as string,
         entity_slug: activeEntity,
         entity_name: entityRow.name as string,
-        title: title.trim(),
+        title: safeTitle,
         draft_text: body,
         record_type: "resolution",
       };
 
+      // Try to persist env if schema supports it
+      basePayload.is_test = isSandbox;
+
       if (!selectedId) {
-        const { data, error } = await supabase
+        // INSERT (try with is_test, then without)
+        const insertTry = await supabase
           .from("governance_drafts")
           .insert({
             ...basePayload,
@@ -422,20 +525,59 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
               status,
               created_at,
               updated_at,
-              finalized_record_id
+              finalized_record_id,
+              is_test
             `
           )
           .single();
 
-        if (error) throw error;
+        if (insertTry.error) {
+          if (isMissingColumnErr(insertTry.error)) {
+            // retry without is_test
+            delete basePayload.is_test;
+            const retry = await supabase
+              .from("governance_drafts")
+              .insert({
+                ...basePayload,
+                status: "draft" as DraftStatus,
+              })
+              .select(
+                `
+                  id,
+                  entity_id,
+                  entity_slug,
+                  entity_name,
+                  title,
+                  record_type,
+                  draft_text,
+                  status,
+                  created_at,
+                  updated_at,
+                  finalized_record_id
+                `
+              )
+              .single();
 
-        const newDraft = data as DraftRecord;
-        setDrafts((prev) => [newDraft, ...prev]);
-        setSelectedId(newDraft.id);
-        markLoadedSnapshot(newDraft.id, newDraft.title ?? "", newDraft.draft_text ?? "");
-        flashInfo("Draft created.");
+            if (retry.error) throw retry.error;
+
+            const newDraft = retry.data as DraftRecord;
+            setDrafts((prev) => [newDraft, ...prev]);
+            setSelectedId(newDraft.id);
+            markLoadedSnapshot(newDraft.id, newDraft.title ?? "", newDraft.draft_text ?? "");
+            flashInfo("Draft created.");
+          } else {
+            throw insertTry.error;
+          }
+        } else {
+          const newDraft = insertTry.data as DraftRecord;
+          setDrafts((prev) => [newDraft, ...prev]);
+          setSelectedId(newDraft.id);
+          markLoadedSnapshot(newDraft.id, newDraft.title ?? "", newDraft.draft_text ?? "");
+          flashInfo("Draft created.");
+        }
       } else {
-        const { data, error } = await supabase
+        // UPDATE (try with is_test, then without)
+        const updateTry = await supabase
           .from("governance_drafts")
           .update({
             ...basePayload,
@@ -454,17 +596,54 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
               status,
               created_at,
               updated_at,
-              finalized_record_id
+              finalized_record_id,
+              is_test
             `
           )
           .single();
 
-        if (error) throw error;
+        if (updateTry.error) {
+          if (isMissingColumnErr(updateTry.error)) {
+            delete basePayload.is_test;
+            const retry = await supabase
+              .from("governance_drafts")
+              .update({
+                ...basePayload,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", selectedId)
+              .select(
+                `
+                  id,
+                  entity_id,
+                  entity_slug,
+                  entity_name,
+                  title,
+                  record_type,
+                  draft_text,
+                  status,
+                  created_at,
+                  updated_at,
+                  finalized_record_id
+                `
+              )
+              .single();
 
-        const updated = data as DraftRecord;
-        setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
-        markLoadedSnapshot(updated.id, updated.title ?? "", updated.draft_text ?? "");
-        flashInfo("Draft saved.");
+            if (retry.error) throw retry.error;
+
+            const updated = retry.data as DraftRecord;
+            setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
+            markLoadedSnapshot(updated.id, updated.title ?? "", updated.draft_text ?? "");
+            flashInfo("Draft saved.");
+          } else {
+            throw updateTry.error;
+          }
+        } else {
+          const updated = updateTry.data as DraftRecord;
+          setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
+          markLoadedSnapshot(updated.id, updated.title ?? "", updated.draft_text ?? "");
+          flashInfo("Draft saved.");
+        }
       }
     } catch (err: any) {
       flashError(err?.message ?? "Failed to save draft.");
@@ -486,12 +665,17 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
     setInfo(null);
 
     try {
-      const { data, error } = await supabase
+      const baseUpdate: any = {
+        status: "reviewed" as DraftStatus,
+        updated_at: new Date().toISOString(),
+      };
+
+      // (optional) keep env pinned if supported
+      baseUpdate.is_test = isSandbox;
+
+      const tryUpd = await supabase
         .from("governance_drafts")
-        .update({
-          status: "reviewed" as DraftStatus,
-          updated_at: new Date().toISOString(),
-        })
+        .update(baseUpdate)
         .eq("id", selectedId)
         .select(
           `
@@ -505,17 +689,51 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
             status,
             created_at,
             updated_at,
-            finalized_record_id
+            finalized_record_id,
+            is_test
           `
         )
         .single();
 
-      if (error) throw error;
+      if (tryUpd.error) {
+        if (isMissingColumnErr(tryUpd.error)) {
+          delete baseUpdate.is_test;
+          const retry = await supabase
+            .from("governance_drafts")
+            .update(baseUpdate)
+            .eq("id", selectedId)
+            .select(
+              `
+                id,
+                entity_id,
+                entity_slug,
+                entity_name,
+                title,
+                record_type,
+                draft_text,
+                status,
+                created_at,
+                updated_at,
+                finalized_record_id
+              `
+            )
+            .single();
 
-      const updated = data as DraftRecord;
-      setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
-      markLoadedSnapshot(updated.id, updated.title ?? "", updated.draft_text ?? "");
-      flashInfo("Marked as reviewed.");
+          if (retry.error) throw retry.error;
+
+          const updated = retry.data as DraftRecord;
+          setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
+          markLoadedSnapshot(updated.id, updated.title ?? "", updated.draft_text ?? "");
+          flashInfo("Marked as reviewed.");
+        } else {
+          throw tryUpd.error;
+        }
+      } else {
+        const updated = tryUpd.data as DraftRecord;
+        setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
+        markLoadedSnapshot(updated.id, updated.title ?? "", updated.draft_text ?? "");
+        flashInfo("Marked as reviewed.");
+      }
     } catch (err: any) {
       flashError(err?.message ?? "Failed to mark as reviewed.");
     } finally {
@@ -546,33 +764,61 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
       if (entityErr || !entityRow) throw entityErr ?? new Error("Entity not found.");
 
-      const { data: ledgerRow, error: ledgerErr } = await supabase
+      const safeTitle = isSandbox && !looksSandboxTitle(title.trim()) ? `SANDBOX • ${title.trim()}` : title.trim();
+
+      // Insert into ledger (try with is_test, then without)
+      const ledgerPayload: any = {
+        entity_id: entityRow.id as string,
+        title: safeTitle,
+        description: null,
+        record_type: "resolution",
+        record_no: null,
+        body,
+        source: "ci-alchemy",
+        status: "PENDING",
+      };
+      ledgerPayload.is_test = isSandbox;
+
+      const tryLedger = await supabase
         .from("governance_ledger")
-        .insert({
-          entity_id: entityRow.id as string,
-          title: title.trim(),
-          description: null,
-          record_type: "resolution",
-          record_no: null,
-          body,
-          source: "ci-alchemy",
-          status: "PENDING",
-        })
+        .insert(ledgerPayload)
         .select("id")
         .single();
 
-      if (ledgerErr || !ledgerRow) throw ledgerErr ?? new Error("Ledger insert failed.");
+      let ledgerId: string | null = null;
 
-      const ledgerId = (ledgerRow as { id: string }).id;
+      if (tryLedger.error) {
+        if (isMissingColumnErr(tryLedger.error)) {
+          delete ledgerPayload.is_test;
+          const retry = await supabase
+            .from("governance_ledger")
+            .insert(ledgerPayload)
+            .select("id")
+            .single();
 
-      const { data: updatedDraft, error: draftErr } = await supabase
+          if (retry.error || !retry.data) throw retry.error ?? new Error("Ledger insert failed.");
+          ledgerId = (retry.data as { id: string }).id;
+        } else {
+          throw tryLedger.error;
+        }
+      } else {
+        ledgerId = (tryLedger.data as { id: string }).id;
+      }
+
+      if (!ledgerId) throw new Error("Ledger insert failed.");
+
+      // Update draft to finalized + link ledgerId (try with is_test, then without)
+      const draftUpdate: any = {
+        status: "finalized" as DraftStatus,
+        finalized_record_id: ledgerId,
+        finalized_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      draftUpdate.is_test = isSandbox;
+
+      const tryDraftUpd = await supabase
         .from("governance_drafts")
-        .update({
-          status: "finalized" as DraftStatus,
-          finalized_record_id: ledgerId,
-          finalized_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        } as any)
+        .update(draftUpdate)
         .eq("id", selectedId)
         .select(
           `
@@ -586,17 +832,52 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
             status,
             created_at,
             updated_at,
-            finalized_record_id
+            finalized_record_id,
+            is_test
           `
         )
         .single();
 
-      if (draftErr) throw draftErr;
+      if (tryDraftUpd.error) {
+        if (isMissingColumnErr(tryDraftUpd.error)) {
+          delete draftUpdate.is_test;
+          const retry = await supabase
+            .from("governance_drafts")
+            .update(draftUpdate)
+            .eq("id", selectedId)
+            .select(
+              `
+                id,
+                entity_id,
+                entity_slug,
+                entity_name,
+                title,
+                record_type,
+                draft_text,
+                status,
+                created_at,
+                updated_at,
+                finalized_record_id
+              `
+            )
+            .single();
 
-      const updated = updatedDraft as DraftRecord;
-      setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
-      markLoadedSnapshot(updated.id, updated.title ?? "", updated.draft_text ?? "");
+          if (retry.error) throw retry.error;
+
+          const updated = retry.data as DraftRecord;
+          setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
+          markLoadedSnapshot(updated.id, updated.title ?? "", updated.draft_text ?? "");
+        } else {
+          throw tryDraftUpd.error;
+        }
+      } else {
+        const updated = tryDraftUpd.data as DraftRecord;
+        setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
+        markLoadedSnapshot(updated.id, updated.title ?? "", updated.draft_text ?? "");
+      }
+
       flashInfo("Finalized → Council queue.");
+      await reloadDrafts(true);
     } catch (err: any) {
       flashError(err?.message ?? "Failed to finalize.");
     } finally {
@@ -616,14 +897,17 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
   }
 
   async function softDeleteDraft(draftId: string, reason: string) {
-    const { data, error } = await supabase
+    const baseUpdate: any = {
+      status: "discarded" as DraftStatus,
+      updated_at: new Date().toISOString(),
+      discard_reason: reason || null,
+      discarded_at: new Date().toISOString(),
+    };
+    baseUpdate.is_test = isSandbox;
+
+    const tryUpd = await supabase
       .from("governance_drafts")
-      .update({
-        status: "discarded" as DraftStatus,
-        updated_at: new Date().toISOString(),
-        discard_reason: reason || null,
-        discarded_at: new Date().toISOString(),
-      } as any)
+      .update(baseUpdate)
       .eq("id", draftId)
       .select(
         `
@@ -637,12 +921,43 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           status,
           created_at,
           updated_at,
-          finalized_record_id
+          finalized_record_id,
+          is_test
         `
       )
       .single();
-    if (error) throw error;
-    return data as DraftRecord;
+
+    if (tryUpd.error) {
+      if (isMissingColumnErr(tryUpd.error)) {
+        delete baseUpdate.is_test;
+        const retry = await supabase
+          .from("governance_drafts")
+          .update(baseUpdate)
+          .eq("id", draftId)
+          .select(
+            `
+              id,
+              entity_id,
+              entity_slug,
+              entity_name,
+              title,
+              record_type,
+              draft_text,
+              status,
+              created_at,
+              updated_at,
+              finalized_record_id
+            `
+          )
+          .single();
+
+        if (retry.error) throw retry.error;
+        return retry.data as DraftRecord;
+      }
+      throw tryUpd.error;
+    }
+
+    return tryUpd.data as DraftRecord;
   }
 
   async function hardDeleteDraft(draftId: string, reason: string) {
@@ -691,9 +1006,24 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
       setDeleteOpen(false);
 
-      // re-select something sane
-      const nextRows = drafts.filter((d) => d.id !== selectedId);
-      const next = pickDefaultSelection(nextRows);
+      // re-select something sane (use latest drafts state post-mutation)
+      const nextRows = (deleteMode === "hard"
+        ? drafts.filter((d) => d.id !== selectedId)
+        : drafts.map((d) => (d.id === selectedId ? { ...d, status: "discarded" as DraftStatus } : d))
+      ) as DraftRecord[];
+
+      const nextScoped =
+        nextRows.filter((r) =>
+          typeof r.is_test === "boolean"
+            ? isSandbox
+              ? r.is_test
+              : !r.is_test
+            : isSandbox
+            ? looksSandboxTitle(r.title)
+            : !looksSandboxTitle(r.title)
+        ) ?? [];
+
+      const next = pickDefaultSelection(nextScoped);
       if (next) {
         setSelectedId(next.id);
         setTitle(next.title ?? "");
@@ -723,29 +1053,39 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
   }
 
   // Styles for editor theme
-  const editorCard = editorTheme === "light"
-    ? "bg-white text-slate-900 border-slate-200"
-    : "bg-slate-950/70 text-slate-100 border-slate-800";
+  const editorCard =
+    editorTheme === "light"
+      ? "bg-white text-slate-900 border-slate-200"
+      : "bg-slate-950/70 text-slate-100 border-slate-800";
 
-  const inputBase = editorTheme === "light"
-    ? "bg-white border-slate-200 text-slate-900 placeholder:text-slate-400 focus:border-emerald-500"
-    : "bg-slate-900/80 border-slate-700 text-slate-100 placeholder:text-slate-500 focus:border-emerald-400";
+  const inputBase =
+    editorTheme === "light"
+      ? "bg-white border-slate-200 text-slate-900 placeholder:text-slate-400 focus:border-emerald-500"
+      : "bg-slate-900/80 border-slate-700 text-slate-100 placeholder:text-slate-500 focus:border-emerald-400";
 
-  const textareaBase = editorTheme === "light"
-    ? "bg-white border-slate-200 text-slate-900 focus:border-emerald-500"
-    : "bg-slate-900/80 border-slate-700 text-slate-100 focus:border-emerald-400";
+  const textareaBase =
+    editorTheme === "light"
+      ? "bg-white border-slate-200 text-slate-900 focus:border-emerald-500"
+      : "bg-slate-900/80 border-slate-700 text-slate-100 focus:border-emerald-400";
 
   return (
     <div className="h-full flex flex-col px-8 pt-6 pb-6">
       {/* Header under OS bar */}
       <div className="mb-4 shrink-0">
         <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI • Alchemy</div>
-        <h1 className="mt-1 text-xl font-semibold text-slate-50">
-          Drafting Console · AI Scribe
-        </h1>
+        <h1 className="mt-1 text-xl font-semibold text-slate-50">Drafting Console · AI Scribe</h1>
         <p className="mt-1 text-xs text-slate-400 max-w-3xl">
-          Draft safely inside Alchemy. <span className="text-emerald-300 font-semibold">Finalize</span> promotes into Council (governance_ledger status=PENDING).
+          Draft safely inside Alchemy.{" "}
+          <span className="text-emerald-300 font-semibold">Finalize</span> promotes into Council (governance_ledger status=PENDING).
         </p>
+        <div className="mt-2 text-xs text-slate-400">
+          Entity: <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
+          <span className="mx-2 text-slate-700">•</span>
+          Lane:{" "}
+          <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>
+            {env}
+          </span>
+        </div>
       </div>
 
       {/* Main OS window frame (Parliament-style) */}
@@ -815,7 +1155,9 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                 <div className="shrink-0 p-4 border-b border-slate-800">
                   <div className="flex items-center justify-between gap-2">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-                      Drafts · {filteredDrafts.length}/{drafts.length}
+                      Drafts · {filteredDrafts.length}/{envFilteredDrafts.length}
+                      <span className="mx-2 text-slate-700">•</span>
+                      <span className={cx(isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
                     </div>
                     <button
                       onClick={() => reloadDrafts(true)}
@@ -900,6 +1242,11 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                   </div>
                   <div className="mt-1 text-[13px] text-slate-400">
                     Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
+                    <span className="mx-2 text-slate-700">•</span>
+                    Lane:{" "}
+                    <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>
+                      {env}
+                    </span>
                     {selectedDraft?.finalized_record_id && (
                       <>
                         <span className="mx-2 text-slate-700">•</span>
@@ -953,14 +1300,20 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                 <div className={cx("h-full w-full rounded-2xl border overflow-hidden", editorCard)}>
                   {/* editor inner */}
                   <div className="h-full flex flex-col">
-                    <div className={cx("shrink-0 px-5 py-4 border-b", editorTheme === "light" ? "border-slate-200" : "border-slate-800")}>
+                    <div
+                      className={cx(
+                        "shrink-0 px-5 py-4 border-b",
+                        editorTheme === "light" ? "border-slate-200" : "border-slate-800"
+                      )}
+                    >
                       <input
                         className={cx(
                           "w-full rounded-2xl border px-4 py-3 text-[15px] outline-none transition",
                           inputBase,
-                          (!canMutateSelected || saving || finalizing || alchemyRunning) && "opacity-70 cursor-not-allowed"
+                          (!canMutateSelected || saving || finalizing || alchemyRunning) &&
+                            "opacity-70 cursor-not-allowed"
                         )}
-                        placeholder="Resolution title"
+                        placeholder={isSandbox ? 'Resolution title (SANDBOX auto-tag)' : "Resolution title"}
                         value={title}
                         onChange={(e) => onTitleChange(e.target.value)}
                         disabled={!canMutateSelected || saving || finalizing || alchemyRunning}
@@ -972,7 +1325,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                         className={cx(
                           "h-full w-full resize-none rounded-2xl border px-4 py-4 text-[13px] leading-[1.75] outline-none transition",
                           textareaBase,
-                          (!canMutateSelected || saving || finalizing || alchemyRunning) && "opacity-70 cursor-not-allowed"
+                          (!canMutateSelected || saving || finalizing || alchemyRunning) &&
+                            "opacity-70 cursor-not-allowed"
                         )}
                         placeholder="Draft body… (or Run Alchemy)"
                         value={body}
@@ -982,9 +1336,12 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                     </div>
 
                     {/* Actions row */}
-                    <div className={cx("shrink-0 px-5 py-4 border-t flex flex-wrap gap-2",
-                      editorTheme === "light" ? "border-slate-200" : "border-slate-800"
-                    )}>
+                    <div
+                      className={cx(
+                        "shrink-0 px-5 py-4 border-t flex flex-wrap gap-2",
+                        editorTheme === "light" ? "border-slate-200" : "border-slate-800"
+                      )}
+                    >
                       <button
                         onClick={handleRunAlchemy}
                         disabled={alchemyRunning || saving || finalizing}
@@ -1049,7 +1406,9 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
               {/* Footer strip (OS-contained) */}
               <div className="shrink-0 px-5 py-3 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
                 <span>CI-Alchemy · Draft factory (governance_drafts)</span>
-                <span>Finalize → governance_ledger (PENDING) → Council authority</span>
+                <span>
+                  Lane-aware · Finalize → governance_ledger (PENDING) → Council authority
+                </span>
               </div>
             </section>
           </div>
@@ -1068,6 +1427,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                 </div>
                 <div className="mt-1 text-[11px] text-slate-500">
                   {selectedDraft ? `${selectedDraft.status.toUpperCase()} • ${fmtShort(selectedDraft.created_at)}` : "—"}
+                  <span className="mx-2 text-slate-700">•</span>
+                  <span className={cx(isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
                 </div>
               </div>
 
@@ -1101,9 +1462,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           <div className="w-full max-w-[620px] rounded-3xl border border-slate-800 bg-slate-950 shadow-2xl shadow-black/60 overflow-hidden">
             <div className="px-6 py-5 border-b border-slate-800">
               <div className="text-[11px] uppercase tracking-[0.22em] text-rose-300">Delete draft</div>
-              <div className="mt-1 text-[16px] font-semibold text-slate-100">
-                Discard vs Permanent Delete
-              </div>
+              <div className="mt-1 text-[16px] font-semibold text-slate-100">Discard vs Permanent Delete</div>
               <div className="mt-2 text-[12px] text-slate-400">
                 Allowed only before finalize. Ledger-linked drafts are locked.
               </div>
@@ -1184,9 +1543,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                 disabled={deleteBusy || !canMutateSelected}
                 className={cx(
                   "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition disabled:opacity-50 disabled:cursor-not-allowed",
-                  deleteMode === "soft"
-                    ? "bg-emerald-500 text-black hover:bg-emerald-400"
-                    : "bg-rose-500 text-black hover:bg-rose-400"
+                  deleteMode === "soft" ? "bg-emerald-500 text-black hover:bg-emerald-400" : "bg-rose-500 text-black hover:bg-rose-400"
                 )}
               >
                 {deleteBusy ? "Deleting…" : deleteMode === "soft" ? "Discard" : "Hard Delete"}
@@ -1216,9 +1573,7 @@ function StatusTabButton({
       onClick={onClick}
       className={cx(
         "px-4 py-2 rounded-full text-left transition min-w-[110px]",
-        active
-          ? "bg-emerald-500/15 border border-emerald-400/70 text-slate-50"
-          : "bg-transparent border border-transparent hover:bg-slate-900/60 text-slate-300"
+        active ? "bg-emerald-500/15 border border-emerald-400/70 text-slate-50" : "bg-transparent border border-transparent hover:bg-slate-900/60 text-slate-300"
       )}
     >
       <div className="text-xs font-semibold">{label}</div>
