@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
-import { useOsEnv } from "@/components/OsEnvContext"; // CHANGE #1: use global env context (no guessing)
+import { useOsEnv } from "@/components/OsEnvContext";
 
 type DraftStatus = "draft" | "reviewed" | "finalized" | "discarded";
 
@@ -62,7 +62,7 @@ function isMissingColumnErr(err: any) {
 
 export default function CIAlchemyPage() {
   const entityCtx = useEntity() as any;
-  const osEnv = useOsEnv(); // CHANGE #1 (cont.): pull from provider
+  const osEnv = useOsEnv();
 
   // IMPORTANT: entitySlug is ALWAYS holdings/lounge/real-estate (never "sandbox")
   const activeEntity = (entityCtx?.activeEntity as string) || "holdings";
@@ -71,9 +71,9 @@ export default function CIAlchemyPage() {
     [activeEntity]
   );
 
-  // CHANGE #2: the one-liner that makes Alchemy lane-aware everywhere
-  const isSandbox = osEnv.isSandbox; // ✅ env toggle ONLY controls is_test
-  const env = isSandbox ? "SANDBOX" : "ROT"; // ✅ FIX: OsEnvContextValue has no envLabel
+  // Lane flag (must match Council)
+  const isSandbox = !!osEnv.isSandbox;
+  const env = isSandbox ? "SANDBOX" : "ROT";
 
   // Core state
   const [loading, setLoading] = useState(true);
@@ -90,8 +90,8 @@ export default function CIAlchemyPage() {
   // OS UX controls
   const [statusTab, setStatusTab] = useState<StatusTab>("draft");
   const [query, setQuery] = useState("");
-  const [drawerOpen, setDrawerOpen] = useState(true); // registry drawer
-  const [readerOpen, setReaderOpen] = useState(false); // preview modal
+  const [drawerOpen, setDrawerOpen] = useState(true);
+  const [readerOpen, setReaderOpen] = useState(false);
   const [editorTheme, setEditorTheme] = useState<"light" | "dark">("light");
 
   const [error, setError] = useState<string | null>(null);
@@ -117,16 +117,14 @@ export default function CIAlchemyPage() {
 
   // Mutations allowed only while still inside Alchemy (not finalized / not ledger-linked)
   const canMutateSelected = useMemo(() => {
-    if (!selectedDraft) return true; // new unsaved draft in editor
+    if (!selectedDraft) return true;
     return !selectedDraft.finalized_record_id && selectedDraft.status !== "finalized";
   }, [selectedDraft]);
 
-  // Strict env filtering:
-  // - If DB returns is_test, filter by it.
-  // - If DB doesn't have is_test, we DO NOT try to guess by title (avoid drift).
+  // Client-side env filter ONLY when field is actually present as boolean
   const envFilteredDrafts = useMemo(() => {
-    const hasEnv = drafts.some((d) => typeof d.is_test === "boolean");
-    if (!hasEnv) return drafts;
+    const hasEnvBool = drafts.some((d) => typeof d.is_test === "boolean");
+    if (!hasEnvBool) return drafts;
     return drafts.filter((d) => (isSandbox ? d.is_test === true : d.is_test === false));
   }, [drafts, isSandbox]);
 
@@ -187,6 +185,8 @@ export default function CIAlchemyPage() {
     setLoading(true);
     setError(null);
 
+    // STRICT lane query: if is_test exists but query fails for any reason other than "missing column",
+    // we DO NOT fall back (to avoid mixing ROT+SANDBOX like you saw).
     const tryWithIsTest = async () => {
       const q = supabase
         .from("governance_drafts")
@@ -207,7 +207,7 @@ export default function CIAlchemyPage() {
           `
         )
         .eq("entity_slug", activeEntity)
-        .eq("is_test", isSandbox) // lane-aware query
+        .eq("is_test", isSandbox)
         .order("created_at", { ascending: false });
 
       const { data, error } = await q;
@@ -215,6 +215,7 @@ export default function CIAlchemyPage() {
       return (data ?? []) as DraftRecord[];
     };
 
+    // Only used if column truly doesn't exist
     const tryWithoutIsTest = async () => {
       const { data, error } = await supabase
         .from("governance_drafts")
@@ -245,8 +246,12 @@ export default function CIAlchemyPage() {
       try {
         rows = await tryWithIsTest();
       } catch (e: any) {
-        if (isMissingColumnErr(e)) rows = await tryWithoutIsTest();
-        else rows = await tryWithoutIsTest();
+        if (isMissingColumnErr(e)) {
+          rows = await tryWithoutIsTest();
+        } else {
+          // IMPORTANT: no silent fallback -> prevents lane drift/mismatch
+          throw e;
+        }
       }
 
       setDrafts(rows);
@@ -280,7 +285,7 @@ export default function CIAlchemyPage() {
     }
   }
 
-  // CRITICAL: env + entity must re-scope Alchemy registry (SANDBOX vs ROT)
+  // CRITICAL: env + entity must re-scope Alchemy registry
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -293,7 +298,7 @@ export default function CIAlchemyPage() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeEntity, isSandbox]); // CHANGE #2 (cont.): lane dependency is isSandbox
+  }, [activeEntity, isSandbox]);
 
   function handleSelectDraft(draft: DraftRecord) {
     if (!confirmNavigateAwayIfDirty()) return;
@@ -464,7 +469,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
       if (entityErr || !entityRow) throw entityErr ?? new Error("Entity not found.");
 
-      // IMPORTANT: always store the real entity_id for holdings/lounge/real-estate
       const basePayload: any = {
         entity_id: entityRow.id as string,
         entity_slug: activeEntity,
@@ -732,39 +736,27 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
       if (entityErr || !entityRow) throw entityErr ?? new Error("Entity not found.");
 
-      // Insert into ledger:
-      // - entity_id is ALWAYS holdings/lounge/real-estate id
-      // - env toggle ONLY sets is_test
       const ledgerPayload: any = {
         entity_id: entityRow.id as string,
         title: title.trim(),
         description: null,
         record_type: "resolution",
         record_no: null,
-        body, // NOTE: your schema uses `body` (not body_text)
+        body, // schema uses `body`
         source: "ci-alchemy",
         status: "PENDING",
         is_test: isSandbox,
       };
 
-      const tryLedger = await supabase
-        .from("governance_ledger")
-        .insert(ledgerPayload)
-        .select("id")
-        .single();
+      const tryLedger = await supabase.from("governance_ledger").insert(ledgerPayload).select("id").single();
 
       let ledgerId: string | null = null;
 
       if (tryLedger.error) {
         if (isMissingColumnErr(tryLedger.error)) {
           delete ledgerPayload.is_test;
-          const retry = await supabase
-            .from("governance_ledger")
-            .insert(ledgerPayload)
-            .select("id")
-            .single();
-          if (retry.error || !retry.data)
-            throw retry.error ?? new Error("Ledger insert failed.");
+          const retry = await supabase.from("governance_ledger").insert(ledgerPayload).select("id").single();
+          if (retry.error || !retry.data) throw retry.error ?? new Error("Ledger insert failed.");
           ledgerId = (retry.data as { id: string }).id;
         } else {
           throw tryLedger.error;
@@ -930,27 +922,19 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
   async function hardDeleteDraft(draftId: string, reason: string) {
     const tryTwo = await supabase.rpc(
       "owner_delete_governance_draft",
-      {
-        p_draft_id: draftId,
-        p_reason: reason || null,
-      } as any
+      { p_draft_id: draftId, p_reason: reason || null } as any
     );
     if (!tryTwo.error) return;
 
     const tryOne = await supabase.rpc(
       "owner_delete_governance_draft",
-      {
-        p_draft_id: draftId,
-      } as any
+      { p_draft_id: draftId } as any
     );
     if (!tryOne.error) return;
 
     const tryAlt = await supabase.rpc(
       "owner_delete_governance_draft",
-      {
-        draft_id: draftId,
-        reason: reason || null,
-      } as any
+      { draft_id: draftId, reason: reason || null } as any
     );
     if (tryAlt.error) throw tryAlt.error;
   }
@@ -1062,36 +1046,11 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           {/* Top strip: tabs + controls */}
           <div className="shrink-0 mb-4 flex items-center justify-between gap-4">
             <div className="inline-flex rounded-full bg-slate-950/70 border border-slate-800 p-1 overflow-hidden">
-              <StatusTabButton
-                label="Drafts"
-                value="draft"
-                active={statusTab === "draft"}
-                onClick={() => setStatusTab("draft")}
-              />
-              <StatusTabButton
-                label="Reviewed"
-                value="reviewed"
-                active={statusTab === "reviewed"}
-                onClick={() => setStatusTab("reviewed")}
-              />
-              <StatusTabButton
-                label="Finalized"
-                value="finalized"
-                active={statusTab === "finalized"}
-                onClick={() => setStatusTab("finalized")}
-              />
-              <StatusTabButton
-                label="Discarded"
-                value="discarded"
-                active={statusTab === "discarded"}
-                onClick={() => setStatusTab("discarded")}
-              />
-              <StatusTabButton
-                label="All"
-                value="all"
-                active={statusTab === "all"}
-                onClick={() => setStatusTab("all")}
-              />
+              <StatusTabButton label="Drafts" value="draft" active={statusTab === "draft"} onClick={() => setStatusTab("draft")} />
+              <StatusTabButton label="Reviewed" value="reviewed" active={statusTab === "reviewed"} onClick={() => setStatusTab("reviewed")} />
+              <StatusTabButton label="Finalized" value="finalized" active={statusTab === "finalized"} onClick={() => setStatusTab("finalized")} />
+              <StatusTabButton label="Discarded" value="discarded" active={statusTab === "discarded"} onClick={() => setStatusTab("discarded")} />
+              <StatusTabButton label="All" value="all" active={statusTab === "all"} onClick={() => setStatusTab("all")} />
             </div>
 
             <div className="flex items-center gap-2">
@@ -1108,9 +1067,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                   onClick={() => setEditorTheme("light")}
                   className={cx(
                     "rounded-full px-3 py-1 transition",
-                    editorTheme === "light"
-                      ? "bg-white text-black"
-                      : "text-slate-400 hover:bg-slate-900/60"
+                    editorTheme === "light" ? "bg-white text-black" : "text-slate-400 hover:bg-slate-900/60"
                   )}
                 >
                   Paper
@@ -1119,9 +1076,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                   onClick={() => setEditorTheme("dark")}
                   className={cx(
                     "rounded-full px-3 py-1 transition",
-                    editorTheme === "dark"
-                      ? "bg-emerald-500 text-black"
-                      : "text-slate-400 hover:bg-slate-900/60"
+                    editorTheme === "dark" ? "bg-emerald-500 text-black" : "text-slate-400 hover:bg-slate-900/60"
                   )}
                 >
                   Noir
@@ -1290,12 +1245,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
               <div className="flex-1 min-h-0 overflow-hidden p-5">
                 <div className={cx("h-full w-full rounded-2xl border overflow-hidden", editorCard)}>
                   <div className="h-full flex flex-col">
-                    <div
-                      className={cx(
-                        "shrink-0 px-5 py-4 border-b",
-                        editorTheme === "light" ? "border-slate-200" : "border-slate-800"
-                      )}
-                    >
+                    <div className={cx("shrink-0 px-5 py-4 border-b", editorTheme === "light" ? "border-slate-200" : "border-slate-800")}>
                       <input
                         className={cx(
                           "w-full rounded-2xl border px-4 py-3 text-[15px] outline-none transition",
@@ -1325,12 +1275,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                       />
                     </div>
 
-                    <div
-                      className={cx(
-                        "shrink-0 px-5 py-4 border-t flex flex-wrap gap-2",
-                        editorTheme === "light" ? "border-slate-200" : "border-slate-800"
-                      )}
-                    >
+                    <div className={cx("shrink-0 px-5 py-4 border-t flex flex-wrap gap-2", editorTheme === "light" ? "border-slate-200" : "border-slate-800")}>
                       <button
                         onClick={handleRunAlchemy}
                         disabled={alchemyRunning || saving || finalizing}
