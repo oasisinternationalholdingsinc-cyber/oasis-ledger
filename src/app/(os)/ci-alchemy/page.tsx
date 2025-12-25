@@ -73,7 +73,7 @@ export default function CIAlchemyPage() {
 
   // CHANGE #2: the one-liner that makes Alchemy lane-aware everywhere
   const isSandbox = osEnv.isSandbox; // ✅ env toggle ONLY controls is_test
-  const env = osEnv.envLabel; // "SANDBOX" | "ROT" (or whatever your context exposes)
+  const env = isSandbox ? "SANDBOX" : "ROT"; // ✅ FIX: OsEnvContextValue has no envLabel
 
   // Core state
   const [loading, setLoading] = useState(true);
@@ -106,7 +106,9 @@ export default function CIAlchemyPage() {
 
   // Unsaved changes guard
   const [dirty, setDirty] = useState(false);
-  const lastLoadedRef = useRef<{ id: string | null; title: string; body: string } | null>(null);
+  const lastLoadedRef = useRef<{ id: string | null; title: string; body: string } | null>(
+    null
+  );
 
   const selectedDraft = useMemo(
     () => drafts.find((d) => d.id === selectedId) ?? null,
@@ -619,7 +621,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
   async function handleMarkReviewed() {
     if (!selectedId) return flashError("Select a draft first.");
-    if (!canMutateSelected) return flashError("This draft has left Alchemy and can’t be changed here.");
+    if (!canMutateSelected)
+      return flashError("This draft has left Alchemy and can’t be changed here.");
 
     const draft = drafts.find((d) => d.id === selectedId);
     if (!draft) return flashError("Draft not found.");
@@ -710,9 +713,11 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
     const draft = drafts.find((d) => d.id === selectedId);
     if (!draft) return flashError("Draft not found.");
 
-    if (!title.trim() || !body.trim()) return flashError("Title and body are required before finalizing.");
+    if (!title.trim() || !body.trim())
+      return flashError("Title and body are required before finalizing.");
     if (draft.status === "finalized") return flashInfo("Already finalized.");
-    if (draft.finalized_record_id) return flashError("This draft is already linked to a ledger record.");
+    if (draft.finalized_record_id)
+      return flashError("This draft is already linked to a ledger record.");
 
     setFinalizing(true);
     setError(null);
@@ -758,7 +763,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
             .insert(ledgerPayload)
             .select("id")
             .single();
-          if (retry.error || !retry.data) throw retry.error ?? new Error("Ledger insert failed.");
+          if (retry.error || !retry.data)
+            throw retry.error ?? new Error("Ledger insert failed.");
           ledgerId = (retry.data as { id: string }).id;
         } else {
           throw tryLedger.error;
@@ -1032,17 +1038,21 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       {/* Header under OS bar */}
       <div className="mb-4 shrink-0">
         <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI • Alchemy</div>
-        <h1 className="mt-1 text-xl font-semibold text-slate-50">Drafting Console · AI Scribe</h1>
+        <h1 className="mt-1 text-xl font-semibold text-slate-50">
+          Drafting Console · AI Scribe
+        </h1>
         <p className="mt-1 text-xs text-slate-400 max-w-3xl">
           Draft safely inside Alchemy.{" "}
-          <span className="text-emerald-300 font-semibold">Finalize</span> promotes into Council (governance_ledger
-          status=PENDING).
+          <span className="text-emerald-300 font-semibold">Finalize</span> promotes into
+          Council (governance_ledger status=PENDING).
         </p>
         <div className="mt-2 text-xs text-slate-400">
           Entity: <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
           <span className="mx-2 text-slate-700">•</span>
           Lane:{" "}
-          <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
+          <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>
+            {env}
+          </span>
         </div>
       </div>
 
@@ -1052,11 +1062,36 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           {/* Top strip: tabs + controls */}
           <div className="shrink-0 mb-4 flex items-center justify-between gap-4">
             <div className="inline-flex rounded-full bg-slate-950/70 border border-slate-800 p-1 overflow-hidden">
-              <StatusTabButton label="Drafts" value="draft" active={statusTab === "draft"} onClick={() => setStatusTab("draft")} />
-              <StatusTabButton label="Reviewed" value="reviewed" active={statusTab === "reviewed"} onClick={() => setStatusTab("reviewed")} />
-              <StatusTabButton label="Finalized" value="finalized" active={statusTab === "finalized"} onClick={() => setStatusTab("finalized")} />
-              <StatusTabButton label="Discarded" value="discarded" active={statusTab === "discarded"} onClick={() => setStatusTab("discarded")} />
-              <StatusTabButton label="All" value="all" active={statusTab === "all"} onClick={() => setStatusTab("all")} />
+              <StatusTabButton
+                label="Drafts"
+                value="draft"
+                active={statusTab === "draft"}
+                onClick={() => setStatusTab("draft")}
+              />
+              <StatusTabButton
+                label="Reviewed"
+                value="reviewed"
+                active={statusTab === "reviewed"}
+                onClick={() => setStatusTab("reviewed")}
+              />
+              <StatusTabButton
+                label="Finalized"
+                value="finalized"
+                active={statusTab === "finalized"}
+                onClick={() => setStatusTab("finalized")}
+              />
+              <StatusTabButton
+                label="Discarded"
+                value="discarded"
+                active={statusTab === "discarded"}
+                onClick={() => setStatusTab("discarded")}
+              />
+              <StatusTabButton
+                label="All"
+                value="all"
+                active={statusTab === "all"}
+                onClick={() => setStatusTab("all")}
+              />
             </div>
 
             <div className="flex items-center gap-2">
@@ -1073,7 +1108,9 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                   onClick={() => setEditorTheme("light")}
                   className={cx(
                     "rounded-full px-3 py-1 transition",
-                    editorTheme === "light" ? "bg-white text-black" : "text-slate-400 hover:bg-slate-900/60"
+                    editorTheme === "light"
+                      ? "bg-white text-black"
+                      : "text-slate-400 hover:bg-slate-900/60"
                   )}
                 >
                   Paper
@@ -1082,7 +1119,9 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                   onClick={() => setEditorTheme("dark")}
                   className={cx(
                     "rounded-full px-3 py-1 transition",
-                    editorTheme === "dark" ? "bg-emerald-500 text-black" : "text-slate-400 hover:bg-slate-900/60"
+                    editorTheme === "dark"
+                      ? "bg-emerald-500 text-black"
+                      : "text-slate-400 hover:bg-slate-900/60"
                   )}
                 >
                   Noir
@@ -1189,12 +1228,17 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
             <section className="flex-1 min-w-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
               <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
                 <div className="min-w-0">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Workspace</div>
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
+                    Workspace
+                  </div>
                   <div className="mt-1 text-[13px] text-slate-400">
-                    Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
+                    Entity:{" "}
+                    <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
                     <span className="mx-2 text-slate-700">•</span>
                     Lane:{" "}
-                    <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
+                    <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>
+                      {env}
+                    </span>
                     {selectedDraft?.finalized_record_id && (
                       <>
                         <span className="mx-2 text-slate-700">•</span>
@@ -1368,7 +1412,9 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                   {(selectedDraft?.title || title || "(untitled)") as string}
                 </div>
                 <div className="mt-1 text-[11px] text-slate-500">
-                  {selectedDraft ? `${selectedDraft.status.toUpperCase()} • ${fmtShort(selectedDraft.created_at)}` : "—"}
+                  {selectedDraft
+                    ? `${selectedDraft.status.toUpperCase()} • ${fmtShort(selectedDraft.created_at)}`
+                    : "—"}
                   <span className="mx-2 text-slate-700">•</span>
                   <span className={cx(isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
                 </div>
@@ -1385,7 +1431,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
             <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5">
               <div className="rounded-2xl border border-slate-800 bg-black/40 px-5 py-5">
                 <pre className="whitespace-pre-wrap font-sans text-[13px] leading-[1.8] text-slate-100">
-                  {selectedDraft ? (selectedDraft.draft_text ?? "") : (body ?? "")}
+                  {selectedDraft ? selectedDraft.draft_text ?? "" : body ?? ""}
                 </pre>
               </div>
             </div>
@@ -1404,8 +1450,12 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           <div className="w-full max-w-[620px] rounded-3xl border border-slate-800 bg-slate-950 shadow-2xl shadow-black/60 overflow-hidden">
             <div className="px-6 py-5 border-b border-slate-800">
               <div className="text-[11px] uppercase tracking-[0.22em] text-rose-300">Delete draft</div>
-              <div className="mt-1 text-[16px] font-semibold text-slate-100">Discard vs Permanent Delete</div>
-              <div className="mt-2 text-[12px] text-slate-400">Allowed only before finalize. Ledger-linked drafts are locked.</div>
+              <div className="mt-1 text-[16px] font-semibold text-slate-100">
+                Discard vs Permanent Delete
+              </div>
+              <div className="mt-2 text-[12px] text-slate-400">
+                Allowed only before finalize. Ledger-linked drafts are locked.
+              </div>
             </div>
 
             <div className="px-6 py-5 space-y-4">
@@ -1442,7 +1492,9 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
               </div>
 
               <div>
-                <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 mb-2">Reason (optional)</div>
+                <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 mb-2">
+                  Reason (optional)
+                </div>
                 <textarea
                   className="w-full min-h-[96px] rounded-2xl border border-slate-800 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 resize-none outline-none focus:border-slate-600"
                   value={deleteReason}
@@ -1454,7 +1506,9 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
               {deleteMode === "hard" && (
                 <div className="rounded-2xl border border-rose-500/30 bg-rose-500/5 px-4 py-3">
-                  <div className="text-[11px] uppercase tracking-[0.2em] text-rose-300">Confirm hard delete</div>
+                  <div className="text-[11px] uppercase tracking-[0.2em] text-rose-300">
+                    Confirm hard delete
+                  </div>
                   <div className="mt-1 text-[11px] text-slate-400">
                     Type <span className="text-slate-200 font-semibold">DELETE</span> to confirm.
                   </div>
