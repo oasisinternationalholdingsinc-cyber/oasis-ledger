@@ -6,7 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
-import { useOsEnv } from "@/components/OsEnvContext"; // ✅ CHANGE #1: use global env context (no guessing)
+import { useOsEnv } from "@/components/OsEnvContext";
 
 type CouncilStatus = "PENDING" | "APPROVED" | "REJECTED" | "ARCHIVED";
 type StatusTab = "PENDING" | "APPROVED" | "REJECTED" | "ARCHIVED" | "ALL";
@@ -19,7 +19,6 @@ type LedgerRecord = {
   is_test: boolean | null;
   created_at: string | null;
 
-  // optional fields (safe)
   body?: string | null;
   record_type?: string | null;
   source?: string | null;
@@ -56,23 +55,27 @@ function isMissingColumnErr(err: any) {
   return msg.includes("does not exist") && msg.includes("column");
 }
 
+function isTruthImmutableErr(err: any) {
+  const msg = (err?.message ?? "").toLowerCase();
+  return msg.includes("truth records are immutable") || msg.includes("immutable");
+}
+
 export default function CICouncilPage() {
   const entityCtx = useEntity() as any;
-  const osEnv = useOsEnv(); // ✅ CHANGE #1 (cont.)
+  const osEnv = useOsEnv();
 
   // CRITICAL: entity is ALWAYS corp entity (never "sandbox")
   const activeEntitySlug = (entityCtx?.activeEntity as string) || "holdings";
 
-  // ✅ CHANGE #2: the one-liner that makes Council lane-aware everywhere
-  const isSandbox = !!osEnv?.isSandbox; // env toggle ONLY controls is_test
-  const env: "SANDBOX" | "ROT" = isSandbox ? "SANDBOX" : "ROT"; // no envLabel dependency
+  // env toggle ONLY controls is_test
+  const isSandbox = !!osEnv?.isSandbox;
+  const env: "SANDBOX" | "ROT" = isSandbox ? "SANDBOX" : "ROT";
 
   const activeEntityLabel = useMemo(
     () => ENTITY_LABELS[activeEntitySlug] ?? activeEntitySlug,
     [activeEntitySlug]
   );
 
-  // entity_id scoping (robust): prefer context; fallback lookup by slug
   const [entityId, setEntityId] = useState<string | null>(
     (entityCtx?.activeEntityId as string) || null
   );
@@ -109,7 +112,6 @@ export default function CICouncilPage() {
   );
 
   // env filtering:
-  // If DB returns is_test, filter strictly by it.
   const envFiltered = useMemo(() => {
     const hasEnv = records.some((r) => typeof r.is_test === "boolean");
     if (!hasEnv) return records;
@@ -135,17 +137,14 @@ export default function CICouncilPage() {
   }, [envFiltered, tab, query]);
 
   async function ensureEntityId(slug: string) {
-    // Prefer existing
     if (entityId) return entityId;
 
-    // If context provides it later
     const ctxId = (entityCtx?.activeEntityId as string) || null;
     if (ctxId) {
       setEntityId(ctxId);
       return ctxId;
     }
 
-    // Fallback: lookup by slug
     const { data, error } = await supabase
       .from("entities")
       .select("id, slug")
@@ -197,7 +196,6 @@ export default function CICouncilPage() {
 
       setRecords(rows);
 
-      // selection logic (avoid “undefined uuid” by always requiring a real selected record)
       if (preserveSelection && selectedId) {
         const still = rows.find((r) => r.id === selectedId);
         if (still) {
@@ -206,7 +204,6 @@ export default function CICouncilPage() {
         }
       }
 
-      // auto-pick first row in current tab (stable)
       const tabKey = tab === "ALL" ? "ALL" : tab;
       const inTab =
         tabKey === "ALL" ? rows : rows.filter((r) => (r.status ?? "").toUpperCase() === tabKey);
@@ -227,7 +224,6 @@ export default function CICouncilPage() {
     }
   }
 
-  // Re-scope when entity/env changes
   useEffect(() => {
     setTab("PENDING");
     setQuery("");
@@ -241,6 +237,40 @@ export default function CICouncilPage() {
     setSelectedId(rec.id);
     setError(null);
     setInfo(null);
+  }
+
+  /**
+   * ✅ Slight adjustment for enterprise “SQL is backend always”:
+   * Try SECURITY DEFINER RPC first (bypasses RoT immutability trigger safely),
+   * fallback to direct update only if RPC isn’t present.
+   *
+   * Expected function signature (recommended):
+   *   council_set_status(p_record_id uuid, p_next_status text) returns jsonb { ok, status, error? }
+   */
+  async function setCouncilStatus(recordId: string, next: CouncilStatus) {
+    // 1) Preferred: RPC
+    try {
+      const { data, error } = await supabase.rpc("council_set_status", {
+        p_record_id: recordId,
+        p_next_status: next,
+      });
+      if (!error) {
+        const ok = (data as any)?.ok;
+        if (ok === false) throw new Error((data as any)?.error ?? "Council RPC failed.");
+        return;
+      }
+      // If function missing, fall through to direct update
+      const msg = (error?.message ?? "").toLowerCase();
+      if (!msg.includes("function") && !msg.includes("does not exist")) throw error;
+    } catch (e: any) {
+      // If it’s the immutability guardrail, we want the UI to tell you exactly what to fix.
+      if (isTruthImmutableErr(e)) throw e;
+      // otherwise keep going to fallback
+    }
+
+    // 2) Fallback: direct update (works if RoT immutability allows status updates)
+    const { error: upErr } = await supabase.from("governance_ledger").update({ status: next }).eq("id", recordId);
+    if (upErr) throw upErr;
   }
 
   async function updateStatus(next: CouncilStatus) {
@@ -263,13 +293,18 @@ export default function CICouncilPage() {
     setInfo(null);
 
     try {
-      const { error } = await supabase.from("governance_ledger").update({ status: next }).eq("id", selected.id);
-      if (error) throw error;
+      await setCouncilStatus(selected.id, next);
 
       setRecords((prev) => prev.map((r) => (r.id === selected.id ? { ...r, status: next } : r)));
       flashInfo(`Council: ${next}.`);
     } catch (err: any) {
-      flashError(err?.message ?? `Failed to set status ${next}.`);
+      if (isTruthImmutableErr(err)) {
+        flashError(
+          "DB guardrail blocked this update: “Truth records are immutable”. Council must set status via SECURITY DEFINER SQL (e.g., rpc: council_set_status)."
+        );
+      } else {
+        flashError(err?.message ?? `Failed to set status ${next}.`);
+      }
     } finally {
       setBusy(null);
       void reload(true);
@@ -309,15 +344,15 @@ export default function CICouncilPage() {
         {showNoEntityWarning && (
           <div className="mt-3 rounded-2xl border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-[12px] text-amber-200">
             OS Context: <b>activeEntityId</b> was missing, so Council is resolving <code>entities.id</code> by slug
-            automatically. (This preserves the rule: env toggle only flips <code>is_test</code>.)
+            automatically. (Env toggle only flips <code>is_test</code>.)
           </div>
         )}
       </div>
 
-      {/* Main OS window frame (match Alchemy) */}
+      {/* Main OS window frame */}
       <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
         <div className="w-full max-w-[1500px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-6 py-5 flex flex-col overflow-hidden">
-          {/* Top strip: tabs + controls */}
+          {/* Top strip */}
           <div className="shrink-0 mb-4 flex items-center justify-between gap-4">
             <div className="inline-flex rounded-full bg-slate-950/70 border border-slate-800 p-1 overflow-hidden">
               <StatusTabButton label="Pending" value="PENDING" active={tab === "PENDING"} onClick={() => setTab("PENDING")} />
@@ -352,7 +387,7 @@ export default function CICouncilPage() {
             </div>
           </div>
 
-          {/* Workspace body (NO page scroll) */}
+          {/* Workspace */}
           <div className="flex-1 min-h-0 flex gap-4 overflow-hidden">
             {/* Left queue drawer */}
             {drawerOpen && (
@@ -410,10 +445,10 @@ export default function CICouncilPage() {
                                   st === "APPROVED"
                                     ? "bg-emerald-500/15 text-emerald-200"
                                     : st === "REJECTED"
-                                    ? "bg-rose-500/15 text-rose-200"
-                                    : st === "ARCHIVED"
-                                    ? "bg-slate-700/40 text-slate-300"
-                                    : "bg-sky-500/15 text-sky-200"
+                                      ? "bg-rose-500/15 text-rose-200"
+                                      : st === "ARCHIVED"
+                                        ? "bg-slate-700/40 text-slate-300"
+                                        : "bg-sky-500/15 text-sky-200"
                                 )}
                               >
                                 {st || "—"}
@@ -539,7 +574,6 @@ export default function CICouncilPage() {
               </div>
 
               <div className="flex-1 min-h-0 overflow-y-auto px-5 py-5 space-y-4">
-                {/* AXIOM advisory shell (non-blocking) */}
                 <div className="rounded-2xl border border-slate-800 bg-black/35 px-4 py-4">
                   <div className="text-[11px] uppercase tracking-[0.22em] text-indigo-200">AXIOM Advisory</div>
                   <div className="mt-2 text-[12px] text-slate-400 leading-relaxed">
@@ -598,7 +632,7 @@ export default function CICouncilPage() {
         </div>
       </div>
 
-      {/* Reader Modal (matches Alchemy) */}
+      {/* Reader Modal */}
       {readerOpen && (
         <div className="fixed inset-0 z-[90] bg-black/70 px-6 py-6 flex items-center justify-center">
           <div className="w-full max-w-[980px] h-[85vh] rounded-3xl border border-slate-800 bg-slate-950/95 shadow-2xl shadow-black/70 overflow-hidden flex flex-col">
