@@ -1,4 +1,3 @@
-```tsx
 // src/app/(os)/ci-alchemy/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
@@ -304,7 +303,8 @@ export default function CIAlchemyPage() {
     const q = query.trim().toLowerCase();
     if (q) {
       list = list.filter((d) => {
-        const hay = `${d.title ?? ""}\n${d.draft_text ?? ""}`.toLowerCase();
+        // ✅ SAFEST: avoids template literal backslash/newline copy-paste issues (Turbopack parse error)
+        const hay = [d.title ?? "", d.draft_text ?? ""].join("\n").toLowerCase();
         return hay.includes(q);
       });
     }
@@ -729,7 +729,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
     if (draft.finalized_record_id) return flashError("This draft is already linked to a ledger record.");
     if (!canMutateSelected) return flashError("This draft has left Alchemy and can’t be finalized here.");
 
-    // Lane safety (your screenshot console warning)
     if (typeof draft.is_test === "boolean" && draft.is_test !== isSandbox) {
       return flashError("Lane mismatch: this draft belongs to the other environment.");
     }
@@ -743,7 +742,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
     setInfo(null);
 
     try {
-      // optional auto-save if dirty
       if (dirty) {
         await handleSaveDraft();
       }
@@ -793,7 +791,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
     }
   }
 
-  // Delete modal + delete methods
   function openDelete() {
     if (!selectedDraft) return flashError("Select a draft first.");
     if (!canMutateSelected) return flashError("Can’t remove a draft that already left Alchemy.");
@@ -851,10 +848,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
   async function hardDeleteDraft(draftId: string, reason: string) {
     const tryTwo = await supabase.rpc(
       "owner_delete_governance_draft",
-      {
-        p_draft_id: draftId,
-        p_reason: reason || null,
-      } as any
+      { p_draft_id: draftId, p_reason: reason || null } as any
     );
     if (!tryTwo.error) return;
 
@@ -863,10 +857,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
     const tryAlt = await supabase.rpc(
       "owner_delete_governance_draft",
-      {
-        draft_id: draftId,
-        reason: reason || null,
-      } as any
+      { draft_id: draftId, reason: reason || null } as any
     );
     if (tryAlt.error) throw tryAlt.error;
   }
@@ -1627,4 +1618,3 @@ function StatusTabButton({
     </button>
   );
 }
-```
