@@ -1,14 +1,18 @@
+// src/app/(os)/ci-forge/forge.client.tsx
 "use client";
+export const dynamic = "force-dynamic";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
+import { useOsEnv } from "@/components/OsEnvContext";
 
 type ForgeQueueItem = {
   ledger_id: string;
   title: string;
   ledger_status: string;
   created_at: string;
+
   entity_id: string;
   entity_name: string;
   entity_slug: string;
@@ -21,8 +25,13 @@ type ForgeQueueItem = {
   last_signed_at: string | null;
   days_since_last_signature: number | null;
 
-  // Optional: if your view adds later
+  // Optional (future)
   body?: string | null;
+
+  // Optional (future portal deep-links if your view exposes them)
+  signer_url?: string | null;
+  verify_url?: string | null;
+  certificate_url?: string | null;
 };
 
 type StartSignatureResponse = {
@@ -48,8 +57,37 @@ type ArchiveSignedResolutionResponse = {
   error?: string;
 };
 
+type AxiomReviewResponse = {
+  ok: boolean;
+  record_id?: string;
+  summary_id?: string | null;
+  analysis_id?: string | null;
+  advice_id?: string | null;
+  compliance_review_id?: string | null;
+  message?: string;
+  error?: string;
+};
+
 type RiskLevel = "GREEN" | "AMBER" | "RED" | "IDLE";
 type TabKey = "active" | "completed";
+
+type AxiomLatest = {
+  summary?:
+    | { id: string; summary: string | null; generated_at: string | null; model: string | null }
+    | null;
+  analysis?:
+    | { id: string; analysis: string | null; generated_at: string | null; model: string | null }
+    | null;
+  advice?:
+    | {
+        id: string;
+        advice: string | null;
+        recommendation: string | null;
+        generated_at: string | null;
+        model: string | null;
+      }
+    | null;
+};
 
 function fmt(iso: string | null | undefined) {
   if (!iso) return "—";
@@ -68,6 +106,8 @@ function clamp(s: string, n: number) {
 
 export default function ForgeClient() {
   const { activeEntity } = useEntity();
+  const { env } = useOsEnv(); // "ROT" | "SANDBOX" (per our OS)
+  const isTest = env === "SANDBOX";
 
   const [tab, setTab] = useState<TabKey>("active");
 
@@ -87,8 +127,14 @@ export default function ForgeClient() {
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
+  // AXIOM states (side-car only)
+  const [axiomLoading, setAxiomLoading] = useState(false);
+  const [axiomError, setAxiomError] = useState<string | null>(null);
+  const [axiomInfo, setAxiomInfo] = useState<string | null>(null);
+  const [axiomLatest, setAxiomLatest] = useState<AxiomLatest>({});
+
   // --------------------------
-  // Load Forge queue (entity-scoped, OS selector)
+  // Load Forge queue (entity + env scoped)
   // --------------------------
   useEffect(() => {
     let cancelled = false;
@@ -99,26 +145,33 @@ export default function ForgeClient() {
       setInfo(null);
 
       try {
+        const selectCols = [
+          "ledger_id",
+          "title",
+          "ledger_status",
+          "created_at",
+          "entity_id",
+          "entity_name",
+          "entity_slug",
+          "envelope_id",
+          "envelope_status",
+          "parties_total",
+          "parties_signed",
+          "last_signed_at",
+          "days_since_last_signature",
+          // optional deep-links if your view exposes them (safe to remove if not present)
+          "signer_url",
+          "verify_url",
+          "certificate_url",
+          // env column (expected in enterprise views)
+          "is_test",
+        ].join(", ");
+
         const { data, error } = await supabase
           .from("v_forge_queue_latest")
-          .select(
-            [
-              "ledger_id",
-              "title",
-              "ledger_status",
-              "created_at",
-              "entity_id",
-              "entity_name",
-              "entity_slug",
-              "envelope_id",
-              "envelope_status",
-              "parties_total",
-              "parties_signed",
-              "last_signed_at",
-              "days_since_last_signature",
-            ].join(", "),
-          )
+          .select(selectCols)
           .eq("entity_slug", activeEntity)
+          .eq("is_test", isTest)
           .order("created_at", { ascending: false });
 
         if (cancelled) return;
@@ -127,7 +180,7 @@ export default function ForgeClient() {
           console.error("CI-Forge queue error:", error);
           setQueue([]);
           setSelectedId(null);
-          setError("Unable to load Forge queue for this entity.");
+          setError("Unable to load Forge queue for this entity/environment.");
           return;
         }
 
@@ -139,7 +192,7 @@ export default function ForgeClient() {
         if (cancelled) return;
         setQueue([]);
         setSelectedId(null);
-        setError("Unable to load Forge queue for this entity.");
+        setError("Unable to load Forge queue for this entity/environment.");
       } finally {
         if (!cancelled) setLoadingQueue(false);
       }
@@ -149,7 +202,7 @@ export default function ForgeClient() {
     return () => {
       cancelled = true;
     };
-  }, [activeEntity]);
+  }, [activeEntity, isTest]);
 
   // --------------------------
   // Split queue into Active vs Completed
@@ -162,15 +215,12 @@ export default function ForgeClient() {
   const visibleQueue = tab === "active" ? activeQueue : completedQueue;
 
   useEffect(() => {
-    // When switching tabs, auto-select first item in that tab
     setSelectedId(visibleQueue[0]?.ledger_id ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
   const selected =
-    visibleQueue.find((q) => q.ledger_id === selectedId) ??
-    visibleQueue[0] ??
-    null;
+    visibleQueue.find((q) => q.ledger_id === selectedId) ?? visibleQueue[0] ?? null;
 
   const envelopeLocked =
     !!selected?.envelope_status &&
@@ -222,6 +272,20 @@ export default function ForgeClient() {
     return "Idle";
   };
 
+  const envPill = () => (
+    <span
+      className={[
+        "rounded-full px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase border",
+        isTest
+          ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+          : "border-emerald-500/30 bg-emerald-500/10 text-emerald-200",
+      ].join(" ")}
+      title={isTest ? "SANDBOX (is_test=true)" : "RoT (is_test=false)"}
+    >
+      {isTest ? "SANDBOX" : "RoT"}
+    </span>
+  );
+
   function flashError(msg: string) {
     console.error(msg);
     setError(msg);
@@ -233,31 +297,47 @@ export default function ForgeClient() {
     setTimeout(() => setInfo(null), 4500);
   }
 
+  function flashAxiomError(msg: string) {
+    console.error(msg);
+    setAxiomError(msg);
+    setTimeout(() => setAxiomError(null), 6500);
+  }
+
+  function flashAxiomInfo(msg: string) {
+    setAxiomInfo(msg);
+    setTimeout(() => setAxiomInfo(null), 5000);
+  }
+
   // --------------------------
-  // Actions (keep existing wiring)
+  // Refresh queue helper (entity + env scoped)
   // --------------------------
   async function refreshQueueKeepSelection(keepLedgerId?: string | null) {
     try {
+      const selectCols = [
+        "ledger_id",
+        "title",
+        "ledger_status",
+        "created_at",
+        "entity_id",
+        "entity_name",
+        "entity_slug",
+        "envelope_id",
+        "envelope_status",
+        "parties_total",
+        "parties_signed",
+        "last_signed_at",
+        "days_since_last_signature",
+        "signer_url",
+        "verify_url",
+        "certificate_url",
+        "is_test",
+      ].join(", ");
+
       const { data, error } = await supabase
         .from("v_forge_queue_latest")
-        .select(
-          [
-            "ledger_id",
-            "title",
-            "ledger_status",
-            "created_at",
-            "entity_id",
-            "entity_name",
-            "entity_slug",
-            "envelope_id",
-            "envelope_status",
-            "parties_total",
-            "parties_signed",
-            "last_signed_at",
-            "days_since_last_signature",
-          ].join(", "),
-        )
+        .select(selectCols)
         .eq("entity_slug", activeEntity)
+        .eq("is_test", isTest)
         .order("created_at", { ascending: false });
 
       if (error) throw error;
@@ -265,15 +345,81 @@ export default function ForgeClient() {
       const rows = ((data ?? []) as unknown as ForgeQueueItem[]) ?? [];
       setQueue(rows);
 
-      const nextVisible = tab === "active" ? rows.filter((r) => !isCompleted(r)) : rows.filter((r) => isCompleted(r));
+      const nextVisible =
+        tab === "active" ? rows.filter((r) => !isCompleted(r)) : rows.filter((r) => isCompleted(r));
+
       const fallback = nextVisible[0]?.ledger_id ?? null;
-      const desired = keepLedgerId && nextVisible.some((x) => x.ledger_id === keepLedgerId) ? keepLedgerId : fallback;
+      const desired =
+        keepLedgerId && nextVisible.some((x) => x.ledger_id === keepLedgerId)
+          ? keepLedgerId
+          : fallback;
+
       setSelectedId(desired);
     } catch (e) {
       console.error("refreshQueue error", e);
     }
   }
 
+  // --------------------------
+  // AXIOM: load latest artifacts (existing tables)
+  // --------------------------
+  async function loadAxiomLatest(recordId: string) {
+    setAxiomError(null);
+
+    try {
+      const [s, a, adv] = await Promise.all([
+        supabase
+          .from("ai_summaries")
+          .select("id, summary, generated_at, model")
+          .eq("record_id", recordId)
+          .order("generated_at", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+
+        supabase
+          .from("ai_analyses")
+          .select("id, analysis, generated_at, model")
+          .eq("record_id", recordId)
+          .order("generated_at", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+
+        supabase
+          .from("ai_advice")
+          .select("id, advice, recommendation, generated_at, model")
+          .eq("record_id", recordId)
+          .order("generated_at", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+      ]);
+
+      if (s.error) console.warn("AXIOM latest summary load error:", s.error);
+      if (a.error) console.warn("AXIOM latest analysis load error:", a.error);
+      if (adv.error) console.warn("AXIOM latest advice load error:", adv.error);
+
+      setAxiomLatest({
+        summary: (s.data as any) ?? null,
+        analysis: (a.data as any) ?? null,
+        advice: (adv.data as any) ?? null,
+      });
+    } catch (e) {
+      console.error("loadAxiomLatest exception", e);
+      flashAxiomError("Unable to load AXIOM artifacts.");
+    }
+  }
+
+  useEffect(() => {
+    if (!selected?.ledger_id) {
+      setAxiomLatest({});
+      return;
+    }
+    loadAxiomLatest(selected.ledger_id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.ledger_id]);
+
+  // --------------------------
+  // Actions (existing wiring preserved)
+  // --------------------------
   async function onStartEnvelope(e: FormEvent) {
     e.preventDefault();
     setError(null);
@@ -395,26 +541,77 @@ export default function ForgeClient() {
   }
 
   // --------------------------
-  // AXIOM advisory (UI only, never blocking)
+  // AXIOM: pre-signature review (Edge Function; advisory-only)
+  // --------------------------
+  async function onRunAxiomReview() {
+    if (!selected) return;
+
+    setAxiomError(null);
+    setAxiomInfo(null);
+    setAxiomLoading(true);
+
+    try {
+      const { data, error } = await supabase.functions.invoke("axiom-pre-signature-review", {
+        body: {
+          record_id: selected.ledger_id,
+          entity_slug: selected.entity_slug,
+          envelope_id: selected.envelope_id ?? null, // safe extra input if function ignores
+          trigger: "forge-pre-signature",
+        },
+      });
+
+      if (error) throw error;
+
+      const res = data as AxiomReviewResponse;
+
+      if (!res?.ok) {
+        flashAxiomError(res?.error ?? "AXIOM review failed.");
+        return;
+      }
+
+      flashAxiomInfo(res.message ?? "AXIOM review completed.");
+      await loadAxiomLatest(selected.ledger_id);
+    } catch (e) {
+      console.error("axiom-pre-signature-review error", e);
+      flashAxiomError("Unable to run AXIOM review.");
+    } finally {
+      setAxiomLoading(false);
+    }
+  }
+
+  // --------------------------
+  // AXIOM advisory bullets (UI only; never blocking)
   // --------------------------
   const axiomAdvisory = useMemo(() => {
-    if (!selected) return { severity: "IDLE" as RiskLevel, bullets: ["Select an execution record to view intelligence."] };
+    if (!selected) {
+      return {
+        severity: "IDLE" as RiskLevel,
+        bullets: ["Select an execution record to view intelligence."],
+      };
+    }
 
     const risk = computeRiskLevel(selected);
     const bullets: string[] = [];
 
-    if (!selected.envelope_id) bullets.push("No envelope exists yet. If Council approved signature-required execution, start the envelope.");
-    if (selected.envelope_id && !envelopeSigned) bullets.push("Envelope is active. Monitor signer progress; resend invite if stalled.");
-    if (envelopeSigned) bullets.push("Envelope completed. Next action is Archive Now to generate archive-grade artifacts + registry entry.");
+    if (!selected.envelope_id)
+      bullets.push(
+        "No envelope exists yet. If Council approved signature-required execution, start the envelope.",
+      );
+    if (selected.envelope_id && !envelopeSigned)
+      bullets.push("Envelope is active. Monitor signer progress; resend invite if stalled.");
+    if (envelopeSigned)
+      bullets.push(
+        "Envelope completed. Next action is Archive Now to generate archive-grade artifacts + registry entry.",
+      );
 
-    if (!primarySignerEmail.trim() || !primarySignerName.trim()) {
-      bullets.push("Signer identity fields are empty in UI. Ensure signer name + email are correct before starting execution.");
-    }
-
+    bullets.push("Run AXIOM Review to generate/refresh advisory intelligence for this record.");
     bullets.push("AXIOM is advisory-only: it never blocks human authority.");
+    bullets.push(
+      "Uploads/signing PDFs remain pristine; only the archive render embeds an immutable AXIOM snapshot.",
+    );
 
     return { severity: risk, bullets };
-  }, [selected, envelopeSigned, primarySignerEmail, primarySignerName]);
+  }, [selected, envelopeSigned]);
 
   // --------------------------
   // UI helpers
@@ -434,14 +631,29 @@ export default function ForgeClient() {
     </button>
   );
 
+  const portalBtn = (href: string, label: string) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="flex-1 text-center rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-2 text-[11px] font-semibold text-slate-200 hover:border-amber-500/40 hover:text-slate-100 transition"
+    >
+      {label}
+    </a>
+  );
+
   return (
     <div className="flex h-full flex-col px-8 pt-6 pb-6">
       {/* Header */}
       <div className="mb-4 shrink-0">
-        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI-FORGE</div>
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI-FORGE</div>
+          {envPill()}
+        </div>
         <h1 className="mt-1 text-lg font-semibold text-amber-300">Execution — Signature-required</h1>
         <p className="mt-1 text-[11px] text-slate-400">
-          Entity-scoped via OS selector. Forge is signature-only. Archive quality artifacts are produced after completion.
+          Entity-scoped via OS selector. Environment-scoped via OS env toggle (is_test). Forge is signature-only. Archive
+          quality artifacts are produced after completion.
         </p>
       </div>
 
@@ -452,10 +664,11 @@ export default function ForgeClient() {
           <div className="mb-4 flex shrink-0 items-start justify-between gap-4">
             <div className="flex flex-col gap-1">
               <div className="text-[11px] text-slate-400">
-                Active Entity: <span className="font-semibold text-slate-100">{activeEntity}</span>
+                Active Entity: <span className="font-semibold text-slate-100">{activeEntity}</span>{" "}
+                <span className="ml-2">{envPill()}</span>
               </div>
               <div className="text-[11px] text-slate-500">
-                Queue is sourced from <span className="text-slate-300">v_forge_queue_latest</span>.
+                Queue sourced from <span className="text-slate-300">v_forge_queue_latest</span>.
               </div>
             </div>
 
@@ -518,7 +731,10 @@ export default function ForgeClient() {
                         </div>
 
                         <div className="flex flex-col items-end gap-2">
-                          <div className={["h-2.5 w-2.5 rounded-full", riskLightClasses(risk)].join(" ")} title={riskLabel(risk)} />
+                          <div
+                            className={["h-2.5 w-2.5 rounded-full", riskLightClasses(risk)].join(" ")}
+                            title={riskLabel(risk)}
+                          />
                           <div className="text-[10px] text-slate-500">
                             {q.parties_signed ?? 0}/{q.parties_total ?? 0}
                           </div>
@@ -543,8 +759,9 @@ export default function ForgeClient() {
                   {selected ? selected.title : "No record selected"}
                 </div>
                 <div className="mt-1 text-[11px] text-slate-500">
-                  Ledger Status: <span className="text-slate-300">{selected?.ledger_status ?? "—"}</span>{" "}
-                  • Envelope: <span className="text-slate-300">{selected?.envelope_status ?? "—"}</span>
+                  Ledger Status: <span className="text-slate-300">{selected?.ledger_status ?? "—"}</span> • Envelope:{" "}
+                  <span className="text-slate-300">{selected?.envelope_status ?? "—"}</span> • Env:{" "}
+                  <span className="text-slate-300">{isTest ? "SANDBOX" : "RoT"}</span>
                 </div>
               </div>
 
@@ -555,9 +772,7 @@ export default function ForgeClient() {
                   <>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
-                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500 mb-2">
-                          Signer
-                        </div>
+                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500 mb-2">Signer</div>
 
                         <div className="space-y-2">
                           <div>
@@ -593,9 +808,7 @@ export default function ForgeClient() {
                       </div>
 
                       <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
-                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500 mb-2">
-                          Actions
-                        </div>
+                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500 mb-2">Actions</div>
 
                         <div className="flex flex-col gap-2">
                           <form onSubmit={onStartEnvelope}>
@@ -609,7 +822,11 @@ export default function ForgeClient() {
                                   : "bg-emerald-500 text-black hover:bg-emerald-400",
                               ].join(" ")}
                             >
-                              {envelopeLocked ? "Envelope already created" : isStarting ? "Starting…" : "Start envelope"}
+                              {envelopeLocked
+                                ? "Envelope already created"
+                                : isStarting
+                                  ? "Starting…"
+                                  : "Start envelope"}
                             </button>
                           </form>
 
@@ -643,7 +860,7 @@ export default function ForgeClient() {
                         </div>
 
                         <div className="mt-3 text-[11px] text-slate-500">
-                          Forge does not bypass archive discipline. Both paths must produce archive-quality PDF + hash.
+                          Forge is signature-only. No bypass. Archive happens after completion and produces archive-quality PDF + hash.
                         </div>
                       </div>
                     </div>
@@ -673,9 +890,7 @@ export default function ForgeClient() {
             <section className="w-[360px] shrink-0 overflow-hidden rounded-2xl border border-slate-900 bg-slate-950/35">
               <div className="border-b border-slate-900 px-4 py-3">
                 <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Intelligence + Artifacts</div>
-                <div className="mt-1 text-[11px] text-slate-400">
-                  AXIOM is advisory-only. Humans execute.
-                </div>
+                <div className="mt-1 text-[11px] text-slate-400">AXIOM is advisory-only. Humans execute.</div>
               </div>
 
               <div className="h-full overflow-y-auto px-4 py-4 space-y-3">
@@ -684,7 +899,9 @@ export default function ForgeClient() {
                   <div className="flex items-center justify-between">
                     <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">AXIOM Advisory</div>
                     <div className="flex items-center gap-2">
-                      <div className={["h-2.5 w-2.5 rounded-full", riskLightClasses(axiomAdvisory.severity)].join(" ")} />
+                      <div
+                        className={["h-2.5 w-2.5 rounded-full", riskLightClasses(axiomAdvisory.severity)].join(" ")}
+                      />
                       <div className="text-[10px] text-slate-400">{riskLabel(axiomAdvisory.severity)}</div>
                     </div>
                   </div>
@@ -695,12 +912,94 @@ export default function ForgeClient() {
                     ))}
                   </ul>
 
-                  <div className="mt-3 text-[10px] text-slate-500">
-                    Later: “Run review” can generate summaries/analysis/advice into AXIOM timeline for this ledger_id.
+                  <div className="mt-3 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={onRunAxiomReview}
+                      disabled={!selected || axiomLoading}
+                      className={[
+                        "flex-1 rounded-xl px-3 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
+                        !selected || axiomLoading
+                          ? "border-slate-800 bg-slate-950/30 text-slate-500 cursor-not-allowed"
+                          : "border-cyan-500/50 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/15",
+                      ].join(" ")}
+                    >
+                      {axiomLoading ? "Running…" : "Run AXIOM Review"}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => (selected?.ledger_id ? loadAxiomLatest(selected.ledger_id) : null)}
+                      disabled={!selected?.ledger_id || axiomLoading}
+                      className={[
+                        "rounded-xl px-3 py-2 text-[11px] font-semibold transition border",
+                        !selected?.ledger_id || axiomLoading
+                          ? "border-slate-800 bg-slate-950/30 text-slate-500 cursor-not-allowed"
+                          : "border-slate-800 bg-slate-950/50 text-slate-200 hover:border-slate-700 hover:text-slate-100",
+                      ].join(" ")}
+                    >
+                      Refresh
+                    </button>
+                  </div>
+
+                  {axiomError && (
+                    <div className="mt-3 text-[11px] text-red-400 bg-red-950/40 border border-red-800/60 rounded-xl px-3 py-2">
+                      {axiomError}
+                    </div>
+                  )}
+
+                  {axiomInfo && !axiomError && (
+                    <div className="mt-3 text-[11px] text-cyan-200 bg-cyan-950/30 border border-cyan-800/50 rounded-xl px-3 py-2">
+                      {axiomInfo}
+                    </div>
+                  )}
+
+                  {/* Latest artifacts preview */}
+                  <div className="mt-4 space-y-3">
+                    <div className="rounded-xl border border-slate-900 bg-black/25 p-3">
+                      <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Latest Summary</div>
+                      <div className="mt-1 text-[10px] text-slate-500">
+                        {axiomLatest.summary?.generated_at ? fmt(axiomLatest.summary.generated_at) : "—"}
+                        {axiomLatest.summary?.model ? ` · ${axiomLatest.summary.model}` : ""}
+                      </div>
+                      <div className="mt-2 text-[11px] text-slate-200 whitespace-pre-wrap">
+                        {axiomLatest.summary?.summary?.trim() ? axiomLatest.summary.summary : "No summary yet."}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-900 bg-black/25 p-3">
+                      <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Latest Analysis</div>
+                      <div className="mt-1 text-[10px] text-slate-500">
+                        {axiomLatest.analysis?.generated_at ? fmt(axiomLatest.analysis.generated_at) : "—"}
+                        {axiomLatest.analysis?.model ? ` · ${axiomLatest.analysis.model}` : ""}
+                      </div>
+                      <div className="mt-2 text-[11px] text-slate-200 whitespace-pre-wrap">
+                        {axiomLatest.analysis?.analysis?.trim() ? axiomLatest.analysis.analysis : "No analysis yet."}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-900 bg-black/25 p-3">
+                      <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Latest Advice</div>
+                      <div className="mt-1 text-[10px] text-slate-500">
+                        {axiomLatest.advice?.generated_at ? fmt(axiomLatest.advice.generated_at) : "—"}
+                        {axiomLatest.advice?.model ? ` · ${axiomLatest.advice.model}` : ""}
+                      </div>
+                      <div className="mt-2 text-[11px] text-slate-200 whitespace-pre-wrap">
+                        {axiomLatest.advice?.advice?.trim()
+                          ? axiomLatest.advice.advice
+                          : axiomLatest.advice?.recommendation?.trim()
+                            ? axiomLatest.advice.recommendation
+                            : "No advice yet."}
+                      </div>
+                    </div>
+
+                    <div className="text-[10px] text-slate-500">
+                      AXIOM runs side-car on evidence and writes intelligence only. Files/hashes remain pristine until Archive seals an immutable snapshot.
+                    </div>
                   </div>
                 </div>
 
-                {/* Artifacts panel (minimal, no guessing fields) */}
+                {/* Artifacts panel */}
                 <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
                   <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Artifacts</div>
 
@@ -722,6 +1021,20 @@ export default function ForgeClient() {
                       <span className="text-slate-200">{fmt(selected?.last_signed_at)}</span>
                     </div>
 
+                    {/* Portal links if present */}
+                    {(selected?.signer_url || selected?.verify_url || selected?.certificate_url) && (
+                      <div className="mt-2 grid grid-cols-1 gap-2">
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Portal</div>
+                        <div className="flex gap-2">
+                          {selected?.signer_url ? portalBtn(selected.signer_url, "Signer") : null}
+                          {selected?.verify_url ? portalBtn(selected.verify_url, "Verify") : null}
+                        </div>
+                        <div className="flex gap-2">
+                          {selected?.certificate_url ? portalBtn(selected.certificate_url, "Certificate") : null}
+                        </div>
+                      </div>
+                    )}
+
                     <div className="mt-2 flex gap-2">
                       <a
                         href="/ci-archive/minute-book"
@@ -739,7 +1052,7 @@ export default function ForgeClient() {
                     </div>
 
                     <div className="text-[10px] text-slate-500 mt-1">
-                      Signed PDF + certificate deep-links can be surfaced here once your view exposes storage paths / IDs.
+                      If portal URLs aren’t present yet, expose them in v_forge_queue_latest (or join via ci_portal_urls) and they’ll auto-render here.
                     </div>
                   </div>
                 </div>
