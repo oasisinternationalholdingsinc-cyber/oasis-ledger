@@ -21,12 +21,27 @@ type DraftRecord = {
   created_at: string | null;
   updated_at: string | null;
   finalized_record_id: string | null;
+
+  // optional env field (safe)
   is_test?: boolean | null;
 };
 
 type StatusTab = "draft" | "reviewed" | "finalized" | "discarded" | "all";
 type DeleteMode = "soft" | "hard";
 type WorkspaceTab = "editor" | "axiom";
+
+type AxiomNote = {
+  id: string;
+  scope_type: "document" | "section" | "book" | "entity";
+  scope_id: string;
+  note_type: string | null;
+  title: string | null;
+  content: string | null; // ✅ ai_notes.content
+  model: string | null;
+  tokens_used: number | null;
+  created_by: string | null;
+  created_at: string | null;
+};
 
 const ENTITY_LABELS: Record<string, string> = {
   holdings: "Oasis International Holdings Inc.",
@@ -59,19 +74,6 @@ function isMissingColumnErr(err: any) {
   return msg.includes("does not exist") && msg.includes("column");
 }
 
-function isMissingRelationErr(err: any) {
-  const msg = (err?.message ?? "").toLowerCase();
-  return msg.includes("does not exist") && (msg.includes("relation") || msg.includes("table"));
-}
-
-async function safeReadJson(raw: string) {
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
 export default function CIAlchemyPage() {
   const entityCtx = useEntity() as any;
   const osEnv = useOsEnv();
@@ -93,7 +95,6 @@ export default function CIAlchemyPage() {
   const [finalizing, setFinalizing] = useState(false);
   const [alchemyRunning, setAlchemyRunning] = useState(false);
   const [axiomRunning, setAxiomRunning] = useState(false);
-  const [axiomLoading, setAxiomLoading] = useState(false);
 
   const [drafts, setDrafts] = useState<DraftRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -103,24 +104,14 @@ export default function CIAlchemyPage() {
 
   // OS UX controls
   const [statusTab, setStatusTab] = useState<StatusTab>("draft");
-  const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>("editor");
   const [query, setQuery] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(true);
   const [readerOpen, setReaderOpen] = useState(false);
   const [editorTheme, setEditorTheme] = useState<"light" | "dark">("light");
+  const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>("editor");
 
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
-
-  // AXIOM state (latest summary)
-  const [axiomSummary, setAxiomSummary] = useState<string | null>(null);
-  const [axiomMeta, setAxiomMeta] = useState<{
-    note_id?: string;
-    created_at?: string | null;
-    note_type?: string | null;
-    source?: string | null;
-  } | null>(null);
-  const [axiomLastRefreshIso, setAxiomLastRefreshIso] = useState<string | null>(null);
 
   // Delete modal
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -147,7 +138,7 @@ export default function CIAlchemyPage() {
   function flashError(msg: string) {
     console.error(msg);
     setError(msg);
-    setTimeout(() => setError(null), 9000);
+    setTimeout(() => setError(null), 7000);
   }
 
   function flashInfo(msg: string) {
@@ -185,6 +176,9 @@ export default function CIAlchemyPage() {
     setLoading(true);
     setError(null);
 
+    // STRICT lane query.
+    // We ONLY fall back if the is_test column truly does not exist.
+    // (No silent mixing of ROT+SANDBOX ever.)
     const tryWithIsTest = async () => {
       const q = supabase
         .from("governance_drafts")
@@ -243,8 +237,11 @@ export default function CIAlchemyPage() {
       try {
         rows = await tryWithIsTest();
       } catch (e: any) {
-        if (isMissingColumnErr(e)) rows = await tryWithoutIsTest();
-        else throw e;
+        if (isMissingColumnErr(e)) {
+          rows = await tryWithoutIsTest();
+        } else {
+          throw e;
+        }
       }
 
       setDrafts(rows);
@@ -278,117 +275,14 @@ export default function CIAlchemyPage() {
     }
   }
 
-  // ---------- AXIOM: robust fetch of latest ai_notes summary ----------
-  async function loadLatestAxiomSummary(draftId: string | null) {
-    if (!draftId) {
-      setAxiomSummary(null);
-      setAxiomMeta(null);
-      setAxiomLastRefreshIso(new Date().toISOString());
-      return;
-    }
-
-    setAxiomLoading(true);
-    setError(null);
-
-    // We MUST avoid hardcoding columns that might not exist (you saw ai_notes.body does not exist).
-    // Strategy:
-    //  1) Try multiple content column candidates (content/note/text/markdown/summary/body).
-    //  2) Try ordering by created_at; if missing, fallback to generated_at; if missing, no order.
-    //  3) Always filter scope_type='document', scope_id=draftId, note_type='summary'
-    const contentCandidates = ["content", "note", "text", "markdown", "summary", "body", "note_text", "result_text"];
-
-    const baseFilter = (q: any) =>
-      q
-        .eq("scope_type", "document")
-        .eq("scope_id", draftId)
-        .eq("note_type", "summary");
-
-    const tryQuery = async (selectCols: string, orderCol?: string) => {
-      let q = supabase.from("ai_notes").select(selectCols).limit(1);
-      q = baseFilter(q);
-
-      if (orderCol) q = q.order(orderCol, { ascending: false });
-
-      const { data, error } = await q;
-      if (error) throw error;
-      return (data ?? []) as any[];
-    };
-
-    try {
-      // Try with created_at ordering first
-      let row: any | null = null;
-      let lastErr: any = null;
-
-      for (const c of contentCandidates) {
-        // include a small stable set of meta columns, but don’t assume they exist
-        // (id usually exists; created_at likely exists but not guaranteed)
-        const selectCols = `id, ${c}, note_type, created_at, source`;
-        try {
-          const rows = await tryQuery(selectCols, "created_at");
-          if (rows.length > 0) {
-            row = rows[0];
-            if (row?.[c] != null) {
-              setAxiomSummary(String(row[c]));
-              setAxiomMeta({
-                note_id: row?.id ?? undefined,
-                created_at: row?.created_at ?? null,
-                note_type: row?.note_type ?? null,
-                source: row?.source ?? null,
-              });
-              setAxiomLastRefreshIso(new Date().toISOString());
-              setAxiomLoading(false);
-              return;
-            }
-          } else {
-            // no rows, keep searching but remember "no rows" isn't an error
-            lastErr = null;
-          }
-        } catch (e: any) {
-          lastErr = e;
-          // If column missing, continue to next candidate. If relation missing, hard stop.
-          if (isMissingRelationErr(e)) throw e;
-          if (isMissingColumnErr(e)) continue;
-          // Unknown error: break early and surface it
-          throw e;
-        }
-      }
-
-      // If we got here: either no rows exist OR content column mismatch.
-      if (!row) {
-        setAxiomSummary(null);
-        setAxiomMeta(null);
-        setAxiomLastRefreshIso(new Date().toISOString());
-        setAxiomLoading(false);
-        return;
-      }
-
-      // If row exists but none of the candidate columns yielded content:
-      if (lastErr && isMissingColumnErr(lastErr)) {
-        setAxiomSummary(null);
-        setAxiomMeta(null);
-        setAxiomLastRefreshIso(new Date().toISOString());
-        setAxiomLoading(false);
-        return;
-      }
-
-      setAxiomSummary(null);
-      setAxiomMeta(null);
-      setAxiomLastRefreshIso(new Date().toISOString());
-    } catch (err: any) {
-      flashError(err?.message ?? "Failed to load AXIOM summary.");
-    } finally {
-      setAxiomLoading(false);
-    }
-  }
-
   // CRITICAL: env + entity must re-scope Alchemy registry
   useEffect(() => {
     let cancelled = false;
     (async () => {
       if (cancelled) return;
       setStatusTab("draft");
-      setWorkspaceTab("editor");
       setQuery("");
+      setWorkspaceTab("editor");
       await reloadDrafts(false);
     })();
     return () => {
@@ -396,13 +290,6 @@ export default function CIAlchemyPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeEntity, isSandbox]);
-
-  // Whenever selection changes, refresh AXIOM tab snapshot lazily (only if user is on AXIOM tab)
-  useEffect(() => {
-    if (workspaceTab !== "axiom") return;
-    void loadLatestAxiomSummary(selectedId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceTab, selectedId]);
 
   function handleSelectDraft(draft: DraftRecord) {
     if (!confirmNavigateAwayIfDirty()) return;
@@ -423,10 +310,8 @@ export default function CIAlchemyPage() {
     setBody("");
     setInfo(null);
     setError(null);
+    setWorkspaceTab("editor");
     markLoadedSnapshot(null, "", "");
-    setAxiomSummary(null);
-    setAxiomMeta(null);
-    setAxiomLastRefreshIso(null);
   }
 
   // --- FILTERING (already strict lane query; this is for UI search/status only) ---
@@ -445,6 +330,70 @@ export default function CIAlchemyPage() {
 
     return list;
   }, [drafts, statusTab, query]);
+
+  // -------------------------
+  // AXIOM (ai_notes) panel
+  // -------------------------
+  const [axiomNotes, setAxiomNotes] = useState<AxiomNote[]>([]);
+  const [axiomLoading, setAxiomLoading] = useState(false);
+  const [axiomErr, setAxiomErr] = useState<string | null>(null);
+  const [axiomLastRefresh, setAxiomLastRefresh] = useState<string | null>(null);
+
+  const selectedAxiomSummary = useMemo(() => {
+    // prefer note_type='summary' latest
+    const summaries = axiomNotes.filter((n) => (n.note_type ?? "").toLowerCase() === "summary");
+    return summaries[0] ?? axiomNotes[0] ?? null;
+  }, [axiomNotes]);
+
+  async function loadAxiomNotes() {
+    if (!selectedId) return;
+
+    setAxiomLoading(true);
+    setAxiomErr(null);
+
+    try {
+      // ✅ correct columns: title + content
+      const { data, error } = await supabase
+        .from("ai_notes")
+        .select(
+          `
+            id,
+            scope_type,
+            scope_id,
+            note_type,
+            title,
+            content,
+            model,
+            tokens_used,
+            created_by,
+            created_at
+          `
+        )
+        .eq("scope_type", "document")
+        .eq("scope_id", selectedId)
+        .order("created_at", { ascending: false })
+        .limit(25);
+
+      if (error) throw error;
+
+      const rows = (data ?? []) as AxiomNote[];
+      setAxiomNotes(rows);
+      setAxiomLastRefresh(new Date().toISOString());
+    } catch (e: any) {
+      setAxiomNotes([]);
+      setAxiomErr(e?.message ?? "Failed to load AXIOM notes.");
+    } finally {
+      setAxiomLoading(false);
+    }
+  }
+
+  // Only fetch AXIOM when the AXIOM tab is actually open (prevents request spam)
+  useEffect(() => {
+    if (workspaceTab !== "axiom") return;
+    if (!selectedId) return;
+    void loadAxiomNotes();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceTab, selectedId]);
 
   // Run CI-Alchemy (Edge Function "scribe")
   async function handleRunAlchemy() {
@@ -476,6 +425,7 @@ export default function CIAlchemyPage() {
       }
 
       const hasBody = body.trim().length > 0;
+
       const instructions = hasBody
         ? body.trim()
         : `Draft a formal corporate resolution for ${activeEntityLabel} about: "${
@@ -505,49 +455,52 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         body: JSON.stringify(payload),
       });
 
-      const raw = await res.text();
-      const data = await safeReadJson(raw);
-
       if (!res.ok) {
-        console.error("scribe HTTP error", res.status, raw);
-        flashError(`CI-Alchemy HTTP ${res.status}: ${raw?.slice(0, 240) || "See console."}`);
+        const text = await res.text();
+        console.error("scribe HTTP error", res.status, text);
+        flashError(`CI-Alchemy HTTP ${res.status}. See console for details.`);
         return;
       }
 
-      if (!data?.ok) {
-        const detail = data?.error || data?.stage || raw || "Unknown error.";
-        flashError(`CI-Alchemy failed: ${String(detail).slice(0, 240)}`);
+      const data = await res.json();
+      const asAny = data as any;
+
+      if (!asAny?.ok) {
+        const detail = asAny?.error || asAny?.stage || "Unknown error.";
+        flashError(`CI-Alchemy failed: ${detail}`);
         return;
       }
 
-      const draftId: string | undefined = data.draft_id;
-      const draftText: string = data.draft_text || data.draft || data.content || data.text || "";
+      const draftId: string | undefined = asAny.draft_id;
+      const draftText: string =
+        asAny.draft_text || asAny.draft || asAny.content || asAny.text || "";
 
       if (!draftText?.trim()) {
         flashError("CI-Alchemy returned no usable draft body.");
         return;
       }
 
-      const producedTitle = (data.title || title.trim() || "(untitled)") as string;
+      const producedTitle = (asAny.title || title.trim() || "(untitled)") as string;
 
       const newDraft: DraftRecord = {
         id: draftId || crypto.randomUUID(),
-        entity_id: data.entity_id ?? null,
-        entity_slug: data.entity_slug ?? activeEntity,
-        entity_name: data.entity_name ?? activeEntityLabel,
+        entity_id: asAny.entity_id ?? null,
+        entity_slug: asAny.entity_slug ?? activeEntity,
+        entity_name: asAny.entity_name ?? activeEntityLabel,
         title: producedTitle,
-        record_type: data.record_type || "resolution",
+        record_type: asAny.record_type || "resolution",
         draft_text: draftText,
-        status: (data.draft_status || "draft") as DraftStatus,
-        created_at: data.draft_created_at ?? new Date().toISOString(),
+        status: (asAny.draft_status || "draft") as DraftStatus,
+        created_at: asAny.draft_created_at ?? new Date().toISOString(),
         updated_at: null,
-        finalized_record_id: data.finalized_record_id ?? null,
-        is_test: typeof data.is_test === "boolean" ? data.is_test : isSandbox,
+        finalized_record_id: asAny.finalized_record_id ?? null,
+        is_test: typeof asAny.is_test === "boolean" ? asAny.is_test : isSandbox,
       };
 
       setTitle(newDraft.title);
       setBody(newDraft.draft_text);
       setSelectedId(newDraft.id);
+      setWorkspaceTab("editor");
 
       setDrafts((prev) => {
         const without = prev.filter((d) => d.id !== newDraft.id);
@@ -588,6 +541,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       const accessToken = sessionData?.session?.access_token;
       if (!accessToken) return flashError("Not authenticated. Please log in (OS auth gate).");
 
+      // Draft-stage AXIOM writes to ai_notes:
+      // scope_type='document', scope_id=draft_id, note_type='summary', content=...
       const payload = {
         draft_id: selectedId,
         entity_slug: activeEntity,
@@ -608,26 +563,31 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       });
 
       const raw = await res.text();
-      const data = await safeReadJson(raw);
+      let data: any = null;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        // keep raw
+      }
 
       if (!res.ok) {
         console.error("axiom-pre-draft-review HTTP error", res.status, raw);
-        flashError(`AXIOM Review HTTP ${res.status}: ${raw?.slice(0, 240) || "See console."}`);
+        flashError(`AXIOM Review HTTP ${res.status}. See console.`);
         return;
       }
 
       if (!data?.ok) {
-        console.error("AXIOM review failed payload", data ?? raw);
-        flashError(String(data?.error || raw || "AXIOM review failed.").slice(0, 240));
+        console.error("AXIOM review failed payload", data);
+        flashError(data?.error || "AXIOM review failed.");
         return;
       }
 
       const noteId = data?.note_id || data?.ai_note_id || data?.id || null;
-      flashInfo(noteId ? `AXIOM saved (note_id=${noteId}).` : "AXIOM saved.");
+      flashInfo(noteId ? `AXIOM Review saved (note_id=${noteId}).` : "AXIOM Review saved.");
 
-      // Auto-refresh AXIOM panel
-      await loadLatestAxiomSummary(selectedId);
+      // ✅ Immediately refresh panel + switch to AXIOM tab so you SEE it.
       setWorkspaceTab("axiom");
+      await loadAxiomNotes();
     } catch (err: any) {
       console.error("axiom review invoke exception", err);
       flashError(err?.message ?? "Network error calling AXIOM Review.");
@@ -1176,11 +1136,13 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         setSelectedId(next.id);
         setTitle(next.title ?? "");
         setBody(next.draft_text ?? "");
+        setWorkspaceTab("editor");
         markLoadedSnapshot(next.id, next.title ?? "", next.draft_text ?? "");
       } else {
         setSelectedId(null);
         setTitle("");
         setBody("");
+        setWorkspaceTab("editor");
         markLoadedSnapshot(null, "", "");
       }
     } catch (err: any) {
@@ -1442,41 +1404,37 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
               </div>
 
               {/* Workspace tabs */}
-              <div className="shrink-0 px-5 py-3 border-b border-slate-800 flex items-center justify-between">
-                <div className="inline-flex rounded-full bg-slate-950/70 border border-slate-800 p-1">
+              <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex items-center justify-between gap-3">
+                <div className="inline-flex rounded-full border border-slate-800 bg-slate-950/60 p-1">
                   <button
                     onClick={() => setWorkspaceTab("editor")}
                     className={cx(
                       "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
                       workspaceTab === "editor"
                         ? "bg-emerald-500/15 border border-emerald-400/70 text-slate-50"
-                        : "border border-transparent text-slate-300 hover:bg-slate-900/60"
+                        : "text-slate-300 hover:bg-slate-900/60 border border-transparent"
                     )}
                   >
                     Editor
                   </button>
                   <button
-                    onClick={() => {
-                      setWorkspaceTab("axiom");
-                      void loadLatestAxiomSummary(selectedId);
-                    }}
+                    onClick={() => setWorkspaceTab("axiom")}
                     className={cx(
                       "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
                       workspaceTab === "axiom"
-                        ? "bg-sky-500/15 border border-sky-400/60 text-slate-50"
-                        : "border border-transparent text-slate-300 hover:bg-slate-900/60"
+                        ? "bg-sky-500/15 border border-sky-400/70 text-slate-50"
+                        : "text-slate-300 hover:bg-slate-900/60 border border-transparent"
                     )}
                   >
                     AXIOM
                   </button>
                 </div>
 
-                {/* AXIOM controls ONLY show on AXIOM tab (prevents duplicates) */}
-                {workspaceTab === "axiom" && (
+                {workspaceTab === "axiom" ? (
                   <div className="flex items-center gap-2">
                     <button
-                      onClick={() => loadLatestAxiomSummary(selectedId)}
-                      disabled={axiomLoading}
+                      onClick={() => loadAxiomNotes()}
+                      disabled={!selectedId || axiomLoading}
                       className="rounded-full border border-slate-800 bg-slate-950/60 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50"
                     >
                       {axiomLoading ? "Refreshing…" : "Refresh AXIOM"}
@@ -1487,13 +1445,54 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                       className="rounded-full border border-sky-400/50 bg-sky-500/10 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-sky-200 hover:bg-sky-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
                       title="Runs AXIOM draft review (writes ai_notes scoped to this draft)"
                     >
-                      {axiomRunning ? "AXIOM…" : "Run AXIOM"}
+                      {axiomRunning ? "Running…" : "Run AXIOM"}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={handleRunAlchemy}
+                      disabled={alchemyRunning || saving || finalizing || axiomRunning}
+                      className="rounded-full border border-emerald-400/70 bg-emerald-500/10 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {alchemyRunning ? "Running…" : "Run Alchemy"}
+                    </button>
+
+                    <button
+                      onClick={handleSaveDraft}
+                      disabled={saving || finalizing || !canMutateSelected || axiomRunning}
+                      className="rounded-full bg-emerald-500 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-black hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {saving ? "Saving…" : "Save"}
+                    </button>
+
+                    <button
+                      onClick={handleMarkReviewed}
+                      disabled={!selectedDraft || saving || finalizing || !canMutateSelected || axiomRunning}
+                      className="rounded-full border border-amber-400/60 bg-slate-950/60 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Mark reviewed
+                    </button>
+
+                    <button
+                      onClick={handleFinalize}
+                      disabled={!selectedDraft || saving || finalizing || !canMutateSelected || axiomRunning}
+                      className="rounded-full border border-emerald-500/60 bg-black/40 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {finalizing ? "Finalizing…" : "Finalize → Council"}
+                    </button>
+
+                    <button
+                      onClick={openDelete}
+                      disabled={!selectedDraft || !canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning}
+                      className="rounded-full border border-rose-500/50 bg-rose-500/10 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-rose-200 hover:bg-rose-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Delete
                     </button>
                   </div>
                 )}
               </div>
 
-              {/* Body */}
               <div className="flex-1 min-h-0 overflow-hidden p-5">
                 {workspaceTab === "editor" ? (
                   <div className={cx("h-full w-full rounded-2xl border overflow-hidden", editorCard)}>
@@ -1532,135 +1531,120 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                           disabled={!canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning}
                         />
                       </div>
-
-                      <div
-                        className={cx(
-                          "shrink-0 px-5 py-4 border-t flex flex-wrap gap-2",
-                          editorTheme === "light" ? "border-slate-200" : "border-slate-800"
-                        )}
-                      >
-                        <button
-                          onClick={handleRunAlchemy}
-                          disabled={alchemyRunning || saving || finalizing || axiomRunning}
-                          className="rounded-full border border-emerald-400/70 bg-emerald-500/10 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          {alchemyRunning ? "Running…" : "Run Alchemy"}
-                        </button>
-
-                        <button
-                          onClick={handleSaveDraft}
-                          disabled={saving || finalizing || !canMutateSelected || axiomRunning}
-                          className="rounded-full bg-emerald-500 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-black hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          {saving ? "Saving…" : "Save"}
-                        </button>
-
-                        <button
-                          onClick={handleMarkReviewed}
-                          disabled={!selectedDraft || saving || finalizing || !canMutateSelected || axiomRunning}
-                          className="rounded-full border border-amber-400/60 bg-slate-950/60 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          Mark reviewed
-                        </button>
-
-                        <button
-                          onClick={handleFinalize}
-                          disabled={!selectedDraft || saving || finalizing || !canMutateSelected || axiomRunning}
-                          className="rounded-full border border-emerald-500/60 bg-black/40 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          {finalizing ? "Finalizing…" : "Finalize → Council"}
-                        </button>
-
-                        <div className="flex-1" />
-
-                        <button
-                          onClick={openDelete}
-                          disabled={!selectedDraft || !canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning}
-                          className="rounded-full border border-rose-500/50 bg-rose-500/10 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-rose-200 hover:bg-rose-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          Delete
-                        </button>
-                      </div>
                     </div>
                   </div>
                 ) : (
-                  // AXIOM TAB
-                  <div className="h-full w-full rounded-2xl border border-slate-800 bg-black/40 overflow-hidden flex flex-col">
+                  <div className="h-full w-full rounded-2xl border border-slate-800 bg-slate-950/40 overflow-hidden flex flex-col">
                     <div className="shrink-0 px-5 py-4 border-b border-slate-800">
-                      <div className="text-[11px] uppercase tracking-[0.22em] text-sky-300">
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
                         AXIOM · Draft Review
                       </div>
-                      <div className="mt-2 text-[12px] text-slate-400 leading-relaxed">
-                        Read-only intelligence sidecar. Draft-stage writes{" "}
-                        <span className="text-slate-200 font-semibold">ai_notes</span> only
-                        (scope_type=document, note_type=summary). Nothing touches files. Archive embeds AXIOM snapshot later.
+                      <div className="mt-2 text-[12px] text-slate-400 max-w-3xl">
+                        Advisory-only intelligence sidecar. Draft stage writes to{" "}
+                        <span className="text-sky-200 font-semibold">ai_notes</span> only (
+                        <span className="text-slate-200">scope_type=document</span>,{" "}
+                        <span className="text-slate-200">note_type=summary</span>). Archive embeds AXIOM snapshot later.
                       </div>
-                      <div className="mt-3 text-[11px] text-slate-500">
-                        Draft:{" "}
-                        <span className="text-slate-200 font-semibold">
-                          {selectedDraft?.title || title || "(untitled)"}
-                        </span>
+                      <div className="mt-2 text-[11px] text-slate-500">
+                        Draft: <span className="text-slate-200">{selectedDraft?.title || title || "—"}</span>
                         <span className="mx-2 text-slate-700">•</span>
-                        Lane:{" "}
-                        <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>
-                          {env}
-                        </span>
+                        Lane: <span className={cx(isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
                         <span className="mx-2 text-slate-700">•</span>
-                        Last refresh: <span className="text-slate-300">{axiomLastRefreshIso ? fmtShort(axiomLastRefreshIso) : "—"}</span>
+                        Last refresh: <span className="text-slate-300">{axiomLastRefresh ? fmtShort(axiomLastRefresh) : "—"}</span>
                       </div>
                     </div>
 
-                    <div className="flex-1 min-h-0 overflow-y-auto p-5">
+                    <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
+                      {axiomErr && (
+                        <div className="rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-200">
+                          {axiomErr}
+                        </div>
+                      )}
+
                       {!selectedId ? (
-                        <div className="rounded-2xl border border-slate-800 bg-slate-950/40 px-5 py-4 text-[13px] text-slate-400">
-                          Select a draft to view AXIOM output.
+                        <div className="rounded-2xl border border-slate-800 bg-black/30 px-5 py-4 text-[13px] text-slate-400">
+                          Select a draft to view AXIOM notes.
                         </div>
                       ) : axiomLoading ? (
-                        <div className="rounded-2xl border border-slate-800 bg-slate-950/40 px-5 py-4 text-[13px] text-slate-400">
-                          Loading AXIOM summary…
+                        <div className="rounded-2xl border border-slate-800 bg-black/30 px-5 py-4 text-[13px] text-slate-400">
+                          Loading AXIOM notes…
                         </div>
-                      ) : !axiomSummary ? (
-                        <div className="rounded-2xl border border-slate-800 bg-slate-950/40 px-5 py-4 text-[13px] text-slate-400">
-                          No AXIOM summary found for this draft yet. Click{" "}
-                          <span className="text-sky-200 font-semibold">Run AXIOM</span>.
+                      ) : !selectedAxiomSummary ? (
+                        <div className="rounded-2xl border border-slate-800 bg-black/30 px-5 py-4 text-[13px] text-slate-400">
+                          No AXIOM summary found for this draft yet. Click <span className="text-sky-200 font-semibold">Run AXIOM</span>.
                         </div>
                       ) : (
-                        <div className="rounded-2xl border border-slate-800 bg-slate-950/40 px-5 py-5">
-                          <div className="flex items-start justify-between gap-3">
+                        <div className="rounded-2xl border border-slate-800 bg-black/30 overflow-hidden">
+                          <div className="px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
                             <div className="min-w-0">
-                              <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">
-                                Latest summary
+                              <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">
+                                Latest Summary
                               </div>
-                              <div className="mt-2 text-[11px] text-slate-500">
-                                {axiomMeta?.note_id ? (
-                                  <>
-                                    note_id: <span className="text-slate-300">{axiomMeta.note_id}</span>
-                                    <span className="mx-2 text-slate-700">•</span>
-                                  </>
-                                ) : null}
-                                created: <span className="text-slate-300">{fmtShort(axiomMeta?.created_at ?? null)}</span>
+                              <div className="mt-1 text-[13px] font-semibold text-slate-100 truncate">
+                                {selectedAxiomSummary.title || "AXIOM Draft Summary"}
+                              </div>
+                              <div className="mt-1 text-[11px] text-slate-500">
+                                {fmtShort(selectedAxiomSummary.created_at)}
+                                <span className="mx-2 text-slate-700">•</span>
+                                model: <span className="text-slate-300">{selectedAxiomSummary.model || "—"}</span>
+                                <span className="mx-2 text-slate-700">•</span>
+                                tokens: <span className="text-slate-300">{selectedAxiomSummary.tokens_used ?? "—"}</span>
                               </div>
                             </div>
-                            <button
-                              onClick={() => loadLatestAxiomSummary(selectedId)}
-                              className="rounded-full border border-slate-800 bg-slate-950/60 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
-                            >
-                              Refresh
-                            </button>
+
+                            <span className="shrink-0 rounded-full border border-sky-400/40 bg-sky-500/10 px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-sky-200">
+                              {selectedAxiomSummary.note_type || "summary"}
+                            </span>
                           </div>
 
-                          <div className="mt-4 rounded-2xl border border-slate-800 bg-black/40 px-5 py-5">
-                            <pre className="whitespace-pre-wrap font-sans text-[13px] leading-[1.8] text-slate-100">
-                              {axiomSummary}
+                          <div className="px-5 py-5">
+                            <pre className="whitespace-pre-wrap font-sans text-[13px] leading-[1.85] text-slate-100">
+                              {selectedAxiomSummary.content || "—"}
                             </pre>
                           </div>
                         </div>
                       )}
+
+                      {axiomNotes.length > 1 && (
+                        <div className="rounded-2xl border border-slate-800 bg-black/20 overflow-hidden">
+                          <div className="px-5 py-3 border-b border-slate-800 text-[11px] uppercase tracking-[0.22em] text-slate-400">
+                            AXIOM History ({axiomNotes.length})
+                          </div>
+                          <ul className="divide-y divide-slate-800">
+                            {axiomNotes.map((n) => (
+                              <li key={n.id} className="px-5 py-4">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <div className="text-[12px] font-semibold text-slate-100 truncate">
+                                      {n.title || "AXIOM Note"}
+                                    </div>
+                                    <div className="mt-1 text-[11px] text-slate-500">
+                                      {fmtShort(n.created_at)}
+                                      <span className="mx-2 text-slate-700">•</span>
+                                      {n.note_type || "note"}
+                                      <span className="mx-2 text-slate-700">•</span>
+                                      {n.model || "—"}
+                                    </div>
+                                  </div>
+                                  <span className="rounded-full border border-slate-700 bg-slate-900/60 px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-slate-300">
+                                    {n.id.slice(0, 8)}
+                                  </span>
+                                </div>
+                                {n.content && (
+                                  <div className="mt-3 rounded-2xl border border-slate-800 bg-black/30 px-4 py-3 text-[12px] leading-[1.7] text-slate-200">
+                                    {n.content.length > 320 ? `${n.content.slice(0, 320)}…` : n.content}
+                                  </div>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
                     </div>
 
-                    <div className="shrink-0 px-5 py-4 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
-                      <span>AXIOM · advisory-only · ai_notes (draft stage)</span>
-                      <span>Lane-aware · nothing mutates evidence</span>
+                    <div className="shrink-0 px-5 py-3 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
+                      <span>AXIOM · ai_notes (draft-stage) · advisory-only</span>
+                      <span>Archive embeds AXIOM snapshot later (not during draft)</span>
                     </div>
                   </div>
                 )}
