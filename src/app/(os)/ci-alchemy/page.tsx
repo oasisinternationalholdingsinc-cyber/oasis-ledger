@@ -1,3 +1,4 @@
+// src/app/(os)/ci-alchemy/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -79,6 +80,7 @@ export default function CIAlchemyPage() {
   const [saving, setSaving] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
   const [alchemyRunning, setAlchemyRunning] = useState(false);
+  const [axiomRunning, setAxiomRunning] = useState(false);
 
   const [drafts, setDrafts] = useState<DraftRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -432,6 +434,80 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       flashError(err?.message ?? "Network error calling CI-Alchemy (scribe).");
     } finally {
       setAlchemyRunning(false);
+    }
+  }
+
+  // AXIOM pre-draft review (Edge Function "axiom-pre-draft-review")
+  async function handleAxiomReview() {
+    if (!selectedId) return flashError("Select a draft first.");
+    if (!canMutateSelected)
+      return flashError("This draft has left Alchemy. Draft-stage AXIOM runs pre-finalize only.");
+    if (!title.trim() || !body.trim()) return flashError("Title + body required (save first).");
+
+    const baseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    if (!baseUrl || !anonKey) return flashError("Missing Supabase URL or anon key in environment.");
+
+    setAxiomRunning(true);
+    setError(null);
+    setInfo(null);
+
+    try {
+      const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
+      if (sessionErr) throw sessionErr;
+
+      const accessToken = sessionData?.session?.access_token;
+      if (!accessToken) return flashError("Not authenticated. Please log in (OS auth gate).");
+
+      // IMPORTANT: draft-stage AXIOM should write to ai_notes (scope_type='document', scope_id=draft_id)
+      // Your edge function should verify JWT, then insert ai_notes with created_by = user.id.
+      const payload = {
+        draft_id: selectedId,
+        entity_slug: activeEntity,
+        trigger: "alchemy-pre-finalize",
+        // optionally pass content so the function stays DB-read-light (your choice)
+        title: title.trim(),
+        draft_text: body,
+        is_test: isSandbox,
+      };
+
+      const res = await fetch(`${baseUrl}/functions/v1/axiom-pre-draft-review`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: anonKey,
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const raw = await res.text();
+      let data: any = null;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        // keep raw
+      }
+
+      if (!res.ok) {
+        console.error("axiom-pre-draft-review HTTP error", res.status, raw);
+        flashError(`AXIOM Review HTTP ${res.status}. See console.`);
+        return;
+      }
+
+      if (!data?.ok) {
+        console.error("AXIOM review failed payload", data);
+        flashError(data?.error || "AXIOM review failed.");
+        return;
+      }
+
+      const noteId = data?.note_id || data?.ai_note_id || data?.id || null;
+      flashInfo(noteId ? `AXIOM Review saved (note_id=${noteId}).` : "AXIOM Review saved.");
+    } catch (err: any) {
+      console.error("axiom review invoke exception", err);
+      flashError(err?.message ?? "Network error calling AXIOM Review.");
+    } finally {
+      setAxiomRunning(false);
     }
   }
 
@@ -1253,13 +1329,13 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                         className={cx(
                           "w-full rounded-2xl border px-4 py-3 text-[15px] outline-none transition",
                           inputBase,
-                          (!canMutateSelected || saving || finalizing || alchemyRunning) &&
+                          (!canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning) &&
                             "opacity-70 cursor-not-allowed"
                         )}
                         placeholder="Resolution title"
                         value={title}
                         onChange={(e) => onTitleChange(e.target.value)}
-                        disabled={!canMutateSelected || saving || finalizing || alchemyRunning}
+                        disabled={!canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning}
                       />
                     </div>
 
@@ -1268,13 +1344,13 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                         className={cx(
                           "h-full w-full resize-none rounded-2xl border px-4 py-4 text-[13px] leading-[1.75] outline-none transition",
                           textareaBase,
-                          (!canMutateSelected || saving || finalizing || alchemyRunning) &&
+                          (!canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning) &&
                             "opacity-70 cursor-not-allowed"
                         )}
                         placeholder="Draft body… (or Run Alchemy)"
                         value={body}
                         onChange={(e) => onBodyChange(e.target.value)}
-                        disabled={!canMutateSelected || saving || finalizing || alchemyRunning}
+                        disabled={!canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning}
                       />
                     </div>
 
@@ -1286,7 +1362,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                     >
                       <button
                         onClick={handleRunAlchemy}
-                        disabled={alchemyRunning || saving || finalizing}
+                        disabled={alchemyRunning || saving || finalizing || axiomRunning}
                         className="rounded-full border border-emerald-400/70 bg-emerald-500/10 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {alchemyRunning ? "Running…" : "Run Alchemy"}
@@ -1294,15 +1370,24 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
                       <button
                         onClick={handleSaveDraft}
-                        disabled={saving || finalizing || !canMutateSelected}
+                        disabled={saving || finalizing || !canMutateSelected || axiomRunning}
                         className="rounded-full bg-emerald-500 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-black hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {saving ? "Saving…" : "Save"}
                       </button>
 
                       <button
+                        onClick={handleAxiomReview}
+                        disabled={!selectedDraft || saving || finalizing || !canMutateSelected || alchemyRunning || axiomRunning}
+                        className="rounded-full border border-sky-400/50 bg-sky-500/10 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-sky-200 hover:bg-sky-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Runs AXIOM draft review (writes ai_notes scoped to this draft)"
+                      >
+                        {axiomRunning ? "AXIOM…" : "AXIOM Review"}
+                      </button>
+
+                      <button
                         onClick={handleMarkReviewed}
-                        disabled={!selectedDraft || saving || finalizing || !canMutateSelected}
+                        disabled={!selectedDraft || saving || finalizing || !canMutateSelected || axiomRunning}
                         className="rounded-full border border-amber-400/60 bg-slate-950/60 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         Mark reviewed
@@ -1310,7 +1395,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
                       <button
                         onClick={handleFinalize}
-                        disabled={!selectedDraft || saving || finalizing || !canMutateSelected}
+                        disabled={!selectedDraft || saving || finalizing || !canMutateSelected || axiomRunning}
                         className="rounded-full border border-emerald-500/60 bg-black/40 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {finalizing ? "Finalizing…" : "Finalize → Council"}
@@ -1320,7 +1405,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
                       <button
                         onClick={openDelete}
-                        disabled={!selectedDraft || !canMutateSelected || saving || finalizing || alchemyRunning}
+                        disabled={!selectedDraft || !canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning}
                         className="rounded-full border border-rose-500/50 bg-rose-500/10 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-rose-200 hover:bg-rose-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         Delete
@@ -1347,7 +1432,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
               <div className="shrink-0 px-5 py-3 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
                 <span>CI-Alchemy · Draft factory (governance_drafts)</span>
-                <span>Lane-aware · Finalize → governance_ledger (PENDING) → Council authority</span>
+                <span>Lane-aware · AXIOM Review → ai_notes · Finalize → governance_ledger (PENDING)</span>
               </div>
             </section>
           </div>
