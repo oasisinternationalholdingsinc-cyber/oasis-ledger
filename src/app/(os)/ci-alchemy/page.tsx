@@ -1,4 +1,3 @@
-// src/app/(os)/ci-alchemy/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -1164,6 +1163,21 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       ? "bg-white border-slate-200 text-slate-900 focus:border-emerald-500"
       : "bg-slate-900/80 border-slate-700 text-slate-100 focus:border-emerald-400";
 
+  // ✅ Reader content source: Draft vs AXIOM snapshot (no wiring changes)
+  const readerMode = workspaceTab === "axiom" ? "axiom" : "draft";
+  const readerTitle =
+    readerMode === "axiom"
+      ? (selectedAxiomSummary?.title || "AXIOM Snapshot")
+      : (selectedDraft?.title || title || "(untitled)");
+  const readerMetaLine =
+    readerMode === "axiom"
+      ? `${fmtShort(selectedAxiomSummary?.created_at ?? null)} • model: ${selectedAxiomSummary?.model || "—"} • tokens: ${selectedAxiomSummary?.tokens_used ?? "—"}`
+      : `${selectedDraft ? `${selectedDraft.status.toUpperCase()} • ${fmtShort(selectedDraft.created_at)}` : "—"}`;
+  const readerBody =
+    readerMode === "axiom"
+      ? (selectedAxiomSummary?.content || "No AXIOM summary yet. Run AXIOM to generate one.")
+      : (selectedDraft ? selectedDraft.draft_text ?? "" : body ?? "");
+
   return (
     <div className="h-full flex flex-col px-8 pt-6 pb-6">
       {/* Header under OS bar */}
@@ -1230,6 +1244,13 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
               <button
                 onClick={() => {
+                  // ✅ Reader opens either Draft or AXIOM snapshot depending on tab
+                  if (workspaceTab === "axiom") {
+                    if (!selectedId) return flashError("Select a draft first.");
+                    // If no summary yet, still open reader (shows guidance text)
+                    setReaderOpen(true);
+                    return;
+                  }
                   if (!selectedDraft && !body.trim()) return flashError("Select a draft (or write) first.");
                   setReaderOpen(true);
                 }}
@@ -1665,12 +1686,14 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           <div className="w-full max-w-[980px] h-[85vh] rounded-3xl border border-slate-800 bg-slate-950/95 shadow-2xl shadow-black/70 overflow-hidden flex flex-col">
             <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
               <div className="min-w-0">
-                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Reader</div>
+                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">
+                  Reader · {readerMode === "axiom" ? "AXIOM Snapshot" : "Draft"}
+                </div>
                 <div className="mt-1 text-[15px] font-semibold text-slate-100 truncate">
-                  {(selectedDraft?.title || title || "(untitled)") as string}
+                  {readerTitle}
                 </div>
                 <div className="mt-1 text-[11px] text-slate-500">
-                  {selectedDraft ? `${selectedDraft.status.toUpperCase()} • ${fmtShort(selectedDraft.created_at)}` : "—"}
+                  {readerMetaLine}
                   <span className="mx-2 text-slate-700">•</span>
                   <span className={cx(isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
                 </div>
@@ -1687,7 +1710,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
             <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5">
               <div className="rounded-2xl border border-slate-800 bg-black/40 px-5 py-5">
                 <pre className="whitespace-pre-wrap font-sans text-[13px] leading-[1.8] text-slate-100">
-                  {selectedDraft ? selectedDraft.draft_text ?? "" : body ?? ""}
+                  {readerBody}
                 </pre>
               </div>
             </div>
