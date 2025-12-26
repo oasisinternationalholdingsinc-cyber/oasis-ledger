@@ -20,8 +20,6 @@ type DraftRecord = {
   created_at: string | null;
   updated_at: string | null;
   finalized_record_id: string | null;
-
-  // optional env field (safe)
   is_test?: boolean | null;
 };
 
@@ -35,7 +33,7 @@ type AxiomNote = {
   scope_id: string;
   note_type: string | null;
   title: string | null;
-  content: string | null; // ✅ ai_notes.content
+  content: string | null;
   model: string | null;
   tokens_used: number | null;
   created_by: string | null;
@@ -77,18 +75,15 @@ export default function CIAlchemyPage() {
   const entityCtx = useEntity() as any;
   const osEnv = useOsEnv();
 
-  // IMPORTANT: entitySlug is ALWAYS holdings/lounge/real-estate (never "sandbox")
   const activeEntity = (entityCtx?.activeEntity as string) || "holdings";
   const activeEntityLabel = useMemo(
     () => ENTITY_LABELS[activeEntity] ?? activeEntity,
     [activeEntity]
   );
 
-  // Lane flag (must match Council)
   const isSandbox = !!osEnv.isSandbox;
   const env = isSandbox ? "SANDBOX" : "ROT";
 
-  // Core state
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
@@ -101,8 +96,6 @@ export default function CIAlchemyPage() {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
 
-  // OS UX controls
-  // ✅ Default open view is Drafts (as requested)
   const [statusTab, setStatusTab] = useState<StatusTab>("draft");
   const [query, setQuery] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(true);
@@ -113,14 +106,12 @@ export default function CIAlchemyPage() {
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
-  // Delete modal
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteMode, setDeleteMode] = useState<DeleteMode>("soft");
   const [deleteReason, setDeleteReason] = useState("");
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [deleteBusy, setDeleteBusy] = useState(false);
 
-  // Unsaved changes guard
   const [dirty, setDirty] = useState(false);
   const lastLoadedRef = useRef<{ id: string | null; title: string; body: string } | null>(null);
 
@@ -129,7 +120,6 @@ export default function CIAlchemyPage() {
     [drafts, selectedId]
   );
 
-  // Mutations allowed only while still inside Alchemy (not finalized / not ledger-linked)
   const canMutateSelected = useMemo(() => {
     if (!selectedDraft) return true;
     return !selectedDraft.finalized_record_id && selectedDraft.status !== "finalized";
@@ -163,7 +153,6 @@ export default function CIAlchemyPage() {
     return window.confirm("You have unsaved edits. Continue and lose changes?");
   }
 
-  // ✅ Prefer Draft first (default open selection)
   function pickDefaultSelection(rows: DraftRecord[]) {
     const preferred =
       rows.find((d) => d.status === "draft" && !d.finalized_record_id) ||
@@ -177,9 +166,6 @@ export default function CIAlchemyPage() {
     setLoading(true);
     setError(null);
 
-    // STRICT lane query.
-    // We ONLY fall back if the is_test column truly does not exist.
-    // (No silent mixing of ROT+SANDBOX ever.)
     const tryWithIsTest = async () => {
       const q = supabase
         .from("governance_drafts")
@@ -238,11 +224,8 @@ export default function CIAlchemyPage() {
       try {
         rows = await tryWithIsTest();
       } catch (e: any) {
-        if (isMissingColumnErr(e)) {
-          rows = await tryWithoutIsTest();
-        } else {
-          throw e;
-        }
+        if (isMissingColumnErr(e)) rows = await tryWithoutIsTest();
+        else throw e;
       }
 
       setDrafts(rows);
@@ -276,12 +259,10 @@ export default function CIAlchemyPage() {
     }
   }
 
-  // CRITICAL: env + entity must re-scope Alchemy registry
   useEffect(() => {
     let cancelled = false;
     (async () => {
       if (cancelled) return;
-      // ✅ Always open on Drafts tab
       setStatusTab("draft");
       setQuery("");
       setWorkspaceTab("editor");
@@ -295,7 +276,6 @@ export default function CIAlchemyPage() {
 
   function handleSelectDraft(draft: DraftRecord) {
     if (!confirmNavigateAwayIfDirty()) return;
-
     setSelectedId(draft.id);
     setTitle(draft.title ?? "");
     setBody(draft.draft_text ?? "");
@@ -306,7 +286,6 @@ export default function CIAlchemyPage() {
 
   function handleNewDraft() {
     if (!confirmNavigateAwayIfDirty()) return;
-
     setSelectedId(null);
     setTitle("");
     setBody("");
@@ -316,10 +295,8 @@ export default function CIAlchemyPage() {
     markLoadedSnapshot(null, "", "");
   }
 
-  // --- FILTERING (already strict lane query; this is for UI search/status only) ---
   const filteredDrafts = useMemo(() => {
     let list = drafts;
-
     if (statusTab !== "all") list = list.filter((d) => d.status === statusTab);
 
     const q = query.trim().toLowerCase();
@@ -329,12 +306,11 @@ export default function CIAlchemyPage() {
         return hay.includes(q);
       });
     }
-
     return list;
   }, [drafts, statusTab, query]);
 
   // -------------------------
-  // AXIOM (ai_notes) panel
+  // AXIOM (ai_notes)
   // -------------------------
   const [axiomNotes, setAxiomNotes] = useState<AxiomNote[]>([]);
   const [axiomLoading, setAxiomLoading] = useState(false);
@@ -342,19 +318,16 @@ export default function CIAlchemyPage() {
   const [axiomLastRefresh, setAxiomLastRefresh] = useState<string | null>(null);
 
   const selectedAxiomSummary = useMemo(() => {
-    // prefer note_type='summary' latest
     const summaries = axiomNotes.filter((n) => (n.note_type ?? "").toLowerCase() === "summary");
     return summaries[0] ?? axiomNotes[0] ?? null;
   }, [axiomNotes]);
 
   async function loadAxiomNotes() {
     if (!selectedId) return;
-
     setAxiomLoading(true);
     setAxiomErr(null);
 
     try {
-      // ✅ correct columns: title + content
       const { data, error } = await supabase
         .from("ai_notes")
         .select(
@@ -377,9 +350,7 @@ export default function CIAlchemyPage() {
         .limit(25);
 
       if (error) throw error;
-
-      const rows = (data ?? []) as AxiomNote[];
-      setAxiomNotes(rows);
+      setAxiomNotes((data ?? []) as AxiomNote[]);
       setAxiomLastRefresh(new Date().toISOString());
     } catch (e: any) {
       setAxiomNotes([]);
@@ -389,7 +360,6 @@ export default function CIAlchemyPage() {
     }
   }
 
-  // Only fetch AXIOM when the AXIOM tab is actually open (prevents request spam)
   useEffect(() => {
     if (workspaceTab !== "axiom") return;
     if (!selectedId) return;
@@ -406,11 +376,7 @@ export default function CIAlchemyPage() {
 
     const baseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-    if (!baseUrl || !anonKey) {
-      flashError("Missing Supabase URL or anon key in environment.");
-      return;
-    }
+    if (!baseUrl || !anonKey) return flashError("Missing Supabase URL or anon key in environment.");
 
     setAlchemyRunning(true);
     setError(null);
@@ -421,13 +387,9 @@ export default function CIAlchemyPage() {
       if (sessionErr) throw sessionErr;
 
       const accessToken = sessionData?.session?.access_token;
-      if (!accessToken) {
-        flashError("Not authenticated. Please log in (OS auth gate).");
-        return;
-      }
+      if (!accessToken) return flashError("Not authenticated. Please log in (OS auth gate).");
 
       const hasBody = body.trim().length > 0;
-
       const instructions = hasBody
         ? body.trim()
         : `Draft a formal corporate resolution for ${activeEntityLabel} about: "${
@@ -460,43 +422,31 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       if (!res.ok) {
         const text = await res.text();
         console.error("scribe HTTP error", res.status, text);
-        flashError(`CI-Alchemy HTTP ${res.status}. See console for details.`);
-        return;
+        return flashError(`CI-Alchemy HTTP ${res.status}. See console for details.`);
       }
 
       const data = await res.json();
-      const asAny = data as any;
+      if (!data?.ok) return flashError(`CI-Alchemy failed: ${data?.error || data?.stage || "Unknown error."}`);
 
-      if (!asAny?.ok) {
-        const detail = asAny?.error || asAny?.stage || "Unknown error.";
-        flashError(`CI-Alchemy failed: ${detail}`);
-        return;
-      }
+      const draftId: string | undefined = data.draft_id;
+      const draftText: string = data.draft_text || data.draft || data.content || data.text || "";
+      if (!draftText?.trim()) return flashError("CI-Alchemy returned no usable draft body.");
 
-      const draftId: string | undefined = asAny.draft_id;
-      const draftText: string =
-        asAny.draft_text || asAny.draft || asAny.content || asAny.text || "";
-
-      if (!draftText?.trim()) {
-        flashError("CI-Alchemy returned no usable draft body.");
-        return;
-      }
-
-      const producedTitle = (asAny.title || title.trim() || "(untitled)") as string;
+      const producedTitle = (data.title || title.trim() || "(untitled)") as string;
 
       const newDraft: DraftRecord = {
         id: draftId || crypto.randomUUID(),
-        entity_id: asAny.entity_id ?? null,
-        entity_slug: asAny.entity_slug ?? activeEntity,
-        entity_name: asAny.entity_name ?? activeEntityLabel,
+        entity_id: data.entity_id ?? null,
+        entity_slug: data.entity_slug ?? activeEntity,
+        entity_name: data.entity_name ?? activeEntityLabel,
         title: producedTitle,
-        record_type: asAny.record_type || "resolution",
+        record_type: data.record_type || "resolution",
         draft_text: draftText,
-        status: (asAny.draft_status || "draft") as DraftStatus,
-        created_at: asAny.draft_created_at ?? new Date().toISOString(),
+        status: (data.draft_status || "draft") as DraftStatus,
+        created_at: data.draft_created_at ?? new Date().toISOString(),
         updated_at: null,
-        finalized_record_id: asAny.finalized_record_id ?? null,
-        is_test: typeof asAny.is_test === "boolean" ? asAny.is_test : isSandbox,
+        finalized_record_id: data.finalized_record_id ?? null,
+        is_test: typeof data.is_test === "boolean" ? data.is_test : isSandbox,
       };
 
       setTitle(newDraft.title);
@@ -510,7 +460,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       });
 
       markLoadedSnapshot(newDraft.id, newDraft.title, newDraft.draft_text);
-
       flashInfo("Draft created. Review, edit, then Save.");
       await reloadDrafts(true);
     } catch (err: any) {
@@ -521,11 +470,10 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
     }
   }
 
-  // AXIOM pre-draft review (Edge Function "axiom-pre-draft-review")
+  // AXIOM pre-draft review
   async function handleAxiomReview() {
     if (!selectedId) return flashError("Select a draft first.");
-    if (!canMutateSelected)
-      return flashError("This draft has left Alchemy. Draft-stage AXIOM runs pre-finalize only.");
+    if (!canMutateSelected) return flashError("This draft left Alchemy. Draft-stage AXIOM runs pre-finalize only.");
     if (!title.trim() || !body.trim()) return flashError("Title + body required (save first).");
 
     const baseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -543,8 +491,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       const accessToken = sessionData?.session?.access_token;
       if (!accessToken) return flashError("Not authenticated. Please log in (OS auth gate).");
 
-      // Draft-stage AXIOM writes to ai_notes:
-      // scope_type='document', scope_id=draft_id, note_type='summary', content=...
       const payload = {
         draft_id: selectedId,
         entity_slug: activeEntity,
@@ -568,26 +514,17 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       let data: any = null;
       try {
         data = JSON.parse(raw);
-      } catch {
-        // keep raw
-      }
+      } catch {}
 
       if (!res.ok) {
         console.error("axiom-pre-draft-review HTTP error", res.status, raw);
-        flashError(`AXIOM Review HTTP ${res.status}. See console.`);
-        return;
+        return flashError(`AXIOM Review HTTP ${res.status}. See console.`);
       }
-
-      if (!data?.ok) {
-        console.error("AXIOM review failed payload", data);
-        flashError(data?.error || "AXIOM review failed.");
-        return;
-      }
+      if (!data?.ok) return flashError(data?.error || "AXIOM review failed.");
 
       const noteId = data?.note_id || data?.ai_note_id || data?.id || null;
       flashInfo(noteId ? `AXIOM Review saved (note_id=${noteId}).` : "AXIOM Review saved.");
 
-      // ✅ Immediately refresh panel + switch to AXIOM tab so you SEE it.
       setWorkspaceTab("axiom");
       await loadAxiomNotes();
     } catch (err: any) {
@@ -599,15 +536,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
   }
 
   async function handleSaveDraft() {
-    if (!title.trim() || !body.trim()) {
-      flashError("Title and body are required to save a draft.");
-      return;
-    }
-
-    if (selectedDraft?.status === "finalized") {
-      flashError("This draft is finalized. Create a new revision instead.");
-      return;
-    }
+    if (!title.trim() || !body.trim()) return flashError("Title and body are required to save a draft.");
+    if (selectedDraft?.status === "finalized") return flashError("This draft is finalized. Create a new revision instead.");
 
     setSaving(true);
     setError(null);
@@ -635,24 +565,11 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       if (!selectedId) {
         const insertTry = await supabase
           .from("governance_drafts")
-          .insert({
-            ...basePayload,
-            status: "draft" as DraftStatus,
-          })
+          .insert({ ...basePayload, status: "draft" as DraftStatus })
           .select(
             `
-              id,
-              entity_id,
-              entity_slug,
-              entity_name,
-              title,
-              record_type,
-              draft_text,
-              status,
-              created_at,
-              updated_at,
-              finalized_record_id,
-              is_test
+              id, entity_id, entity_slug, entity_name, title, record_type, draft_text,
+              status, created_at, updated_at, finalized_record_id, is_test
             `
           )
           .single();
@@ -662,27 +579,14 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
             delete basePayload.is_test;
             const retry = await supabase
               .from("governance_drafts")
-              .insert({
-                ...basePayload,
-                status: "draft" as DraftStatus,
-              })
+              .insert({ ...basePayload, status: "draft" as DraftStatus })
               .select(
                 `
-                  id,
-                  entity_id,
-                  entity_slug,
-                  entity_name,
-                  title,
-                  record_type,
-                  draft_text,
-                  status,
-                  created_at,
-                  updated_at,
-                  finalized_record_id
+                  id, entity_id, entity_slug, entity_name, title, record_type, draft_text,
+                  status, created_at, updated_at, finalized_record_id
                 `
               )
               .single();
-
             if (retry.error) throw retry.error;
 
             const newDraft = retry.data as DraftRecord;
@@ -690,9 +594,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
             setSelectedId(newDraft.id);
             markLoadedSnapshot(newDraft.id, newDraft.title ?? "", newDraft.draft_text ?? "");
             flashInfo("Draft created.");
-          } else {
-            throw insertTry.error;
-          }
+          } else throw insertTry.error;
         } else {
           const newDraft = insertTry.data as DraftRecord;
           setDrafts((prev) => [newDraft, ...prev]);
@@ -703,25 +605,12 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       } else {
         const updateTry = await supabase
           .from("governance_drafts")
-          .update({
-            ...basePayload,
-            updated_at: new Date().toISOString(),
-          })
+          .update({ ...basePayload, updated_at: new Date().toISOString() })
           .eq("id", selectedId)
           .select(
             `
-              id,
-              entity_id,
-              entity_slug,
-              entity_name,
-              title,
-              record_type,
-              draft_text,
-              status,
-              created_at,
-              updated_at,
-              finalized_record_id,
-              is_test
+              id, entity_id, entity_slug, entity_name, title, record_type, draft_text,
+              status, created_at, updated_at, finalized_record_id, is_test
             `
           )
           .single();
@@ -731,37 +620,22 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
             delete basePayload.is_test;
             const retry = await supabase
               .from("governance_drafts")
-              .update({
-                ...basePayload,
-                updated_at: new Date().toISOString(),
-              })
+              .update({ ...basePayload, updated_at: new Date().toISOString() })
               .eq("id", selectedId)
               .select(
                 `
-                  id,
-                  entity_id,
-                  entity_slug,
-                  entity_name,
-                  title,
-                  record_type,
-                  draft_text,
-                  status,
-                  created_at,
-                  updated_at,
-                  finalized_record_id
+                  id, entity_id, entity_slug, entity_name, title, record_type, draft_text,
+                  status, created_at, updated_at, finalized_record_id
                 `
               )
               .single();
-
             if (retry.error) throw retry.error;
 
             const updated = retry.data as DraftRecord;
             setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
             markLoadedSnapshot(updated.id, updated.title ?? "", updated.draft_text ?? "");
             flashInfo("Draft saved.");
-          } else {
-            throw updateTry.error;
-          }
+          } else throw updateTry.error;
         } else {
           const updated = updateTry.data as DraftRecord;
           setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
@@ -778,8 +652,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
   async function handleMarkReviewed() {
     if (!selectedId) return flashError("Select a draft first.");
-    if (!canMutateSelected)
-      return flashError("This draft has left Alchemy and can’t be changed here.");
+    if (!canMutateSelected) return flashError("This draft has left Alchemy and can’t be changed here.");
 
     const draft = drafts.find((d) => d.id === selectedId);
     if (!draft) return flashError("Draft not found.");
@@ -802,18 +675,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         .eq("id", selectedId)
         .select(
           `
-            id,
-            entity_id,
-            entity_slug,
-            entity_name,
-            title,
-            record_type,
-            draft_text,
-            status,
-            created_at,
-            updated_at,
-            finalized_record_id,
-            is_test
+            id, entity_id, entity_slug, entity_name, title, record_type, draft_text,
+            status, created_at, updated_at, finalized_record_id, is_test
           `
         )
         .single();
@@ -827,30 +690,18 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
             .eq("id", selectedId)
             .select(
               `
-                id,
-                entity_id,
-                entity_slug,
-                entity_name,
-                title,
-                record_type,
-                draft_text,
-                status,
-                created_at,
-                updated_at,
-                finalized_record_id
+                id, entity_id, entity_slug, entity_name, title, record_type, draft_text,
+                status, created_at, updated_at, finalized_record_id
               `
             )
             .single();
-
           if (retry.error) throw retry.error;
 
           const updated = retry.data as DraftRecord;
           setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
           markLoadedSnapshot(updated.id, updated.title ?? "", updated.draft_text ?? "");
           flashInfo("Marked as reviewed.");
-        } else {
-          throw tryUpd.error;
-        }
+        } else throw tryUpd.error;
       } else {
         const updated = tryUpd.data as DraftRecord;
         setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
@@ -864,140 +715,95 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
     }
   }
 
+  // ✅✅ FIXED FINALIZE: calls Edge Function (service_role), no direct insert
   async function handleFinalize() {
     if (!selectedId) return flashError("Select a draft first.");
 
     const draft = drafts.find((d) => d.id === selectedId);
     if (!draft) return flashError("Draft not found.");
 
-    if (!title.trim() || !body.trim())
-      return flashError("Title and body are required before finalizing.");
+    if (!title.trim() || !body.trim()) return flashError("Title and body are required before finalizing.");
     if (draft.status === "finalized") return flashInfo("Already finalized.");
-    if (draft.finalized_record_id)
-      return flashError("This draft is already linked to a ledger record.");
+    if (draft.finalized_record_id) return flashError("This draft is already linked to a ledger record.");
+    if (!canMutateSelected) return flashError("This draft has left Alchemy and can’t be finalized here.");
+
+    // Lane safety: don’t allow cross-lane UI finalize
+    if (typeof draft.is_test === "boolean" && draft.is_test !== isSandbox) {
+      return flashError("Lane mismatch: this draft belongs to the other environment.");
+    }
+
+    const baseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    if (!baseUrl || !anonKey) return flashError("Missing Supabase URL or anon key in environment.");
 
     setFinalizing(true);
     setError(null);
     setInfo(null);
 
     try {
-      const { data: entityRow, error: entityErr } = await supabase
-        .from("entities")
-        .select("id, name, slug")
-        .eq("slug", activeEntity)
-        .single();
-
-      if (entityErr || !entityRow) throw entityErr ?? new Error("Entity not found.");
-
-      const ledgerPayload: any = {
-        entity_id: entityRow.id as string,
-        title: title.trim(),
-        description: null,
-        record_type: "resolution",
-        record_no: null,
-        body, // schema uses `body`
-        source: "ci-alchemy",
-        status: "PENDING",
-        is_test: isSandbox,
-      };
-
-      const tryLedger = await supabase.from("governance_ledger").insert(ledgerPayload).select("id").single();
-
-      let ledgerId: string | null = null;
-
-      if (tryLedger.error) {
-        if (isMissingColumnErr(tryLedger.error)) {
-          delete ledgerPayload.is_test;
-          const retry = await supabase.from("governance_ledger").insert(ledgerPayload).select("id").single();
-          if (retry.error || !retry.data) throw retry.error ?? new Error("Ledger insert failed.");
-          ledgerId = (retry.data as { id: string }).id;
-        } else {
-          throw tryLedger.error;
-        }
-      } else {
-        ledgerId = (tryLedger.data as { id: string }).id;
+      // ensure latest text is saved before finalize (optional but recommended)
+      // If you don’t want auto-save, remove this block.
+      if (dirty) {
+        await handleSaveDraft();
       }
 
-      if (!ledgerId) throw new Error("Ledger insert failed.");
+      const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
+      if (sessionErr) throw sessionErr;
 
-      const draftUpdate: any = {
-        status: "finalized" as DraftStatus,
-        finalized_record_id: ledgerId,
-        finalized_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        is_test: isSandbox,
-      };
+      const accessToken = sessionData?.session?.access_token;
+      if (!accessToken) return flashError("Not authenticated. Please log in (OS auth gate).");
 
-      const tryDraftUpd = await supabase
-        .from("governance_drafts")
-        .update(draftUpdate)
-        .eq("id", selectedId)
-        .select(
-          `
-            id,
-            entity_id,
-            entity_slug,
-            entity_name,
-            title,
-            record_type,
-            draft_text,
-            status,
-            created_at,
-            updated_at,
-            finalized_record_id,
-            is_test
-          `
-        )
-        .single();
+      const res = await fetch(`${baseUrl}/functions/v1/alchemy-finalize`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: anonKey,
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          draft_id: selectedId,
+          is_test: isSandbox, // keeps finalize lane-safe
+        }),
+      });
 
-      if (tryDraftUpd.error) {
-        if (isMissingColumnErr(tryDraftUpd.error)) {
-          delete draftUpdate.is_test;
-          const retry = await supabase
-            .from("governance_drafts")
-            .update(draftUpdate)
-            .eq("id", selectedId)
-            .select(
-              `
-                id,
-                entity_id,
-                entity_slug,
-                entity_name,
-                title,
-                record_type,
-                draft_text,
-                status,
-                created_at,
-                updated_at,
-                finalized_record_id
-              `
-            )
-            .single();
+      const raw = await res.text();
+      let data: any = null;
+      try {
+        data = JSON.parse(raw);
+      } catch {}
 
-          if (retry.error) throw retry.error;
-
-          const updated = retry.data as DraftRecord;
-          setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
-          markLoadedSnapshot(updated.id, updated.title ?? "", updated.draft_text ?? "");
-        } else {
-          throw tryDraftUpd.error;
-        }
-      } else {
-        const updated = tryDraftUpd.data as DraftRecord;
-        setDrafts((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
-        markLoadedSnapshot(updated.id, updated.title ?? "", updated.draft_text ?? "");
+      if (!res.ok) {
+        console.error("alchemy-finalize HTTP error", res.status, raw);
+        return flashError(`Finalize HTTP ${res.status}: ${data?.error || "See console."}`);
       }
 
+      if (!data?.ok) {
+        console.error("alchemy-finalize failed payload", data);
+        return flashError(data?.error || "Finalize failed.");
+      }
+
+      const ledgerId = data?.ledger_id as string | undefined;
+
+      // Refresh local list so draft shows as finalized + linked
       flashInfo("Finalized → Council queue.");
       await reloadDrafts(true);
+
+      // If you want: auto switch to Finalized tab after success
+      // setStatusTab("finalized");
+
+      // If you want: highlight the linked draft in UI
+      if (ledgerId) {
+        // no-op; we keep your normal UX
+      }
     } catch (err: any) {
+      console.error("finalize exception", err);
       flashError(err?.message ?? "Failed to finalize.");
     } finally {
       setFinalizing(false);
     }
   }
 
-  // Delete controls (soft + hard), only pre-finalize
+  // Delete modal + delete methods (unchanged)
   function openDelete() {
     if (!selectedDraft) return flashError("Select a draft first.");
     if (!canMutateSelected) return flashError("Can’t remove a draft that already left Alchemy.");
@@ -1023,18 +829,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       .eq("id", draftId)
       .select(
         `
-          id,
-          entity_id,
-          entity_slug,
-          entity_name,
-          title,
-          record_type,
-          draft_text,
-          status,
-          created_at,
-          updated_at,
-          finalized_record_id,
-          is_test
+          id, entity_id, entity_slug, entity_name, title, record_type, draft_text,
+          status, created_at, updated_at, finalized_record_id, is_test
         `
       )
       .single();
@@ -1048,21 +844,11 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           .eq("id", draftId)
           .select(
             `
-              id,
-              entity_id,
-              entity_slug,
-              entity_name,
-              title,
-              record_type,
-              draft_text,
-              status,
-              created_at,
-              updated_at,
-              finalized_record_id
+              id, entity_id, entity_slug, entity_name, title, record_type, draft_text,
+              status, created_at, updated_at, finalized_record_id
             `
           )
           .single();
-
         if (retry.error) throw retry.error;
         return retry.data as DraftRecord;
       }
@@ -1073,13 +859,19 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
   }
 
   async function hardDeleteDraft(draftId: string, reason: string) {
-    const tryTwo = await supabase.rpc("owner_delete_governance_draft", { p_draft_id: draftId, p_reason: reason || null } as any);
+    const tryTwo = await supabase.rpc("owner_delete_governance_draft", {
+      p_draft_id: draftId,
+      p_reason: reason || null,
+    } as any);
     if (!tryTwo.error) return;
 
     const tryOne = await supabase.rpc("owner_delete_governance_draft", { p_draft_id: draftId } as any);
     if (!tryOne.error) return;
 
-    const tryAlt = await supabase.rpc("owner_delete_governance_draft", { draft_id: draftId, reason: reason || null } as any);
+    const tryAlt = await supabase.rpc("owner_delete_governance_draft", {
+      draft_id: draftId,
+      reason: reason || null,
+    } as any);
     if (tryAlt.error) throw tryAlt.error;
   }
 
@@ -1137,7 +929,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
     }
   }
 
-  // Dirty tracking
   function onTitleChange(v: string) {
     setTitle(v);
     setDirty(computeDirty(v, body, selectedId));
@@ -1147,7 +938,6 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
     setDirty(computeDirty(title, v, selectedId));
   }
 
-  // Styles for editor theme
   const editorCard =
     editorTheme === "light"
       ? "bg-white text-slate-900 border-slate-200"
@@ -1163,20 +953,23 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       ? "bg-white border-slate-200 text-slate-900 focus:border-emerald-500"
       : "bg-slate-900/80 border-slate-700 text-slate-100 focus:border-emerald-400";
 
-  // ✅ Reader content source: Draft vs AXIOM snapshot (no wiring changes)
   const readerMode = workspaceTab === "axiom" ? "axiom" : "draft";
   const readerTitle =
     readerMode === "axiom"
-      ? (selectedAxiomSummary?.title || "AXIOM Snapshot")
-      : (selectedDraft?.title || title || "(untitled)");
+      ? selectedAxiomSummary?.title || "AXIOM Snapshot"
+      : selectedDraft?.title || title || "(untitled)";
   const readerMetaLine =
     readerMode === "axiom"
-      ? `${fmtShort(selectedAxiomSummary?.created_at ?? null)} • model: ${selectedAxiomSummary?.model || "—"} • tokens: ${selectedAxiomSummary?.tokens_used ?? "—"}`
+      ? `${fmtShort(selectedAxiomSummary?.created_at ?? null)} • model: ${
+          selectedAxiomSummary?.model || "—"
+        } • tokens: ${selectedAxiomSummary?.tokens_used ?? "—"}`
       : `${selectedDraft ? `${selectedDraft.status.toUpperCase()} • ${fmtShort(selectedDraft.created_at)}` : "—"}`;
   const readerBody =
     readerMode === "axiom"
-      ? (selectedAxiomSummary?.content || "No AXIOM summary yet. Run AXIOM to generate one.")
-      : (selectedDraft ? selectedDraft.draft_text ?? "" : body ?? "");
+      ? selectedAxiomSummary?.content || "No AXIOM summary yet. Run AXIOM to generate one."
+      : selectedDraft
+      ? selectedDraft.draft_text ?? ""
+      : body ?? "";
 
   return (
     <div className="h-full flex flex-col px-8 pt-6 pb-6">
@@ -1199,7 +992,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         </div>
       </div>
 
-      {/* Main OS window frame (Parliament-style) */}
+      {/* Main OS window frame */}
       <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
         <div className="w-full max-w-[1500px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-6 py-5 flex flex-col overflow-hidden">
           {/* Top strip: tabs + controls */}
@@ -1244,10 +1037,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
               <button
                 onClick={() => {
-                  // ✅ Reader opens either Draft or AXIOM snapshot depending on tab
                   if (workspaceTab === "axiom") {
                     if (!selectedId) return flashError("Select a draft first.");
-                    // If no summary yet, still open reader (shows guidance text)
                     setReaderOpen(true);
                     return;
                   }
@@ -1261,7 +1052,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
             </div>
           </div>
 
-          {/* Workspace body (NO page scroll) */}
+          {/* Workspace body */}
           <div className="flex-1 min-h-0 flex gap-4 overflow-hidden">
             {drawerOpen && (
               <aside className="w-[360px] shrink-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
@@ -1349,17 +1140,11 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
             <section className="flex-1 min-w-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
               <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
                 <div className="min-w-0">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
-                    Workspace
-                  </div>
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Workspace</div>
                   <div className="mt-1 text-[13px] text-slate-400">
-                    Entity:{" "}
-                    <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
+                    Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
                     <span className="mx-2 text-slate-700">•</span>
-                    Lane:{" "}
-                    <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>
-                      {env}
-                    </span>
+                    Lane: <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
                     {selectedDraft?.finalized_record_id && (
                       <>
                         <span className="mx-2 text-slate-700">•</span>
@@ -1502,18 +1287,12 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                 {workspaceTab === "editor" ? (
                   <div className={cx("h-full w-full rounded-2xl border overflow-hidden", editorCard)}>
                     <div className="h-full flex flex-col">
-                      <div
-                        className={cx(
-                          "shrink-0 px-5 py-4 border-b",
-                          editorTheme === "light" ? "border-slate-200" : "border-slate-800"
-                        )}
-                      >
+                      <div className={cx("shrink-0 px-5 py-4 border-b", editorTheme === "light" ? "border-slate-200" : "border-slate-800")}>
                         <input
                           className={cx(
                             "w-full rounded-2xl border px-4 py-3 text-[15px] outline-none transition",
                             inputBase,
-                            (!canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning) &&
-                              "opacity-70 cursor-not-allowed"
+                            (!canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning) && "opacity-70 cursor-not-allowed"
                           )}
                           placeholder="Resolution title"
                           value={title}
@@ -1527,8 +1306,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                           className={cx(
                             "h-full w-full resize-none rounded-2xl border px-4 py-4 text-[13px] leading-[1.75] outline-none transition",
                             textareaBase,
-                            (!canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning) &&
-                              "opacity-70 cursor-not-allowed"
+                            (!canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning) && "opacity-70 cursor-not-allowed"
                           )}
                           placeholder="Draft body… (or Run Alchemy)"
                           value={body}
@@ -1541,9 +1319,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                 ) : (
                   <div className="h-full w-full rounded-2xl border border-slate-800 bg-slate-950/40 overflow-hidden flex flex-col">
                     <div className="shrink-0 px-5 py-4 border-b border-slate-800">
-                      <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
-                        AXIOM · Draft Review
-                      </div>
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">AXIOM · Draft Review</div>
                       <div className="mt-2 text-[12px] text-slate-400 max-w-3xl">
                         Advisory-only intelligence sidecar. Draft stage writes to{" "}
                         <span className="text-sky-200 font-semibold">ai_notes</span> only (
@@ -1583,9 +1359,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                         <div className="rounded-2xl border border-slate-800 bg-black/30 overflow-hidden">
                           <div className="px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
                             <div className="min-w-0">
-                              <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">
-                                Latest Summary
-                              </div>
+                              <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Latest Summary</div>
                               <div className="mt-1 text-[13px] font-semibold text-slate-100 truncate">
                                 {selectedAxiomSummary.title || "AXIOM Draft Summary"}
                               </div>
@@ -1689,9 +1463,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                 <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">
                   Reader · {readerMode === "axiom" ? "AXIOM Snapshot" : "Draft"}
                 </div>
-                <div className="mt-1 text-[15px] font-semibold text-slate-100 truncate">
-                  {readerTitle}
-                </div>
+                <div className="mt-1 text-[15px] font-semibold text-slate-100 truncate">{readerTitle}</div>
                 <div className="mt-1 text-[11px] text-slate-500">
                   {readerMetaLine}
                   <span className="mx-2 text-slate-700">•</span>
@@ -1723,7 +1495,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         </div>
       )}
 
-      {/* Delete Modal (soft + hard) */}
+      {/* Delete Modal */}
       {deleteOpen && selectedDraft && (
         <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/70 px-4">
           <div className="w-full max-w-[620px] rounded-3xl border border-slate-800 bg-slate-950 shadow-2xl shadow-black/60 overflow-hidden">
@@ -1808,9 +1580,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                 disabled={deleteBusy || !canMutateSelected}
                 className={cx(
                   "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition disabled:opacity-50 disabled:cursor-not-allowed",
-                  deleteMode === "soft"
-                    ? "bg-emerald-500 text-black hover:bg-emerald-400"
-                    : "bg-rose-500 text-black hover:bg-rose-400"
+                  deleteMode === "soft" ? "bg-emerald-500 text-black hover:bg-emerald-400" : "bg-rose-500 text-black hover:bg-rose-400"
                 )}
               >
                 {deleteBusy ? "Deleting…" : deleteMode === "soft" ? "Discard" : "Hard Delete"}
