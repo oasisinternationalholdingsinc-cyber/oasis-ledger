@@ -1,3 +1,5 @@
+```tsx
+// src/app/(os)/ci-alchemy/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -715,7 +717,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
     }
   }
 
-  // ✅✅ FIXED FINALIZE: calls Edge Function (service_role), no direct insert
+  // ✅ FINALIZE = Edge Function only (alchemy-finalize). NO direct governance_ledger inserts.
   async function handleFinalize() {
     if (!selectedId) return flashError("Select a draft first.");
 
@@ -727,7 +729,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
     if (draft.finalized_record_id) return flashError("This draft is already linked to a ledger record.");
     if (!canMutateSelected) return flashError("This draft has left Alchemy and can’t be finalized here.");
 
-    // Lane safety: don’t allow cross-lane UI finalize
+    // Lane safety (your screenshot console warning)
     if (typeof draft.is_test === "boolean" && draft.is_test !== isSandbox) {
       return flashError("Lane mismatch: this draft belongs to the other environment.");
     }
@@ -741,8 +743,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
     setInfo(null);
 
     try {
-      // ensure latest text is saved before finalize (optional but recommended)
-      // If you don’t want auto-save, remove this block.
+      // optional auto-save if dirty
       if (dirty) {
         await handleSaveDraft();
       }
@@ -762,7 +763,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         },
         body: JSON.stringify({
           draft_id: selectedId,
-          is_test: isSandbox, // keeps finalize lane-safe
+          is_test: isSandbox,
         }),
       });
 
@@ -782,19 +783,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         return flashError(data?.error || "Finalize failed.");
       }
 
-      const ledgerId = data?.ledger_id as string | undefined;
-
-      // Refresh local list so draft shows as finalized + linked
       flashInfo("Finalized → Council queue.");
       await reloadDrafts(true);
-
-      // If you want: auto switch to Finalized tab after success
-      // setStatusTab("finalized");
-
-      // If you want: highlight the linked draft in UI
-      if (ledgerId) {
-        // no-op; we keep your normal UX
-      }
     } catch (err: any) {
       console.error("finalize exception", err);
       flashError(err?.message ?? "Failed to finalize.");
@@ -803,7 +793,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
     }
   }
 
-  // Delete modal + delete methods (unchanged)
+  // Delete modal + delete methods
   function openDelete() {
     if (!selectedDraft) return flashError("Select a draft first.");
     if (!canMutateSelected) return flashError("Can’t remove a draft that already left Alchemy.");
@@ -859,19 +849,25 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
   }
 
   async function hardDeleteDraft(draftId: string, reason: string) {
-    const tryTwo = await supabase.rpc("owner_delete_governance_draft", {
-      p_draft_id: draftId,
-      p_reason: reason || null,
-    } as any);
+    const tryTwo = await supabase.rpc(
+      "owner_delete_governance_draft",
+      {
+        p_draft_id: draftId,
+        p_reason: reason || null,
+      } as any
+    );
     if (!tryTwo.error) return;
 
     const tryOne = await supabase.rpc("owner_delete_governance_draft", { p_draft_id: draftId } as any);
     if (!tryOne.error) return;
 
-    const tryAlt = await supabase.rpc("owner_delete_governance_draft", {
-      draft_id: draftId,
-      reason: reason || null,
-    } as any);
+    const tryAlt = await supabase.rpc(
+      "owner_delete_governance_draft",
+      {
+        draft_id: draftId,
+        reason: reason || null,
+      } as any
+    );
     if (tryAlt.error) throw tryAlt.error;
   }
 
@@ -1144,7 +1140,10 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                   <div className="mt-1 text-[13px] text-slate-400">
                     Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
                     <span className="mx-2 text-slate-700">•</span>
-                    Lane: <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
+                    Lane:{" "}
+                    <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>
+                      {env}
+                    </span>
                     {selectedDraft?.finalized_record_id && (
                       <>
                         <span className="mx-2 text-slate-700">•</span>
@@ -1287,12 +1286,18 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                 {workspaceTab === "editor" ? (
                   <div className={cx("h-full w-full rounded-2xl border overflow-hidden", editorCard)}>
                     <div className="h-full flex flex-col">
-                      <div className={cx("shrink-0 px-5 py-4 border-b", editorTheme === "light" ? "border-slate-200" : "border-slate-800")}>
+                      <div
+                        className={cx(
+                          "shrink-0 px-5 py-4 border-b",
+                          editorTheme === "light" ? "border-slate-200" : "border-slate-800"
+                        )}
+                      >
                         <input
                           className={cx(
                             "w-full rounded-2xl border px-4 py-3 text-[15px] outline-none transition",
                             inputBase,
-                            (!canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning) && "opacity-70 cursor-not-allowed"
+                            (!canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning) &&
+                              "opacity-70 cursor-not-allowed"
                           )}
                           placeholder="Resolution title"
                           value={title}
@@ -1306,7 +1311,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                           className={cx(
                             "h-full w-full resize-none rounded-2xl border px-4 py-4 text-[13px] leading-[1.75] outline-none transition",
                             textareaBase,
-                            (!canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning) && "opacity-70 cursor-not-allowed"
+                            (!canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning) &&
+                              "opacity-70 cursor-not-allowed"
                           )}
                           placeholder="Draft body… (or Run Alchemy)"
                           value={body}
@@ -1319,7 +1325,9 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                 ) : (
                   <div className="h-full w-full rounded-2xl border border-slate-800 bg-slate-950/40 overflow-hidden flex flex-col">
                     <div className="shrink-0 px-5 py-4 border-b border-slate-800">
-                      <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">AXIOM · Draft Review</div>
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
+                        AXIOM · Draft Review
+                      </div>
                       <div className="mt-2 text-[12px] text-slate-400 max-w-3xl">
                         Advisory-only intelligence sidecar. Draft stage writes to{" "}
                         <span className="text-sky-200 font-semibold">ai_notes</span> only (
@@ -1331,7 +1339,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                         <span className="mx-2 text-slate-700">•</span>
                         Lane: <span className={cx(isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
                         <span className="mx-2 text-slate-700">•</span>
-                        Last refresh: <span className="text-slate-300">{axiomLastRefresh ? fmtShort(axiomLastRefresh) : "—"}</span>
+                        Last refresh:{" "}
+                        <span className="text-slate-300">{axiomLastRefresh ? fmtShort(axiomLastRefresh) : "—"}</span>
                       </div>
                     </div>
 
@@ -1481,9 +1490,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
             <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5">
               <div className="rounded-2xl border border-slate-800 bg-black/40 px-5 py-5">
-                <pre className="whitespace-pre-wrap font-sans text-[13px] leading-[1.8] text-slate-100">
-                  {readerBody}
-                </pre>
+                <pre className="whitespace-pre-wrap font-sans text-[13px] leading-[1.8] text-slate-100">{readerBody}</pre>
               </div>
             </div>
 
@@ -1620,3 +1627,4 @@ function StatusTabButton({
     </button>
   );
 }
+```
