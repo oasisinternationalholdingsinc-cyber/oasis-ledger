@@ -31,12 +31,11 @@ type AxiomNote = {
   model: string | null;
   tokens_used: number | null;
   created_at: string | null;
-  // optional / future-proof
+  // optional (if present in metadata)
   severity?: string | null;
 };
 
 type AxiomMemo = {
-  // returned by Edge Function (we don’t assume table names; we rely on response)
   ok: boolean;
   memo_id?: string;
   note_id?: string;
@@ -46,9 +45,8 @@ type AxiomMemo = {
   file_hash?: string;
   file_size?: number;
   mime_type?: string;
-  registered_document_id?: string;
-  supporting_document_id?: string;
   error?: string;
+  warning?: string;
 };
 
 const ENTITY_LABELS: Record<string, string> = {
@@ -56,6 +54,10 @@ const ENTITY_LABELS: Record<string, string> = {
   lounge: "Oasis International Lounge Inc.",
   "real-estate": "Oasis International Real Estate Inc.",
 };
+
+// ✅ SET THIS TO YOUR DEPLOYED EDGE FUNCTION NAME
+// (Your enterprise function file is correct — your UI just needs to call the right name.)
+const AXIOM_COUNCIL_MEMO_FN = "axiom-council-memo";
 
 function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
@@ -89,13 +91,13 @@ function isTruthImmutableErr(err: any) {
 
 function severityPill(sev?: string | null) {
   const s = (sev ?? "").toUpperCase();
-  if (s.includes("RED") || s === "R" || s.includes("HIGH") || s.includes("CRITICAL")) {
+  if (s.includes("RED") || s.includes("CRITICAL") || s.includes("HIGH")) {
     return "bg-rose-500/15 text-rose-200 border-rose-400/40";
   }
-  if (s.includes("YELLOW") || s === "Y" || s.includes("MED") || s.includes("WARN")) {
+  if (s.includes("YELLOW") || s.includes("WARN") || s.includes("MED")) {
     return "bg-amber-500/15 text-amber-200 border-amber-400/40";
   }
-  if (s.includes("GREEN") || s === "G" || s.includes("LOW") || s.includes("OK")) {
+  if (s.includes("GREEN") || s.includes("OK") || s.includes("LOW")) {
     return "bg-emerald-500/15 text-emerald-200 border-emerald-400/40";
   }
   return "bg-slate-700/30 text-slate-200 border-slate-600/40";
@@ -105,10 +107,10 @@ export default function CICouncilPage() {
   const entityCtx = useEntity() as any;
   const osEnv = useOsEnv();
 
-  // CRITICAL: entity is ALWAYS corp entity (never "sandbox")
+  // ✅ entity is ALWAYS corp entity (never "sandbox")
   const activeEntitySlug = (entityCtx?.activeEntity as string) || "holdings";
 
-  // env toggle ONLY controls is_test
+  // ✅ env toggle ONLY controls is_test
   const isSandbox = !!osEnv?.isSandbox;
   const env: "SANDBOX" | "ROT" = isSandbox ? "SANDBOX" : "ROT";
 
@@ -135,14 +137,10 @@ export default function CICouncilPage() {
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
-  // ✅ AXIOM (Council) additions (UI-only; does NOT touch your status wiring)
-  const [axiomBusy, setAxiomBusy] = useState<null | "load" | "run" | "url">(
-    null
-  );
+  // ✅ AXIOM (Council) state
+  const [axiomBusy, setAxiomBusy] = useState<null | "load" | "run" | "url">(null);
   const [axiomNotes, setAxiomNotes] = useState<AxiomNote[]>([]);
-  const [axiomSelectedNoteId, setAxiomSelectedNoteId] = useState<string | null>(
-    null
-  );
+  const [axiomSelectedNoteId, setAxiomSelectedNoteId] = useState<string | null>(null);
   const [axiomLastMemo, setAxiomLastMemo] = useState<AxiomMemo | null>(null);
   const [axiomMemoUrl, setAxiomMemoUrl] = useState<string | null>(null);
 
@@ -167,9 +165,7 @@ export default function CICouncilPage() {
   const envFiltered = useMemo(() => {
     const hasEnv = records.some((r) => typeof r.is_test === "boolean");
     if (!hasEnv) return records;
-    return records.filter((r) =>
-      isSandbox ? r.is_test === true : r.is_test === false
-    );
+    return records.filter((r) => (isSandbox ? r.is_test === true : r.is_test === false));
   }, [records, isSandbox]);
 
   const filtered = useMemo(() => {
@@ -199,12 +195,7 @@ export default function CICouncilPage() {
       return ctxId;
     }
 
-    const { data, error } = await supabase
-      .from("entities")
-      .select("id, slug")
-      .eq("slug", slug)
-      .single();
-
+    const { data, error } = await supabase.from("entities").select("id, slug").eq("slug", slug).single();
     if (error || !data?.id) throw error ?? new Error("Entity lookup failed.");
     setEntityId(data.id);
     return data.id as string;
@@ -293,7 +284,8 @@ export default function CICouncilPage() {
     setSelectedId(rec.id);
     setError(null);
     setInfo(null);
-    // AXIOM state resets per selection
+
+    // reset AXIOM state per selection
     setAxiomNotes([]);
     setAxiomSelectedNoteId(null);
     setAxiomLastMemo(null);
@@ -301,12 +293,9 @@ export default function CICouncilPage() {
   }
 
   /**
-   * ✅ Slight adjustment for enterprise “SQL is backend always”:
-   * Try SECURITY DEFINER RPC first (bypasses RoT immutability trigger safely),
-   * fallback to direct update only if RPC isn’t present.
-   *
-   * Expected function signature (recommended):
-   *   council_set_status(p_record_id uuid, p_next_status text) returns jsonb { ok, status, error? }
+   * Council status set:
+   * 1) Try SECURITY DEFINER RPC `council_set_status` if present
+   * 2) Fallback to direct update (may be blocked by Truth immutability)
    */
   async function setCouncilStatus(recordId: string, next: CouncilStatus) {
     // 1) Preferred: RPC
@@ -315,24 +304,22 @@ export default function CICouncilPage() {
         p_record_id: recordId,
         p_next_status: next,
       });
+
       if (!error) {
         const ok = (data as any)?.ok;
         if (ok === false) throw new Error((data as any)?.error ?? "Council RPC failed.");
         return;
       }
-      // If function missing, fall through to direct update
+
       const msg = (error?.message ?? "").toLowerCase();
       if (!msg.includes("function") && !msg.includes("does not exist")) throw error;
     } catch (e: any) {
       if (isTruthImmutableErr(e)) throw e;
-      // otherwise keep going to fallback
+      // fall through to direct update
     }
 
     // 2) Fallback: direct update
-    const { error: upErr } = await supabase
-      .from("governance_ledger")
-      .update({ status: next })
-      .eq("id", recordId);
+    const { error: upErr } = await supabase.from("governance_ledger").update({ status: next }).eq("id", recordId);
     if (upErr) throw upErr;
   }
 
@@ -357,14 +344,12 @@ export default function CICouncilPage() {
 
     try {
       await setCouncilStatus(selected.id, next);
-      setRecords((prev) =>
-        prev.map((r) => (r.id === selected.id ? { ...r, status: next } : r))
-      );
+      setRecords((prev) => prev.map((r) => (r.id === selected.id ? { ...r, status: next } : r)));
       flashInfo(`Council: ${next}.`);
     } catch (err: any) {
       if (isTruthImmutableErr(err)) {
         flashError(
-          "DB guardrail blocked this update: “Truth records are immutable”. Council must set status via SECURITY DEFINER SQL (e.g., rpc: council_set_status)."
+          "DB guardrail blocked this update: “Truth records are immutable”. Council must set status via SECURITY DEFINER SQL (rpc: council_set_status)."
         );
       } else {
         flashError(err?.message ?? `Failed to set status ${next}.`);
@@ -377,15 +362,13 @@ export default function CICouncilPage() {
 
   async function handleArchiveDiscipline() {
     flashError(
-      "Council does not directly archive by default. Use Forge (signature path) or wire Council to the deterministic seal/archive function for direct-archive mode."
+      "Council does not directly archive by default. Use Forge (signature path) or wire Council to deterministic seal/archive for direct-archive mode."
     );
   }
 
   const lanePill = cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300");
-
   const canApprove = !!selected && (selected.status ?? "").toUpperCase() === "PENDING";
   const canReject = !!selected && (selected.status ?? "").toUpperCase() === "PENDING";
-
   const showNoEntityWarning = !entityId;
 
   // =========================
@@ -397,68 +380,44 @@ export default function CICouncilPage() {
     return pick ?? (axiomNotes[0] ?? null);
   }, [axiomNotes, axiomSelectedNoteId]);
 
+  const axiomSeverityLabel =
+    (axiomLastMemo?.severity as string | undefined) ??
+    (axiomSelected?.severity as string | undefined) ??
+    null;
+
   async function loadAxiomNotesForSelected() {
     if (!selected?.id) return;
 
     setAxiomBusy("load");
     try {
-      // Primary (ledger-only): try ai_advice (if you have it)
-      // Fallback: ai_notes (works in your system already; safest for UI)
-      let notes: AxiomNote[] = [];
+      // ✅ IMPORTANT FIX:
+      // Do NOT query ai_advice here (your screenshot shows schema mismatch: "column ai_advice.title does not exist")
+      // Council AXIOM reads from ai_notes only (enterprise-stable).
+      const { data, error } = await supabase
+        .from("ai_notes")
+        .select("id,title,content,model,tokens_used,created_at,metadata")
+        .eq("scope_type", "document")
+        .eq("scope_id", selected.id)
+        .in("note_type", ["memo", "summary", "note"]) // memo is what your council-memo function writes
+        .order("created_at", { ascending: false })
+        .limit(25);
 
-      // 1) Try ai_advice (optional)
-      try {
-        const { data, error } = await supabase
-          .from("ai_advice")
-          .select("id,title,content,model,tokens_used,created_at,severity")
-          .eq("record_id", selected.id)
-          .order("created_at", { ascending: false })
-          .limit(20);
+      if (error) throw error;
 
-        if (!error && Array.isArray(data) && data.length) {
-          notes = (data as any[]).map((r) => ({
-            id: r.id,
-            title: r.title ?? "AXIOM Advisory",
-            content: r.content ?? "",
-            model: r.model ?? null,
-            tokens_used: r.tokens_used ?? null,
-            created_at: r.created_at ?? null,
-            severity: r.severity ?? null,
-          }));
-        }
-      } catch {
-        // ignore
-      }
-
-      // 2) Fallback ai_notes (guaranteed pattern in your stack)
-      if (!notes.length) {
-        const { data, error } = await supabase
-          .from("ai_notes")
-          .select("id,title,content,model,tokens_used,created_at")
-          .eq("scope_type", "document")
-          .eq("scope_id", selected.id)
-          .in("note_type", ["summary", "memo", "note"])
-          .order("created_at", { ascending: false })
-          .limit(20);
-
-        if (error) throw error;
-
-        notes = (data ?? []).map((r: any) => ({
-          id: r.id,
-          title: r.title ?? "AXIOM Advisory",
-          content: r.content ?? "",
-          model: r.model ?? null,
-          tokens_used: r.tokens_used ?? null,
-          created_at: r.created_at ?? null,
-        }));
-      }
+      const notes = (data ?? []).map((r: any) => ({
+        id: r.id,
+        title: r.title ?? "AXIOM Advisory",
+        content: r.content ?? "",
+        model: r.model ?? null,
+        tokens_used: r.tokens_used ?? null,
+        created_at: r.created_at ?? null,
+        severity: r?.metadata?.severity ?? r?.metadata?.severity_pill ?? null,
+      })) as AxiomNote[];
 
       setAxiomNotes(notes);
       setAxiomSelectedNoteId(notes[0]?.id ?? null);
 
-      if (!notes.length) {
-        flashInfo("AXIOM: no advisory yet for this record.");
-      }
+      if (!notes.length) flashInfo("AXIOM: no advisory yet for this record.");
     } catch (e: any) {
       flashError(e?.message ?? "AXIOM: failed to load advisory.");
     } finally {
@@ -477,61 +436,36 @@ export default function CICouncilPage() {
     setAxiomMemoUrl(null);
 
     try {
-      // ✅ IMPORTANT: you said you already deployed it.
-      // We DO NOT rewrite it; we just call it.
-      // To avoid back-and-forth on naming, we try a short list of common names.
-      const fnCandidates = [
-        "axiom-council-memo",
-        "axiom-council-advisory",
-        "axiom-memo-render",
-        "axiom-render-memo",
-        "axiom-council-review",
-      ];
-
-      let lastErr: any = null;
-      let payload = {
+      // ✅ EXACT contract your Edge Function expects:
+      // { record_id, is_test }
+      // (Extra fields are harmless, but we keep it tight.)
+      const payload = {
         record_id: selected.id,
-        entity_slug: activeEntitySlug,
         is_test: isSandbox,
-        lane: isSandbox ? "SANDBOX" : "ROT",
-        mode: "council",
       };
 
-      let res: any = null;
+      const { data, error } = await supabase.functions.invoke(AXIOM_COUNCIL_MEMO_FN, {
+        body: payload,
+      });
 
-      for (const fn of fnCandidates) {
-        const { data, error } = await supabase.functions.invoke(fn, { body: payload });
-        if (!error) {
-          res = data;
-          break;
-        }
-        const msg = (error.message ?? "").toLowerCase();
-        // if function missing, try next; otherwise keep the error
-        if (msg.includes("not found") || msg.includes("does not exist") || msg.includes("404")) {
-          lastErr = error;
-          continue;
-        }
-        lastErr = error;
-        break;
-      }
+      if (error) throw error;
 
-      if (!res) throw lastErr ?? new Error("AXIOM memo function not found.");
-
-      const memo = res as AxiomMemo;
-      if (memo.ok === false) throw new Error(memo.error ?? "AXIOM memo failed.");
+      const memo = data as AxiomMemo;
+      if (!memo || memo.ok === false) throw new Error(memo?.error ?? "AXIOM memo failed.");
 
       setAxiomLastMemo(memo);
-      flashInfo("AXIOM memo generated & registered.");
+      flashInfo(memo.warning ? `AXIOM memo generated (warning: ${memo.warning})` : "AXIOM memo generated & registered.");
 
-      // Refresh advisory text too (often memo generation also writes a note row)
+      // Refresh advisory text (memo generation writes ai_notes)
       void loadAxiomNotesForSelected();
 
-      // If we have storage pointers, make a signed URL (bucket likely private)
+      // If we have storage pointers, create signed URL (bucket likely private)
       if (memo.storage_bucket && memo.storage_path) {
         setAxiomBusy("url");
         const { data: urlData, error: urlErr } = await supabase.storage
           .from(memo.storage_bucket)
-          .createSignedUrl(memo.storage_path, 60 * 15); // 15 min
+          .createSignedUrl(memo.storage_path, 60 * 15);
+
         if (!urlErr && urlData?.signedUrl) setAxiomMemoUrl(urlData.signedUrl);
       }
     } catch (e: any) {
@@ -540,11 +474,6 @@ export default function CICouncilPage() {
       setAxiomBusy(null);
     }
   }
-
-  const axiomSeverityLabel =
-    (axiomLastMemo?.severity as string | undefined) ??
-    (axiomSelected?.severity as string | undefined) ??
-    null;
 
   return (
     <div className="h-full flex flex-col px-8 pt-6 pb-6">
@@ -565,7 +494,7 @@ export default function CICouncilPage() {
 
         {showNoEntityWarning && (
           <div className="mt-3 rounded-2xl border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-[12px] text-amber-200">
-            OS Context: <b>activeEntityId</b> was missing, so Council is resolving <code>entities.id</code> by slug
+            OS Context: <b>activeEntityId</b> was missing, so Council resolved <code>entities.id</code> by slug
             automatically. (Env toggle only flips <code>is_test</code>.)
           </div>
         )}
@@ -802,7 +731,12 @@ export default function CICouncilPage() {
                   </div>
 
                   {axiomSeverityLabel && (
-                    <span className={cx("rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.18em]", severityPill(axiomSeverityLabel))}>
+                    <span
+                      className={cx(
+                        "rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.18em]",
+                        severityPill(axiomSeverityLabel)
+                      )}
+                    >
                       {axiomSeverityLabel}
                     </span>
                   )}
@@ -810,7 +744,7 @@ export default function CICouncilPage() {
               </div>
 
               <div className="flex-1 min-h-0 overflow-y-auto px-5 py-5 space-y-4">
-                {/* ✅ AXIOM Advisory (text + Reader view) */}
+                {/* AXIOM Advisory */}
                 <div className="rounded-2xl border border-slate-800 bg-black/35 px-4 py-4">
                   <div className="flex items-center justify-between gap-2">
                     <div className="text-[11px] uppercase tracking-[0.22em] text-indigo-200">
@@ -819,7 +753,7 @@ export default function CICouncilPage() {
                     <div className="flex items-center gap-2">
                       <button
                         onClick={() => loadAxiomNotesForSelected()}
-                        disabled={!selected || axiomBusy === "load" || axiomBusy === "run" || axiomBusy === "url"}
+                        disabled={!selected || axiomBusy !== null}
                         className="rounded-full border border-slate-700 bg-slate-950/40 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {axiomBusy === "load" ? "Loading…" : "Load"}
@@ -827,9 +761,9 @@ export default function CICouncilPage() {
 
                       <button
                         onClick={() => invokeAxiomMemoEdgeFunction()}
-                        disabled={!selected || axiomBusy === "load" || axiomBusy === "run" || axiomBusy === "url"}
+                        disabled={!selected || axiomBusy !== null}
                         className="rounded-full border border-amber-400/50 bg-amber-500/10 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
-                        title="Renders AXIOM Memo PDF as a sidecar evidence attachment (lane-scoped) without touching the resolution PDF."
+                        title="Renders AXIOM Memo PDF as lane-scoped sidecar evidence without touching the resolution PDF."
                       >
                         {axiomBusy === "run" ? "Generating…" : "Generate Memo PDF"}
                       </button>
@@ -848,7 +782,6 @@ export default function CICouncilPage() {
                     )}
                   </div>
 
-                  {/* notes list */}
                   {axiomNotes.length > 0 && (
                     <div className="mt-4">
                       <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">
@@ -872,8 +805,8 @@ export default function CICouncilPage() {
                                 {n.title || "AXIOM Advisory"}
                               </div>
                               <div className="mt-1 text-[10px] text-slate-500">
-                                {fmtShort(n.created_at)}{" "}
-                                {n.model ? `• ${n.model}` : ""}
+                                {fmtShort(n.created_at)}
+                                {n.model ? ` • ${n.model}` : ""}
                                 {typeof n.tokens_used === "number" ? ` • ${n.tokens_used} tok` : ""}
                               </div>
                             </button>
@@ -883,11 +816,8 @@ export default function CICouncilPage() {
                     </div>
                   )}
 
-                  {/* selected note preview */}
                   <div className="mt-4 rounded-2xl border border-slate-800 bg-black/25 px-4 py-4">
-                    <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">
-                      Advisory Preview
-                    </div>
+                    <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Advisory Preview</div>
                     <div className="mt-2 max-h-[190px] overflow-y-auto">
                       <pre className="whitespace-pre-wrap font-sans text-[12px] leading-[1.7] text-slate-200">
                         {axiomSelected?.content?.trim()
@@ -897,21 +827,15 @@ export default function CICouncilPage() {
                     </div>
                   </div>
 
-                  {/* memo PDF status */}
                   <div className="mt-4 rounded-2xl border border-slate-800 bg-black/20 px-4 py-4">
-                    <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">
-                      Memo PDF Attachment
-                    </div>
+                    <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Memo PDF Attachment</div>
 
                     {!axiomLastMemo ? (
-                      <div className="mt-2 text-[12px] text-slate-500">
-                        No memo generated yet.
-                      </div>
+                      <div className="mt-2 text-[12px] text-slate-500">No memo generated yet.</div>
                     ) : (
                       <div className="mt-2 space-y-2">
                         <div className="text-[12px] text-slate-300">
-                          Status:{" "}
-                          <span className="text-emerald-200 font-semibold">Registered</span>
+                          Status: <span className="text-emerald-200 font-semibold">Registered</span>
                           {axiomLastMemo.file_hash ? (
                             <>
                               <span className="mx-2 text-slate-700">•</span>
@@ -923,7 +847,7 @@ export default function CICouncilPage() {
                           ) : null}
                         </div>
 
-                        {axiomMemoUrl && (
+                        {axiomMemoUrl ? (
                           <div className="grid grid-cols-2 gap-2">
                             <a
                               href={axiomMemoUrl}
@@ -941,12 +865,11 @@ export default function CICouncilPage() {
                               Download
                             </a>
                           </div>
-                        )}
-
-                        {!axiomMemoUrl && axiomLastMemo.storage_bucket && axiomLastMemo.storage_path && (
+                        ) : (
                           <div className="text-[11px] text-slate-500">
-                            Stored: <span className="font-mono">{axiomLastMemo.storage_bucket}</span> /{" "}
-                            <span className="font-mono">{axiomLastMemo.storage_path}</span>
+                            Stored:{" "}
+                            <span className="font-mono">{axiomLastMemo.storage_bucket ?? "—"}</span> /{" "}
+                            <span className="font-mono">{axiomLastMemo.storage_path ?? "—"}</span>
                           </div>
                         )}
                       </div>
@@ -954,7 +877,7 @@ export default function CICouncilPage() {
                   </div>
                 </div>
 
-                {/* Authority actions (unchanged wiring) */}
+                {/* Authority actions */}
                 <button
                   onClick={() => updateStatus("APPROVED")}
                   disabled={!canApprove || !!busy}
@@ -974,7 +897,7 @@ export default function CICouncilPage() {
                 <div className="rounded-2xl border border-slate-800 bg-black/25 px-4 py-4">
                   <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Execution & Archive</div>
                   <div className="mt-2 text-[12px] text-slate-500 leading-relaxed">
-                    Signature path executes in Forge. Direct-archive requires the deterministic seal pipeline (PDF→hash→verify).
+                    Signature path executes in Forge. Direct-archive requires deterministic seal (PDF→hash→verify).
                   </div>
 
                   <div className="mt-3 grid grid-cols-2 gap-2">
@@ -1031,7 +954,6 @@ export default function CICouncilPage() {
             </div>
 
             <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 space-y-4">
-              {/* Resolution body */}
               <div className="rounded-2xl border border-slate-800 bg-black/40 px-5 py-5">
                 <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Resolution</div>
                 <pre className="mt-2 whitespace-pre-wrap font-sans text-[13px] leading-[1.8] text-slate-100">
@@ -1039,13 +961,12 @@ export default function CICouncilPage() {
                 </pre>
               </div>
 
-              {/* AXIOM advisory (same Reader, no lane mixing) */}
               <div className="rounded-2xl border border-slate-800 bg-black/30 px-5 py-5">
                 <div className="flex items-center justify-between gap-2">
                   <div className="text-[10px] uppercase tracking-[0.22em] text-indigo-200">AXIOM Advisory</div>
                   <button
                     onClick={() => loadAxiomNotesForSelected()}
-                    disabled={!selected || axiomBusy === "load" || axiomBusy === "run" || axiomBusy === "url"}
+                    disabled={!selected || axiomBusy !== null}
                     className="rounded-full border border-slate-700 bg-slate-950/40 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {axiomBusy === "load" ? "Loading…" : "Load"}
