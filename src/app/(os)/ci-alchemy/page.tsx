@@ -103,6 +103,7 @@ export default function CIAlchemyPage() {
   const [body, setBody] = useState("");
 
   // OS UX controls
+  // ✅ Default open view is Drafts (as requested)
   const [statusTab, setStatusTab] = useState<StatusTab>("draft");
   const [query, setQuery] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(true);
@@ -163,6 +164,7 @@ export default function CIAlchemyPage() {
     return window.confirm("You have unsaved edits. Continue and lose changes?");
   }
 
+  // ✅ Prefer Draft first (default open selection)
   function pickDefaultSelection(rows: DraftRecord[]) {
     const preferred =
       rows.find((d) => d.status === "draft" && !d.finalized_record_id) ||
@@ -280,6 +282,7 @@ export default function CIAlchemyPage() {
     let cancelled = false;
     (async () => {
       if (cancelled) return;
+      // ✅ Always open on Drafts tab
       setStatusTab("draft");
       setQuery("");
       setWorkspaceTab("editor");
@@ -899,22 +902,14 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         is_test: isSandbox,
       };
 
-      const tryLedger = await supabase
-        .from("governance_ledger")
-        .insert(ledgerPayload)
-        .select("id")
-        .single();
+      const tryLedger = await supabase.from("governance_ledger").insert(ledgerPayload).select("id").single();
 
       let ledgerId: string | null = null;
 
       if (tryLedger.error) {
         if (isMissingColumnErr(tryLedger.error)) {
           delete ledgerPayload.is_test;
-          const retry = await supabase
-            .from("governance_ledger")
-            .insert(ledgerPayload)
-            .select("id")
-            .single();
+          const retry = await supabase.from("governance_ledger").insert(ledgerPayload).select("id").single();
           if (retry.error || !retry.data) throw retry.error ?? new Error("Ledger insert failed.");
           ledgerId = (retry.data as { id: string }).id;
         } else {
@@ -1079,22 +1074,13 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
   }
 
   async function hardDeleteDraft(draftId: string, reason: string) {
-    const tryTwo = await supabase.rpc(
-      "owner_delete_governance_draft",
-      { p_draft_id: draftId, p_reason: reason || null } as any
-    );
+    const tryTwo = await supabase.rpc("owner_delete_governance_draft", { p_draft_id: draftId, p_reason: reason || null } as any);
     if (!tryTwo.error) return;
 
-    const tryOne = await supabase.rpc(
-      "owner_delete_governance_draft",
-      { p_draft_id: draftId } as any
-    );
+    const tryOne = await supabase.rpc("owner_delete_governance_draft", { p_draft_id: draftId } as any);
     if (!tryOne.error) return;
 
-    const tryAlt = await supabase.rpc(
-      "owner_delete_governance_draft",
-      { draft_id: draftId, reason: reason || null } as any
-    );
+    const tryAlt = await supabase.rpc("owner_delete_governance_draft", { draft_id: draftId, reason: reason || null } as any);
     if (tryAlt.error) throw tryAlt.error;
   }
 
@@ -1183,13 +1169,11 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       {/* Header under OS bar */}
       <div className="mb-4 shrink-0">
         <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI • Alchemy</div>
-        <h1 className="mt-1 text-xl font-semibold text-slate-50">
-          Drafting Console · AI Scribe
-        </h1>
+        <h1 className="mt-1 text-xl font-semibold text-slate-50">Drafting Console · AI Scribe</h1>
         <p className="mt-1 text-xs text-slate-400 max-w-3xl">
           Draft safely inside Alchemy.{" "}
-          <span className="text-emerald-300 font-semibold">Finalize</span> promotes into
-          Council (governance_ledger status=PENDING).
+          <span className="text-emerald-300 font-semibold">Finalize</span> promotes into Council
+          (governance_ledger status=PENDING).
         </p>
         <div className="mt-2 text-xs text-slate-400">
           Entity: <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
@@ -1571,7 +1555,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                         </div>
                       ) : !selectedAxiomSummary ? (
                         <div className="rounded-2xl border border-slate-800 bg-black/30 px-5 py-4 text-[13px] text-slate-400">
-                          No AXIOM summary found for this draft yet. Click <span className="text-sky-200 font-semibold">Run AXIOM</span>.
+                          No AXIOM summary found for this draft yet. Click{" "}
+                          <span className="text-sky-200 font-semibold">Run AXIOM</span>.
                         </div>
                       ) : (
                         <div className="rounded-2xl border border-slate-800 bg-black/30 overflow-hidden">
@@ -1685,9 +1670,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                   {(selectedDraft?.title || title || "(untitled)") as string}
                 </div>
                 <div className="mt-1 text-[11px] text-slate-500">
-                  {selectedDraft
-                    ? `${selectedDraft.status.toUpperCase()} • ${fmtShort(selectedDraft.created_at)}`
-                    : "—"}
+                  {selectedDraft ? `${selectedDraft.status.toUpperCase()} • ${fmtShort(selectedDraft.created_at)}` : "—"}
                   <span className="mx-2 text-slate-700">•</span>
                   <span className={cx(isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
                 </div>
@@ -1723,12 +1706,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           <div className="w-full max-w-[620px] rounded-3xl border border-slate-800 bg-slate-950 shadow-2xl shadow-black/60 overflow-hidden">
             <div className="px-6 py-5 border-b border-slate-800">
               <div className="text-[11px] uppercase tracking-[0.22em] text-rose-300">Delete draft</div>
-              <div className="mt-1 text-[16px] font-semibold text-slate-100">
-                Discard vs Permanent Delete
-              </div>
-              <div className="mt-2 text-[12px] text-slate-400">
-                Allowed only before finalize. Ledger-linked drafts are locked.
-              </div>
+              <div className="mt-1 text-[16px] font-semibold text-slate-100">Discard vs Permanent Delete</div>
+              <div className="mt-2 text-[12px] text-slate-400">Allowed only before finalize. Ledger-linked drafts are locked.</div>
             </div>
 
             <div className="px-6 py-5 space-y-4">
@@ -1765,9 +1744,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
               </div>
 
               <div>
-                <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 mb-2">
-                  Reason (optional)
-                </div>
+                <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 mb-2">Reason (optional)</div>
                 <textarea
                   className="w-full min-h-[96px] rounded-2xl border border-slate-800 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 resize-none outline-none focus:border-slate-600"
                   value={deleteReason}
@@ -1779,9 +1756,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
               {deleteMode === "hard" && (
                 <div className="rounded-2xl border border-rose-500/30 bg-rose-500/5 px-4 py-3">
-                  <div className="text-[11px] uppercase tracking-[0.2em] text-rose-300">
-                    Confirm hard delete
-                  </div>
+                  <div className="text-[11px] uppercase tracking-[0.2em] text-rose-300">Confirm hard delete</div>
                   <div className="mt-1 text-[11px] text-slate-400">
                     Type <span className="text-slate-200 font-semibold">DELETE</span> to confirm.
                   </div>
