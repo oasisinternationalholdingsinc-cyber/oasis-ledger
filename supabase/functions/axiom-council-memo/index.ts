@@ -1,14 +1,14 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { PDFDocument, StandardFonts, rgb } from "npm:pdf-lib@1.17.1";
+import { PDFDocument, rgb } from "npm:pdf-lib@1.17.1";
 import fontkit from "npm:@pdf-lib/fontkit@1.1.1";
 
 /* ============================
    TYPES
 ============================ */
 type ReqBody = {
-  record_id: string;
-  is_test?: boolean;
+  record_id: string;          // governance_ledger.id
+  is_test?: boolean;          // lane flag
   memo?: {
     executive_summary?: string;
     findings?: Array<{
@@ -21,7 +21,11 @@ type ReqBody = {
       recommendation?: string;
       confidence?: "LOW" | "MEDIUM" | "HIGH";
     }>;
-    conditions?: { pre?: string[]; during?: string[]; post?: string[] };
+    conditions?: {
+      pre?: string[];
+      during?: string[];
+      post?: string[];
+    };
     decision_record?: {
       recommended_disposition?: "APPROVE" | "APPROVE_WITH_CONDITIONS" | "REJECT" | "DEFER";
       rationale?: string;
@@ -53,6 +57,10 @@ function json(req: Request, body: unknown, status = 200) {
   });
 }
 
+function safeStr(x: unknown, fallback = ""): string {
+  return typeof x === "string" ? x : fallback;
+}
+
 async function sha256Hex(bytes: Uint8Array) {
   const buf = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(buf))
@@ -65,21 +73,30 @@ function ymdhm(d = new Date()) {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}`;
 }
 
+/**
+ * PDF-safe sanitizer:
+ * - Inter supports lots of Unicode, but NOT emoji.
+ * - Also keeps the PDF deterministic and stable.
+ */
+function pdfSafe(text: string) {
+  // remove non-ASCII control chars + emoji etc
+  return (text ?? "").replace(/[^\x09\x0A\x0D\x20-\x7E]/g, "");
+}
+
 function computeSeverity(findings: any[]) {
   const list = Array.isArray(findings) ? findings : [];
   const hi = list.filter((f) => ["HIGH", "CRITICAL"].includes(f?.severity));
-  if (hi.some((f) => !!f?.blocking)) return { pill: "RED", emoji: "🔴", rationale: "Blocking high-severity findings." };
-  if (hi.length >= 2) return { pill: "RED", emoji: "🔴", rationale: "Multiple high-severity findings." };
-  if (list.some((f) => f?.severity === "MEDIUM")) return { pill: "YELLOW", emoji: "🟡", rationale: "Moderate concerns present." };
-  return { pill: "GREEN", emoji: "🟢", rationale: "No material concerns detected." };
-}
-
-function safeStr(x: unknown, fallback = ""): string {
-  return typeof x === "string" ? x : fallback;
+  if (hi.some((f) => !!f?.blocking)) return { pill: "RED" as const, rationale: "Blocking high-severity findings." };
+  if (hi.length >= 2) return { pill: "RED" as const, rationale: "Multiple high-severity findings." };
+  if (list.some((f) => f?.severity === "MEDIUM")) return { pill: "YELLOW" as const, rationale: "Moderate concerns present." };
+  return { pill: "GREEN" as const, rationale: "No material concerns detected." };
 }
 
 /* ============================
    PDF RENDERER (INTER)
+   - Uses global _shared fonts
+   - fontkit enabled
+   - no emoji in PDF
 ============================ */
 async function renderMemoPdf(opts: {
   title: string;
@@ -88,43 +105,31 @@ async function renderMemoPdf(opts: {
   recordId: string;
   generatedBy: string;
   generatedAtISO: string;
-  severity: { pill: string; emoji: string; rationale: string };
+  severity: { pill: "GREEN" | "YELLOW" | "RED"; rationale: string };
   memo: Required<NonNullable<ReqBody["memo"]>>;
 }) {
   const pdf = await PDFDocument.create();
   pdf.registerFontkit(fontkit);
 
-  // Correct global shared paths (IMPORTANT)
-  const interRegularUrl = new URL("../_shared/fonts/Inter-Regular.ttf", import.meta.url);
-  const interSemiUrl = new URL("../_shared/fonts/Inter-SemiBold.ttf", import.meta.url);
+  // ✅ Load fonts relative to this file so bundling works
+  const interRegular = await Deno.readFile(new URL("../_shared/fonts/Inter-Regular.ttf", import.meta.url));
+  const interSemi = await Deno.readFile(new URL("../_shared/fonts/Inter-SemiBold.ttf", import.meta.url));
 
-  let font: any;
-  let fontBold: any;
-
-  try {
-    const interRegular = await Deno.readFile(interRegularUrl);
-    const interSemi = await Deno.readFile(interSemiUrl);
-    font = await pdf.embedFont(interRegular, { subset: true });
-    fontBold = await pdf.embedFont(interSemi, { subset: true });
-  } catch (_e) {
-    // fail-safe: never brick prod if fonts go missing
-    font = await pdf.embedFont(StandardFonts.Helvetica);
-    fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
-  }
+  const font = await pdf.embedFont(interRegular, { subset: true });
+  const fontBold = await pdf.embedFont(interSemi, { subset: true });
 
   const pageW = 612;
   const pageH = 792;
+  const margin = 48;
+
   const page = pdf.addPage([pageW, pageH]);
 
-  const margin = 48;
-  let y = 740;
-
-  // simple OS-styled header band
+  // Header bar
   page.drawRectangle({ x: 0, y: pageH - 64, width: pageW, height: 64, color: rgb(0.03, 0.05, 0.10) });
 
   page.drawText("OASIS DIGITAL PARLIAMENT", {
     x: margin,
-    y: pageH - 34,
+    y: pageH - 38,
     size: 11,
     font: fontBold,
     color: rgb(0.95, 0.95, 0.95),
@@ -132,106 +137,88 @@ async function renderMemoPdf(opts: {
 
   page.drawText("AXIOM MEMORANDUM (ADVISORY)", {
     x: margin,
-    y: pageH - 50,
+    y: pageH - 54,
     size: 9,
     font,
     color: rgb(0.75, 0.80, 0.95),
   });
 
-  const right = `${opts.entityName} • ${opts.lane}`;
+  const right = pdfSafe(`${opts.entityName} • ${opts.lane}`);
   const rightWidth = font.widthOfTextAtSize(right, 9);
   page.drawText(right, {
     x: pageW - margin - rightWidth,
-    y: pageH - 50,
+    y: pageH - 54,
     size: 9,
     font,
     color: rgb(0.90, 0.80, 0.35),
   });
 
-  // Title
-  y -= 40;
-  page.drawText(safeStr(opts.title, "Untitled Resolution"), {
+  let y = pageH - 98;
+
+  page.drawText(pdfSafe(opts.title || "Untitled Resolution"), {
     x: margin,
     y,
     size: 16,
     font: fontBold,
-    color: rgb(0.95, 0.95, 0.95),
+    color: rgb(0.98, 0.98, 0.98),
   });
+  y -= 20;
 
-  y -= 18;
-  page.drawText(`Record: ${opts.recordId} • Generated: ${opts.generatedAtISO} • By: ${opts.generatedBy}`, {
-    x: margin,
-    y,
-    size: 9,
-    font,
-    color: rgb(0.65, 0.70, 0.85),
-  });
+  page.drawText(
+    pdfSafe(`Record ID: ${opts.recordId} • Generated: ${opts.generatedAtISO} • By: ${opts.generatedBy}`),
+    { x: margin, y, size: 9, font, color: rgb(0.65, 0.70, 0.85) }
+  );
+  y -= 22;
 
-  // Severity box
-  y -= 28;
+  // Severity pill (NO emoji)
   page.drawRectangle({
     x: margin,
-    y: y - 54,
+    y: y - 42,
     width: pageW - margin * 2,
-    height: 54,
+    height: 42,
     borderColor: rgb(0.20, 0.25, 0.35),
     borderWidth: 1,
     color: rgb(0, 0, 0),
     opacity: 0.35,
   });
 
-  page.drawText(`${opts.severity.emoji}  SEVERITY: ${opts.severity.pill}`, {
+  page.drawText(pdfSafe(`SEVERITY: ${opts.severity.pill}`), {
     x: margin + 14,
-    y: y - 28,
+    y: y - 18,
     size: 12,
     font: fontBold,
     color: rgb(0.90, 0.80, 0.35),
   });
 
-  page.drawText(opts.severity.rationale, {
+  page.drawText(pdfSafe(opts.severity.rationale), {
     x: margin + 14,
-    y: y - 44,
+    y: y - 34,
     size: 9,
     font,
     color: rgb(0.80, 0.80, 0.80),
   });
 
-  y -= 76;
+  y -= 62;
 
-  // Executive summary
   page.drawText("Executive Summary", { x: margin, y, size: 12, font: fontBold, color: rgb(0.95, 0.95, 0.95) });
   y -= 14;
 
-  const wrap = (text: string, maxWidth: number, size: number) => {
-    const words = (text ?? "").split(/\s+/).filter(Boolean);
-    const lines: string[] = [];
-    let line = "";
-    for (const w of words) {
-      const test = line ? `${line} ${w}` : w;
-      if (font.widthOfTextAtSize(test, size) <= maxWidth) line = test;
-      else {
-        if (line) lines.push(line);
-        line = w;
-      }
-    }
-    if (line) lines.push(line);
-    return lines;
-  };
-
-  const summary = safeStr(opts.memo.executive_summary, "AXIOM advisory memo generated for Council review. Advisory only.");
-  const sumLines = wrap(summary, pageW - margin * 2, 10);
-
-  for (const line of sumLines.slice(0, 28)) {
-    page.drawText(line, { x: margin, y, size: 10, font, color: rgb(0.88, 0.88, 0.88) });
-    y -= 14;
-    if (y < 70) break;
-  }
+  const summary = pdfSafe(opts.memo.executive_summary ?? "");
+  page.drawText(summary, {
+    x: margin,
+    y,
+    size: 10,
+    font,
+    color: rgb(0.90, 0.90, 0.90),
+    maxWidth: pageW - margin * 2,
+    lineHeight: 14,
+  });
 
   // Footer
-  page.drawText(
-    `AXIOM is advisory. Council is the authority. • ${opts.recordId.slice(0, 8)}…${opts.recordId.slice(-6)}`,
-    { x: margin, y: 24, size: 8, font, color: rgb(0.6, 0.6, 0.6) }
+  const footer = pdfSafe(
+    `AXIOM is advisory. Council is the authority. • Record ${opts.recordId.slice(0, 8)}…${opts.recordId.slice(-6)}`
   );
+  page.drawText(footer, { x: margin, y: 24, size: 8, font, color: rgb(0.6, 0.6, 0.6) });
 
   return pdf.save();
 }
@@ -263,6 +250,7 @@ Deno.serve(async (req) => {
       { auth: { persistSession: false } }
     );
 
+    // Resolve real user (ai_notes.created_by is NOT NULL)
     const { data: userData, error: userErr } = await sb.auth.getUser(token);
     if (userErr || !userData?.user?.id) return json(req, { ok: false, error: "Invalid session" }, 401);
     const userId = userData.user.id;
@@ -275,37 +263,42 @@ Deno.serve(async (req) => {
 
     if (glErr || !gl) return json(req, { ok: false, error: glErr?.message ?? "Ledger record not found" }, 404);
     if (typeof gl.is_test === "boolean" && gl.is_test !== isTest)
-      return json(req, { ok: false, error: "Lane mismatch (is_test)." }, 400);
+      return json(req, { ok: false, error: "Lane mismatch: record.is_test does not match request is_test" }, 400);
 
-    const { data: ent, error: entErr } = await sb.from("entities").select("name,slug").eq("id", gl.entity_id).single();
+    const { data: ent, error: entErr } = await sb
+      .from("entities")
+      .select("name,slug")
+      .eq("id", gl.entity_id)
+      .single();
+
     if (entErr || !ent) return json(req, { ok: false, error: entErr?.message ?? "Entity not found" }, 404);
 
     const memo = {
-      executive_summary: body.memo?.executive_summary ?? "AXIOM advisory memo generated for Council review. Advisory only.",
+      executive_summary:
+        body.memo?.executive_summary ??
+        "AXIOM advisory memo generated for Council review. Advisory only.",
       findings: body.memo?.findings ?? [],
-      conditions: {
-        pre: body.memo?.conditions?.pre ?? [],
-        during: body.memo?.conditions?.during ?? [],
-        post: body.memo?.conditions?.post ?? [],
-      },
-      decision_record: {
-        recommended_disposition: body.memo?.decision_record?.recommended_disposition ?? "APPROVE_WITH_CONDITIONS",
-        rationale: body.memo?.decision_record?.rationale ?? "Council remains the authority. AXIOM is advisory only.",
-        followups: body.memo?.decision_record?.followups ?? [],
-        suggested_execution_mode: body.memo?.decision_record?.suggested_execution_mode ?? "FORGE_SIGNATURE",
+      conditions: body.memo?.conditions ?? { pre: [], during: [], post: [] },
+      decision_record: body.memo?.decision_record ?? {
+        recommended_disposition: "APPROVE_WITH_CONDITIONS",
+        rationale: "Council remains authority.",
+        followups: [],
+        suggested_execution_mode: "FORGE_SIGNATURE",
       },
       diff_suggestions: body.memo?.diff_suggestions ?? [],
     } as Required<NonNullable<ReqBody["memo"]>>;
 
     const severity = computeSeverity(memo.findings);
+    const generatedAtISO = new Date().toISOString();
+    const generatedBy = `CI-Council:${userId.slice(0, 8)}`;
 
     const pdfBytes = await renderMemoPdf({
-      title: safeStr(gl.title, "Untitled Resolution"),
-      entityName: safeStr(ent.name, ent.slug ?? "Entity"),
+      title: gl.title ?? "Untitled Resolution",
+      entityName: ent.name ?? ent.slug ?? "Entity",
       lane,
       recordId: gl.id,
-      generatedBy: `CI-Council:${userId.slice(0, 8)}`,
-      generatedAtISO: new Date().toISOString(),
+      generatedBy,
+      generatedAtISO,
       severity,
       memo,
     });
@@ -320,27 +313,38 @@ Deno.serve(async (req) => {
     });
     if (upErr) return json(req, { ok: false, error: upErr.message }, 500);
 
-    const { error: docErr } = await sb.from("governance_documents").insert({
-      record_id: gl.id,
-      storage_path: path,
-      doc_type: "axiom_memo",
-      mime_type: "application/pdf",
-      file_hash: hash,
-      file_size: pdfBytes.length,
-      file_name: path.split("/").pop(),
-    });
-    if (docErr) return json(req, { ok: false, error: docErr.message }, 500);
+    const { data: docRow, error: docErr } = await sb
+      .from("governance_documents")
+      .insert({
+        record_id: gl.id,
+        storage_path: path,
+        doc_type: "axiom_memo",
+        mime_type: "application/pdf",
+        file_hash: hash,
+        file_size: pdfBytes.length,
+      })
+      .select("id")
+      .single();
 
-    // Note: if your chk_note_type blocks "memo", switch this to "summary"
-    const { error: noteErr } = await sb.from("ai_notes").insert({
-      scope_type: "document",
-      scope_id: gl.id,
-      note_type: "memo",
-      title: `AXIOM Council Memo • ${severity.emoji} ${severity.pill}`,
-      content: memo.executive_summary,
-      model: "axiom-council-memo",
-      created_by: userId,
-    });
+    if (docErr || !docRow) return json(req, { ok: false, error: docErr?.message ?? "Failed to register governance_documents" }, 500);
+
+    // ai_notes can contain emoji/markdown — that's fine (web UI), but keep note_type valid for your constraints
+    // If your chk_note_type rejects "memo", change note_type to "summary".
+    const noteType = "summary";
+
+    const { data: noteRow, error: noteErr } = await sb
+      .from("ai_notes")
+      .insert({
+        scope_type: "document",
+        scope_id: gl.id,
+        note_type: noteType,
+        title: `AXIOM Council Memo • ${severity.pill}`,
+        content: memo.executive_summary,
+        model: "axiom-council-memo",
+        created_by: userId,
+      })
+      .select("id")
+      .single();
 
     return json(req, {
       ok: true,
@@ -350,7 +354,9 @@ Deno.serve(async (req) => {
       storage_path: path,
       file_hash: hash,
       severity: severity.pill,
-      warning: noteErr ? `ai_notes insert failed: ${noteErr.message}` : null,
+      memo_id: docRow.id,
+      note_id: noteRow?.id ?? null,
+      warning: noteErr ? `ai_notes insert failed: ${noteErr.message}` : undefined,
     });
   } catch (e: any) {
     return json(req, { ok: false, error: e?.message ?? "Unknown error" }, 500);
