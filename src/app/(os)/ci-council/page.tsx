@@ -426,38 +426,50 @@ export default function CICouncilPage() {
     setAxiomMemoUrl(null);
 
     // Build payload FIRST (no syntax errors), then try/catch around invoke.
-    const payload = {
-      record_id: selected.id,
-      is_test: isSandbox,
-      memo: {
-        title: `AXIOM Council Memo — ${activeEntityLabel}`,
-        executive_summary: (axiomSelected?.content ?? "").slice(0, 6000),
-        findings: [] as Array<{
-          severity?: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
-          blocking?: boolean;
-          category?: string;
-          title: string;
-          evidence?: string;
-          recommendation?: string;
-        }>,
-        notes: `Generated from Council. Source note: ${axiomSelected?.id ?? "—"}`,
-      },
-    };
+        try {
+      const payload = {
+        record_id: selected.id,
+        is_test: isSandbox,
+        memo: {
+          title: `AXIOM Council Memo — ${activeEntityLabel}`,
+          executive_summary: (axiomSelected?.content ?? "").slice(0, 6000),
+          findings: [],
+          notes: `Generated from Council. Source note: ${axiomSelected?.id ?? "—"}`,
+        },
+      };
 
-    try {
       const { data, error } = await supabase.functions.invoke(AXIOM_COUNCIL_MEMO_FN, { body: payload });
 
       if (error) {
         const msg = (error as any)?.message ?? "AXIOM memo function not available.";
         throw new Error(
           msg.includes("404") || msg.toLowerCase().includes("not found")
-            ? "AXIOM memo is not deployed yet. Council is still stable — deploy Edge Function `axiom-council-memo` to enable PDF attachments."
+            ? "AXIOM memo is not deployed yet. Council is still stable — recreate Edge Function `axiom-council-memo` to enable PDF attachments."
             : msg
         );
       }
 
       const memo = data as AxiomMemo;
       if (!memo || memo.ok === false) throw new Error(memo?.error ?? "AXIOM memo failed.");
+
+      setAxiomLastMemo(memo);
+      flashInfo(memo.warning ? "AXIOM memo: ok (note warning)." : "AXIOM memo generated & registered.");
+
+      void loadAxiomNotesForSelected();
+
+      if (memo.storage_bucket && memo.storage_path) {
+        setAxiomBusy("url");
+        const { data: urlData, error: urlErr } = await supabase.storage
+          .from(memo.storage_bucket)
+          .createSignedUrl(memo.storage_path, 60 * 15);
+
+        if (!urlErr && urlData?.signedUrl) setAxiomMemoUrl(urlData.signedUrl);
+      }
+    } catch (e: any) {
+      flashError(e?.message ?? "AXIOM: memo generation failed.");
+    } finally {
+      setAxiomBusy(null);
+    }
 
       setAxiomLastMemo(memo);
       flashInfo(memo.warning ? "AXIOM memo: ok (warning)." : "AXIOM memo generated & registered.");
