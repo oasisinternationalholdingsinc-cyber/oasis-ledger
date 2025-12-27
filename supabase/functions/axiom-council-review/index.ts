@@ -2,14 +2,23 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 type ReqBody = {
-  record_id: string;   // governance_ledger.id
-  is_test?: boolean;   // lane flag (optional; we verify against record)
+  record_id: string; // governance_ledger.id
+  is_test?: boolean; // optional; record is source of truth
 };
 
-function json(status: number, body: unknown) {
+// ---- CORS (so browser invoke is clean) ----
+const corsHeaders: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST,OPTIONS",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type, x-requested-with",
+  "Access-Control-Max-Age": "86400",
+};
+
+function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...corsHeaders },
   });
 }
 
@@ -19,42 +28,45 @@ function mustEnv(name: string) {
   return v;
 }
 
-// Keep note_type compatible with your chk constraint
+function safeStr(s: unknown) {
+  return String(s ?? "").trim();
+}
+
+// Keep compatible with your chk_note_type constraint
 const NOTE_TYPE_FOR_COUNCIL = "summary";
+// ai_notes.scope_type enum: document/section/book/entity
 const SCOPE_TYPE_FOR_LEDGER = "document";
 
-export default async function handler(req: Request) {
+Deno.serve(async (req) => {
   try {
-    if (req.method !== "POST") return json(405, { ok: false, error: "Method not allowed" });
+    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
+    if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
 
-    // IMPORTANT: must use the caller’s JWT so created_by can be the real user
+    // Caller must be authenticated so we can attribute created_by properly
     const authHeader = req.headers.get("Authorization") ?? "";
     if (!authHeader.toLowerCase().startsWith("bearer ")) {
-      return json(401, { ok: false, error: "Missing Authorization Bearer token" });
+      return json({ ok: false, error: "Missing Authorization Bearer token" }, 401);
     }
 
-    const { record_id } = (await req.json().catch(() => ({}))) as ReqBody;
-    if (!record_id) return json(400, { ok: false, error: "record_id is required" });
+    const body = (await req.json().catch(() => ({}))) as ReqBody;
+    const record_id = safeStr(body?.record_id);
+    if (!record_id) return json({ ok: false, error: "record_id is required" }, 400);
 
     const supabaseUrl = mustEnv("SUPABASE_URL");
     const serviceKey = mustEnv("SUPABASE_SERVICE_ROLE_KEY");
-
-    // service client (for reading ledger even if RLS gets spicy)
-    const admin = createClient(supabaseUrl, serviceKey, {
-      auth: { persistSession: false },
-    });
-
-    // user client (to identify user id from JWT)
     const anonKey = mustEnv("SUPABASE_ANON_KEY");
+
+    // Admin client (for reliable reads/writes even if RLS is strict)
+    const admin = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false } });
+
+    // User client (to resolve caller user id from JWT)
     const userClient = createClient(supabaseUrl, anonKey, {
       global: { headers: { Authorization: authHeader } },
       auth: { persistSession: false },
     });
 
     const { data: userRes, error: userErr } = await userClient.auth.getUser();
-    if (userErr || !userRes?.user?.id) {
-      return json(401, { ok: false, error: "Invalid session" });
-    }
+    if (userErr || !userRes?.user?.id) return json({ ok: false, error: "Invalid session" }, 401);
     const userId = userRes.user.id;
 
     // 1) Load ledger record
@@ -64,22 +76,23 @@ export default async function handler(req: Request) {
       .eq("id", record_id)
       .single();
 
-    if (recErr || !rec) return json(404, { ok: false, error: recErr?.message ?? "Record not found" });
+    if (recErr || !rec) return json({ ok: false, error: recErr?.message ?? "Record not found" }, 404);
 
-    // 2) Build prompt (enterprise + deterministic-ish)
-    // NOTE: This is where you can later swap in your AXIOM “more intelligent” logic / model.
+    // 2) Create council-grade advisory (template baseline)
+    // NOTE: later you can swap this block with your “more intelligent” AXIOM model pipeline.
     const title = rec.title ?? "(untitled)";
-    const body = (rec.body ?? "").toString();
+    const bodyText = safeStr(rec.body);
 
     const advisory = [
       `# AXIOM Council Advisory`,
       ``,
       `**Record:** ${title}`,
-      `**Status:** ${(rec.status ?? "—").toString()}`,
+      `**Status:** ${safeStr(rec.status) || "—"}`,
       `**Lane:** ${rec.is_test ? "SANDBOX" : "RoT"}`,
       ``,
       `## Executive summary`,
-      `Provide a concise council-grade assessment: clarity, risks, missing evidence, compliance flags.`,
+      `- What this resolution does (in plain language)`,
+      `- What could go wrong (governance/compliance/reputation/execution)`,
       ``,
       `## Findings`,
       `- [GREEN] Consistency: …`,
@@ -88,15 +101,15 @@ export default async function handler(req: Request) {
       ``,
       `## Recommendations`,
       `- Approve/Reject rationale`,
-      `- What must be attached before signature`,
+      `- Attachments required before signature`,
+      `- Any wording fixes before sealing`,
       ``,
       `---`,
       `### Source text`,
-      body.slice(0, 12000),
+      bodyText.slice(0, 12000),
     ].join("\n");
 
     // 3) Insert ai_notes (ledger-scoped)
-    // IMPORTANT: created_by is NOT NULL; set it explicitly.
     const { data: noteRow, error: noteErr } = await admin
       .from("ai_notes")
       .insert({
@@ -105,7 +118,7 @@ export default async function handler(req: Request) {
         note_type: NOTE_TYPE_FOR_COUNCIL,
         title: `AXIOM Council Advisory — ${title}`,
         content: advisory,
-        model: "axiom-council-review:v1",
+        model: "axiom-review-council:v1",
         tokens_used: null,
         created_by: userId,
       })
@@ -113,11 +126,11 @@ export default async function handler(req: Request) {
       .single();
 
     if (noteErr || !noteRow?.id) {
-      return json(500, { ok: false, error: noteErr?.message ?? "Failed to write ai_notes" });
+      return json({ ok: false, error: noteErr?.message ?? "Failed to write ai_notes" }, 500);
     }
 
-    return json(200, { ok: true, note_id: noteRow.id, record_id: rec.id });
+    return json({ ok: true, note_id: noteRow.id, record_id: rec.id });
   } catch (e: any) {
-    return json(500, { ok: false, error: e?.message ?? "Unhandled error" });
+    return json({ ok: false, error: e?.message ?? "Unhandled error" }, 500);
   }
-}
+});

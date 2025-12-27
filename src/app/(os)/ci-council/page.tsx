@@ -46,10 +46,12 @@ type AxiomMemo = {
   mime_type?: string;
   error?: string;
   warning?: string;
+  supporting_document_id?: string | null;
 };
 
-// If/when you recreate it, keep the name stable.
+// ---- Edge Functions (stable names) ----
 const AXIOM_COUNCIL_MEMO_FN = "axiom-council-memo";
+const AXIOM_COUNCIL_REVIEW_FN = "axiom-council-review"; // <-- your council advisory writer (ai_notes)
 
 const ENTITY_LABELS: Record<string, string> = {
   holdings: "Oasis International Holdings Inc.",
@@ -101,7 +103,7 @@ function severityPill(sev?: string | null) {
   return "bg-slate-700/30 text-slate-200 border-slate-600/40";
 }
 
-// Attempts to infer severity from title/content if you don’t store metadata.
+// Attempts to infer severity from title/content (no metadata dependency)
 function inferSeverity(title?: string | null, content?: string | null) {
   const t = `${title ?? ""}\n${content ?? ""}`.toUpperCase();
 
@@ -168,7 +170,7 @@ export default function CICouncilPage() {
   const [info, setInfo] = useState<string | null>(null);
 
   // AXIOM (Council)
-  const [axiomBusy, setAxiomBusy] = useState<null | "load" | "run" | "url">(null);
+  const [axiomBusy, setAxiomBusy] = useState<null | "load" | "run" | "memo" | "url">(null);
   const [axiomNotes, setAxiomNotes] = useState<AxiomNote[]>([]);
   const [axiomSelectedNoteId, setAxiomSelectedNoteId] = useState<string | null>(null);
   const [axiomLastMemo, setAxiomLastMemo] = useState<AxiomMemo | null>(null);
@@ -416,7 +418,7 @@ export default function CICouncilPage() {
         .from("ai_notes")
         .select("id,title,content,model,tokens_used,created_at,note_type")
         .eq("scope_type", "document")
-        .eq("scope_id", selected.id) // ledger record id
+        .eq("scope_id", selected.id)
         .in("note_type", ["summary", "memo", "note"])
         .order("created_at", { ascending: false })
         .limit(20);
@@ -444,17 +446,49 @@ export default function CICouncilPage() {
     }
   }
 
-  async function invokeAxiomMemoEdgeFunction() {
+  async function runAxiomCouncilReview() {
     if (!selected?.id) return flashError("Select a record first.");
 
     setAxiomBusy("run");
+    try {
+      const { data, error } = await supabase.functions.invoke(AXIOM_COUNCIL_REVIEW_FN, {
+        body: { record_id: selected.id, is_test: isSandbox },
+      });
+
+      if (error) {
+        const msg = (error as any)?.message ?? "AXIOM council review failed.";
+        const lower = msg.toLowerCase();
+        if (lower.includes("not found") || lower.includes("404")) {
+          throw new Error(
+            "AXIOM council review is not deployed. Deploy Edge Function `axiom-review-council` (writes ai_notes for governance_ledger.id)."
+          );
+        }
+        throw new Error(msg);
+      }
+
+      const ok = (data as any)?.ok;
+      if (ok === false) throw new Error((data as any)?.error ?? "AXIOM council review failed.");
+
+      flashInfo("AXIOM: advisory generated.");
+      await loadAxiomNotesForSelected();
+    } catch (e: any) {
+      flashError(e?.message ?? "AXIOM: run failed.");
+    } finally {
+      setAxiomBusy(null);
+    }
+  }
+
+  async function invokeAxiomMemoEdgeFunction() {
+    if (!selected?.id) return flashError("Select a record first.");
+
+    setAxiomBusy("memo");
     setAxiomLastMemo(null);
     setAxiomMemoUrl(null);
 
     try {
       const payload = {
-        record_id: selected.id, // governance_ledger.id
-        is_test: isSandbox, // lane flag
+        record_id: selected.id,
+        is_test: isSandbox,
         memo: {
           title: `AXIOM Council Memo — ${activeEntityLabel}`,
           executive_summary: (axiomSelected?.content ?? "").slice(0, 6000),
@@ -469,17 +503,15 @@ export default function CICouncilPage() {
         const msg = (error as any)?.message ?? "AXIOM memo invoke failed.";
         const lower = msg.toLowerCase();
 
-        // common cases: function missing / storage trigger exploding / any 500
         if (lower.includes("not found") || lower.includes("404")) {
           throw new Error(
             "AXIOM memo is not deployed. Council is still stable — deploy Edge Function `axiom-council-memo` to enable memo PDFs."
           );
         }
 
-        // your current case: trigger references NEW.is_test in storage.objects
         if (lower.includes("storage") || lower.includes("objects") || lower.includes("is_test")) {
           throw new Error(
-            "AXIOM memo failed during Storage upload (trigger on storage.objects is referencing a non-existent NEW.is_test field). This does NOT affect Minute Book upload wiring. Fix the storage trigger/function for the memo bucket, or disable memo generation for now."
+            "AXIOM memo failed during Storage upload (a storage.objects trigger is referencing a non-existent NEW.is_test field). Fix that trigger/function for the memo bucket, or disable memo generation for now."
           );
         }
 
@@ -492,10 +524,10 @@ export default function CICouncilPage() {
       setAxiomLastMemo(memo);
       flashInfo(memo.warning ? "AXIOM memo: ok (warning)." : "AXIOM memo generated & registered.");
 
-      // If your memo flow also writes notes later, refresh advisory list
+      // refresh advisory list (memo flow may also write notes later)
       void loadAxiomNotesForSelected();
 
-      // Signed URL for memo PDF (optional convenience)
+      // Signed URL for memo PDF
       if (memo.storage_bucket && memo.storage_path) {
         setAxiomBusy("url");
         const { data: urlData, error: urlErr } = await supabase.storage
@@ -798,12 +830,21 @@ export default function CICouncilPage() {
                       </button>
 
                       <button
+                        onClick={() => runAxiomCouncilReview()}
+                        disabled={!selected || axiomBusy !== null}
+                        className="rounded-full border border-indigo-400/50 bg-indigo-500/10 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-indigo-200 hover:bg-indigo-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Runs AXIOM council review (writes advisory into ai_notes for this governance_ledger.id)."
+                      >
+                        {axiomBusy === "run" ? "Running…" : "Run AXIOM"}
+                      </button>
+
+                      <button
                         onClick={() => invokeAxiomMemoEdgeFunction()}
                         disabled={!selected || axiomBusy !== null}
                         className="rounded-full border border-amber-400/50 bg-amber-500/10 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
                         title="Renders AXIOM Memo PDF as sidecar evidence (lane-scoped) without touching the resolution PDF."
                       >
-                        {axiomBusy === "run" ? "Generating…" : "Generate Memo PDF"}
+                        {axiomBusy === "memo" ? "Generating…" : "Memo PDF"}
                       </button>
                     </div>
                   </div>
@@ -837,7 +878,9 @@ export default function CICouncilPage() {
                                   : "border-slate-800 bg-black/20 hover:bg-slate-900/40"
                               )}
                             >
-                              <div className="text-[12px] font-semibold text-slate-100 truncate">{n.title || "AXIOM Advisory"}</div>
+                              <div className="text-[12px] font-semibold text-slate-100 truncate">
+                                {n.title || "AXIOM Advisory"}
+                              </div>
                               <div className="mt-1 text-[10px] text-slate-500">
                                 {fmtShort(n.created_at)} {n.model ? `• ${n.model}` : ""}{" "}
                                 {typeof n.tokens_used === "number" ? ` • ${n.tokens_used} tok` : ""}
@@ -856,7 +899,7 @@ export default function CICouncilPage() {
                       <pre className="whitespace-pre-wrap font-sans text-[12px] leading-[1.7] text-slate-200">
                         {axiomSelected?.content?.trim()
                           ? axiomSelected.content
-                          : "— (No advisory loaded yet. Click Load.) —"}
+                          : "— (No advisory loaded yet. Click Load or Run AXIOM.) —"}
                       </pre>
                     </div>
                   </div>
@@ -1000,13 +1043,22 @@ export default function CICouncilPage() {
               <div className="rounded-2xl border border-slate-800 bg-black/30 px-5 py-5">
                 <div className="flex items-center justify-between gap-2">
                   <div className="text-[10px] uppercase tracking-[0.22em] text-indigo-200">AXIOM Advisory</div>
-                  <button
-                    onClick={() => loadAxiomNotesForSelected()}
-                    disabled={!selected || axiomBusy !== null}
-                    className="rounded-full border border-slate-700 bg-slate-950/40 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {axiomBusy === "load" ? "Loading…" : "Load"}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => loadAxiomNotesForSelected()}
+                      disabled={!selected || axiomBusy !== null}
+                      className="rounded-full border border-slate-700 bg-slate-950/40 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {axiomBusy === "load" ? "Loading…" : "Load"}
+                    </button>
+                    <button
+                      onClick={() => runAxiomCouncilReview()}
+                      disabled={!selected || axiomBusy !== null}
+                      className="rounded-full border border-indigo-400/50 bg-indigo-500/10 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-indigo-200 hover:bg-indigo-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {axiomBusy === "run" ? "Running…" : "Run AXIOM"}
+                    </button>
+                  </div>
                 </div>
 
                 <div className="mt-2 text-[11px] text-slate-500">
@@ -1014,7 +1066,7 @@ export default function CICouncilPage() {
                 </div>
 
                 <pre className="mt-3 whitespace-pre-wrap font-sans text-[12px] leading-[1.7] text-slate-200">
-                  {axiomSelected?.content?.trim() ? axiomSelected.content : "— (No advisory loaded yet. Click Load.) —"}
+                  {axiomSelected?.content?.trim() ? axiomSelected.content : "— (No advisory loaded yet.) —"}
                 </pre>
               </div>
             </div>
