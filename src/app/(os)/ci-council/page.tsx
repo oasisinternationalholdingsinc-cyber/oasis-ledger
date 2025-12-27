@@ -77,13 +77,13 @@ function fmtShort(iso: string | null) {
   }
 }
 
-function isMissingColumnErr(err: any) {
-  const msg = (err?.message ?? "").toLowerCase();
+function isMissingColumnErr(err: unknown) {
+  const msg = String((err as any)?.message ?? "").toLowerCase();
   return msg.includes("does not exist") && msg.includes("column");
 }
 
-function isTruthImmutableErr(err: any) {
-  const msg = (err?.message ?? "").toLowerCase();
+function isTruthImmutableErr(err: unknown) {
+  const msg = String((err as any)?.message ?? "").toLowerCase();
   return msg.includes("truth records are immutable") || msg.includes("immutable");
 }
 
@@ -105,11 +105,29 @@ function severityPill(sev?: string | null) {
 function inferSeverity(title?: string | null, content?: string | null) {
   const t = `${title ?? ""}\n${content ?? ""}`.toUpperCase();
 
-  if (t.includes("SEVERITY: RED") || t.includes("[RED]") || t.includes("🔴") || t.includes("CRITICAL"))
+  if (
+    t.includes("SEVERITY: RED") ||
+    t.includes("[RED]") ||
+    t.includes("🔴") ||
+    t.includes("CRITICAL") ||
+    t.includes("HIGH RISK")
+  )
     return "RED";
-  if (t.includes("SEVERITY: YELLOW") || t.includes("[YELLOW]") || t.includes("🟡") || t.includes("WARNING"))
+  if (
+    t.includes("SEVERITY: YELLOW") ||
+    t.includes("[YELLOW]") ||
+    t.includes("🟡") ||
+    t.includes("WARNING") ||
+    t.includes("MEDIUM RISK")
+  )
     return "YELLOW";
-  if (t.includes("SEVERITY: GREEN") || t.includes("[GREEN]") || t.includes("🟢") || t.includes("OK"))
+  if (
+    t.includes("SEVERITY: GREEN") ||
+    t.includes("[GREEN]") ||
+    t.includes("🟢") ||
+    t.includes("OK") ||
+    t.includes("LOW RISK")
+  )
     return "GREEN";
 
   return null;
@@ -173,7 +191,7 @@ export default function CICouncilPage() {
     [records, selectedId]
   );
 
-  // env filtering:
+  // env filtering (extra safety if table/view ever returns mixed lanes)
   const envFiltered = useMemo(() => {
     const hasEnv = records.some((r) => typeof r.is_test === "boolean");
     if (!hasEnv) return records;
@@ -207,7 +225,12 @@ export default function CICouncilPage() {
       return ctxId;
     }
 
-    const { data, error } = await supabase.from("entities").select("id, slug").eq("slug", slug).single();
+    const { data, error } = await supabase
+      .from("entities")
+      .select("id, slug")
+      .eq("slug", slug)
+      .single();
+
     if (error || !data?.id) throw error ?? new Error("Entity lookup failed.");
     setEntityId(data.id);
     return data.id as string;
@@ -255,10 +278,7 @@ export default function CICouncilPage() {
 
       if (preserveSelection && selectedId) {
         const still = rows.find((r) => r.id === selectedId);
-        if (still) {
-          setLoading(false);
-          return;
-        }
+        if (still) return;
       }
 
       const tabKey = tab === "ALL" ? "ALL" : tab;
@@ -315,20 +335,26 @@ export default function CICouncilPage() {
         p_record_id: recordId,
         p_next_status: next,
       });
+
       if (!error) {
         const ok = (data as any)?.ok;
         if (ok === false) throw new Error((data as any)?.error ?? "Council RPC failed.");
         return;
       }
+
       const msg = (error?.message ?? "").toLowerCase();
       if (!msg.includes("function") && !msg.includes("does not exist")) throw error;
     } catch (e: any) {
       if (isTruthImmutableErr(e)) throw e;
-      // fall through
+      // fall through to direct update
     }
 
     // 2) fallback update
-    const { error: upErr } = await supabase.from("governance_ledger").update({ status: next }).eq("id", recordId);
+    const { error: upErr } = await supabase
+      .from("governance_ledger")
+      .update({ status: next })
+      .eq("id", recordId);
+
     if (upErr) throw upErr;
   }
 
@@ -385,12 +411,12 @@ export default function CICouncilPage() {
 
     setAxiomBusy("load");
     try {
-      // IMPORTANT: do NOT select metadata (may not exist). Keep it stable.
+      // IMPORTANT: do NOT select metadata (may not exist). Keep stable.
       const { data, error } = await supabase
         .from("ai_notes")
         .select("id,title,content,model,tokens_used,created_at,note_type")
         .eq("scope_type", "document")
-        .eq("scope_id", selected.id)
+        .eq("scope_id", selected.id) // ledger record id
         .in("note_type", ["summary", "memo", "note"])
         .order("created_at", { ascending: false })
         .limit(20);
@@ -425,11 +451,10 @@ export default function CICouncilPage() {
     setAxiomLastMemo(null);
     setAxiomMemoUrl(null);
 
-    // Build payload FIRST (no syntax errors), then try/catch around invoke.
-        try {
+    try {
       const payload = {
-        record_id: selected.id,
-        is_test: isSandbox,
+        record_id: selected.id, // governance_ledger.id
+        is_test: isSandbox, // lane flag
         memo: {
           title: `AXIOM Council Memo — ${activeEntityLabel}`,
           executive_summary: (axiomSelected?.content ?? "").slice(0, 6000),
@@ -441,40 +466,33 @@ export default function CICouncilPage() {
       const { data, error } = await supabase.functions.invoke(AXIOM_COUNCIL_MEMO_FN, { body: payload });
 
       if (error) {
-        const msg = (error as any)?.message ?? "AXIOM memo function not available.";
-        throw new Error(
-          msg.includes("404") || msg.toLowerCase().includes("not found")
-            ? "AXIOM memo is not deployed yet. Council is still stable — recreate Edge Function `axiom-council-memo` to enable PDF attachments."
-            : msg
-        );
+        const msg = (error as any)?.message ?? "AXIOM memo invoke failed.";
+        const lower = msg.toLowerCase();
+
+        // common cases: function missing / storage trigger exploding / any 500
+        if (lower.includes("not found") || lower.includes("404")) {
+          throw new Error(
+            "AXIOM memo is not deployed. Council is still stable — deploy Edge Function `axiom-council-memo` to enable memo PDFs."
+          );
+        }
+
+        // your current case: trigger references NEW.is_test in storage.objects
+        if (lower.includes("storage") || lower.includes("objects") || lower.includes("is_test")) {
+          throw new Error(
+            "AXIOM memo failed during Storage upload (trigger on storage.objects is referencing a non-existent NEW.is_test field). This does NOT affect Minute Book upload wiring. Fix the storage trigger/function for the memo bucket, or disable memo generation for now."
+          );
+        }
+
+        throw new Error(msg);
       }
 
       const memo = data as AxiomMemo;
       if (!memo || memo.ok === false) throw new Error(memo?.error ?? "AXIOM memo failed.");
 
       setAxiomLastMemo(memo);
-      flashInfo(memo.warning ? "AXIOM memo: ok (note warning)." : "AXIOM memo generated & registered.");
-
-      void loadAxiomNotesForSelected();
-
-      if (memo.storage_bucket && memo.storage_path) {
-        setAxiomBusy("url");
-        const { data: urlData, error: urlErr } = await supabase.storage
-          .from(memo.storage_bucket)
-          .createSignedUrl(memo.storage_path, 60 * 15);
-
-        if (!urlErr && urlData?.signedUrl) setAxiomMemoUrl(urlData.signedUrl);
-      }
-    } catch (e: any) {
-      flashError(e?.message ?? "AXIOM: memo generation failed.");
-    } finally {
-      setAxiomBusy(null);
-    }
-
-      setAxiomLastMemo(memo);
       flashInfo(memo.warning ? "AXIOM memo: ok (warning)." : "AXIOM memo generated & registered.");
 
-      // Refresh advisory list (if your memo flow also writes ai_notes later)
+      // If your memo flow also writes notes later, refresh advisory list
       void loadAxiomNotesForSelected();
 
       // Signed URL for memo PDF (optional convenience)
@@ -483,6 +501,7 @@ export default function CICouncilPage() {
         const { data: urlData, error: urlErr } = await supabase.storage
           .from(memo.storage_bucket)
           .createSignedUrl(memo.storage_path, 60 * 15);
+
         if (!urlErr && urlData?.signedUrl) setAxiomMemoUrl(urlData.signedUrl);
       }
     } catch (e: any) {
@@ -504,7 +523,8 @@ export default function CICouncilPage() {
         <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI • Council</div>
         <h1 className="mt-1 text-xl font-semibold text-slate-50">Council Review · Authority Console</h1>
         <p className="mt-1 text-xs text-slate-400 max-w-3xl">
-          Council is the authority gate. <span className="text-emerald-300 font-semibold">Approve</span> or{" "}
+          Council is the authority gate.{" "}
+          <span className="text-emerald-300 font-semibold">Approve</span> or{" "}
           <span className="text-rose-300 font-semibold">Reject</span>. Execution/archival discipline occurs in Forge
           (signature) or in a direct-archive pipeline (if explicitly wired).
         </p>
@@ -834,7 +854,9 @@ export default function CICouncilPage() {
                     <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Advisory Preview</div>
                     <div className="mt-2 max-h-[190px] overflow-y-auto">
                       <pre className="whitespace-pre-wrap font-sans text-[12px] leading-[1.7] text-slate-200">
-                        {axiomSelected?.content?.trim() ? axiomSelected.content : "— (No advisory loaded yet. Click Load.) —"}
+                        {axiomSelected?.content?.trim()
+                          ? axiomSelected.content
+                          : "— (No advisory loaded yet. Click Load.) —"}
                       </pre>
                     </div>
                   </div>
