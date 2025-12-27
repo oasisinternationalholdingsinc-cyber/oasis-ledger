@@ -1,3 +1,4 @@
+// src/app/(os)/ci-council/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -104,10 +105,12 @@ function severityPill(sev?: string | null) {
 function inferSeverity(title?: string | null, content?: string | null) {
   const t = `${title ?? ""}\n${content ?? ""}`.toUpperCase();
 
-  // Common patterns
-  if (t.includes("SEVERITY: RED") || t.includes("[RED]") || t.includes("🔴") || t.includes("CRITICAL")) return "RED";
-  if (t.includes("SEVERITY: YELLOW") || t.includes("[YELLOW]") || t.includes("🟡") || t.includes("WARNING")) return "YELLOW";
-  if (t.includes("SEVERITY: GREEN") || t.includes("[GREEN]") || t.includes("🟢") || t.includes("OK")) return "GREEN";
+  if (t.includes("SEVERITY: RED") || t.includes("[RED]") || t.includes("🔴") || t.includes("CRITICAL"))
+    return "RED";
+  if (t.includes("SEVERITY: YELLOW") || t.includes("[YELLOW]") || t.includes("🟡") || t.includes("WARNING"))
+    return "YELLOW";
+  if (t.includes("SEVERITY: GREEN") || t.includes("[GREEN]") || t.includes("🟢") || t.includes("OK"))
+    return "GREEN";
 
   return null;
 }
@@ -293,6 +296,7 @@ export default function CICouncilPage() {
     setSelectedId(rec.id);
     setError(null);
     setInfo(null);
+
     // AXIOM resets per selection
     setAxiomNotes([]);
     setAxiomSelectedNoteId(null);
@@ -381,7 +385,7 @@ export default function CICouncilPage() {
 
     setAxiomBusy("load");
     try {
-      // FIX: your ai_notes does NOT have metadata, so do NOT select it.
+      // IMPORTANT: do NOT select metadata (may not exist). Keep it stable.
       const { data, error } = await supabase
         .from("ai_notes")
         .select("id,title,content,model,tokens_used,created_at,note_type")
@@ -421,25 +425,33 @@ export default function CICouncilPage() {
     setAxiomLastMemo(null);
     setAxiomMemoUrl(null);
 
-    try const payload = {
-  record_id: selected.id,
-  is_test: isSandbox,
-  memo: {
-    title: `AXIOM Council Memo — ${activeEntityLabel}`,
-    executive_summary: (axiomSelected?.content ?? "").slice(0, 6000),
-    findings: [],
-    notes: `Generated from Council. Source note: ${axiomSelected?.id ?? "—"}`,
-  },
-};
+    // Build payload FIRST (no syntax errors), then try/catch around invoke.
+    const payload = {
+      record_id: selected.id,
+      is_test: isSandbox,
+      memo: {
+        title: `AXIOM Council Memo — ${activeEntityLabel}`,
+        executive_summary: (axiomSelected?.content ?? "").slice(0, 6000),
+        findings: [] as Array<{
+          severity?: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+          blocking?: boolean;
+          category?: string;
+          title: string;
+          evidence?: string;
+          recommendation?: string;
+        }>,
+        notes: `Generated from Council. Source note: ${axiomSelected?.id ?? "—"}`,
+      },
+    };
 
+    try {
       const { data, error } = await supabase.functions.invoke(AXIOM_COUNCIL_MEMO_FN, { body: payload });
 
-      // If function doesn't exist (you deleted it), Supabase returns an error.
       if (error) {
         const msg = (error as any)?.message ?? "AXIOM memo function not available.";
         throw new Error(
           msg.includes("404") || msg.toLowerCase().includes("not found")
-            ? "AXIOM memo is not deployed yet. Council is still stable — recreate Edge Function `axiom-council-memo` to enable PDF attachments."
+            ? "AXIOM memo is not deployed yet. Council is still stable — deploy Edge Function `axiom-council-memo` to enable PDF attachments."
             : msg
         );
       }
@@ -448,12 +460,12 @@ export default function CICouncilPage() {
       if (!memo || memo.ok === false) throw new Error(memo?.error ?? "AXIOM memo failed.");
 
       setAxiomLastMemo(memo);
-      flashInfo(memo.warning ? "AXIOM memo: ok (note warning)." : "AXIOM memo generated & registered.");
+      flashInfo(memo.warning ? "AXIOM memo: ok (warning)." : "AXIOM memo generated & registered.");
 
-      // Refresh advisory list (memo function typically also writes ai_notes)
+      // Refresh advisory list (if your memo flow also writes ai_notes later)
       void loadAxiomNotesForSelected();
 
-      // Signed URL for memo PDF
+      // Signed URL for memo PDF (optional convenience)
       if (memo.storage_bucket && memo.storage_path) {
         setAxiomBusy("url");
         const { data: urlData, error: urlErr } = await supabase.storage
