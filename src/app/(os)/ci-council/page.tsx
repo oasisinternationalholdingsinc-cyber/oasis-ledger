@@ -421,11 +421,16 @@ export default function CICouncilPage() {
     setAxiomLastMemo(null);
     setAxiomMemoUrl(null);
 
-    try {
-      const payload = {
-        record_id: selected.id,
-        is_test: isSandbox,
-      };
+    try const payload = {
+  record_id: selected.id,
+  is_test: isSandbox,
+  memo: {
+    title: `AXIOM Council Memo — ${activeEntityLabel}`,
+    executive_summary: (axiomSelected?.content ?? "").slice(0, 6000),
+    findings: [],
+    notes: `Generated from Council. Source note: ${axiomSelected?.id ?? "—"}`,
+  },
+};
 
       const { data, error } = await supabase.functions.invoke(AXIOM_COUNCIL_MEMO_FN, { body: payload });
 
