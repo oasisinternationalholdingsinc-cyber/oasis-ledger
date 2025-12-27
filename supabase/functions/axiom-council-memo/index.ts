@@ -113,11 +113,11 @@ async function renderMemoPdf(opts: {
 
   // ✅ Load fonts relative to this file so bundling works
   const interRegular = await Deno.readFile(
-  new URL("./_shared/fonts/Inter-Regular.ttf", import.meta.url)
+  new URL("../_shared/fonts/Inter-Regular.ttf", import.meta.url)
 );
 
 const interSemi = await Deno.readFile(
-  new URL("./_shared/fonts/Inter-SemiBold.ttf", import.meta.url)
+  new URL("../_shared/fonts/Inter-SemiBold.ttf", import.meta.url)
 );
 
   const font = await pdf.embedFont(interRegular, { subset: true });
