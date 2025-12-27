@@ -3,9 +3,9 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { PDFDocument, StandardFonts, rgb } from "npm:pdf-lib@1.17.1";
 
 type ReqBody = {
-  record_id: string;   // governance_ledger.id
-  is_test?: boolean;   // lane flag
-  memo: {
+  record_id: string; // governance_ledger.id
+  is_test?: boolean; // lane flag
+  memo?: {
     title?: string;
     executive_summary?: string;
     findings?: Array<{
@@ -20,10 +20,19 @@ type ReqBody = {
   };
 };
 
+// ---- CORS (fixes your 405 + missing allow-origin) ----
+const corsHeaders: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST,OPTIONS",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type, x-requested-with",
+  "Access-Control-Max-Age": "86400",
+};
+
 function json(resBody: unknown, status = 200) {
   return new Response(JSON.stringify(resBody), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...corsHeaders },
   });
 }
 
@@ -55,34 +64,49 @@ async function sha256Hex(bytes: Uint8Array) {
 
 Deno.serve(async (req) => {
   try {
+    // ✅ Preflight support
+    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
+
     if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);
 
-    const url = new URL(req.url);
     const body = (await req.json()) as ReqBody;
 
     const record_id = safeStr(body?.record_id);
     if (!record_id) return json({ ok: false, error: "Missing record_id" }, 400);
-    if (!body?.memo) return json({ ok: false, error: "Missing memo" }, 400);
 
     const is_test = !!body.is_test;
 
     // Service role for storage + DB writes
-    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    if (!supabaseUrl || !serviceKey) {
+      return json({ ok: false, error: "Missing SUPABASE_URL or SERVICE_ROLE key" }, 500);
+    }
+
     const supabase = createClient(supabaseUrl, serviceKey, {
       auth: { persistSession: false },
     });
 
-    // Pull minimal ledger info for header context (optional but nice)
+    // Pull minimal ledger info for header context
     const { data: ledger, error: ledgerErr } = await supabase
       .from("governance_ledger")
-      .select("id,title,entity_id,created_at,status")
+      .select("id,title,entity_id,created_at,status,is_test")
       .eq("id", record_id)
       .single();
 
-    if (ledgerErr) {
-      return json({ ok: false, error: `Ledger fetch failed: ${ledgerErr.message}` }, 400);
+    if (ledgerErr || !ledger) {
+      return json({ ok: false, error: `Ledger fetch failed: ${ledgerErr?.message ?? "not found"}` }, 400);
     }
+
+    // ---- Memo payload: OPTIONAL now ----
+    // If Council didn't send memo, render a minimal memo so the pipeline still works.
+    const memo = body.memo ?? {
+      title: "AXIOM Council Memo",
+      executive_summary:
+        "No memo payload was provided by the client. This memo was generated as a placeholder attachment.",
+      findings: [],
+      notes: "",
+    };
 
     // ==== PDF RENDER (NO CUSTOM FONTS) ====
     const pdf = await PDFDocument.create();
@@ -115,16 +139,7 @@ Deno.serve(async (req) => {
 
       const lines = wrapText(val, maxChars);
       for (const line of lines) {
-        if (y < 70) {
-          // new page
-          const p = pdf.addPage([612, 792]);
-          y = 792 - 56;
-          // rebind page var? easiest: throw for now or keep simple:
-          // For enterprise stability, keep memo short or add multipage support later.
-          // We'll just draw on the first page for now.
-          // (If you want multipage now, I’ll send the fully paginated version.)
-          throw new Error("Memo too long (pagination not enabled in this minimal version).");
-        }
+        if (y < 70) throw new Error("Memo too long (pagination not enabled).");
         page.drawText(line, { x: marginX, y, size: 10.5, font: fontRegular, color: rgb(0.15, 0.15, 0.15) });
         y -= 13;
       }
@@ -132,7 +147,7 @@ Deno.serve(async (req) => {
     };
 
     // Header
-    const topTitle = safeStr(body.memo.title) || "AXIOM Council Memo";
+    const topTitle = safeStr(memo.title) || "AXIOM Council Memo";
     page.drawText(topTitle, { x: marginX, y, size: 18, font: fontBold, color: rgb(0.05, 0.05, 0.05) });
     y -= 20;
 
@@ -157,9 +172,9 @@ Deno.serve(async (req) => {
     drawLine();
 
     // Sections
-    drawTextBlock("Executive summary", body.memo.executive_summary || "", 98);
+    drawTextBlock("Executive summary", memo.executive_summary || "", 98);
 
-    const findings = body.memo.findings ?? [];
+    const findings = memo.findings ?? [];
     if (findings.length) {
       page.drawText("Findings", { x: marginX, y, size: 12.5, font: fontBold, color: rgb(0.1, 0.1, 0.1) });
       y -= 16;
@@ -177,7 +192,7 @@ Deno.serve(async (req) => {
       }
     }
 
-    drawTextBlock("Additional notes", body.memo.notes || "", 98);
+    drawTextBlock("Additional notes", memo.notes || "", 98);
 
     // Footer
     page.drawText(`Generated ${new Date().toISOString()}`, {
@@ -193,7 +208,6 @@ Deno.serve(async (req) => {
     const fileHash = await sha256Hex(pdfU8);
 
     // ==== STORAGE + SUPPORTING DOC REGISTRATION ====
-    // Pick your existing bucket convention (keep it simple & lane-safe)
     const bucket = is_test ? "governance_sandbox" : "governance";
     const storagePath = `${is_test ? "sandbox" : "rot"}/axiom-memos/${record_id}-${Date.now()}.pdf`;
 
@@ -202,53 +216,40 @@ Deno.serve(async (req) => {
       upsert: false,
     });
 
-    if (up.error) {
-      return json({ ok: false, error: `Upload failed: ${up.error.message}` }, 500);
-    }
+    if (up.error) return json({ ok: false, error: `Upload failed: ${up.error.message}` }, 500);
 
-    // If you already have a supporting_documents pattern: insert a row.
-    // If your schema differs, keep only storage return and wire UI to open the signed URL.
-    const { data: sd, error: sdErr } = await supabase
-      .from("supporting_documents")
-      .insert({
-        entity_id: ledger.entity_id,
-        record_id: record_id,
-        storage_bucket: bucket,
-        storage_path: storagePath,
-        mime_type: "application/pdf",
-        file_hash: fileHash,
-        document_class: "axiom_memo",
-        verification_level: "unverified",
-      })
-      .select("id")
-      .single();
+    // Insert supporting_documents (best effort)
+    let supporting_document_id: string | null = null;
+    try {
+      const { data: sd, error: sdErr } = await supabase
+        .from("supporting_documents")
+        .insert({
+          entity_id: ledger.entity_id,
+          record_id: record_id,
+          storage_bucket: bucket,
+          storage_path: storagePath,
+          mime_type: "application/pdf",
+          file_hash: fileHash,
+          document_class: "axiom_memo",
+          verification_level: "unverified",
+        })
+        .select("id")
+        .single();
 
-    // Don’t fail the whole request if your supporting_documents columns differ:
-    // just return the file + signed url anyway.
-    const expiresIn = 60 * 10;
-    const { data: signed, error: signedErr } = await supabase.storage
-      .from(bucket)
-      .createSignedUrl(storagePath, expiresIn);
-
-    if (signedErr) {
-      return json({
-        ok: true,
-        supporting_document_id: sd?.id ?? null,
-        storage_bucket: bucket,
-        storage_path: storagePath,
-        file_hash: fileHash,
-        signed_url: null,
-        warning: `Signed URL failed: ${signedErr.message}`,
-      });
+      if (!sdErr && sd?.id) supporting_document_id = sd.id as string;
+    } catch {
+      // ignore schema mismatch
     }
 
     return json({
       ok: true,
-      supporting_document_id: sd?.id ?? null,
+      supporting_document_id,
       storage_bucket: bucket,
       storage_path: storagePath,
       file_hash: fileHash,
-      signed_url: signed.signedUrl,
+      file_size: pdfU8.length,
+      mime_type: "application/pdf",
+      // optional: you can have Council create a signed URL client-side (it already does)
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
