@@ -186,6 +186,7 @@ export default function CICouncilPage() {
 
   const lastAutoPickRef = useRef<string | null>(null);
   const lastAxiomAutoloadKeyRef = useRef<string | null>(null);
+  const lastArtifactsAutoloadKeyRef = useRef<string | null>(null);
 
   function flashError(msg: string) {
     console.error(msg);
@@ -491,6 +492,22 @@ export default function CICouncilPage() {
     }
   }
 
+  async function ensureSignedUrlForMemo(bucket?: string | null, path?: string | null) {
+    if (!bucket || !path) return;
+    if (axiomBusy !== null) return;
+
+    setAxiomBusy("url");
+    try {
+      const { data: urlData, error: urlErr } = await supabase.storage
+        .from(bucket)
+        .createSignedUrl(path, 60 * 15);
+
+      if (!urlErr && urlData?.signedUrl) setAxiomMemoUrl(urlData.signedUrl);
+    } finally {
+      setAxiomBusy(null);
+    }
+  }
+
   async function invokeAxiomMemoEdgeFunction() {
     if (!selected?.id) return flashError("Select a record first.");
 
@@ -544,12 +561,7 @@ export default function CICouncilPage() {
 
       // Signed URL for memo PDF
       if (memo.storage_bucket && memo.storage_path) {
-        setAxiomBusy("url");
-        const { data: urlData, error: urlErr } = await supabase.storage
-          .from(memo.storage_bucket)
-          .createSignedUrl(memo.storage_path, 60 * 15);
-
-        if (!urlErr && urlData?.signedUrl) setAxiomMemoUrl(urlData.signedUrl);
+        await ensureSignedUrlForMemo(memo.storage_bucket, memo.storage_path);
       }
     } catch (e: any) {
       flashError(e?.message ?? "AXIOM: memo generation failed.");
@@ -564,7 +576,6 @@ export default function CICouncilPage() {
     if (detailTab !== "AXIOM") return;
     if (axiomBusy !== null) return;
 
-    // If we already have notes, don't re-fetch unless record changed.
     const key = `${selected.id}:${env}`;
     if (axiomNotes.length > 0 && lastAxiomAutoloadKeyRef.current === key) return;
 
@@ -572,6 +583,21 @@ export default function CICouncilPage() {
     void loadAxiomNotesForSelected();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detailTab, selectedId]);
+
+  // Preload Artifacts: if memo exists but no signed URL yet, create it automatically
+  useEffect(() => {
+    if (!selected?.id) return;
+    if (detailTab !== "ARTIFACTS") return;
+
+    const key = `${selected.id}:${env}`;
+    if (lastArtifactsAutoloadKeyRef.current === key && axiomMemoUrl) return;
+    lastArtifactsAutoloadKeyRef.current = key;
+
+    if (axiomLastMemo?.storage_bucket && axiomLastMemo?.storage_path && !axiomMemoUrl) {
+      void ensureSignedUrlForMemo(axiomLastMemo.storage_bucket, axiomLastMemo.storage_path);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detailTab, selectedId, axiomLastMemo?.storage_bucket, axiomLastMemo?.storage_path]);
 
   const axiomSeverityLabel =
     (axiomLastMemo?.severity as string | undefined) ??
@@ -594,16 +620,15 @@ export default function CICouncilPage() {
           wired).
         </p>
         <div className="mt-2 text-xs text-slate-400">
-          Entity:{" "}
-          <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
+          Entity: <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
           <span className="mx-2 text-slate-700">•</span>
-          Lane: <span className={lanePill}>{env}</span>
+          Lane: <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
         </div>
 
         {showNoEntityWarning && (
           <div className="mt-3 rounded-2xl border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-[12px] text-amber-200">
-            OS Context: <b>activeEntityId</b> missing; Council resolved{" "}
-            <code>entities.id</code> by slug. Env toggle flips <code>is_test</code> only.
+            OS Context: <b>activeEntityId</b> missing; Council resolved <code>entities.id</code> by slug. Env toggle flips{" "}
+            <code>is_test</code> only.
           </div>
         )}
       </div>
@@ -614,36 +639,11 @@ export default function CICouncilPage() {
           {/* Top strip */}
           <div className="shrink-0 mb-4 flex items-center justify-between gap-4">
             <div className="inline-flex rounded-full bg-slate-950/70 border border-slate-800 p-1 overflow-hidden">
-              <StatusTabButton
-                label="Pending"
-                value="PENDING"
-                active={tab === "PENDING"}
-                onClick={() => setTab("PENDING")}
-              />
-              <StatusTabButton
-                label="Approved"
-                value="APPROVED"
-                active={tab === "APPROVED"}
-                onClick={() => setTab("APPROVED")}
-              />
-              <StatusTabButton
-                label="Rejected"
-                value="REJECTED"
-                active={tab === "REJECTED"}
-                onClick={() => setTab("REJECTED")}
-              />
-              <StatusTabButton
-                label="Archived"
-                value="ARCHIVED"
-                active={tab === "ARCHIVED"}
-                onClick={() => setTab("ARCHIVED")}
-              />
-              <StatusTabButton
-                label="All"
-                value="ALL"
-                active={tab === "ALL"}
-                onClick={() => setTab("ALL")}
-              />
+              <StatusTabButton label="Pending" value="PENDING" active={tab === "PENDING"} onClick={() => setTab("PENDING")} />
+              <StatusTabButton label="Approved" value="APPROVED" active={tab === "APPROVED"} onClick={() => setTab("APPROVED")} />
+              <StatusTabButton label="Rejected" value="REJECTED" active={tab === "REJECTED"} onClick={() => setTab("REJECTED")} />
+              <StatusTabButton label="Archived" value="ARCHIVED" active={tab === "ARCHIVED"} onClick={() => setTab("ARCHIVED")} />
+              <StatusTabButton label="All" value="ALL" active={tab === "ALL"} onClick={() => setTab("ALL")} />
             </div>
 
             <div className="flex items-center gap-2">
@@ -679,8 +679,7 @@ export default function CICouncilPage() {
                 <div className="shrink-0 p-4 border-b border-slate-800">
                   <div className="flex items-center justify-between gap-2">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-                      Queue · {filtered.length}/{envFiltered.length}{" "}
-                      <span className="mx-2 text-slate-700">•</span>
+                      Queue · {filtered.length}/{envFiltered.length} <span className="mx-2 text-slate-700">•</span>
                       <span className={lanePill}>{env}</span>
                     </div>
                   </div>
@@ -756,16 +755,13 @@ export default function CICouncilPage() {
                     Review
                   </div>
                   <div className="mt-1 text-[13px] text-slate-400">
-                    Entity:{" "}
-                    <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
+                    Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
                     <span className="mx-2 text-slate-700">•</span>
                     Lane: <span className={lanePill}>{env}</span>
                     {selected && (
                       <>
                         <span className="mx-2 text-slate-700">•</span>
-                        <span className="text-slate-200">
-                          {(selected.status ?? "").toUpperCase()}
-                        </span>
+                        <span className="text-slate-200">{(selected.status ?? "").toUpperCase()}</span>
                       </>
                     )}
                   </div>
@@ -886,21 +882,9 @@ export default function CICouncilPage() {
                 </div>
 
                 <div className="mt-3 inline-flex rounded-full bg-slate-950/70 border border-slate-800 p-1 overflow-hidden">
-                  <DetailTabButton
-                    label="Record"
-                    active={detailTab === "RECORD"}
-                    onClick={() => setDetailTab("RECORD")}
-                  />
-                  <DetailTabButton
-                    label="AXIOM"
-                    active={detailTab === "AXIOM"}
-                    onClick={() => setDetailTab("AXIOM")}
-                  />
-                  <DetailTabButton
-                    label="Artifacts"
-                    active={detailTab === "ARTIFACTS"}
-                    onClick={() => setDetailTab("ARTIFACTS")}
-                  />
+                  <DetailTabButton label="Record" active={detailTab === "RECORD"} onClick={() => setDetailTab("RECORD")} />
+                  <DetailTabButton label="AXIOM" active={detailTab === "AXIOM"} onClick={() => setDetailTab("AXIOM")} />
+                  <DetailTabButton label="Artifacts" active={detailTab === "ARTIFACTS"} onClick={() => setDetailTab("ARTIFACTS")} />
                 </div>
               </div>
 
@@ -1160,8 +1144,7 @@ export default function CICouncilPage() {
 
                             {!axiomMemoUrl && (
                               <div className="mt-3 text-[11px] text-slate-500">
-                                (If you want “Open/Download” buttons, generate the signed URL by
-                                clicking Memo PDF again, or keep memo URL wiring as-is.)
+                                (Artifacts tab will auto-create a signed URL if bucket/path exist.)
                               </div>
                             )}
                           </div>
@@ -1322,9 +1305,7 @@ export default function CICouncilPage() {
           <div className="w-full max-w-[980px] h-[85vh] rounded-3xl border border-slate-800 bg-slate-950/95 shadow-2xl shadow-black/70 overflow-hidden flex flex-col">
             <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
               <div className="min-w-0">
-                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">
-                  Reader
-                </div>
+                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Reader</div>
                 <div className="mt-1 text-[15px] font-semibold text-slate-100 truncate">
                   {(selected?.title || "(untitled)") as string}
                 </div>
@@ -1345,9 +1326,7 @@ export default function CICouncilPage() {
 
             <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 space-y-4">
               <div className="rounded-2xl border border-slate-800 bg-black/40 px-5 py-5">
-                <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">
-                  Resolution
-                </div>
+                <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Resolution</div>
                 <pre className="mt-2 whitespace-pre-wrap font-sans text-[13px] leading-[1.8] text-slate-100">
                   {selected?.body ?? "—"}
                 </pre>
@@ -1355,9 +1334,7 @@ export default function CICouncilPage() {
 
               <div className="rounded-2xl border border-slate-800 bg-black/30 px-5 py-5">
                 <div className="flex items-center justify-between gap-2">
-                  <div className="text-[10px] uppercase tracking-[0.22em] text-indigo-200">
-                    AXIOM Advisory
-                  </div>
+                  <div className="text-[10px] uppercase tracking-[0.22em] text-indigo-200">AXIOM Advisory</div>
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => loadAxiomNotesForSelected()}
