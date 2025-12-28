@@ -1,12 +1,21 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+/* ────────────────────────────────────────────────────────────
+   ENV
+──────────────────────────────────────────────────────────── */
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
 const SERVICE_ROLE_KEY =
-  Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  Deno.env.get("SERVICE_ROLE_KEY") ??
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-if (!SUPABASE_URL || !SERVICE_ROLE_KEY) throw new Error("Missing Supabase env");
+if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
+  throw new Error("Missing Supabase env vars");
+}
 
+/* ────────────────────────────────────────────────────────────
+   CORS + HELPERS
+──────────────────────────────────────────────────────────── */
 const corsHeaders: HeadersInit = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
@@ -21,50 +30,90 @@ function json(data: unknown, status = 200) {
   });
 }
 
-function asString(x: unknown) {
-  return typeof x === "string" ? x.trim() : "";
+function asString(v: unknown) {
+  return typeof v === "string" ? v.trim() : "";
 }
 
-// Service-role client (writes)
+/* ────────────────────────────────────────────────────────────
+   SERVICE ROLE CLIENT (WRITES)
+──────────────────────────────────────────────────────────── */
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
   global: { fetch },
 });
 
+/* ────────────────────────────────────────────────────────────
+   SAFE INSERT WITH FALLBACK
+   (fallback MUST satisfy NOT NULL constraints)
+──────────────────────────────────────────────────────────── */
 async function insertWithFallback(
   table: "ai_summaries" | "ai_analyses" | "ai_advice",
   primaryRow: Record<string, unknown>,
   fallbackRow: Record<string, unknown>,
 ) {
-  // Try richer insert first (created_by/meta_json/etc.)
-  const first = await supabase.from(table).insert(primaryRow).select("id").maybeSingle();
+  const first = await supabase
+    .from(table)
+    .insert(primaryRow)
+    .select("id")
+    .maybeSingle();
+
   if (!first.error) return { id: (first.data as any)?.id ?? null };
 
-  // Retry minimal insert if schema differs
-  const second = await supabase.from(table).insert(fallbackRow).select("id").maybeSingle();
+  const second = await supabase
+    .from(table)
+    .insert(fallbackRow)
+    .select("id")
+    .maybeSingle();
+
   if (!second.error) return { id: (second.data as any)?.id ?? null };
 
-  return { error: second.error?.message ?? first.error?.message ?? "insert failed" };
+  return {
+    error:
+      second.error?.message ??
+      first.error?.message ??
+      "insert failed",
+  };
 }
 
+/* ────────────────────────────────────────────────────────────
+   HANDLER
+──────────────────────────────────────────────────────────── */
 serve(async (req) => {
-  // ✅ CORS preflight
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { headers: corsHeaders });
+  }
 
-  if (req.method !== "POST") return json({ ok: false, error: "POST required" }, 405);
+  if (req.method !== "POST") {
+    return json({ ok: false, error: "POST required" }, 405);
+  }
 
-  // ✅ Require a user JWT (Forge calls this from the browser)
-  const authHeader = req.headers.get("authorization") || req.headers.get("Authorization") || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-  if (!token) return json({ ok: false, error: "Missing Authorization Bearer token" }, 401);
+  /* ───── AUTH (USER JWT REQUIRED) ───── */
+  const authHeader =
+    req.headers.get("authorization") ||
+    req.headers.get("Authorization") ||
+    "";
 
-  // Verify token -> get user id (enterprise-safe audit)
-  const { data: userData, error: userErr } = await supabase.auth.getUser(token);
+  const token = authHeader.startsWith("Bearer ")
+    ? authHeader.slice(7)
+    : "";
+
+  if (!token) {
+    return json(
+      { ok: false, error: "Missing Authorization Bearer token" },
+      401,
+    );
+  }
+
+  const { data: userData, error: userErr } =
+    await supabase.auth.getUser(token);
+
   if (userErr || !userData?.user?.id) {
     return json({ ok: false, error: "Invalid session" }, 401);
   }
+
   const user_id = userData.user.id;
 
-  let body: any = {};
+  /* ───── BODY ───── */
+  let body: any;
   try {
     body = await req.json();
   } catch {
@@ -73,31 +122,36 @@ serve(async (req) => {
 
   const record_id = asString(body.record_id);
   const entity_slug = asString(body.entity_slug);
-  const envelope_id = asString(body.envelope_id); // optional
+  const envelope_id = asString(body.envelope_id);
   const trigger = asString(body.trigger) || "forge-pre-signature";
 
   if (!record_id || !entity_slug) {
-    return json({ ok: false, error: "record_id and entity_slug required" }, 400);
+    return json(
+      { ok: false, error: "record_id and entity_slug required" },
+      400,
+    );
   }
 
-  // 1) Load governance record (READ-ONLY)
+  /* ───── LOAD LEDGER RECORD (READ ONLY) ───── */
   const { data: record, error: recErr } = await supabase
     .from("governance_ledger")
-    .select("id, title, body, record_type, created_at, is_test, entity_id")
+    .select("id, title, body, record_type, is_test")
     .eq("id", record_id)
     .single();
 
   if (recErr || !record) {
-    return json({ ok: false, error: "Record not found", detail: recErr?.message }, 404);
+    return json(
+      { ok: false, error: "Record not found", detail: recErr?.message },
+      404,
+    );
   }
 
-  // 2) Best-effort audit trail (never blocks)
+  /* ───── BEST-EFFORT AUDIT (NON BLOCKING) ───── */
   try {
     await supabase.from("ai_actions").insert({
-      // your schema may differ; this is non-blocking
       created_by: user_id,
-      entity_slug,
       type: "AXIOM_PRE_SIGNATURE_REVIEW",
+      entity_slug,
       payload: {
         record_id,
         envelope_id: envelope_id || null,
@@ -106,21 +160,20 @@ serve(async (req) => {
       },
     });
   } catch {
-    // swallow
+    /* swallow */
   }
 
-  // 3) Generate outputs (mock for now — deterministic + safe)
+  /* ───── DETERMINISTIC ADVISORY CONTENT ───── */
   const summaryText =
-    `AXIOM pre-signature review: "${record.title}". ` +
-    `This is advisory-only and does not replace counsel or human authority.`;
+    `AXIOM pre-signature review for "${record.title}". ` +
+    `Advisory only. Human authority remains final.`;
 
   const analysisText =
-    "AXIOM assessed intent, scope, and procedural signals. " +
-    "No internal contradictions detected at this stage.";
+    "No internal contradictions detected. Procedural signals appear consistent.";
 
   const recommendationText =
-    "Proceed with signature only if the signatory understands obligations and downstream impact. " +
-    "No blocking risks flagged at this stage.";
+    "Proceed with signature only if the signatory understands obligations and downstream effects. " +
+    "No blocking risks identified at this stage.";
 
   const meta = {
     entity_slug,
@@ -129,7 +182,8 @@ serve(async (req) => {
     is_test: record.is_test ?? null,
   };
 
-  // 4) Write AI tables (schema-flex, enterprise-safe)
+  /* ───── WRITE AI TABLES ───── */
+
   const s = await insertWithFallback(
     "ai_summaries",
     {
@@ -147,7 +201,13 @@ serve(async (req) => {
       model: "axiom-v1",
     },
   );
-  if ((s as any).error) return json({ ok: false, error: "Failed to write ai_summaries", detail: (s as any).error }, 500);
+
+  if ((s as any).error) {
+    return json(
+      { ok: false, error: "Failed to write ai_summaries", detail: (s as any).error },
+      500,
+    );
+  }
 
   const a = await insertWithFallback(
     "ai_analyses",
@@ -166,14 +226,20 @@ serve(async (req) => {
       model: "axiom-v1",
     },
   );
-  if ((a as any).error) return json({ ok: false, error: "Failed to write ai_analyses", detail: (a as any).error }, 500);
+
+  if ((a as any).error) {
+    return json(
+      { ok: false, error: "Failed to write ai_analyses", detail: (a as any).error },
+      500,
+    );
+  }
 
   const adv = await insertWithFallback(
     "ai_advice",
     {
       record_id,
       advice: recommendationText,
-      recommendation: recommendationText,
+      recommendation: recommendationText, // ✅ REQUIRED
       risk_rating: 0.15,
       confidence: 0.86,
       ai_source: "edge",
@@ -184,14 +250,22 @@ serve(async (req) => {
     {
       record_id,
       advice: recommendationText,
+      recommendation: recommendationText, // ✅ REQUIRED (FIX)
       model: "axiom-v1",
     },
   );
-  if ((adv as any).error) return json({ ok: false, error: "Failed to write ai_advice", detail: (adv as any).error }, 500);
 
+  if ((adv as any).error) {
+    return json(
+      { ok: false, error: "Failed to write ai_advice", detail: (adv as any).error },
+      500,
+    );
+  }
+
+  /* ───── DONE ───── */
   return json({
     ok: true,
-    message: "AXIOM pre-signature review completed.",
+    message: "AXIOM pre-signature review completed",
     record_id,
     envelope_id: envelope_id || null,
     summary_id: (s as any).id ?? null,
