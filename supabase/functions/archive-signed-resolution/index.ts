@@ -7,9 +7,19 @@ const SERVICE_ROLE_KEY =
 
 if (!SUPABASE_URL || !SERVICE_ROLE_KEY) throw new Error("Missing Supabase env");
 
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+  global: { fetch },
+});
 
 const MINUTE_BOOK_BUCKET = Deno.env.get("MINUTE_BOOK_BUCKET") ?? "minute_book";
+const SIGNED_PDF_BUCKET = Deno.env.get("SIGNED_PDF_BUCKET") ?? MINUTE_BOOK_BUCKET;
+
+// where archive-save-document will place the Minute Book entry
+const DEFAULT_DOMAIN_KEY = Deno.env.get("DEFAULT_MINUTE_BOOK_DOMAIN_KEY") ?? "governance";
+const DEFAULT_SECTION_NAME = Deno.env.get("DEFAULT_MINUTE_BOOK_SECTION_NAME") ?? "Governance";
+
+// Optional: if you have an RPC that seals into verified_documents registry
+const SEAL_RPC_NAME = Deno.env.get("SEAL_RPC_NAME") ?? "seal_governance_record_for_archive";
 
 const corsHeaders: HeadersInit = {
   "Access-Control-Allow-Origin": "*",
@@ -28,46 +38,50 @@ function asString(x: unknown) {
   return typeof x === "string" ? x.trim() : "";
 }
 
-function bytesToBase64(bytes: Uint8Array): string {
-  let bin = "";
+function base64FromBytes(bytes: Uint8Array): string {
+  let binary = "";
   const chunk = 0x8000;
   for (let i = 0; i < bytes.length; i += chunk) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
   }
-  return btoa(bin);
+  return btoa(binary);
 }
 
 type ReqBody = {
-  record_id?: string;   // governance_ledger.id (REQUIRED)
-  envelope_id?: string; // signature_envelopes.id (REQUIRED)
+  // UI may send one or both; envelope_id is sufficient
+  envelope_id?: string;
+  record_id?: string;
+
+  // UI may send is_test, but governance_ledger is source of truth
+  is_test?: boolean;
+
+  // optional placement overrides
+  domain_key?: string;
+  section_name?: string;
+
+  // optional override
+  signed_bucket?: string;
 };
 
-async function findSignedPdfPath(recordId: string): Promise<string | null> {
-  // Prefer the explicit "-signed.pdf" file
+async function findSignedObjectPath(recordId: string): Promise<{ bucket: string; path: string } | null> {
+  // primary: look for "*-signed.pdf" in the signed bucket
   const { data, error } = await supabase
     .from("storage.objects")
-    .select("name, created_at")
-    .eq("bucket_id", MINUTE_BOOK_BUCKET)
-    .ilike("name", `%${recordId}%-signed.pdf`)
+    .select("bucket_id, name, created_at")
+    .eq("bucket_id", SIGNED_PDF_BUCKET)
+    .ilike("name", `%${recordId}%-signed.pdf%`)
     .order("created_at", { ascending: false })
     .limit(1);
 
-  if (error) throw new Error(`storage.objects lookup failed: ${error.message}`);
-  if (data && data.length > 0) return data[0].name as string;
+  if (error) {
+    console.warn("storage.objects search error:", error.message);
+    return null;
+  }
 
-  // Fallback: any PDF containing record id (last resort)
-  const { data: data2, error: error2 } = await supabase
-    .from("storage.objects")
-    .select("name, created_at")
-    .eq("bucket_id", MINUTE_BOOK_BUCKET)
-    .ilike("name", `%${recordId}%.pdf`)
-    .order("created_at", { ascending: false })
-    .limit(1);
+  const row = data?.[0];
+  if (!row?.bucket_id || !row?.name) return null;
 
-  if (error2) throw new Error(`storage.objects fallback lookup failed: ${error2.message}`);
-  if (data2 && data2.length > 0) return data2[0].name as string;
-
-  return null;
+  return { bucket: row.bucket_id as string, path: row.name as string };
 }
 
 serve(async (req) => {
@@ -81,14 +95,35 @@ serve(async (req) => {
     return json({ ok: false, error: "Invalid JSON" }, 400);
   }
 
-  const record_id = asString(body.record_id);
   const envelope_id = asString(body.envelope_id);
+  const record_id_in = asString(body.record_id);
 
-  if (!record_id || !envelope_id) {
-    return json({ ok: false, error: "record_id (governance_ledger.id) and envelope_id are required" }, 400);
+  if (!envelope_id && !record_id_in) {
+    return json({ ok: false, error: "Provide envelope_id (preferred) or record_id" }, 400);
   }
 
-  // 1) Load governance record (truth for entity_id + lane + title)
+  // 1) Load envelope (if provided) to resolve record_id + storage_path
+  let record_id = record_id_in;
+  let envelope_storage_path = "";
+  let envelope_status = "";
+  if (envelope_id) {
+    const { data: env, error: envErr } = await supabase
+      .from("signature_envelopes")
+      .select("id, record_id, status, storage_path, supporting_document_path")
+      .eq("id", envelope_id)
+      .maybeSingle();
+
+    if (envErr) return json({ ok: false, error: "Failed to load signature_envelopes", details: envErr.message }, 500);
+    if (!env) return json({ ok: false, error: "Envelope not found", envelope_id }, 404);
+
+    record_id = record_id || (env.record_id as string);
+    envelope_status = asString(env.status);
+    envelope_storage_path = asString(env.storage_path) || asString(env.supporting_document_path);
+  }
+
+  if (!record_id) return json({ ok: false, error: "Could not resolve record_id" }, 400);
+
+  // 2) Load governance record (truth source for lane + entity)
   const { data: ledger, error: ledErr } = await supabase
     .from("governance_ledger")
     .select("id, title, entity_id, is_test")
@@ -96,118 +131,147 @@ serve(async (req) => {
     .maybeSingle();
 
   if (ledErr) return json({ ok: false, error: "Failed to load governance_ledger", details: ledErr.message }, 500);
-  if (!ledger) return json({ ok: false, error: "record_id not found in governance_ledger" }, 404);
+  if (!ledger) return json({ ok: false, error: "record_id not found in governance_ledger", record_id }, 404);
 
   const lane_is_test = (ledger.is_test ?? false) === true;
+  const title = asString(ledger.title) || "Signed Resolution";
+  const entity_id = asString(ledger.entity_id);
+  if (!entity_id) return json({ ok: false, error: "governance_ledger.entity_id missing", record_id }, 400);
 
-  // 2) Load envelope (only for status sanity; DO NOT trust lane from envelope)
-  const { data: env, error: envErr } = await supabase
-    .from("signature_envelopes")
-    .select("id, record_id, status, completed_at")
-    .eq("id", envelope_id)
+  // 3) Resolve entity_key from entities.slug (must match your enum keys)
+  const { data: ent, error: entErr } = await supabase
+    .from("entities")
+    .select("slug")
+    .eq("id", entity_id)
     .maybeSingle();
 
-  if (envErr) return json({ ok: false, error: "Failed to load signature_envelopes", details: envErr.message }, 500);
-  if (!env) return json({ ok: false, error: "envelope_id not found in signature_envelopes" }, 404);
+  if (entErr) return json({ ok: false, error: "Failed to resolve entity slug", details: entErr.message }, 500);
+  const entity_key = asString(ent?.slug);
+  if (!entity_key) return json({ ok: false, error: "Could not resolve entity_key from entities.slug", entity_id }, 400);
 
-  if ((env.status || "").toLowerCase() !== "completed") {
-    return json({ ok: false, error: "Envelope is not completed", envelope_status: env.status }, 400);
+  // 4) Determine signed pdf path
+  const signed_bucket = asString(body.signed_bucket) || SIGNED_PDF_BUCKET;
+
+  // Preferred: if envelope has a base storage path, derive "-signed.pdf"
+  let signed_path = "";
+  if (envelope_storage_path) {
+    // if it's ".../<id>.pdf" -> ".../<id>-signed.pdf"
+    if (envelope_storage_path.toLowerCase().endsWith(".pdf")) {
+      signed_path = envelope_storage_path.replace(/\.pdf$/i, "-signed.pdf");
+    } else {
+      // fallback
+      signed_path = envelope_storage_path;
+    }
   }
 
-  // 3) Find signed pdf path in minute_book bucket
-  let signedPath: string | null = null;
-  try {
-    signedPath = await findSignedPdfPath(record_id);
-  } catch (e) {
-    return json({ ok: false, error: "Failed searching for signed PDF", details: (e as Error).message }, 500);
+  // Verify it exists; otherwise search storage.objects
+  if (signed_path) {
+    const { data: obj, error: objErr } = await supabase
+      .from("storage.objects")
+      .select("name")
+      .eq("bucket_id", signed_bucket)
+      .eq("name", signed_path)
+      .maybeSingle();
+
+    if (objErr) console.warn("object verify error:", objErr.message);
+    if (!obj?.name) signed_path = "";
   }
 
-  if (!signedPath) {
-    return json({
-      ok: false,
-      error: "Signed PDF not found in storage",
-      hint: `Expected something like: holdings/Resolutions/${record_id}-signed.pdf in bucket ${MINUTE_BOOK_BUCKET}`,
-    }, 404);
+  if (!signed_path) {
+    const found = await findSignedObjectPath(record_id);
+    if (!found) {
+      return json(
+        {
+          ok: false,
+          error: "Failed to locate signed PDF in storage",
+          record_id,
+          envelope_id: envelope_id || null,
+          hint: `Expected ${signed_bucket} to contain *${record_id}*-signed.pdf`,
+        },
+        404,
+      );
+    }
+    signed_path = found.path;
   }
 
-  // 4) Download PDF bytes
-  const { data: dl, error: dlErr } = await supabase.storage
-    .from(MINUTE_BOOK_BUCKET)
-    .download(signedPath);
+  // 5) Download signed PDF bytes
+  const { data: signedBlob, error: dlErr } = await supabase.storage
+    .from(signed_bucket)
+    .download(signed_path);
 
-  if (dlErr || !dl) {
-    return json({
-      ok: false,
-      error: "Failed to download signed PDF",
-      details: dlErr?.message ?? "download returned null",
-      bucket: MINUTE_BOOK_BUCKET,
-      path: signedPath,
-    }, 500);
+  if (dlErr || !signedBlob) {
+    return json(
+      {
+        ok: false,
+        error: "Failed to download signed PDF",
+        details: dlErr?.message ?? "{}",
+        signed_bucket,
+        signed_path,
+      },
+      500,
+    );
   }
 
-  const pdfBytes = new Uint8Array(await dl.arrayBuffer());
-  const pdf_base64 = bytesToBase64(pdfBytes);
+  const signedBytes = new Uint8Array(await signedBlob.arrayBuffer());
+  const pdf_base64 = base64FromBytes(signedBytes);
 
-  // 5) Call archive-save-document (service-role) to register Minute Book + supporting_documents
-  const url = `${SUPABASE_URL}/functions/v1/archive-save-document`;
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
-      "apikey": SERVICE_ROLE_KEY,
-    },
-    body: JSON.stringify({
+  // 6) Call archive-save-document (Minute Book + supporting_documents + pointers)
+  const domain_key = asString(body.domain_key) || DEFAULT_DOMAIN_KEY;
+  const section_name = asString(body.section_name) || DEFAULT_SECTION_NAME;
+
+  const { data: saveRes, error: saveErr } = await supabase.functions.invoke("archive-save-document", {
+    body: {
       source_record_id: record_id,
       pdf_base64,
-      envelope_id,
+      title,
+      entity_id,
+      entity_key,
       is_test: lane_is_test,
-      title: ledger.title ?? "Signed Resolution",
-      entity_id: ledger.entity_id,
+      envelope_id: envelope_id || null,
+      domain_key,
+      section_name,
       bucket: MINUTE_BOOK_BUCKET,
-    }),
+    },
   });
 
-  const outText = await resp.text();
-  let outJson: any = null;
-  try { outJson = JSON.parse(outText); } catch { /* ignore */ }
-
-  if (!resp.ok) {
-    return json({
-      ok: false,
-      error: "archive-save-document failed",
-      status: resp.status,
-      details: outJson ?? outText,
-      record_id,
-      envelope_id,
-      is_test: lane_is_test,
-      bucket: MINUTE_BOOK_BUCKET,
-      path: signedPath,
-    }, 500);
+  if (saveErr) {
+    return json(
+      {
+        ok: false,
+        error: "archive-save-document failed",
+        details: saveErr.message,
+        record_id,
+        envelope_id: envelope_id || null,
+      },
+      500,
+    );
   }
 
-  // 6) Best-effort seal into verified registry (won't break if RPC missing)
-  let seal_result: any = null;
-  let seal_error: string | null = null;
-  try {
-    const { data, error } = await supabase.rpc("seal_governance_record_for_archive", {
-      p_record_id: record_id,
+  // 7) Best-effort seal into verified registry (if RPC exists)
+  let seal_result: unknown = null;
+  {
+    const { data: sealData, error: sealErr } = await supabase.rpc(SEAL_RPC_NAME as any, {
+      record_id,
     } as any);
-    if (error) seal_error = error.message;
-    else seal_result = data;
-  } catch (e) {
-    seal_error = (e as Error).message;
+
+    if (sealErr) {
+      // Don't fail the whole archive if seal is already done or RPC differs.
+      console.warn("seal rpc failed (non-blocking):", sealErr.message);
+    } else {
+      seal_result = sealData;
+    }
   }
 
   return json({
     ok: true,
     record_id,
-    envelope_id,
-    is_test: lane_is_test,
-    bucket: MINUTE_BOOK_BUCKET,
-    signed_pdf_path: signedPath,
-    archive_save_document: outJson ?? outText,
+    envelope_id: envelope_id || null,
+    envelope_status: envelope_status || null,
+    lane_is_test,
+    signed_bucket,
+    signed_path,
+    minute_book_bucket: MINUTE_BOOK_BUCKET,
+    archive_save_result: saveRes ?? null,
     seal_result,
-    seal_error,
   });
 });
