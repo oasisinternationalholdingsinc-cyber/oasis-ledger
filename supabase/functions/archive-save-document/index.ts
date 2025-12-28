@@ -59,7 +59,6 @@ type ReqBody = {
   section_name?: string;
 
   title?: string;
-  entity_id?: string;
   entity_key?: string;
   is_test?: boolean;
 
@@ -89,7 +88,7 @@ serve(async (req) => {
   const section_name = asString(body.section_name) || DEFAULT_SECTION_NAME;
 
   // ─────────────────────────────────────────────
-  // Load ledger record (truth source)
+  // Load governance ledger (SINGLE SOURCE OF TRUTH)
   // ─────────────────────────────────────────────
   const { data: ledger, error: ledErr } = await supabase
     .from("governance_ledger")
@@ -107,20 +106,15 @@ serve(async (req) => {
   const is_test = ledger.is_test === true;
 
   // ─────────────────────────────────────────────
-  // Resolve entity_key
+  // Resolve entity_key from entity_id
   // ─────────────────────────────────────────────
   let entity_key = asString(body.entity_key);
 
   if (!entity_key) {
-    const entity_id = asString(body.entity_id) || ledger.entity_id;
-    if (!entity_id) {
-      return json({ ok: false, error: "Missing entity_id" }, 400);
-    }
-
     const { data: ent, error: entErr } = await supabase
       .from("entities")
       .select("slug")
-      .eq("id", entity_id)
+      .eq("id", ledger.entity_id)
       .maybeSingle();
 
     if (entErr || !ent?.slug) {
@@ -139,7 +133,7 @@ serve(async (req) => {
   const sha256 = await sha256Hex(pdfBytes);
 
   // ─────────────────────────────────────────────
-  // Idempotency check
+  // Idempotency (same ledger record → same entry)
   // ─────────────────────────────────────────────
   const { data: existing } = await supabase
     .from("minute_book_entries")
@@ -156,12 +150,14 @@ serve(async (req) => {
   }
 
   // ─────────────────────────────────────────────
-  // Insert minute_book_entries
-  // entry_type is ALWAYS 'resolution' for Forge
+  // INSERT minute_book_entries (EXPLICIT entity_id)
+  // entry_type = 'resolution' (Forge output)
+  // entry_date = DEFAULT (CURRENT_DATE)
   // ─────────────────────────────────────────────
   const { data: mbe, error: mbeErr } = await supabase
     .from("minute_book_entries")
     .insert({
+      entity_id: ledger.entity_id,     // 🔒 REQUIRED
       entity_key,
       domain_key,
       section_name,
@@ -182,7 +178,7 @@ serve(async (req) => {
   const entry_id = mbe.id as string;
 
   // ─────────────────────────────────────────────
-  // Storage path (lane-safe)
+  // Storage path (entity + lane + domain safe)
   // ─────────────────────────────────────────────
   const safeTitle = title
     .toLowerCase()
@@ -209,7 +205,7 @@ serve(async (req) => {
   }
 
   // ─────────────────────────────────────────────
-  // Insert PRIMARY supporting document
+  // PRIMARY supporting document (verified)
   // ─────────────────────────────────────────────
   const { error: sdErr } = await supabase
     .from("supporting_documents")
@@ -229,7 +225,7 @@ serve(async (req) => {
     return json(
       {
         ok: false,
-        error: "Archive partial: document metadata failed",
+        error: "Archive partial: supporting_documents insert failed",
         details: sdErr.message,
         minute_book_entry_id: entry_id,
       },

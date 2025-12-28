@@ -91,7 +91,7 @@ serve(async (req) => {
   const pdf_base64 = bufferToBase64(await file.arrayBuffer());
 
   // ─────────────────────────────────────────────
-  // Call archive-save-document (single source of truth)
+  // Canonical archive invocation
   // ─────────────────────────────────────────────
   const { data, error } = await supabase.functions.invoke(
     "archive-save-document",
