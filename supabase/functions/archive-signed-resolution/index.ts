@@ -1,4 +1,3 @@
-// supabase/functions/archive-signed-resolution/index.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -10,14 +9,16 @@ if (!SUPABASE_URL || !SERVICE_ROLE_KEY) throw new Error("Missing Supabase env");
 
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
 
-const SIGNED_BUCKET = Deno.env.get("MINUTE_BOOK_BUCKET") ?? "minute_book";
+// IMPORTANT: signed envelope PDFs usually live in the governance bucket, NOT minute_book
+const SIGNED_PDF_BUCKET = Deno.env.get("SIGNED_PDF_BUCKET") ?? "governance_sandbox";
+const MINUTE_BOOK_BUCKET = Deno.env.get("MINUTE_BOOK_BUCKET") ?? "minute_book";
+
 const DEFAULT_DOMAIN_KEY = Deno.env.get("DEFAULT_MINUTE_BOOK_DOMAIN_KEY") ?? "governance";
 const DEFAULT_SECTION_NAME = Deno.env.get("DEFAULT_MINUTE_BOOK_SECTION_NAME") ?? "Governance";
 
 const corsHeaders: HeadersInit = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
@@ -49,6 +50,9 @@ type ArchiveSaveResp = {
   ok: boolean;
   minute_book_entry_id?: string;
   already_archived?: boolean;
+  storage_path?: string;
+  file_name?: string;
+  sha256?: string;
   error?: string;
   details?: unknown;
 };
@@ -90,7 +94,7 @@ serve(async (req) => {
 
   const record_id = env.record_id as string;
 
-  // 2) Ledger (truth source)
+  // 2) Ledger (lane truth + entity + title)
   const { data: ledger, error: ledErr } = await supabase
     .from("governance_ledger")
     .select("id, title, entity_id, is_test")
@@ -99,14 +103,13 @@ serve(async (req) => {
 
   if (ledErr) return json({ ok: false, error: "Failed to load governance_ledger", details: ledErr.message }, 500);
   if (!ledger) return json({ ok: false, error: "governance_ledger record not found for envelope.record_id" }, 404);
-  if (!ledger.entity_id) return json({ ok: false, error: "governance_ledger missing entity_id" }, 400);
 
   const domain_key = (asString(body.domain_key) || DEFAULT_DOMAIN_KEY).trim();
   const section_name = (asString(body.section_name) || DEFAULT_SECTION_NAME).trim();
 
-  // 3) Download signed pdf
+  // 3) Download signed pdf (from SIGNED_PDF_BUCKET)
   const { data: file, error: dlErr } = await supabase.storage
-    .from(SIGNED_BUCKET)
+    .from(SIGNED_PDF_BUCKET)
     .download(env.storage_path);
 
   if (dlErr || !file) {
@@ -122,16 +125,13 @@ serve(async (req) => {
       body: {
         source_record_id: record_id,
         pdf_base64,
-
         domain_key,
         section_name,
-
         title: ledger.title ?? "Signed Resolution",
         entity_id: ledger.entity_id,
         is_test: ledger.is_test ?? false,
         envelope_id,
-
-        bucket: SIGNED_BUCKET,
+        bucket: MINUTE_BOOK_BUCKET,
       },
     },
   );
@@ -139,19 +139,31 @@ serve(async (req) => {
   if (invErr) {
     const extra = await readInvokeErrorDetails(invErr);
     return json(
-      {
-        ok: false,
-        error: (extra as any)?.error ?? invErr.message ?? "archive-save-document failed",
-        details: extra ?? null,
-      },
+      { ok: false, error: (extra as any)?.error ?? invErr.message ?? "archive-save-document failed", details: extra ?? null },
       400,
     );
   }
 
   if (!out?.ok) {
+    return json({ ok: false, error: out?.error ?? "archive-save-document returned ok=false", details: out?.details ?? null }, 400);
+  }
+
+  // 5) Seal -> Verified Registry (this is the missing link)
+  const { data: sealOut, error: sealErr } = await supabase.rpc("seal_governance_record_for_archive", {
+    p_ledger_id: record_id,
+  });
+
+  if (sealErr) {
     return json(
-      { ok: false, error: out?.error ?? "archive-save-document returned ok=false", details: out?.details ?? null },
-      400,
+      {
+        ok: false,
+        error: "Archived to minute book but sealing (verified registry) failed",
+        details: sealErr.message,
+        minute_book_entry_id: out.minute_book_entry_id ?? null,
+        record_id,
+        envelope_id,
+      },
+      500,
     );
   }
 
@@ -164,5 +176,6 @@ serve(async (req) => {
     domain_key,
     section_name,
     is_test: ledger.is_test ?? false,
+    seal: sealOut ?? null,
   });
 });
