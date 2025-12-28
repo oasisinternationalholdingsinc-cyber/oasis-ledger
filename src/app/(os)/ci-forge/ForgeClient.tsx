@@ -105,6 +105,23 @@ function clamp(s: string, n: number) {
   return t.length > n ? `${t.slice(0, n)}…` : t;
 }
 
+// Best-effort: surface Supabase Edge Function error body (helps debug 400/401/500)
+async function extractFnError(err: any): Promise<string> {
+  try {
+    const anyErr = err as any;
+    const ctx = anyErr?.context;
+    const resp: Response | undefined = ctx?.response;
+
+    if (resp && typeof resp.text === "function") {
+      const t = await resp.text();
+      if (t?.trim()) return t;
+    }
+  } catch {
+    // ignore
+  }
+  return err?.message || "Request failed.";
+}
+
 export default function ForgeClient() {
   const { activeEntity } = useEntity();
   const { env } = useOsEnv(); // "ROT" | "SANDBOX"
@@ -217,8 +234,14 @@ export default function ForgeClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, activeEntity, isTest]);
 
-  const selected =
-    visibleQueue.find((q) => q.ledger_id === selectedId) ?? visibleQueue[0] ?? null;
+  const selected = visibleQueue.find((q) => q.ledger_id === selectedId) ?? visibleQueue[0] ?? null;
+
+  // small UX: clear any previous portal error + portal when switching records
+  useEffect(() => {
+    setPortal({});
+    setPortalError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.ledger_id]);
 
   const envelopeLocked =
     !!selected?.envelope_status &&
@@ -338,7 +361,9 @@ export default function ForgeClient() {
       setQueue(rows);
 
       const nextVisible =
-        tab === "active" ? rows.filter((r) => !isCompleted(r)) : rows.filter((r) => isCompleted(r));
+        tab === "active"
+          ? rows.filter((r) => !isCompleted(r))
+          : rows.filter((r) => isCompleted(r));
 
       const fallback = nextVisible[0]?.ledger_id ?? null;
       const desired =
@@ -360,8 +385,6 @@ export default function ForgeClient() {
     setPortal({});
 
     try {
-      // Function signature is expected to be: ci_portal_urls(p_envelope_id uuid) -> jsonb
-      // If your arg name differs, adjust to match.
       const { data, error } = await supabase.rpc("ci_portal_urls", { p_envelope_id: envelopeId });
 
       if (error) {
@@ -370,7 +393,6 @@ export default function ForgeClient() {
         return;
       }
 
-      // data may be json or wrapped depending on how RPC is defined
       const pu = (data as any) ?? {};
       setPortal({
         signer_url: pu?.signer_url ?? pu?.signer ?? null,
@@ -471,10 +493,13 @@ export default function ForgeClient() {
 
     setIsStarting(true);
     try {
+      // ✅ Adjustment: include is_test + entity_id in payload (harmless if ignored; required if function validates lane/entity)
       const { data, error } = await supabase.functions.invoke("start-signature", {
         body: {
           record_id: selected.ledger_id,
-          entity_slug: selected.entity_slug,
+          entity_slug: selected.entity_slug, // keep for backwards compat
+          entity_id: selected.entity_id, // added
+          is_test: isTest, // added (your env toggle is canonical lane flag)
           signer_name: primarySignerName.trim(),
           signer_email: primarySignerEmail.trim(),
           cc_emails: ccEmails
@@ -484,7 +509,11 @@ export default function ForgeClient() {
         },
       });
 
-      if (error) throw error;
+      if (error) {
+        const msg = await extractFnError(error);
+        throw new Error(msg);
+      }
+
       const res = data as StartSignatureResponse;
 
       if (!res?.ok) {
@@ -494,9 +523,9 @@ export default function ForgeClient() {
 
       flashInfo(res.reused ? "Existing envelope reused." : "Envelope started.");
       await refreshQueueKeepSelection(selected.ledger_id);
-    } catch (err) {
+    } catch (err: any) {
       console.error("start-signature error", err);
-      flashError("Unable to start envelope.");
+      flashError(err?.message || "Unable to start envelope.");
     } finally {
       setIsStarting(false);
     }
@@ -514,10 +543,18 @@ export default function ForgeClient() {
     setIsSendingInvite(true);
     try {
       const { data, error } = await supabase.functions.invoke("send-signature-invite", {
-        body: { envelope_id: selected.envelope_id },
+        body: {
+          envelope_id: selected.envelope_id,
+          // optional lane hint (harmless if ignored)
+          is_test: isTest,
+        },
       });
 
-      if (error) throw error;
+      if (error) {
+        const msg = await extractFnError(error);
+        throw new Error(msg);
+      }
+
       const res = data as SendInviteResponse;
 
       if (!res?.ok) {
@@ -527,9 +564,9 @@ export default function ForgeClient() {
 
       flashInfo(res.message ?? "Invite sent.");
       await refreshQueueKeepSelection(selected.ledger_id);
-    } catch (err) {
+    } catch (err: any) {
       console.error("send-signature-invite error", err);
-      flashError("Unable to send invite.");
+      flashError(err?.message || "Unable to send invite.");
     } finally {
       setIsSendingInvite(false);
     }
@@ -551,10 +588,18 @@ export default function ForgeClient() {
     setIsArchiving(true);
     try {
       const { data, error } = await supabase.functions.invoke("archive-signed-resolution", {
-        body: { envelope_id: selected.envelope_id },
+        body: {
+          envelope_id: selected.envelope_id,
+          // optional lane hint (harmless if ignored)
+          is_test: isTest,
+        },
       });
 
-      if (error) throw error;
+      if (error) {
+        const msg = await extractFnError(error);
+        throw new Error(msg);
+      }
+
       const res = data as ArchiveSignedResolutionResponse;
 
       if (!res?.ok) {
@@ -564,9 +609,9 @@ export default function ForgeClient() {
 
       flashInfo(res.already_archived ? "Already archived." : "Archived into CI-Archive Minute Book.");
       await refreshQueueKeepSelection(selected.ledger_id);
-    } catch (err) {
+    } catch (err: any) {
       console.error("archive-signed-resolution error", err);
-      flashError("Unable to archive signed resolution.");
+      flashError(err?.message || "Unable to archive signed resolution.");
     } finally {
       setIsArchiving(false);
     }
@@ -587,12 +632,17 @@ export default function ForgeClient() {
         body: {
           record_id: selected.ledger_id,
           entity_slug: selected.entity_slug,
+          entity_id: selected.entity_id,
+          is_test: isTest,
           envelope_id: selected.envelope_id ?? null,
           trigger: "forge-pre-signature",
         },
       });
 
-      if (error) throw error;
+      if (error) {
+        const msg = await extractFnError(error);
+        throw new Error(msg);
+      }
 
       const res = data as AxiomReviewResponse;
       if (!res?.ok) {
@@ -602,9 +652,9 @@ export default function ForgeClient() {
 
       flashAxiomInfo(res.message ?? "AXIOM review completed.");
       await loadAxiomLatest(selected.ledger_id);
-    } catch (e) {
+    } catch (e: any) {
       console.error("axiom-pre-signature-review error", e);
-      flashAxiomError("Unable to run AXIOM review.");
+      flashAxiomError(e?.message || "Unable to run AXIOM review.");
     } finally {
       setAxiomLoading(false);
     }
@@ -612,15 +662,20 @@ export default function ForgeClient() {
 
   const axiomAdvisory = useMemo(() => {
     if (!selected) {
-      return { severity: "IDLE" as RiskLevel, bullets: ["Select an execution record to view intelligence."] };
+      return {
+        severity: "IDLE" as RiskLevel,
+        bullets: ["Select an execution record to view intelligence."],
+      };
     }
 
     const risk = computeRiskLevel(selected);
     const bullets: string[] = [];
 
     if (!selected.envelope_id) bullets.push("No envelope exists yet. Start the envelope to begin signing.");
-    if (selected.envelope_id && !envelopeSigned) bullets.push("Envelope is active. Monitor progress; resend invite if stalled.");
-    if (envelopeSigned) bullets.push("Envelope completed. Next action is Archive Now to generate archive-grade artifacts + registry entry.");
+    if (selected.envelope_id && !envelopeSigned)
+      bullets.push("Envelope is active. Monitor progress; resend invite if stalled.");
+    if (envelopeSigned)
+      bullets.push("Envelope completed. Next action is Archive Now to generate archive-grade artifacts + registry entry.");
 
     bullets.push("Run AXIOM Review to generate/refresh advisory intelligence for this record.");
     bullets.push("AXIOM is advisory-only: it never blocks human authority.");
@@ -740,7 +795,10 @@ export default function ForgeClient() {
                         </div>
 
                         <div className="flex flex-col items-end gap-2">
-                          <div className={["h-2.5 w-2.5 rounded-full", riskLightClasses(risk)].join(" ")} title={riskLabel(risk)} />
+                          <div
+                            className={["h-2.5 w-2.5 rounded-full", riskLightClasses(risk)].join(" ")}
+                            title={riskLabel(risk)}
+                          />
                           <div className="text-[10px] text-slate-500">
                             {q.parties_signed ?? 0}/{q.parties_total ?? 0}
                           </div>
@@ -765,8 +823,8 @@ export default function ForgeClient() {
                   {selected ? selected.title : "No record selected"}
                 </div>
                 <div className="mt-1 text-[11px] text-slate-500">
-                  Ledger Status: <span className="text-slate-300">{selected?.ledger_status ?? "—"}</span> • Envelope:{" "}
-                  <span className="text-slate-300">{selected?.envelope_status ?? "—"}</span> • Env:{" "}
+                  Ledger Status: <span className="text-slate-300">{selected?.ledger_status ?? "—"}</span> •
+                  Envelope: <span className="text-slate-300">{selected?.envelope_status ?? "—"}</span> • Env:{" "}
                   <span className="text-slate-300">{isTest ? "SANDBOX" : "RoT"}</span>
                 </div>
               </div>
@@ -828,7 +886,11 @@ export default function ForgeClient() {
                                   : "bg-emerald-500 text-black hover:bg-emerald-400",
                               ].join(" ")}
                             >
-                              {envelopeLocked ? "Envelope already created" : isStarting ? "Starting…" : "Start envelope"}
+                              {envelopeLocked
+                                ? "Envelope already created"
+                                : isStarting
+                                ? "Starting…"
+                                : "Start envelope"}
                             </button>
                           </form>
 
@@ -891,7 +953,9 @@ export default function ForgeClient() {
             {/* Right */}
             <section className="w-[360px] shrink-0 overflow-hidden rounded-2xl border border-slate-900 bg-slate-950/35">
               <div className="border-b border-slate-900 px-4 py-3">
-                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Intelligence + Artifacts</div>
+                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">
+                  Intelligence + Artifacts
+                </div>
                 <div className="mt-1 text-[11px] text-slate-400">AXIOM is advisory-only. Humans execute.</div>
               </div>
 
@@ -1020,9 +1084,7 @@ export default function ForgeClient() {
                       <span className="text-slate-200">{fmt(selected?.last_signed_at)}</span>
                     </div>
 
-                    {portalError ? (
-                      <div className="mt-2 text-[10px] text-slate-500">{portalError}</div>
-                    ) : null}
+                    {portalError ? <div className="mt-2 text-[10px] text-slate-500">{portalError}</div> : null}
 
                     {(portal.signer_url || portal.verify_url || portal.certificate_url) && (
                       <div className="mt-2 grid grid-cols-1 gap-2">
