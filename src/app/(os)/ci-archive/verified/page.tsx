@@ -1,3 +1,4 @@
+// src/app/(os)/ci-archive/verified/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -24,7 +25,7 @@ type VerifiedRow = {
   verification_level: string;
   is_archived: boolean;
 
-  // derived (joined)
+  // derived
   lane_is_test?: boolean | null;
   ledger_status?: string | null;
 };
@@ -32,16 +33,49 @@ type VerifiedRow = {
 type Tab = "ALL" | "SIGNED" | "ARCHIVED";
 
 export default function VerifiedRegistryPage() {
-  const { activeEntity } = useEntity();
+  const { activeEntity } = useEntity(); // NOTE: this is an EntityKey/slug (e.g. "holdings"), NOT an object
   const { env } = useOsEnv();
   const laneIsTest = env === "SANDBOX";
+
+  const activeSlug = (activeEntity ?? null) as string | null;
+
+  const [entityId, setEntityId] = useState<string | null>(null);
 
   const [rows, setRows] = useState<VerifiedRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [tab, setTab] = useState<Tab>("ALL");
   const [q, setQ] = useState("");
 
-  const entityId = activeEntity?.entity_id ?? null;
+  // Resolve entity_id from entities table using active slug
+  useEffect(() => {
+    let alive = true;
+
+    async function resolveEntity() {
+      if (!activeSlug) {
+        if (alive) setEntityId(null);
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("entities")
+        .select("id")
+        .eq("slug", activeSlug)
+        .maybeSingle();
+
+      if (error) {
+        console.error("[verified] resolve entity id error:", error);
+        if (alive) setEntityId(null);
+        return;
+      }
+
+      if (alive) setEntityId(data?.id ?? null);
+    }
+
+    resolveEntity();
+    return () => {
+      alive = false;
+    };
+  }, [activeSlug]);
 
   useEffect(() => {
     let alive = true;
@@ -54,8 +88,7 @@ export default function VerifiedRegistryPage() {
 
       setLoading(true);
 
-      // Pull verified docs for this entity, then derive lane by joining governance_ledger.
-      // NOTE: no schema changes; we do two queries to keep it simple and resilient.
+      // Pull verified docs for this entity
       const { data: vd, error: vdErr } = await supabase
         .from("verified_documents")
         .select(
@@ -66,16 +99,17 @@ export default function VerifiedRegistryPage() {
         .limit(200);
 
       if (vdErr) {
-        console.error(vdErr);
+        console.error("[verified] verified_documents error:", vdErr);
         if (alive) setRows([]);
         setLoading(false);
         return;
       }
 
       const recordIds = (vd ?? [])
-        .map((r) => r.source_record_id)
+        .map((r: any) => r.source_record_id)
         .filter(Boolean) as string[];
 
+      // Join lane/status from governance_ledger (no schema changes)
       const laneMap = new Map<string, { is_test: boolean; status: string }>();
 
       if (recordIds.length) {
@@ -84,23 +118,26 @@ export default function VerifiedRegistryPage() {
           .select("id,is_test,status")
           .in("id", recordIds);
 
-        if (!glErr && gl) {
-          for (const r of gl) laneMap.set(r.id, { is_test: r.is_test, status: r.status });
+        if (glErr) {
+          console.warn("[verified] governance_ledger join warning:", glErr);
+        } else if (gl) {
+          for (const r of gl as any[]) laneMap.set(r.id, { is_test: r.is_test, status: r.status });
         }
       }
 
-      const merged: VerifiedRow[] = (vd ?? []).map((r) => {
+      const merged: VerifiedRow[] = (vd ?? []).map((r: any) => {
         const m = r.source_record_id ? laneMap.get(r.source_record_id) : null;
         return {
-          ...(r as any),
+          ...(r as VerifiedRow),
           lane_is_test: m?.is_test ?? null,
           ledger_status: m?.status ?? null,
         };
       });
 
+      // Lane-safe filtering:
+      // - If linked to a ledger record: must match env lane (is_test)
+      // - If NOT linked: show in both lanes (registry may include other doc classes)
       const laneFiltered = merged.filter((r) => {
-        // If doc is not linked to a ledger record, we still show it in BOTH lanes
-        // (or you can choose to hide it). Here: show only if lane matches when known.
         if (r.lane_is_test === null || r.lane_is_test === undefined) return true;
         return r.lane_is_test === laneIsTest;
       });
@@ -136,7 +173,8 @@ export default function VerifiedRegistryPage() {
             <div className="text-[11px] tracking-[0.28em] text-white/50">CI-ARCHIVE</div>
             <h1 className="mt-1 text-xl font-semibold text-white">Verified Registry</h1>
             <div className="mt-1 text-sm text-white/60">
-              Lane: <span className="text-white/80">{laneIsTest ? "SANDBOX" : "RoT"}</span> · Entity-scoped
+              Lane: <span className="text-white/80">{laneIsTest ? "SANDBOX" : "RoT"}</span> · Entity:{" "}
+              <span className="text-white/80">{activeSlug ?? "—"}</span>
             </div>
           </div>
 
@@ -218,7 +256,7 @@ export default function VerifiedRegistryPage() {
                             {r.document_class} · {r.verification_level}
                             {r.ledger_status ? ` · Ledger: ${r.ledger_status}` : ""}
                           </div>
-                          <div className="mt-2 text-[11px] text-white/40 break-all">{r.storage_path}</div>
+                          <div className="mt-2 break-all text-[11px] text-white/40">{r.storage_path}</div>
                         </div>
 
                         <div className="flex flex-col items-end gap-2">
@@ -243,7 +281,7 @@ export default function VerifiedRegistryPage() {
                       </div>
 
                       {r.file_hash ? (
-                        <div className="mt-2 text-[11px] text-white/35 break-all">hash: {r.file_hash}</div>
+                        <div className="mt-2 break-all text-[11px] text-white/35">hash: {r.file_hash}</div>
                       ) : null}
                     </div>
                   ))
@@ -262,7 +300,8 @@ export default function VerifiedRegistryPage() {
                   1) Council approves → <span className="text-white/80">approved_by_council = true</span>
                 </div>
                 <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-                  2) Forge completes envelope → <span className="text-white/80">signature_envelopes.status = completed</span>
+                  2) Forge completes envelope →{" "}
+                  <span className="text-white/80">signature_envelopes.status = completed</span>
                 </div>
                 <div className="rounded-xl border border-white/10 bg-white/5 p-3">
                   3) Archive/Seal (service role) → creates <span className="text-white/80">verified_documents</span>
@@ -273,8 +312,8 @@ export default function VerifiedRegistryPage() {
               </div>
 
               <div className="mt-4 text-xs text-white/50">
-                Lane-safe: this list filters by <span className="text-white/70">governance_ledger.is_test</span> joined
-                through <span className="text-white/70">verified_documents.source_record_id</span>.
+                Lane-safe: list filters by <span className="text-white/70">governance_ledger.is_test</span> joined via{" "}
+                <span className="text-white/70">verified_documents.source_record_id</span>.
               </div>
             </div>
           </div>
