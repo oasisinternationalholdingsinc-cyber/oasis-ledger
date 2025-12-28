@@ -3,245 +3,238 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
 const SERVICE_ROLE_KEY =
-  Deno.env.get("SERVICE_ROLE_KEY") ??
-  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
-  throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
-}
+if (!SUPABASE_URL || !SERVICE_ROLE_KEY) throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
 
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-  global: { fetch },
-});
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
 
-const MINUTE_BOOK_BUCKET =
-  Deno.env.get("MINUTE_BOOK_BUCKET") ?? "minute_book";
+const MINUTE_BOOK_BUCKET = Deno.env.get("MINUTE_BOOK_BUCKET") ?? "minute_book";
+
+// archived PDF path pattern (lane-safe)
+const ARCHIVE_PREFIX_ROT = Deno.env.get("ARCHIVE_PREFIX_ROT") ?? "archive";
+const ARCHIVE_PREFIX_SANDBOX = Deno.env.get("ARCHIVE_PREFIX_SANDBOX") ?? "sandbox/archive";
+
+const DEFAULT_DOMAIN_KEY = Deno.env.get("DEFAULT_MINUTE_BOOK_DOMAIN_KEY") ?? "governance";
+const DEFAULT_SECTION_NAME = Deno.env.get("DEFAULT_MINUTE_BOOK_SECTION_NAME") ?? "Resolutions";
 
 const corsHeaders: HeadersInit = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body, null, 2), {
     status,
-    headers: {
-      "Content-Type": "application/json",
-      ...corsHeaders,
-    },
+    headers: { "Content-Type": "application/json", ...corsHeaders },
   });
 }
 
-serve(async (req: Request): Promise<Response> => {
-  if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: corsHeaders });
-  }
+function base64ToUint8Array(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
 
-  if (req.method !== "POST") {
-    return json({ ok: false, error: "Method not allowed" }, 405);
-  }
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const arr = Array.from(new Uint8Array(digest));
+  return arr.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+type ReqBody = {
+  source_record_id?: string; // governance_ledger.id
+  pdf_base64?: string;
+
+  // ✅ required to satisfy minute_book_entries.domain_key NOT NULL
+  domain_key?: string;
+  section_name?: string;
+
+  // lane + context
+  is_test?: boolean;
+
+  // optional metadata
+  title?: string;
+  entity_id?: string;
+  envelope_id?: string;
+
+  // traceability only
+  signed_bucket?: string;
+  signed_storage_path?: string;
+};
+
+type ResBody = {
+  ok: boolean;
+  minute_book_entry_id?: string;
+  already_archived?: boolean;
+  error?: string;
+  details?: unknown;
+};
+
+serve(async (req: Request): Promise<Response> => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
 
   try {
-    const body = await req.json().catch(() => ({}));
+    const body = (await req.json().catch(() => ({}))) as ReqBody;
 
-    // Required: ledger id for the source record
-    const source_record_id: string | undefined = body.source_record_id;
+    const source_record_id = body.source_record_id?.trim();
+    const pdf_base64 = body.pdf_base64?.trim();
 
-    // Optional fields (for future pdf upload / context)
-    const pdf_base64: string | undefined = body.pdf_base64;
-    const bucket: string = body.bucket ?? MINUTE_BOOK_BUCKET;
-    const storagePath: string | null = body.storagePath ?? null;
-    const envelope_id: string | null = body.envelope_id ?? null;
+    if (!source_record_id) return json({ ok: false, error: "Missing source_record_id" }, 400);
+    if (!pdf_base64) return json({ ok: false, error: "Missing pdf_base64" }, 400);
 
-    if (!source_record_id) {
-      return json(
-        {
-          ok: false,
-          error: "Missing required field: source_record_id",
-          required: ["source_record_id"],
-          received: { source_record_id },
-        },
-        400,
-      );
-    }
+    const is_test = Boolean(body.is_test);
 
-    // 1) Look up the ledger record using the current schema
-    const { data: ledger, error: ledgerErr } = await supabase
+    // domain_key MUST be non-null for minute_book_entries
+    const domain_key = (body.domain_key?.trim() || DEFAULT_DOMAIN_KEY).trim();
+    const section_name = (body.section_name?.trim() || DEFAULT_SECTION_NAME).trim();
+
+    // validate domain_key exists
+    const { data: dom, error: domErr } = await supabase
+      .from("governance_domains")
+      .select("key")
+      .eq("key", domain_key)
+      .maybeSingle();
+
+    if (domErr) return json({ ok: false, error: "Failed to validate governance domain.", details: domErr }, 500);
+    if (!dom) return json({ ok: false, error: `Invalid domain_key: "${domain_key}" does not exist in governance_domains.key` }, 400);
+
+    // load ledger record (authoritative source for entity_id/title if not provided)
+    const { data: ledger, error: ledErr } = await supabase
       .from("governance_ledger")
-      .select(
-        `
-          id,
-          title,
-          record_type,
-          entity_id,
-          entities!inner (
-            slug,
-            name
-          )
-        `,
-      )
+      .select("id, title, entity_id, is_test")
       .eq("id", source_record_id)
       .maybeSingle();
 
-    if (ledgerErr) {
-      console.error("archive-save-document: ledger lookup error", ledgerErr);
-      return json(
-        {
-          ok: false,
-          error: "Ledger record not found",
-          details: ledgerErr.message,
-          source_record_id,
-        },
-        404,
-      );
-    }
+    if (ledErr) return json({ ok: false, error: "Failed to load governance_ledger record.", details: ledErr }, 500);
+    if (!ledger) return json({ ok: false, error: "governance_ledger record not found for source_record_id" }, 404);
 
-    if (!ledger) {
-      return json(
-        {
-          ok: false,
-          error: "Ledger record not found",
-          source_record_id,
-        },
-        404,
-      );
-    }
+    // lane safety: prefer ledger.is_test if present
+    const lane_is_test = Boolean(ledger.is_test ?? is_test);
 
-    const entity_id: string | null = (ledger as any).entity_id ?? null;
-    const entitySlug: string | null = (ledger as any).entities?.slug ?? null;
-    const entityName: string | null = (ledger as any).entities?.name ?? null;
+    // entity slug/key for storage layout + registry (assumes entities table has key/slug)
+    const entity_id = String(body.entity_id ?? ledger.entity_id ?? "");
+    if (!entity_id) return json({ ok: false, error: "Missing entity_id (could not resolve from governance_ledger)." }, 400);
 
-    if (!entitySlug) {
-      return json(
-        {
-          ok: false,
-          error:
-            "Ledger record found, but entity slug (entities.slug) is missing.",
-          source_record_id,
-        },
-        400,
-      );
-    }
+    const { data: ent, error: entErr } = await supabase
+      .from("entities")
+      .select("id, key, slug, name")
+      .eq("id", entity_id)
+      .maybeSingle();
 
-    if (!entity_id) {
-      return json(
-        {
-          ok: false,
-          error:
-            "Ledger record found, but entity_id is missing for this record.",
-          source_record_id,
-        },
-        400,
-      );
-    }
+    if (entErr) return json({ ok: false, error: "Failed to load entity.", details: entErr }, 500);
+    if (!ent) return json({ ok: false, error: "Entity not found for entity_id." }, 404);
 
-    const entity_key = entitySlug as string;
-    const title: string =
-      (ledger as any).title ?? "Signed governance record";
-    const record_type: string =
-      (ledger as any).record_type ?? "resolution";
+    const entity_key = (ent as any).key ?? (ent as any).slug ?? "entity";
 
-    // 2) Decide section name based on record_type
-    let section_name = "Resolutions";
-    if (
-      record_type.toLowerCase().includes("special") ||
-      record_type.toLowerCase().includes("extraordinary")
-    ) {
-      section_name = "SpecialResolutions";
-    }
+    // compute archive storage path
+    const prefix = lane_is_test ? ARCHIVE_PREFIX_SANDBOX : ARCHIVE_PREFIX_ROT;
+    const storage_path = `${entity_key}/${prefix}/${source_record_id}.pdf`;
 
-    // 3) Optional: check if already archived (by ledger record id + entity)
-    const { data: existing, error: existingErr } = await supabase
-      .from("minute_book_entries")
-      .select("id")
-      .eq("entity_key", entity_key)
-      .eq("entity_id", entity_id)
-      .eq("source_record_id", source_record_id)
-      .limit(1);
+    // decode + hash
+    const pdfBytes = base64ToUint8Array(pdf_base64);
+    const sha256 = await sha256Hex(pdfBytes);
 
-    if (existingErr) {
-      console.error(
-        "archive-save-document: check existing error",
-        existingErr,
-      );
-    }
-
-    if (existing && existing.length > 0) {
-      return json({
-        ok: true,
-        minute_book_entry_id: existing[0].id,
-        already_archived: true,
+    // 1) Upload archived PDF (idempotent overwrite is ok for sandbox; RoT should be immutable at seal-time)
+    const { error: upErr } = await supabase.storage
+      .from(MINUTE_BOOK_BUCKET)
+      .upload(storage_path, pdfBytes, {
+        contentType: "application/pdf",
+        upsert: lane_is_test, // sandbox can overwrite; RoT should normally be immutable elsewhere
       });
-    }
 
-    // 4) Decide storage_path for the archive entry
-    let finalStoragePath = storagePath;
-    if (!finalStoragePath) {
-      const safeTitle = title
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/gi, "-")
-        .replace(/^-+|-+$/g, "");
-      finalStoragePath = `${entity_key}/${section_name}/${source_record_id}-${safeTitle}.pdf`;
-    }
+    if (upErr) return json({ ok: false, error: "Failed to upload archived PDF to storage.", details: upErr }, 500);
 
-    // 5) (Optional) If you want, you can decode pdf_base64 and upload here using
-    // supabase.storage.from(bucket).upload(finalStoragePath, ...)
-
-    // 6) Insert into minute_book_entries (✅ include entity_id, ❌ no storage_bucket)
-    const entry_date = new Date().toISOString().slice(0, 10);
-
-    const { data: insertRows, error: insertErr } = await supabase
-      .from("minute_book_entries")
-      .insert([
-        {
-          entity_key,            // e.g. "holdings"
-          entity_id,             // ✅ required NOT NULL column
-          entry_date,
-          entry_type: record_type,
-          title,
-          notes: envelope_id
-            ? `Archived from envelope ${envelope_id}`
-            : "Archived signed record",
-          section_name,
-          storage_path: finalStoragePath,
-          source: "signed_record",
-          source_record_id,
-        },
-      ])
+    // 2) Check if already archived (by source_record_id + lane)
+    // NOTE: adjust table name if yours differs; this matches your Verified Registry concept.
+    const { data: existingV, error: exErr } = await supabase
+      .from("verified_documents")
       .select("id")
-      .single();
+      .eq("source_record_id", source_record_id)
+      .eq("is_test", lane_is_test)
+      .maybeSingle();
 
-    if (insertErr) {
-      console.error(
-        "archive-save-document: insert minute_book_entries error",
-        insertErr,
-      );
+    if (exErr) {
+      // not fatal, but we log
+      console.error("archive-save-document: verified_documents lookup failed", exErr);
+    }
+
+    // 3) Insert minute_book_entries (THIS is where your domain_key was missing)
+    const title = (body.title ?? ledger.title ?? "Archived Resolution").toString();
+
+    const { data: mbe, error: mbeErr } = await supabase
+      .from("minute_book_entries")
+      .insert({
+        entity_key,
+        domain_key,          // ✅ REQUIRED (fix)
+        section_name,        // optional but nice
+        title,
+        entry_type: "resolution",
+        source_record_id: source_record_id,
+        is_test: lane_is_test,
+      })
+      .select("id")
+      .maybeSingle();
+
+    if (mbeErr) {
+      console.error("archive-save-document: minute_book_entries insert failed", mbeErr);
       return json(
-        {
-          ok: false,
-          error: "Failed to insert minute book entry",
-          details: insertErr.message,
-        },
-        500,
+        { ok: false, error: "Failed to insert minute book entry", details: mbeErr?.message ?? mbeErr },
+        400,
       );
     }
 
-    return json({
+    const minute_book_entry_id = mbe?.id as string;
+
+    // 4) supporting_documents (primary doc for registry PDF access)
+    const { error: sdErr } = await supabase
+      .from("supporting_documents")
+      .insert({
+        entry_id: minute_book_entry_id,
+        bucket: MINUTE_BOOK_BUCKET,
+        storage_path,
+        sha256,
+        is_primary: true,
+        is_test: lane_is_test,
+        source_record_id,
+      });
+
+    if (sdErr) {
+      console.error("archive-save-document: supporting_documents insert failed", sdErr);
+      return json({ ok: false, error: "Failed to insert supporting document", details: sdErr?.message ?? sdErr }, 400);
+    }
+
+    // 5) verified_documents upsert-ish
+    if (!existingV?.id) {
+      const { error: vErr } = await supabase.from("verified_documents").insert({
+        entity_key,
+        source_record_id,
+        bucket: MINUTE_BOOK_BUCKET,
+        storage_path,
+        sha256,
+        is_test: lane_is_test,
+        envelope_id: body.envelope_id ?? null,
+        title,
+      });
+
+      if (vErr) {
+        // not fatal to minute book, but we return it (you want verified registry to be correct)
+        console.error("archive-save-document: verified_documents insert failed", vErr);
+        return json({ ok: false, error: "Failed to insert verified document", details: vErr?.message ?? vErr }, 400);
+      }
+    }
+
+    const res: ResBody = {
       ok: true,
-      minute_book_entry_id: insertRows?.id ?? null,
-      already_archived: false,
-    });
+      minute_book_entry_id,
+      already_archived: Boolean(existingV?.id),
+    };
+    return json(res, 200);
   } catch (err) {
-    console.error("archive-save-document: unexpected error", err);
-    return json(
-      {
-        ok: false,
-        error:
-          err instanceof Error ? err.message : "Unexpected error in function.",
-      },
-      500,
-    );
+    console.error("archive-save-document: unexpected", err);
+    return json({ ok: false, error: err instanceof Error ? err.message : "Unexpected error" }, 500);
   }
 });
