@@ -5,11 +5,12 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
    ENV
 ──────────────────────────────────────────────────────────── */
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY");
 const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ??
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
+if (!SUPABASE_URL || !ANON_KEY || !SERVICE_ROLE_KEY) {
   throw new Error("Missing Supabase env vars");
 }
 
@@ -35,10 +36,22 @@ function asString(v: unknown) {
 }
 
 /* ────────────────────────────────────────────────────────────
-   SERVICE ROLE CLIENT (WRITES)
+   CLIENTS (ISOLATED BY DESIGN)
 ──────────────────────────────────────────────────────────── */
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+
+// 🔐 USER AUTH CLIENT — used ONLY to validate JWT
+const supabaseAuth = createClient(SUPABASE_URL, ANON_KEY, {
   global: { fetch },
+});
+
+// 🔒 SERVICE ROLE CLIENT — used ONLY for DB writes (NO user context)
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+  global: {
+    fetch,
+    headers: {
+      Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+    },
+  },
 });
 
 /* ────────────────────────────────────────────────────────────
@@ -104,7 +117,7 @@ serve(async (req) => {
   }
 
   const { data: userData, error: userErr } =
-    await supabase.auth.getUser(token);
+    await supabaseAuth.auth.getUser(token);
 
   if (userErr || !userData?.user?.id) {
     return json({ ok: false, error: "Invalid session" }, 401);
@@ -182,7 +195,7 @@ serve(async (req) => {
     is_test: record.is_test ?? null,
   };
 
-  /* ───── WRITE AI TABLES ───── */
+  /* ───── WRITE AI TABLES (SERVICE ROLE ONLY) ───── */
 
   const s = await insertWithFallback(
     "ai_summaries",
@@ -239,7 +252,7 @@ serve(async (req) => {
     {
       record_id,
       advice: recommendationText,
-      recommendation: recommendationText, // ✅ REQUIRED
+      recommendation: recommendationText,
       risk_rating: 0.15,
       confidence: 0.86,
       ai_source: "edge",
@@ -250,7 +263,7 @@ serve(async (req) => {
     {
       record_id,
       advice: recommendationText,
-      recommendation: recommendationText, // ✅ REQUIRED (FIX)
+      recommendation: recommendationText, // 🔒 REQUIRED
       model: "axiom-v1",
     },
   );
