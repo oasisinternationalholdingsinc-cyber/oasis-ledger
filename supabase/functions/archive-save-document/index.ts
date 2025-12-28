@@ -1,3 +1,4 @@
+// supabase/functions/archive-save-document/index.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -5,19 +6,13 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
 const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
-  throw new Error("Missing Supabase env");
-}
+if (!SUPABASE_URL || !SERVICE_ROLE_KEY) throw new Error("Missing Supabase env");
 
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-  global: { fetch },
-});
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
 
 const BUCKET = Deno.env.get("MINUTE_BOOK_BUCKET") ?? "minute_book";
-const DEFAULT_DOMAIN_KEY =
-  Deno.env.get("DEFAULT_MINUTE_BOOK_DOMAIN_KEY") ?? "governance";
-const DEFAULT_SECTION_NAME =
-  Deno.env.get("DEFAULT_MINUTE_BOOK_SECTION_NAME") ?? "Governance";
+const DEFAULT_DOMAIN_KEY = Deno.env.get("DEFAULT_MINUTE_BOOK_DOMAIN_KEY") ?? "governance";
+const DEFAULT_SECTION_NAME = Deno.env.get("DEFAULT_MINUTE_BOOK_SECTION_NAME") ?? "Governance";
 
 const corsHeaders: HeadersInit = {
   "Access-Control-Allow-Origin": "*",
@@ -33,50 +28,57 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-function asString(v: unknown) {
-  return typeof v === "string" ? v.trim() : "";
+function asString(x: unknown) {
+  return typeof x === "string" ? x.trim() : "";
 }
 
+// base64 -> Uint8Array
 function base64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
 }
 
+// sha256 hex
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  const arr = Array.from(new Uint8Array(digest));
+  return arr.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 type ReqBody = {
-  source_record_id: string; // governance_ledger.id
-  pdf_base64: string;
+  source_record_id?: string; // governance_ledger.id
+  pdf_base64?: string;
 
+  // placement
   domain_key?: string;
   section_name?: string;
 
+  // context
   title?: string;
-  entity_key?: string;
-  is_test?: boolean;
-
+  entity_id?: string;  // optional; will be derived from governance_ledger if missing
+  entity_key?: string; // optional; will be derived from entities.slug if missing
+  is_test?: boolean;   // optional; will be derived from governance_ledger if missing
   envelope_id?: string;
+
+  // optional overrides
+  bucket?: string;
 };
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
-  if (req.method !== "POST") {
-    return json({ ok: false, error: "POST required" }, 405);
-  }
+  if (req.method !== "POST") return json({ ok: false, error: "POST required" }, 405);
 
-  const body = (await req.json().catch(() => null)) as ReqBody | null;
-  if (!body) return json({ ok: false, error: "Invalid JSON" }, 400);
+  let body: ReqBody;
+  try {
+    body = (await req.json()) as ReqBody;
+  } catch {
+    return json({ ok: false, error: "Invalid JSON" }, 400);
+  }
 
   const source_record_id = asString(body.source_record_id);
   const pdf_base64 = asString(body.pdf_base64);
-
   if (!source_record_id || !pdf_base64) {
     return json(
       { ok: false, error: "source_record_id and pdf_base64 are required" },
@@ -84,129 +86,126 @@ serve(async (req) => {
     );
   }
 
-  const domain_key = asString(body.domain_key) || DEFAULT_DOMAIN_KEY;
-  const section_name = asString(body.section_name) || DEFAULT_SECTION_NAME;
+  const domain_key = (asString(body.domain_key) || DEFAULT_DOMAIN_KEY).trim();
+  const section_name = (asString(body.section_name) || DEFAULT_SECTION_NAME).trim();
 
-  // ─────────────────────────────────────────────
-  // Load governance ledger (SINGLE SOURCE OF TRUTH)
-  // ─────────────────────────────────────────────
+  // 1) Validate domain_key exists
+  {
+    const { data: dom, error: domErr } = await supabase
+      .from("governance_domains")
+      .select("key")
+      .eq("key", domain_key)
+      .maybeSingle();
+
+    if (domErr) {
+      return json({ ok: false, error: "Failed to validate domain_key", details: domErr.message }, 500);
+    }
+    if (!dom) {
+      return json({ ok: false, error: `Invalid domain_key '${domain_key}'` }, 400);
+    }
+  }
+
+  // 2) Load ledger record (truth source)
   const { data: ledger, error: ledErr } = await supabase
     .from("governance_ledger")
     .select("id, title, entity_id, is_test")
     .eq("id", source_record_id)
     .maybeSingle();
 
-  if (ledErr) {
-    return json({ ok: false, error: "Failed to load ledger", details: ledErr.message }, 500);
-  }
-  if (!ledger) {
-    return json({ ok: false, error: "Ledger record not found" }, 404);
-  }
+  if (ledErr) return json({ ok: false, error: "Failed to load governance_ledger", details: ledErr.message }, 500);
+  if (!ledger) return json({ ok: false, error: "source_record_id not found in governance_ledger" }, 404);
 
-  const is_test = ledger.is_test === true;
+  const entity_id = asString(body.entity_id) || asString(ledger.entity_id);
+  if (!entity_id) return json({ ok: false, error: "Missing entity_id" }, 400);
 
-  // ─────────────────────────────────────────────
-  // Resolve entity_key from entity_id
-  // ─────────────────────────────────────────────
+  const lane_is_test = (ledger.is_test ?? body.is_test ?? false) === true;
+
+  // 3) Resolve entity_key (enum) from entities.slug unless explicitly provided
   let entity_key = asString(body.entity_key);
-
   if (!entity_key) {
     const { data: ent, error: entErr } = await supabase
       .from("entities")
       .select("slug")
-      .eq("id", ledger.entity_id)
+      .eq("id", entity_id)
       .maybeSingle();
 
-    if (entErr || !ent?.slug) {
-      return json({ ok: false, error: "Failed to resolve entity_key" }, 500);
-    }
+    if (entErr) return json({ ok: false, error: "Failed to resolve entity", details: entErr.message }, 500);
+    if (!ent?.slug) return json({ ok: false, error: "Could not resolve entity_key from entities.slug" }, 400);
 
-    entity_key = ent.slug;
+    entity_key = ent.slug; // must match entity_key_enum labels (holdings/lounge/real-estate)
   }
 
-  const title = asString(body.title) || ledger.title || "Signed Resolution";
+  const title = asString(body.title) || asString(ledger.title) || "Signed Resolution";
 
-  // ─────────────────────────────────────────────
-  // Decode + hash PDF
-  // ─────────────────────────────────────────────
+  // 4) Decode + hash
   const pdfBytes = base64ToBytes(pdf_base64);
-  const sha256 = await sha256Hex(pdfBytes);
+  const hash_hex = await sha256Hex(pdfBytes);
 
-  // ─────────────────────────────────────────────
-  // Idempotency (same ledger record → same entry)
-  // ─────────────────────────────────────────────
-  const { data: existing } = await supabase
+  // 5) Idempotency: if already archived for this source_record_id, return existing
+  const { data: existing, error: exErr } = await supabase
     .from("minute_book_entries")
     .select("id")
     .eq("source_record_id", source_record_id)
     .maybeSingle();
 
+  if (exErr) console.warn("archive-save-document: idempotency check failed", exErr.message);
   if (existing?.id) {
-    return json({
-      ok: true,
-      already_archived: true,
-      minute_book_entry_id: existing.id,
-    });
+    return json({ ok: true, already_archived: true, minute_book_entry_id: existing.id });
   }
 
-  // ─────────────────────────────────────────────
-  // INSERT minute_book_entries (EXPLICIT entity_id)
-  // entry_type = 'resolution' (Forge output)
-  // entry_date = DEFAULT (CURRENT_DATE)
-  // ─────────────────────────────────────────────
+  // 6) Create minute_book_entries row (MUST include entity_id + is_test)
   const { data: mbe, error: mbeErr } = await supabase
     .from("minute_book_entries")
     .insert({
-      entity_id: ledger.entity_id,     // 🔒 REQUIRED
-      entity_key,
+      entity_id,
+      entity_key,          // enum
       domain_key,
       section_name,
       title,
-      entry_type: "resolution",
       source_record_id,
+      source_envelope_id: asString(body.envelope_id) || null,
+      is_test: lane_is_test,
+      // entry_date default now()
+      // entry_type default 'resolution'
     })
     .select("id")
     .single();
 
   if (mbeErr) {
-    return json(
-      { ok: false, error: "Failed to insert minute_book_entries", details: mbeErr.message },
-      400,
-    );
+    return json({
+      ok: false,
+      error: "Failed to insert minute book entry",
+      details: mbeErr.message,
+    }, 400);
   }
 
   const entry_id = mbe.id as string;
 
-  // ─────────────────────────────────────────────
-  // Storage path (entity + lane + domain safe)
-  // ─────────────────────────────────────────────
+  // 7) Upload PDF to storage using lane-safe path
   const safeTitle = title
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)/g, "")
     .slice(0, 80);
 
-  const lane = is_test ? "sandbox" : "rot";
+  const lanePrefix = lane_is_test ? "sandbox" : "rot";
   const storage_path =
-    `${entity_key}/${lane}/${domain_key}/${entry_id}/${safeTitle || "resolution"}.pdf`;
+    `${entity_key}/${lanePrefix}/${domain_key}/${entry_id}/${safeTitle || "resolution"}.pdf`;
+
+  const bucket = asString(body.bucket) || BUCKET;
 
   const { error: upErr } = await supabase.storage
-    .from(BUCKET)
+    .from(bucket)
     .upload(storage_path, pdfBytes, {
       contentType: "application/pdf",
       upsert: true,
     });
 
   if (upErr) {
-    return json(
-      { ok: false, error: "Failed to upload PDF", details: upErr.message },
-      500,
-    );
+    return json({ ok: false, error: "Failed to upload PDF to storage", details: upErr.message }, 500);
   }
 
-  // ─────────────────────────────────────────────
-  // PRIMARY supporting document (verified)
-  // ─────────────────────────────────────────────
+  // 8) supporting_documents PRIMARY (hash lives here)
   const { error: sdErr } = await supabase
     .from("supporting_documents")
     .insert({
@@ -216,31 +215,32 @@ serve(async (req) => {
       storage_path,
       file_name: `${safeTitle || "resolution"}.pdf`,
       mime_type: "application/pdf",
-      sha256,
+      sha256: hash_hex,
       source_record_id,
-      envelope_id: body.envelope_id ?? null,
+      envelope_id: asString(body.envelope_id) || null,
+      // if your supporting_documents has is_test, it’s ok to add it later—don’t assume.
     });
 
   if (sdErr) {
-    return json(
-      {
-        ok: false,
-        error: "Archive partial: supporting_documents insert failed",
-        details: sdErr.message,
-        minute_book_entry_id: entry_id,
-      },
-      500,
-    );
+    return json({
+      ok: false,
+      error: "Minute book entry created but failed to insert supporting_documents",
+      details: sdErr.message,
+      minute_book_entry_id: entry_id,
+      storage_path,
+    }, 500);
   }
 
   return json({
     ok: true,
     minute_book_entry_id: entry_id,
+    already_archived: false,
+    entity_id,
     entity_key,
     domain_key,
     section_name,
-    is_test,
+    is_test: lane_is_test,
     storage_path,
-    sha256,
+    sha256: hash_hex,
   });
 });
