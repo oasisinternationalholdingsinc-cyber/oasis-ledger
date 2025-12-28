@@ -25,13 +25,7 @@ type ForgeQueueItem = {
   last_signed_at: string | null;
   days_since_last_signature: number | null;
 
-  // Optional (future)
-  body?: string | null;
-
-  // Optional (future portal deep-links if your view exposes them)
-  signer_url?: string | null;
-  verify_url?: string | null;
-  certificate_url?: string | null;
+  is_test?: boolean | null;
 };
 
 type StartSignatureResponse = {
@@ -89,6 +83,13 @@ type AxiomLatest = {
     | null;
 };
 
+type PortalUrls = {
+  signer_url?: string | null;
+  viewer_url?: string | null;
+  verify_url?: string | null;
+  certificate_url?: string | null;
+};
+
 function fmt(iso: string | null | undefined) {
   if (!iso) return "—";
   try {
@@ -106,7 +107,7 @@ function clamp(s: string, n: number) {
 
 export default function ForgeClient() {
   const { activeEntity } = useEntity();
-  const { env } = useOsEnv(); // "ROT" | "SANDBOX" (per our OS)
+  const { env } = useOsEnv(); // "ROT" | "SANDBOX"
   const isTest = env === "SANDBOX";
 
   const [tab, setTab] = useState<TabKey>("active");
@@ -127,97 +128,94 @@ export default function ForgeClient() {
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
-  // AXIOM states (side-car only)
+  // AXIOM (sidecar-only)
   const [axiomLoading, setAxiomLoading] = useState(false);
   const [axiomError, setAxiomError] = useState<string | null>(null);
   const [axiomInfo, setAxiomInfo] = useState<string | null>(null);
   const [axiomLatest, setAxiomLatest] = useState<AxiomLatest>({});
 
+  // Portal URLs (derived via RPC; avoids view column mismatch)
+  const [portal, setPortal] = useState<PortalUrls>({});
+  const [portalError, setPortalError] = useState<string | null>(null);
+
   // --------------------------
-  // Load Forge queue (entity + env scoped)
+  // Queue loader (entity + env scoped)
   // --------------------------
-  useEffect(() => {
-    let cancelled = false;
+  async function fetchQueue() {
+    setLoadingQueue(true);
+    setError(null);
+    setInfo(null);
 
-    async function fetchQueue() {
-      setLoadingQueue(true);
-      setError(null);
-      setInfo(null);
+    try {
+      const selectCols = [
+        "ledger_id",
+        "title",
+        "ledger_status",
+        "created_at",
+        "entity_id",
+        "entity_name",
+        "entity_slug",
+        "envelope_id",
+        "envelope_status",
+        "parties_total",
+        "parties_signed",
+        "last_signed_at",
+        "days_since_last_signature",
+        "is_test",
+      ].join(", ");
 
-      try {
-        const selectCols = [
-          "ledger_id",
-          "title",
-          "ledger_status",
-          "created_at",
-          "entity_id",
-          "entity_name",
-          "entity_slug",
-          "envelope_id",
-          "envelope_status",
-          "parties_total",
-          "parties_signed",
-          "last_signed_at",
-          "days_since_last_signature",
-          // optional deep-links if your view exposes them (safe to remove if not present)
-          "signer_url",
-          "verify_url",
-          "certificate_url",
-          // env column (expected in enterprise views)
-          "is_test",
-        ].join(", ");
+      const { data, error } = await supabase
+        .from("v_forge_queue_latest")
+        .select(selectCols)
+        .eq("entity_slug", activeEntity)
+        .eq("is_test", isTest)
+        .order("created_at", { ascending: false });
 
-        const { data, error } = await supabase
-          .from("v_forge_queue_latest")
-          .select(selectCols)
-          .eq("entity_slug", activeEntity)
-          .eq("is_test", isTest)
-          .order("created_at", { ascending: false });
-
-        if (cancelled) return;
-
-        if (error) {
-          console.error("CI-Forge queue error:", error);
-          setQueue([]);
-          setSelectedId(null);
-          setError("Unable to load Forge queue for this entity/environment.");
-          return;
-        }
-
-        const rows = ((data ?? []) as unknown as ForgeQueueItem[]) ?? [];
-        setQueue(rows);
-        setSelectedId(rows[0]?.ledger_id ?? null);
-      } catch (err) {
-        console.error("CI-Forge queue exception:", err);
-        if (cancelled) return;
+      if (error) {
+        console.error("CI-Forge queue error:", error);
         setQueue([]);
         setSelectedId(null);
         setError("Unable to load Forge queue for this entity/environment.");
-      } finally {
-        if (!cancelled) setLoadingQueue(false);
+        return;
       }
-    }
 
-    fetchQueue();
+      const rows = ((data ?? []) as unknown as ForgeQueueItem[]) ?? [];
+      setQueue(rows);
+      setSelectedId(rows[0]?.ledger_id ?? null);
+    } catch (err) {
+      console.error("CI-Forge queue exception:", err);
+      setQueue([]);
+      setSelectedId(null);
+      setError("Unable to load Forge queue for this entity/environment.");
+    } finally {
+      setLoadingQueue(false);
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (cancelled) return;
+      await fetchQueue();
+    })();
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeEntity, isTest]);
 
   // --------------------------
-  // Split queue into Active vs Completed
+  // Tabs
   // --------------------------
   const isCompleted = (item: ForgeQueueItem) => item.envelope_status === "completed";
-
   const activeQueue = useMemo(() => queue.filter((q) => !isCompleted(q)), [queue]);
   const completedQueue = useMemo(() => queue.filter((q) => isCompleted(q)), [queue]);
-
   const visibleQueue = tab === "active" ? activeQueue : completedQueue;
 
   useEffect(() => {
     setSelectedId(visibleQueue[0]?.ledger_id ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
+  }, [tab, activeEntity, isTest]);
 
   const selected =
     visibleQueue.find((q) => q.ledger_id === selectedId) ?? visibleQueue[0] ?? null;
@@ -230,7 +228,7 @@ export default function ForgeClient() {
   const envelopeSigned = selected?.envelope_status === "completed";
 
   // --------------------------
-  // Risk engine (advisory-only)
+  // Risk (UI only)
   // --------------------------
   const computeRiskLevel = (item: ForgeQueueItem): RiskLevel => {
     const days = item.days_since_last_signature ?? null;
@@ -308,9 +306,6 @@ export default function ForgeClient() {
     setTimeout(() => setAxiomInfo(null), 5000);
   }
 
-  // --------------------------
-  // Refresh queue helper (entity + env scoped)
-  // --------------------------
   async function refreshQueueKeepSelection(keepLedgerId?: string | null) {
     try {
       const selectCols = [
@@ -327,9 +322,6 @@ export default function ForgeClient() {
         "parties_signed",
         "last_signed_at",
         "days_since_last_signature",
-        "signer_url",
-        "verify_url",
-        "certificate_url",
         "is_test",
       ].join(", ");
 
@@ -361,7 +353,49 @@ export default function ForgeClient() {
   }
 
   // --------------------------
-  // AXIOM: load latest artifacts (existing tables)
+  // Portal URLs (safe: derived via RPC when envelope exists)
+  // --------------------------
+  async function loadPortalUrls(envelopeId: string) {
+    setPortalError(null);
+    setPortal({});
+
+    try {
+      // Function signature is expected to be: ci_portal_urls(p_envelope_id uuid) -> jsonb
+      // If your arg name differs, adjust to match.
+      const { data, error } = await supabase.rpc("ci_portal_urls", { p_envelope_id: envelopeId });
+
+      if (error) {
+        console.warn("ci_portal_urls RPC error:", error);
+        setPortalError("Portal URLs unavailable (RPC).");
+        return;
+      }
+
+      // data may be json or wrapped depending on how RPC is defined
+      const pu = (data as any) ?? {};
+      setPortal({
+        signer_url: pu?.signer_url ?? pu?.signer ?? null,
+        viewer_url: pu?.viewer_url ?? pu?.viewer ?? null,
+        verify_url: pu?.verify_url ?? pu?.verify ?? null,
+        certificate_url: pu?.certificate_url ?? pu?.certificate ?? null,
+      });
+    } catch (e) {
+      console.warn("loadPortalUrls exception:", e);
+      setPortalError("Portal URLs unavailable.");
+    }
+  }
+
+  useEffect(() => {
+    if (!selected?.envelope_id) {
+      setPortal({});
+      setPortalError(null);
+      return;
+    }
+    loadPortalUrls(selected.envelope_id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.envelope_id]);
+
+  // --------------------------
+  // AXIOM: load latest artifacts (ledger tables)
   // --------------------------
   async function loadAxiomLatest(recordId: string) {
     setAxiomError(null);
@@ -418,7 +452,7 @@ export default function ForgeClient() {
   }, [selected?.ledger_id]);
 
   // --------------------------
-  // Actions (existing wiring preserved)
+  // Actions (wiring preserved)
   // --------------------------
   async function onStartEnvelope(e: FormEvent) {
     e.preventDefault();
@@ -528,9 +562,7 @@ export default function ForgeClient() {
         return;
       }
 
-      if (res.already_archived) flashInfo("Already archived.");
-      else flashInfo("Archived into CI-Archive Minute Book.");
-
+      flashInfo(res.already_archived ? "Already archived." : "Archived into CI-Archive Minute Book.");
       await refreshQueueKeepSelection(selected.ledger_id);
     } catch (err) {
       console.error("archive-signed-resolution error", err);
@@ -541,7 +573,7 @@ export default function ForgeClient() {
   }
 
   // --------------------------
-  // AXIOM: pre-signature review (Edge Function; advisory-only)
+  // AXIOM: pre-signature review (advisory-only)
   // --------------------------
   async function onRunAxiomReview() {
     if (!selected) return;
@@ -555,7 +587,7 @@ export default function ForgeClient() {
         body: {
           record_id: selected.ledger_id,
           entity_slug: selected.entity_slug,
-          envelope_id: selected.envelope_id ?? null, // safe extra input if function ignores
+          envelope_id: selected.envelope_id ?? null,
           trigger: "forge-pre-signature",
         },
       });
@@ -563,7 +595,6 @@ export default function ForgeClient() {
       if (error) throw error;
 
       const res = data as AxiomReviewResponse;
-
       if (!res?.ok) {
         flashAxiomError(res?.error ?? "AXIOM review failed.");
         return;
@@ -579,43 +610,25 @@ export default function ForgeClient() {
     }
   }
 
-  // --------------------------
-  // AXIOM advisory bullets (UI only; never blocking)
-  // --------------------------
   const axiomAdvisory = useMemo(() => {
     if (!selected) {
-      return {
-        severity: "IDLE" as RiskLevel,
-        bullets: ["Select an execution record to view intelligence."],
-      };
+      return { severity: "IDLE" as RiskLevel, bullets: ["Select an execution record to view intelligence."] };
     }
 
     const risk = computeRiskLevel(selected);
     const bullets: string[] = [];
 
-    if (!selected.envelope_id)
-      bullets.push(
-        "No envelope exists yet. If Council approved signature-required execution, start the envelope.",
-      );
-    if (selected.envelope_id && !envelopeSigned)
-      bullets.push("Envelope is active. Monitor signer progress; resend invite if stalled.");
-    if (envelopeSigned)
-      bullets.push(
-        "Envelope completed. Next action is Archive Now to generate archive-grade artifacts + registry entry.",
-      );
+    if (!selected.envelope_id) bullets.push("No envelope exists yet. Start the envelope to begin signing.");
+    if (selected.envelope_id && !envelopeSigned) bullets.push("Envelope is active. Monitor progress; resend invite if stalled.");
+    if (envelopeSigned) bullets.push("Envelope completed. Next action is Archive Now to generate archive-grade artifacts + registry entry.");
 
     bullets.push("Run AXIOM Review to generate/refresh advisory intelligence for this record.");
     bullets.push("AXIOM is advisory-only: it never blocks human authority.");
-    bullets.push(
-      "Uploads/signing PDFs remain pristine; only the archive render embeds an immutable AXIOM snapshot.",
-    );
+    bullets.push("Signing PDFs remain pristine; only the archive render embeds an immutable AXIOM snapshot.");
 
     return { severity: risk, bullets };
   }, [selected, envelopeSigned]);
 
-  // --------------------------
-  // UI helpers
-  // --------------------------
   const tabBtn = (k: TabKey, label: string, count: number) => (
     <button
       type="button"
@@ -644,7 +657,6 @@ export default function ForgeClient() {
 
   return (
     <div className="flex h-full flex-col px-8 pt-6 pb-6">
-      {/* Header */}
       <div className="mb-4 shrink-0">
         <div className="flex items-center justify-between gap-3">
           <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI-FORGE</div>
@@ -652,15 +664,12 @@ export default function ForgeClient() {
         </div>
         <h1 className="mt-1 text-lg font-semibold text-amber-300">Execution — Signature-required</h1>
         <p className="mt-1 text-[11px] text-slate-400">
-          Entity-scoped via OS selector. Environment-scoped via OS env toggle (is_test). Forge is signature-only. Archive
-          quality artifacts are produced after completion.
+          Entity-scoped via OS selector. Environment-scoped via OS env toggle (is_test). Forge is signature-only; archive artifacts are produced after completion.
         </p>
       </div>
 
-      {/* Main frame */}
       <div className="flex min-h-0 flex-1 justify-center overflow-hidden">
         <div className="flex h-full w-full max-w-[1400px] flex-col overflow-hidden rounded-3xl border border-slate-900 bg-black/60 px-6 py-5 shadow-[0_0_60px_rgba(15,23,42,0.9)]">
-          {/* Title bar */}
           <div className="mb-4 flex shrink-0 items-start justify-between gap-4">
             <div className="flex flex-col gap-1">
               <div className="text-[11px] text-slate-400">
@@ -686,7 +695,7 @@ export default function ForgeClient() {
           </div>
 
           <div className="flex min-h-0 flex-1 gap-5 overflow-hidden">
-            {/* Left column: queue */}
+            {/* Left */}
             <section className="w-[320px] shrink-0 overflow-hidden rounded-2xl border border-slate-900 bg-slate-950/40">
               <div className="border-b border-slate-900 px-4 py-3">
                 <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">
@@ -731,10 +740,7 @@ export default function ForgeClient() {
                         </div>
 
                         <div className="flex flex-col items-end gap-2">
-                          <div
-                            className={["h-2.5 w-2.5 rounded-full", riskLightClasses(risk)].join(" ")}
-                            title={riskLabel(risk)}
-                          />
+                          <div className={["h-2.5 w-2.5 rounded-full", riskLightClasses(risk)].join(" ")} title={riskLabel(risk)} />
                           <div className="text-[10px] text-slate-500">
                             {q.parties_signed ?? 0}/{q.parties_total ?? 0}
                           </div>
@@ -751,7 +757,7 @@ export default function ForgeClient() {
               </div>
             </section>
 
-            {/* Middle column: execution */}
+            {/* Middle */}
             <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-900 bg-slate-950/30">
               <div className="border-b border-slate-900 px-5 py-4">
                 <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Execution</div>
@@ -822,11 +828,7 @@ export default function ForgeClient() {
                                   : "bg-emerald-500 text-black hover:bg-emerald-400",
                               ].join(" ")}
                             >
-                              {envelopeLocked
-                                ? "Envelope already created"
-                                : isStarting
-                                  ? "Starting…"
-                                  : "Start envelope"}
+                              {envelopeLocked ? "Envelope already created" : isStarting ? "Starting…" : "Start envelope"}
                             </button>
                           </form>
 
@@ -886,7 +888,7 @@ export default function ForgeClient() {
               </div>
             </section>
 
-            {/* Right column: AXIOM + artifacts */}
+            {/* Right */}
             <section className="w-[360px] shrink-0 overflow-hidden rounded-2xl border border-slate-900 bg-slate-950/35">
               <div className="border-b border-slate-900 px-4 py-3">
                 <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Intelligence + Artifacts</div>
@@ -894,14 +896,12 @@ export default function ForgeClient() {
               </div>
 
               <div className="h-full overflow-y-auto px-4 py-4 space-y-3">
-                {/* AXIOM panel */}
+                {/* AXIOM */}
                 <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
                   <div className="flex items-center justify-between">
                     <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">AXIOM Advisory</div>
                     <div className="flex items-center gap-2">
-                      <div
-                        className={["h-2.5 w-2.5 rounded-full", riskLightClasses(axiomAdvisory.severity)].join(" ")}
-                      />
+                      <div className={["h-2.5 w-2.5 rounded-full", riskLightClasses(axiomAdvisory.severity)].join(" ")} />
                       <div className="text-[10px] text-slate-400">{riskLabel(axiomAdvisory.severity)}</div>
                     </div>
                   </div>
@@ -954,7 +954,6 @@ export default function ForgeClient() {
                     </div>
                   )}
 
-                  {/* Latest artifacts preview */}
                   <div className="mt-4 space-y-3">
                     <div className="rounded-xl border border-slate-900 bg-black/25 p-3">
                       <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Latest Summary</div>
@@ -988,18 +987,18 @@ export default function ForgeClient() {
                         {axiomLatest.advice?.advice?.trim()
                           ? axiomLatest.advice.advice
                           : axiomLatest.advice?.recommendation?.trim()
-                            ? axiomLatest.advice.recommendation
-                            : "No advice yet."}
+                          ? axiomLatest.advice.recommendation
+                          : "No advice yet."}
                       </div>
                     </div>
 
                     <div className="text-[10px] text-slate-500">
-                      AXIOM runs side-car on evidence and writes intelligence only. Files/hashes remain pristine until Archive seals an immutable snapshot.
+                      AXIOM runs side-car and writes intelligence only. Files/hashes remain pristine until Archive seals an immutable snapshot.
                     </div>
                   </div>
                 </div>
 
-                {/* Artifacts panel */}
+                {/* Artifacts */}
                 <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
                   <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Artifacts</div>
 
@@ -1021,16 +1020,19 @@ export default function ForgeClient() {
                       <span className="text-slate-200">{fmt(selected?.last_signed_at)}</span>
                     </div>
 
-                    {/* Portal links if present */}
-                    {(selected?.signer_url || selected?.verify_url || selected?.certificate_url) && (
+                    {portalError ? (
+                      <div className="mt-2 text-[10px] text-slate-500">{portalError}</div>
+                    ) : null}
+
+                    {(portal.signer_url || portal.verify_url || portal.certificate_url) && (
                       <div className="mt-2 grid grid-cols-1 gap-2">
                         <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Portal</div>
                         <div className="flex gap-2">
-                          {selected?.signer_url ? portalBtn(selected.signer_url, "Signer") : null}
-                          {selected?.verify_url ? portalBtn(selected.verify_url, "Verify") : null}
+                          {portal.signer_url ? portalBtn(portal.signer_url, "Signer") : null}
+                          {portal.verify_url ? portalBtn(portal.verify_url, "Verify") : null}
                         </div>
                         <div className="flex gap-2">
-                          {selected?.certificate_url ? portalBtn(selected.certificate_url, "Certificate") : null}
+                          {portal.certificate_url ? portalBtn(portal.certificate_url, "Certificate") : null}
                         </div>
                       </div>
                     )}
@@ -1052,12 +1054,11 @@ export default function ForgeClient() {
                     </div>
 
                     <div className="text-[10px] text-slate-500 mt-1">
-                      If portal URLs aren’t present yet, expose them in v_forge_queue_latest (or join via ci_portal_urls) and they’ll auto-render here.
+                      Portal URLs are derived via <span className="text-slate-300">ci_portal_urls(envelope_id)</span> (no view changes).
                     </div>
                   </div>
                 </div>
 
-                {/* Notes */}
                 <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
                   <div className="flex items-center justify-between">
                     <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Forge Notes</div>
