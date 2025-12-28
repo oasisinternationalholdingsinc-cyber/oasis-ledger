@@ -5,20 +5,28 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
 const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-if (!SUPABASE_URL || !SERVICE_ROLE_KEY) throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
+if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
+  throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
+}
 
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+  global: { fetch },
+});
 
-// Where the *signed* PDF currently lives
+// Signed PDFs produced by Forge (where envelope.storage_path points)
 const SIGNED_BUCKET = Deno.env.get("MINUTE_BOOK_BUCKET") ?? "minute_book";
 
-// Domain placement (minute_book_entries.domain_key is NOT NULL)
-const DEFAULT_DOMAIN_KEY = Deno.env.get("DEFAULT_MINUTE_BOOK_DOMAIN_KEY") ?? "governance";
-const DEFAULT_SECTION_NAME = Deno.env.get("DEFAULT_MINUTE_BOOK_SECTION_NAME") ?? "Resolutions";
+// Where to file inside Minute Book (must exist in governance_domains.key)
+const DEFAULT_DOMAIN_KEY =
+  (Deno.env.get("DEFAULT_MINUTE_BOOK_DOMAIN_KEY") ?? "governance").trim();
+
+const DEFAULT_SECTION_NAME =
+  (Deno.env.get("DEFAULT_MINUTE_BOOK_SECTION_NAME") ?? "Resolutions").trim();
 
 const corsHeaders: HeadersInit = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
@@ -36,12 +44,6 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
-type ReqBody = {
-  envelope_id?: string;
-  domain_key?: string;    // optional override
-  section_name?: string;  // optional override
-};
-
 type ArchiveSaveDocumentResponse = {
   ok: boolean;
   minute_book_entry_id?: string;
@@ -50,14 +52,22 @@ type ArchiveSaveDocumentResponse = {
   details?: unknown;
 };
 
+type ReqBody = {
+  envelope_id?: string;
+  domain_key?: string;
+  section_name?: string;
+};
+
 async function readInvokeErrorDetails(err: unknown): Promise<unknown> {
   try {
     const resp = (err as any)?.context as Response | undefined;
     if (!resp) return null;
+
     try {
       return await resp.clone().json();
     } catch {
-      return (await resp.clone().text())?.slice(0, 4000);
+      const t = await resp.clone().text();
+      return t?.slice(0, 4000);
     }
   } catch {
     return null;
@@ -72,12 +82,14 @@ serve(async (req: Request): Promise<Response> => {
     const body = (await req.json().catch(() => ({}))) as ReqBody;
     const envelope_id = body.envelope_id?.trim();
 
-    if (!envelope_id) return json({ ok: false, error: "Missing envelope_id in request body." }, 400);
+    if (!envelope_id) {
+      return json({ ok: false, error: "Missing envelope_id in request body." }, 400);
+    }
 
-    // 1) Envelope lookup: record_id + storage_path
+    // 1) Envelope (immutable once completed)
     const { data: envelope, error: envErr } = await supabase
       .from("signature_envelopes")
-      .select("id, status, record_id, storage_path, is_test")
+      .select("id, status, record_id, storage_path")
       .eq("id", envelope_id)
       .maybeSingle();
 
@@ -85,20 +97,20 @@ serve(async (req: Request): Promise<Response> => {
       console.error("archive-signed-resolution: envelope lookup error", envErr);
       return json({ ok: false, error: "Failed to look up signature envelope." }, 500);
     }
-    if (!envelope) return json({ ok: false, error: "No signature envelope found for this ID." }, 404);
+    if (!envelope) return json({ ok: false, error: "Envelope not found." }, 404);
     if (envelope.status !== "completed") {
       return json({ ok: false, error: "Envelope is not completed yet." }, 400);
     }
-    if (!envelope.storage_path) {
-      return json({ ok: false, error: "Envelope has no storage_path for signed PDF." }, 400);
-    }
     if (!envelope.record_id) {
-      return json({ ok: false, error: "Envelope is missing record_id (governance_ledger link)." }, 400);
+      return json({ ok: false, error: "Envelope missing record_id." }, 400);
+    }
+    if (!envelope.storage_path) {
+      return json({ ok: false, error: "Envelope missing storage_path." }, 400);
     }
 
-    const record_id = String(envelope.record_id);
+    const record_id = envelope.record_id as string;
 
-    // 2) Ledger lookup: lane + entity + title (lane comes from ledger, not envelope)
+    // 2) Ledger is the lane source of truth
     const { data: ledger, error: ledErr } = await supabase
       .from("governance_ledger")
       .select("id, title, entity_id, is_test, status")
@@ -109,14 +121,16 @@ serve(async (req: Request): Promise<Response> => {
       console.error("archive-signed-resolution: ledger lookup error", ledErr);
       return json({ ok: false, error: "Failed to look up governance_ledger record." }, 500);
     }
-    if (!ledger) return json({ ok: false, error: "No governance_ledger record found for envelope.record_id." }, 404);
+    if (!ledger) {
+      return json({ ok: false, error: "governance_ledger record not found for envelope.record_id." }, 404);
+    }
 
-    const lane_is_test = Boolean(ledger.is_test); // ✅ canonical lane
+    const lane_is_test = Boolean(ledger.is_test);
 
     const domain_key = (body.domain_key?.trim() || DEFAULT_DOMAIN_KEY).trim();
     const section_name = (body.section_name?.trim() || DEFAULT_SECTION_NAME).trim();
 
-    // 3) Download signed PDF bytes
+    // 3) Download signed PDF
     const { data: file, error: downloadErr } = await supabase.storage
       .from(SIGNED_BUCKET)
       .download(envelope.storage_path);
@@ -128,24 +142,18 @@ serve(async (req: Request): Promise<Response> => {
 
     const pdf_base64 = arrayBufferToBase64(await file.arrayBuffer());
 
-    // 4) Invoke ingest layer (service-role) and pass REQUIRED domain_key + lane
+    // 4) Call archive-save-document (service_role)
     const { data: archiveData, error: archiveErr } =
       await supabase.functions.invoke<ArchiveSaveDocumentResponse>("archive-save-document", {
         body: {
           source_record_id: record_id,
           pdf_base64,
-
-          // ✅ fix: lane + domain placement
           is_test: lane_is_test,
           domain_key,
           section_name,
-
-          // helpful metadata
           title: ledger.title ?? "Signed Resolution",
           entity_id: ledger.entity_id,
           envelope_id,
-
-          // traceability
           signed_bucket: SIGNED_BUCKET,
           signed_storage_path: envelope.storage_path,
         },
@@ -157,7 +165,7 @@ serve(async (req: Request): Promise<Response> => {
       return json(
         {
           ok: false,
-          error: (extra as any)?.error ?? (archiveErr as any)?.message ?? "archive-save-document failed",
+          error: (extra as any)?.error ?? (archiveErr as any)?.message ?? "archive-save-document failed.",
           details: extra ?? null,
         },
         400,
@@ -166,7 +174,11 @@ serve(async (req: Request): Promise<Response> => {
 
     if (!archiveData?.ok) {
       return json(
-        { ok: false, error: archiveData?.error ?? "archive-save-document returned ok=false", details: archiveData?.details ?? null },
+        {
+          ok: false,
+          error: archiveData?.error ?? "archive-save-document returned ok=false.",
+          details: archiveData?.details ?? null,
+        },
         400,
       );
     }
@@ -180,7 +192,10 @@ serve(async (req: Request): Promise<Response> => {
       section_name,
     });
   } catch (err) {
-    console.error("archive-signed-resolution: unexpected", err);
-    return json({ ok: false, error: err instanceof Error ? err.message : "Unexpected error" }, 500);
+    console.error("archive-signed-resolution: unexpected error", err);
+    return json(
+      { ok: false, error: err instanceof Error ? err.message : "Unexpected error." },
+      500,
+    );
   }
 });
