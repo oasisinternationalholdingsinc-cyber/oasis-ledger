@@ -1,4 +1,3 @@
-// src/app/(os)/ci-forge/forge.client.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -493,15 +492,27 @@ export default function ForgeClient() {
 
     setIsStarting(true);
     try {
-      // ✅ Adjustment: include is_test + entity_id in payload (harmless if ignored; required if function validates lane/entity)
+      // ✅ CRITICAL FIX:
+      // Your start-signature Edge Function requires { record_id, entity_slug, parties: [...] }.
+      // (It will 400 if parties[] is missing/empty.)
+      const parties = [
+        {
+          signer_name: primarySignerName.trim(),
+          signer_email: primarySignerEmail.trim(),
+          role: "signer",
+          signing_order: 1,
+        },
+      ];
+
       const { data, error } = await supabase.functions.invoke("start-signature", {
         body: {
           record_id: selected.ledger_id,
-          entity_slug: selected.entity_slug, // keep for backwards compat
-          entity_id: selected.entity_id, // added
-          is_test: isTest, // added (your env toggle is canonical lane flag)
-          signer_name: primarySignerName.trim(),
-          signer_email: primarySignerEmail.trim(),
+          entity_slug: selected.entity_slug,
+          parties,
+
+          // harmless extras (ignored by your current function, but safe to include)
+          entity_id: selected.entity_id,
+          is_test: isTest,
           cc_emails: ccEmails
             .split(",")
             .map((x) => x.trim())
@@ -580,7 +591,7 @@ export default function ForgeClient() {
       flashError("No envelope found for this record.");
       return;
     }
-    if (!envelopeSigned) {
+    if (!selected || selected.envelope_status !== "completed") {
       flashError("Envelope is not completed yet.");
       return;
     }
@@ -672,9 +683,9 @@ export default function ForgeClient() {
     const bullets: string[] = [];
 
     if (!selected.envelope_id) bullets.push("No envelope exists yet. Start the envelope to begin signing.");
-    if (selected.envelope_id && !envelopeSigned)
+    if (selected.envelope_id && selected.envelope_status !== "completed")
       bullets.push("Envelope is active. Monitor progress; resend invite if stalled.");
-    if (envelopeSigned)
+    if (selected.envelope_status === "completed")
       bullets.push("Envelope completed. Next action is Archive Now to generate archive-grade artifacts + registry entry.");
 
     bullets.push("Run AXIOM Review to generate/refresh advisory intelligence for this record.");
@@ -682,7 +693,7 @@ export default function ForgeClient() {
     bullets.push("Signing PDFs remain pristine; only the archive render embeds an immutable AXIOM snapshot.");
 
     return { severity: risk, bullets };
-  }, [selected, envelopeSigned]);
+  }, [selected]);
 
   const tabBtn = (k: TabKey, label: string, count: number) => (
     <button
@@ -911,10 +922,10 @@ export default function ForgeClient() {
                           <button
                             type="button"
                             onClick={onArchiveSigned}
-                            disabled={isArchiving || !envelopeSigned}
+                            disabled={isArchiving || selected.envelope_status !== "completed"}
                             className={[
                               "w-full rounded-xl px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
-                              isArchiving || !envelopeSigned
+                              isArchiving || selected.envelope_status !== "completed"
                                 ? "border-slate-800 bg-slate-950/30 text-slate-500 cursor-not-allowed"
                                 : "border-amber-500/60 bg-amber-500/10 text-amber-200 hover:bg-amber-500/15",
                             ].join(" ")}
@@ -953,9 +964,7 @@ export default function ForgeClient() {
             {/* Right */}
             <section className="w-[360px] shrink-0 overflow-hidden rounded-2xl border border-slate-900 bg-slate-950/35">
               <div className="border-b border-slate-900 px-4 py-3">
-                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">
-                  Intelligence + Artifacts
-                </div>
+                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Intelligence + Artifacts</div>
                 <div className="mt-1 text-[11px] text-slate-400">AXIOM is advisory-only. Humans execute.</div>
               </div>
 
