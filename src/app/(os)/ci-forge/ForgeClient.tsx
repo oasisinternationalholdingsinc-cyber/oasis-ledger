@@ -63,6 +63,7 @@ type AxiomReviewResponse = {
 
 type RiskLevel = "GREEN" | "AMBER" | "RED" | "IDLE";
 type TabKey = "active" | "completed";
+type AxiomTab = "advisory" | "summary" | "analysis" | "advice";
 
 type AxiomLatest = {
   summary?:
@@ -127,6 +128,7 @@ export default function ForgeClient() {
   const isTest = env === "SANDBOX";
 
   const [tab, setTab] = useState<TabKey>("active");
+  const [axiomTab, setAxiomTab] = useState<AxiomTab>("advisory");
 
   const [queue, setQueue] = useState<ForgeQueueItem[]>([]);
   const [loadingQueue, setLoadingQueue] = useState(false);
@@ -154,9 +156,6 @@ export default function ForgeClient() {
   const [portal, setPortal] = useState<PortalUrls>({});
   const [portalError, setPortalError] = useState<string | null>(null);
 
-  // --------------------------
-  // Queue loader (entity + env scoped)
-  // --------------------------
   async function fetchQueue() {
     setLoadingQueue(true);
     setError(null);
@@ -220,9 +219,6 @@ export default function ForgeClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeEntity, isTest]);
 
-  // --------------------------
-  // Tabs
-  // --------------------------
   const isCompleted = (item: ForgeQueueItem) => item.envelope_status === "completed";
   const activeQueue = useMemo(() => queue.filter((q) => !isCompleted(q)), [queue]);
   const completedQueue = useMemo(() => queue.filter((q) => isCompleted(q)), [queue]);
@@ -235,7 +231,6 @@ export default function ForgeClient() {
 
   const selected = visibleQueue.find((q) => q.ledger_id === selectedId) ?? visibleQueue[0] ?? null;
 
-  // small UX: clear any previous portal error + portal when switching records
   useEffect(() => {
     setPortal({});
     setPortalError(null);
@@ -247,11 +242,6 @@ export default function ForgeClient() {
     selected.envelope_status !== "cancelled" &&
     selected.envelope_status !== "expired";
 
-  const envelopeSigned = selected?.envelope_status === "completed";
-
-  // --------------------------
-  // Risk (UI only)
-  // --------------------------
   const computeRiskLevel = (item: ForgeQueueItem): RiskLevel => {
     const days = item.days_since_last_signature ?? null;
     const status = item.envelope_status;
@@ -377,27 +367,40 @@ export default function ForgeClient() {
   }
 
   // --------------------------
-  // Portal URLs (safe: derived via RPC when envelope exists)
+  // Portal URLs (robust param name)
   // --------------------------
   async function loadPortalUrls(envelopeId: string) {
     setPortalError(null);
     setPortal({});
 
     try {
-      const { data, error } = await supabase.rpc("ci_portal_urls", { p_envelope_id: envelopeId });
+      // Some deployments use p_envelope_id; some use envelope_id.
+      // We try both without changing DB function signature.
+      const tryRpc = async (args: any) => {
+        const r = await supabase.rpc("ci_portal_urls", args);
+        return r;
+      };
 
-      if (error) {
-        console.warn("ci_portal_urls RPC error:", error);
+      let r = await tryRpc({ p_envelope_id: envelopeId });
+      if (r.error) {
+        r = await tryRpc({ envelope_id: envelopeId });
+      }
+
+      if (r.error) {
+        console.warn("ci_portal_urls RPC error:", r.error);
         setPortalError("Portal URLs unavailable (RPC).");
         return;
       }
 
-      const pu = (data as any) ?? {};
+      const pu = (r.data as any) ?? {};
+      // function often returns a single row (record) or array of rows
+      const row = Array.isArray(pu) ? pu[0] : pu;
+
       setPortal({
-        signer_url: pu?.signer_url ?? pu?.signer ?? null,
-        viewer_url: pu?.viewer_url ?? pu?.viewer ?? null,
-        verify_url: pu?.verify_url ?? pu?.verify ?? null,
-        certificate_url: pu?.certificate_url ?? pu?.certificate ?? null,
+        signer_url: row?.signer_url ?? row?.signer ?? null,
+        viewer_url: row?.viewer_url ?? row?.viewer ?? null,
+        verify_url: row?.verify_url ?? row?.verify ?? null,
+        certificate_url: row?.certificate_url ?? row?.certificate ?? null,
       });
     } catch (e) {
       console.warn("loadPortalUrls exception:", e);
@@ -492,9 +495,6 @@ export default function ForgeClient() {
 
     setIsStarting(true);
     try {
-      // ✅ CRITICAL FIX:
-      // Your start-signature Edge Function requires { record_id, entity_slug, parties: [...] }.
-      // (It will 400 if parties[] is missing/empty.)
       const parties = [
         {
           signer_name: primarySignerName.trim(),
@@ -510,7 +510,6 @@ export default function ForgeClient() {
           entity_slug: selected.entity_slug,
           parties,
 
-          // harmless extras (ignored by your current function, but safe to include)
           entity_id: selected.entity_id,
           is_test: isTest,
           cc_emails: ccEmails
@@ -556,7 +555,6 @@ export default function ForgeClient() {
       const { data, error } = await supabase.functions.invoke("send-signature-invite", {
         body: {
           envelope_id: selected.envelope_id,
-          // optional lane hint (harmless if ignored)
           is_test: isTest,
         },
       });
@@ -601,7 +599,6 @@ export default function ForgeClient() {
       const { data, error } = await supabase.functions.invoke("archive-signed-resolution", {
         body: {
           envelope_id: selected.envelope_id,
-          // optional lane hint (harmless if ignored)
           is_test: isTest,
         },
       });
@@ -628,9 +625,6 @@ export default function ForgeClient() {
     }
   }
 
-  // --------------------------
-  // AXIOM: pre-signature review (advisory-only)
-  // --------------------------
   async function onRunAxiomReview() {
     if (!selected) return;
 
@@ -663,6 +657,7 @@ export default function ForgeClient() {
 
       flashAxiomInfo(res.message ?? "AXIOM review completed.");
       await loadAxiomLatest(selected.ledger_id);
+      setAxiomTab("summary");
     } catch (e: any) {
       console.error("axiom-pre-signature-review error", e);
       flashAxiomError(e?.message || "Unable to run AXIOM review.");
@@ -688,9 +683,9 @@ export default function ForgeClient() {
     if (selected.envelope_status === "completed")
       bullets.push("Envelope completed. Next action is Archive Now to generate archive-grade artifacts + registry entry.");
 
-    bullets.push("Run AXIOM Review to generate/refresh advisory intelligence for this record.");
-    bullets.push("AXIOM is advisory-only: it never blocks human authority.");
-    bullets.push("Signing PDFs remain pristine; only the archive render embeds an immutable AXIOM snapshot.");
+    bullets.push("AXIOM Review generates advisory intelligence (side-car).");
+    bullets.push("AXIOM is advisory-only. It never blocks authority.");
+    bullets.push("Signing PDF stays pristine; archive render embeds immutable AXIOM snapshot at seal-time.");
 
     return { severity: risk, bullets };
   }, [selected]);
@@ -719,6 +714,21 @@ export default function ForgeClient() {
     >
       {label}
     </a>
+  );
+
+  const axiomTabBtn = (k: AxiomTab, label: string) => (
+    <button
+      type="button"
+      onClick={() => setAxiomTab(k)}
+      className={[
+        "rounded-full px-3 py-1.5 text-[11px] font-semibold transition border",
+        axiomTab === k
+          ? "bg-cyan-500/15 text-cyan-100 border-cyan-500/40"
+          : "bg-slate-950/40 text-slate-300 border-slate-800 hover:border-slate-700 hover:text-slate-100",
+      ].join(" ")}
+    >
+      {label}
+    </button>
   );
 
   return (
@@ -935,7 +945,7 @@ export default function ForgeClient() {
                         </div>
 
                         <div className="mt-3 text-[11px] text-slate-500">
-                          Forge is signature-only. No bypass. Archive happens after completion and produces archive-quality PDF + hash.
+                          Forge is signature-only. Archive happens after completion and produces archive-quality PDF + hash.
                         </div>
                       </div>
                     </div>
@@ -964,26 +974,27 @@ export default function ForgeClient() {
             {/* Right */}
             <section className="w-[360px] shrink-0 overflow-hidden rounded-2xl border border-slate-900 bg-slate-950/35">
               <div className="border-b border-slate-900 px-4 py-3">
-                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Intelligence + Artifacts</div>
-                <div className="mt-1 text-[11px] text-slate-400">AXIOM is advisory-only. Humans execute.</div>
+                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">AXIOM + Portal</div>
+                <div className="mt-1 text-[11px] text-slate-400">Advisory-only. Humans execute.</div>
               </div>
 
               <div className="h-full overflow-y-auto px-4 py-4 space-y-3">
                 {/* AXIOM */}
                 <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
                   <div className="flex items-center justify-between">
-                    <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">AXIOM Advisory</div>
+                    <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">AXIOM</div>
                     <div className="flex items-center gap-2">
                       <div className={["h-2.5 w-2.5 rounded-full", riskLightClasses(axiomAdvisory.severity)].join(" ")} />
                       <div className="text-[10px] text-slate-400">{riskLabel(axiomAdvisory.severity)}</div>
                     </div>
                   </div>
 
-                  <ul className="mt-2 space-y-2 text-[11px] text-slate-300 list-disc pl-4">
-                    {axiomAdvisory.bullets.map((b) => (
-                      <li key={b}>{b}</li>
-                    ))}
-                  </ul>
+                  <div className="mt-3 flex items-center gap-2 flex-wrap">
+                    {axiomTabBtn("advisory", "Advisory")}
+                    {axiomTabBtn("summary", "Summary")}
+                    {axiomTabBtn("analysis", "Analysis")}
+                    {axiomTabBtn("advice", "Advice")}
+                  </div>
 
                   <div className="mt-3 flex gap-2">
                     <button
@@ -997,7 +1008,7 @@ export default function ForgeClient() {
                           : "border-cyan-500/50 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/15",
                       ].join(" ")}
                     >
-                      {axiomLoading ? "Running…" : "Run AXIOM Review"}
+                      {axiomLoading ? "Running…" : "Run AXIOM"}
                     </button>
 
                     <button
@@ -1027,77 +1038,84 @@ export default function ForgeClient() {
                     </div>
                   )}
 
-                  <div className="mt-4 space-y-3">
-                    <div className="rounded-xl border border-slate-900 bg-black/25 p-3">
-                      <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Latest Summary</div>
-                      <div className="mt-1 text-[10px] text-slate-500">
-                        {axiomLatest.summary?.generated_at ? fmt(axiomLatest.summary.generated_at) : "—"}
-                        {axiomLatest.summary?.model ? ` · ${axiomLatest.summary.model}` : ""}
-                      </div>
-                      <div className="mt-2 text-[11px] text-slate-200 whitespace-pre-wrap">
-                        {axiomLatest.summary?.summary?.trim() ? axiomLatest.summary.summary : "No summary yet."}
-                      </div>
-                    </div>
+                  {/* Panel body */}
+                  <div className="mt-3 rounded-xl border border-slate-900 bg-black/25 p-3">
+                    {axiomTab === "advisory" ? (
+                      <>
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Advisory</div>
+                        <ul className="mt-2 space-y-2 text-[11px] text-slate-300 list-disc pl-4">
+                          {axiomAdvisory.bullets.map((b) => (
+                            <li key={b}>{b}</li>
+                          ))}
+                        </ul>
+                      </>
+                    ) : null}
 
-                    <div className="rounded-xl border border-slate-900 bg-black/25 p-3">
-                      <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Latest Analysis</div>
-                      <div className="mt-1 text-[10px] text-slate-500">
-                        {axiomLatest.analysis?.generated_at ? fmt(axiomLatest.analysis.generated_at) : "—"}
-                        {axiomLatest.analysis?.model ? ` · ${axiomLatest.analysis.model}` : ""}
-                      </div>
-                      <div className="mt-2 text-[11px] text-slate-200 whitespace-pre-wrap">
-                        {axiomLatest.analysis?.analysis?.trim() ? axiomLatest.analysis.analysis : "No analysis yet."}
-                      </div>
-                    </div>
+                    {axiomTab === "summary" ? (
+                      <>
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Latest Summary</div>
+                        <div className="mt-1 text-[10px] text-slate-500">
+                          {axiomLatest.summary?.generated_at ? fmt(axiomLatest.summary.generated_at) : "—"}
+                          {axiomLatest.summary?.model ? ` · ${axiomLatest.summary.model}` : ""}
+                        </div>
+                        <div className="mt-2 text-[11px] text-slate-200 whitespace-pre-wrap">
+                          {axiomLatest.summary?.summary?.trim() ? axiomLatest.summary.summary : "No summary yet."}
+                        </div>
+                      </>
+                    ) : null}
 
-                    <div className="rounded-xl border border-slate-900 bg-black/25 p-3">
-                      <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Latest Advice</div>
-                      <div className="mt-1 text-[10px] text-slate-500">
-                        {axiomLatest.advice?.generated_at ? fmt(axiomLatest.advice.generated_at) : "—"}
-                        {axiomLatest.advice?.model ? ` · ${axiomLatest.advice.model}` : ""}
-                      </div>
-                      <div className="mt-2 text-[11px] text-slate-200 whitespace-pre-wrap">
-                        {axiomLatest.advice?.advice?.trim()
-                          ? axiomLatest.advice.advice
-                          : axiomLatest.advice?.recommendation?.trim()
-                          ? axiomLatest.advice.recommendation
-                          : "No advice yet."}
-                      </div>
-                    </div>
+                    {axiomTab === "analysis" ? (
+                      <>
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Latest Analysis</div>
+                        <div className="mt-1 text-[10px] text-slate-500">
+                          {axiomLatest.analysis?.generated_at ? fmt(axiomLatest.analysis.generated_at) : "—"}
+                          {axiomLatest.analysis?.model ? ` · ${axiomLatest.analysis.model}` : ""}
+                        </div>
+                        <div className="mt-2 text-[11px] text-slate-200 whitespace-pre-wrap">
+                          {axiomLatest.analysis?.analysis?.trim() ? axiomLatest.analysis.analysis : "No analysis yet."}
+                        </div>
+                      </>
+                    ) : null}
 
-                    <div className="text-[10px] text-slate-500">
-                      AXIOM runs side-car and writes intelligence only. Files/hashes remain pristine until Archive seals an immutable snapshot.
-                    </div>
+                    {axiomTab === "advice" ? (
+                      <>
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Latest Advice</div>
+                        <div className="mt-1 text-[10px] text-slate-500">
+                          {axiomLatest.advice?.generated_at ? fmt(axiomLatest.advice.generated_at) : "—"}
+                          {axiomLatest.advice?.model ? ` · ${axiomLatest.advice.model}` : ""}
+                        </div>
+                        <div className="mt-2 text-[11px] text-slate-200 whitespace-pre-wrap">
+                          {axiomLatest.advice?.advice?.trim()
+                            ? axiomLatest.advice.advice
+                            : axiomLatest.advice?.recommendation?.trim()
+                            ? axiomLatest.advice.recommendation
+                            : "No advice yet."}
+                        </div>
+                      </>
+                    ) : null}
+                  </div>
+
+                  <div className="mt-2 text-[10px] text-slate-500">
+                    AXIOM is side-car until Archive seal-time. No mutations to signing PDFs.
                   </div>
                 </div>
 
-                {/* Artifacts */}
+                {/* Portal */}
                 <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
-                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Artifacts</div>
+                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Portal</div>
 
                   <div className="mt-2 grid grid-cols-1 gap-2 text-[11px] text-slate-300">
                     <div className="flex items-center justify-between">
-                      <span className="text-slate-500">Envelope ID</span>
+                      <span className="text-slate-500">Envelope</span>
                       <span className="font-mono text-[10px] text-slate-300">
                         {selected?.envelope_id ? clamp(selected.envelope_id, 12) : "—"}
                       </span>
                     </div>
 
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-500">Envelope Status</span>
-                      <span className="text-slate-200">{selected?.envelope_status ?? "—"}</span>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-500">Last Signed</span>
-                      <span className="text-slate-200">{fmt(selected?.last_signed_at)}</span>
-                    </div>
-
                     {portalError ? <div className="mt-2 text-[10px] text-slate-500">{portalError}</div> : null}
 
-                    {(portal.signer_url || portal.verify_url || portal.certificate_url) && (
+                    {(portal.signer_url || portal.verify_url || portal.certificate_url) ? (
                       <div className="mt-2 grid grid-cols-1 gap-2">
-                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Portal</div>
                         <div className="flex gap-2">
                           {portal.signer_url ? portalBtn(portal.signer_url, "Signer") : null}
                           {portal.verify_url ? portalBtn(portal.verify_url, "Verify") : null}
@@ -1106,6 +1124,10 @@ export default function ForgeClient() {
                           {portal.certificate_url ? portalBtn(portal.certificate_url, "Certificate") : null}
                         </div>
                       </div>
+                    ) : (
+                      <div className="mt-1 text-[10px] text-slate-500">
+                        Portal links appear after an envelope exists (derived via ci_portal_urls).
+                      </div>
                     )}
 
                     <div className="mt-2 flex gap-2">
@@ -1113,23 +1135,24 @@ export default function ForgeClient() {
                         href="/ci-archive/minute-book"
                         className="flex-1 text-center rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-2 text-[11px] font-semibold text-slate-200 hover:border-amber-500/40 hover:text-slate-100 transition"
                       >
-                        Open CI-Archive
+                        CI-Archive
                       </a>
 
                       <a
                         href="/ci-sign"
                         className="flex-1 text-center rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-2 text-[11px] font-semibold text-slate-200 hover:border-amber-500/40 hover:text-slate-100 transition"
                       >
-                        Open CI-Sign
+                        CI-Sign
                       </a>
                     </div>
 
                     <div className="text-[10px] text-slate-500 mt-1">
-                      Portal URLs are derived via <span className="text-slate-300">ci_portal_urls(envelope_id)</span> (no view changes).
+                      Links are derived via <span className="text-slate-300">ci_portal_urls(envelope_id)</span>. No view changes.
                     </div>
                   </div>
                 </div>
 
+                {/* Notes */}
                 <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
                   <div className="flex items-center justify-between">
                     <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Forge Notes</div>
@@ -1137,7 +1160,7 @@ export default function ForgeClient() {
                   </div>
                   <textarea
                     className="mt-2 w-full min-h-[160px] rounded-xl bg-slate-950/70 border border-slate-800 px-3 py-2 text-sm text-slate-100 resize-none"
-                    placeholder="Track execution conditions, signer confirmations, and archiving notes."
+                    placeholder="Track execution note(s), signer confirmations, and archiving notes."
                   />
                 </div>
               </div>
