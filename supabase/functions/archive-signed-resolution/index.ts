@@ -3,7 +3,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY =
-  Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  Deno.env.get("SERVICE_ROLE_KEY") ??
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
   global: { fetch },
@@ -12,42 +13,52 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
 const MINUTE_BOOK_BUCKET = "minute_book";
 const SEAL_RPC = "seal_governance_record_for_archive";
 
-const cors = {
+const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-const json = (x: unknown, s = 200) =>
-  new Response(JSON.stringify(x, null, 2), {
-    status: s,
-    headers: { ...cors, "Content-Type": "application/json" },
+const json = (data: unknown, status = 200) =>
+  new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
 
 serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ ok: false }, 405);
 
   const { envelope_id, record_id } = await req.json();
 
   if (!envelope_id && !record_id) {
-    return json({ ok: false, error: "envelope_id or record_id required" }, 400);
+    return json(
+      { ok: false, error: "envelope_id or record_id required" },
+      400
+    );
   }
 
   /* -------------------------------------------------------
-     1. Load envelope (preferred truth source)
+     1. Resolve record_id from envelope (preferred)
   ------------------------------------------------------- */
   let resolvedRecordId = record_id;
 
   if (envelope_id) {
-    const { data: env } = await supabase
+    const { data: env, error } = await supabase
       .from("signature_envelopes")
       .select("record_id, status")
       .eq("id", envelope_id)
       .maybeSingle();
 
-    if (!env) return json({ ok: false, error: "Envelope not found" }, 404);
+    if (error || !env) {
+      return json({ ok: false, error: "Envelope not found" }, 404);
+    }
+
     if (env.status !== "completed") {
-      return json({ ok: false, error: "Envelope not completed" }, 400);
+      return json(
+        { ok: false, error: "Envelope not completed" },
+        400
+      );
     }
 
     resolvedRecordId ||= env.record_id;
@@ -77,22 +88,22 @@ serve(async (req) => {
   }
 
   /* -------------------------------------------------------
-     3. Find signed PDF in storage (NO assumptions)
+     3. Locate signed PDF (no path assumptions)
   ------------------------------------------------------- */
   const { data: signedObj } = await supabase
     .schema("storage")
     .from("objects")
-    .select("bucket_id, name")
+    .select("bucket_id, name, created_at")
     .ilike("name", `%${resolvedRecordId}%-signed.pdf`)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
 
   if (!signedObj) {
-    return json({
-      ok: false,
-      error: "Signed PDF not found in storage",
-    }, 404);
+    return json(
+      { ok: false, error: "Signed PDF not found in storage" },
+      404
+    );
   }
 
   const { data: blob } = await supabase.storage
@@ -100,22 +111,23 @@ serve(async (req) => {
     .download(signedObj.name);
 
   if (!blob) {
-    return json({ ok: false, error: "Failed to download signed PDF" }, 500);
+    return json(
+      { ok: false, error: "Failed to download signed PDF" },
+      500
+    );
   }
 
-  const pdfBytes = new Uint8Array(await blob.arrayBuffer());
-  const pdfBase64 = btoa(
-    String.fromCharCode(...pdfBytes)
-  );
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const pdf_base64 = btoa(String.fromCharCode(...bytes));
 
   /* -------------------------------------------------------
-     4. Register PRIMARY Minute Book document
+     4. Archive → Minute Book (canonical)
   ------------------------------------------------------- */
   const { data: archiveRes, error: archiveErr } =
     await supabase.functions.invoke("archive-save-document", {
       body: {
         source_record_id: resolvedRecordId,
-        pdf_base64: pdfBase64,
+        pdf_base64,
         title: ledger.title ?? "Signed Resolution",
         entity_id: ledger.entity_id,
         entity_key: entity.slug,
@@ -126,22 +138,51 @@ serve(async (req) => {
       },
     });
 
-  if (archiveErr) {
-    return json({
-      ok: false,
-      error: "archive-save-document failed",
-      details: archiveErr.message,
-    }, 500);
+  if (archiveErr || !archiveRes?.entry_id || !archiveRes?.storage_path) {
+    return json(
+      {
+        ok: false,
+        error: "archive-save-document failed",
+        details: archiveErr?.message ?? "Invalid response",
+      },
+      500
+    );
   }
 
   /* -------------------------------------------------------
-     5. Seal (non-blocking)
+     5. CRITICAL: ensure PRIMARY supporting_document
+  ------------------------------------------------------- */
+  const { error: supportErr } = await supabase
+    .from("supporting_documents")
+    .insert({
+      entry_id: archiveRes.entry_id,
+      role: "primary",
+      file_path: archiveRes.storage_path,
+      file_name: `${ledger.title ?? "Signed Resolution"}.pdf`,
+      file_hash: archiveRes.file_hash ?? null,
+      file_size: archiveRes.file_size ?? null,
+      mime_type: "application/pdf",
+      source: "archive-signed-resolution",
+    });
+
+  if (supportErr) {
+    return json(
+      {
+        ok: false,
+        error: "Failed to create primary supporting document",
+        details: supportErr.message,
+      },
+      500
+    );
+  }
+
+  /* -------------------------------------------------------
+     6. Seal (non-blocking)
   ------------------------------------------------------- */
   let seal = null;
   const { data: sealData } = await supabase.rpc(SEAL_RPC, {
     record_id: resolvedRecordId,
   });
-
   seal = sealData ?? null;
 
   return json({
