@@ -156,6 +156,9 @@ export default function ForgeClient() {
   const [portal, setPortal] = useState<PortalUrls>({});
   const [portalError, setPortalError] = useState<string | null>(null);
 
+  // --------------------------
+  // Queue loader (entity + env scoped)
+  // --------------------------
   async function fetchQueue() {
     setLoadingQueue(true);
     setError(null);
@@ -219,6 +222,9 @@ export default function ForgeClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeEntity, isTest]);
 
+  // --------------------------
+  // Tabs
+  // --------------------------
   const isCompleted = (item: ForgeQueueItem) => item.envelope_status === "completed";
   const activeQueue = useMemo(() => queue.filter((q) => !isCompleted(q)), [queue]);
   const completedQueue = useMemo(() => queue.filter((q) => isCompleted(q)), [queue]);
@@ -231,6 +237,7 @@ export default function ForgeClient() {
 
   const selected = visibleQueue.find((q) => q.ledger_id === selectedId) ?? visibleQueue[0] ?? null;
 
+  // Clear any previous portal info when switching records
   useEffect(() => {
     setPortal({});
     setPortalError(null);
@@ -242,6 +249,9 @@ export default function ForgeClient() {
     selected.envelope_status !== "cancelled" &&
     selected.envelope_status !== "expired";
 
+  // --------------------------
+  // Risk (UI only)
+  // --------------------------
   const computeRiskLevel = (item: ForgeQueueItem): RiskLevel => {
     const days = item.days_since_last_signature ?? null;
     const status = item.envelope_status;
@@ -367,33 +377,33 @@ export default function ForgeClient() {
   }
 
   // --------------------------
-  // Portal URLs (robust param name)
+  // Portal URLs (robust param name; supports old/new SQL funcs)
   // --------------------------
   async function loadPortalUrls(envelopeId: string) {
     setPortalError(null);
     setPortal({});
 
     try {
-      // Some deployments use p_envelope_id; some use envelope_id.
-      // We try both without changing DB function signature.
-      const tryRpc = async (args: any) => {
-        const r = await supabase.rpc("ci_portal_urls", args);
+      const tryRpc = async (fn: string, args: any) => {
+        const r = await supabase.rpc(fn as any, args as any);
         return r;
       };
 
-      let r = await tryRpc({ p_envelope_id: envelopeId });
-      if (r.error) {
-        r = await tryRpc({ envelope_id: envelopeId });
-      }
+      // Prefer new rpc function name (you created this to avoid dependency hell)
+      let r = await tryRpc("ci_portal_urls_rpc", { p_envelope_id: envelopeId });
+      if (r.error) r = await tryRpc("ci_portal_urls_rpc", { envelope_id: envelopeId });
+
+      // Fallback to legacy function name if needed
+      if (r.error) r = await tryRpc("ci_portal_urls", { p_envelope_id: envelopeId });
+      if (r.error) r = await tryRpc("ci_portal_urls", { envelope_id: envelopeId });
 
       if (r.error) {
-        console.warn("ci_portal_urls RPC error:", r.error);
+        console.warn("Portal RPC error:", r.error);
         setPortalError("Portal URLs unavailable (RPC).");
         return;
       }
 
       const pu = (r.data as any) ?? {};
-      // function often returns a single row (record) or array of rows
       const row = Array.isArray(pu) ? pu[0] : pu;
 
       setPortal({
@@ -510,6 +520,7 @@ export default function ForgeClient() {
           entity_slug: selected.entity_slug,
           parties,
 
+          // optional extras
           entity_id: selected.entity_id,
           is_test: isTest,
           cc_emails: ccEmails
@@ -625,6 +636,9 @@ export default function ForgeClient() {
     }
   }
 
+  // --------------------------
+  // AXIOM: pre-signature review (advisory-only)
+  // --------------------------
   async function onRunAxiomReview() {
     if (!selected) return;
 
@@ -690,6 +704,9 @@ export default function ForgeClient() {
     return { severity: risk, bullets };
   }, [selected]);
 
+  // --------------------------
+  // UI Helpers
+  // --------------------------
   const tabBtn = (k: TabKey, label: string, count: number) => (
     <button
       type="button"
@@ -816,10 +833,7 @@ export default function ForgeClient() {
                         </div>
 
                         <div className="flex flex-col items-end gap-2">
-                          <div
-                            className={["h-2.5 w-2.5 rounded-full", riskLightClasses(risk)].join(" ")}
-                            title={riskLabel(risk)}
-                          />
+                          <div className={["h-2.5 w-2.5 rounded-full", riskLightClasses(risk)].join(" ")} title={riskLabel(risk)} />
                           <div className="text-[10px] text-slate-500">
                             {q.parties_signed ?? 0}/{q.parties_total ?? 0}
                           </div>
@@ -844,8 +858,8 @@ export default function ForgeClient() {
                   {selected ? selected.title : "No record selected"}
                 </div>
                 <div className="mt-1 text-[11px] text-slate-500">
-                  Ledger Status: <span className="text-slate-300">{selected?.ledger_status ?? "—"}</span> •
-                  Envelope: <span className="text-slate-300">{selected?.envelope_status ?? "—"}</span> • Env:{" "}
+                  Ledger Status: <span className="text-slate-300">{selected?.ledger_status ?? "—"}</span> • Envelope:{" "}
+                  <span className="text-slate-300">{selected?.envelope_status ?? "—"}</span> • Env:{" "}
                   <span className="text-slate-300">{isTest ? "SANDBOX" : "RoT"}</span>
                 </div>
               </div>
@@ -907,11 +921,7 @@ export default function ForgeClient() {
                                   : "bg-emerald-500 text-black hover:bg-emerald-400",
                               ].join(" ")}
                             >
-                              {envelopeLocked
-                                ? "Envelope already created"
-                                : isStarting
-                                ? "Starting…"
-                                : "Start envelope"}
+                              {envelopeLocked ? "Envelope already created" : isStarting ? "Starting…" : "Start envelope"}
                             </button>
                           </form>
 
@@ -1038,7 +1048,6 @@ export default function ForgeClient() {
                     </div>
                   )}
 
-                  {/* Panel body */}
                   <div className="mt-3 rounded-xl border border-slate-900 bg-black/25 p-3">
                     {axiomTab === "advisory" ? (
                       <>
@@ -1114,7 +1123,7 @@ export default function ForgeClient() {
 
                     {portalError ? <div className="mt-2 text-[10px] text-slate-500">{portalError}</div> : null}
 
-                    {(portal.signer_url || portal.verify_url || portal.certificate_url) ? (
+                    {portal.signer_url || portal.verify_url || portal.certificate_url ? (
                       <div className="mt-2 grid grid-cols-1 gap-2">
                         <div className="flex gap-2">
                           {portal.signer_url ? portalBtn(portal.signer_url, "Signer") : null}
@@ -1126,7 +1135,7 @@ export default function ForgeClient() {
                       </div>
                     ) : (
                       <div className="mt-1 text-[10px] text-slate-500">
-                        Portal links appear after an envelope exists (derived via ci_portal_urls).
+                        Portal links appear after an envelope exists (derived via ci_portal_urls_rpc / ci_portal_urls).
                       </div>
                     )}
 
@@ -1147,7 +1156,8 @@ export default function ForgeClient() {
                     </div>
 
                     <div className="text-[10px] text-slate-500 mt-1">
-                      Links are derived via <span className="text-slate-300">ci_portal_urls(envelope_id)</span>. No view changes.
+                      Links are derived via <span className="text-slate-300">ci_portal_urls_rpc(envelope_id)</span>{" "}
+                      (fallback: <span className="text-slate-300">ci_portal_urls</span>). No view changes.
                     </div>
                   </div>
                 </div>
