@@ -90,6 +90,33 @@ type PortalUrls = {
   certificate_url?: string | null;
 };
 
+type ArchiveEvidence = {
+  minute_book_entry_id: string | null;
+  minute_book_title: string | null;
+  minute_book_is_test: boolean | null;
+  supporting_docs: Array<{
+    id: string;
+    doc_type: string | null;
+    file_path: string | null;
+    file_name: string | null;
+    file_hash: string | null;
+    mime_type: string | null;
+    file_size: number | null;
+    uploaded_at: string | null;
+    signature_envelope_id: string | null;
+    verified: boolean | null;
+    registry_visible: boolean | null;
+  }>;
+  verified_document: null | {
+    id: string;
+    storage_bucket: string | null;
+    storage_path: string | null;
+    file_hash: string | null;
+    verification_level: string | null;
+    created_at: string | null;
+  };
+};
+
 function fmt(iso: string | null | undefined) {
   if (!iso) return "—";
   try {
@@ -155,6 +182,17 @@ export default function ForgeClient() {
   // Portal URLs (derived via RPC; avoids view column mismatch)
   const [portal, setPortal] = useState<PortalUrls>({});
   const [portalError, setPortalError] = useState<string | null>(null);
+
+  // ✅ Archive Evidence (minute_book + supporting_docs + verified)
+  const [evidenceLoading, setEvidenceLoading] = useState(false);
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
+  const [evidence, setEvidence] = useState<ArchiveEvidence>({
+    minute_book_entry_id: null,
+    minute_book_title: null,
+    minute_book_is_test: null,
+    supporting_docs: [],
+    verified_document: null,
+  });
 
   // --------------------------
   // Queue loader (entity + env scoped)
@@ -389,11 +427,9 @@ export default function ForgeClient() {
         return r;
       };
 
-      // Prefer new rpc function name (you created this to avoid dependency hell)
       let r = await tryRpc("ci_portal_urls_rpc", { p_envelope_id: envelopeId });
       if (r.error) r = await tryRpc("ci_portal_urls_rpc", { envelope_id: envelopeId });
 
-      // Fallback to legacy function name if needed
       if (r.error) r = await tryRpc("ci_portal_urls", { p_envelope_id: envelopeId });
       if (r.error) r = await tryRpc("ci_portal_urls", { envelope_id: envelopeId });
 
@@ -484,6 +520,101 @@ export default function ForgeClient() {
     loadAxiomLatest(selected.ledger_id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.ledger_id]);
+
+  // --------------------------
+  // ✅ Archive Evidence loader (minute book + supporting docs + verified)
+  // --------------------------
+  async function loadArchiveEvidence(recordId: string) {
+    setEvidenceLoading(true);
+    setEvidenceError(null);
+
+    try {
+      // 1) minute book entry (lane-safe)
+      const mbe = await supabase
+        .from("minute_book_entries")
+        .select("id, title, is_test")
+        .eq("source_record_id", recordId)
+        .eq("is_test", isTest)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (mbe.error) {
+        console.warn("minute_book_entries evidence error", mbe.error);
+      }
+
+      const minuteBookEntryId = (mbe.data as any)?.id ?? null;
+
+      // 2) supporting docs (only if entry exists)
+      let supporting_docs: ArchiveEvidence["supporting_docs"] = [];
+      if (minuteBookEntryId) {
+        const sd = await supabase
+          .from("supporting_documents")
+          .select(
+            "id, doc_type, file_path, file_name, file_hash, mime_type, file_size, uploaded_at, signature_envelope_id, verified, registry_visible"
+          )
+          .eq("entry_id", minuteBookEntryId)
+          .order("uploaded_at", { ascending: false });
+
+        if (sd.error) {
+          console.warn("supporting_documents evidence error", sd.error);
+        } else {
+          supporting_docs = ((sd.data ?? []) as any) ?? [];
+        }
+      }
+
+      // 3) verified registry (may be missing; that’s what we want to surface)
+      const vd = await supabase
+        .from("verified_documents")
+        .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
+        .eq("source_record_id", recordId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (vd.error) {
+        console.warn("verified_documents evidence error", vd.error);
+      }
+
+      setEvidence({
+        minute_book_entry_id: minuteBookEntryId,
+        minute_book_title: (mbe.data as any)?.title ?? null,
+        minute_book_is_test: (mbe.data as any)?.is_test ?? null,
+        supporting_docs,
+        verified_document: (vd.data as any) ?? null,
+      });
+    } catch (e) {
+      console.error("loadArchiveEvidence exception", e);
+      setEvidenceError("Unable to load archive evidence.");
+      setEvidence({
+        minute_book_entry_id: null,
+        minute_book_title: null,
+        minute_book_is_test: null,
+        supporting_docs: [],
+        verified_document: null,
+      });
+    } finally {
+      setEvidenceLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!selected?.ledger_id) {
+      setEvidence({
+        minute_book_entry_id: null,
+        minute_book_title: null,
+        minute_book_is_test: null,
+        supporting_docs: [],
+        verified_document: null,
+      });
+      setEvidenceError(null);
+      return;
+    }
+    loadArchiveEvidence(selected.ledger_id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.ledger_id, isTest]);
+
+  const alreadyArchived = !!evidence.minute_book_entry_id;
 
   // --------------------------
   // Actions (wiring preserved)
@@ -628,6 +759,9 @@ export default function ForgeClient() {
 
       flashInfo(res.already_archived ? "Already archived." : "Archived into CI-Archive Minute Book.");
       await refreshQueueKeepSelection(selected.ledger_id);
+
+      // ✅ refresh evidence so the user sees paths immediately
+      await loadArchiveEvidence(selected.ledger_id);
     } catch (err: any) {
       console.error("archive-signed-resolution error", err);
       flashError(err?.message || "Unable to archive signed resolution.");
@@ -950,7 +1084,7 @@ export default function ForgeClient() {
                                 : "border-amber-500/60 bg-amber-500/10 text-amber-200 hover:bg-amber-500/15",
                             ].join(" ")}
                           >
-                            {isArchiving ? "Archiving…" : "Archive now"}
+                            {isArchiving ? "Archiving…" : alreadyArchived ? "Archive now (Already archived)" : "Archive now"}
                           </button>
                         </div>
 
@@ -989,6 +1123,95 @@ export default function ForgeClient() {
               </div>
 
               <div className="h-full overflow-y-auto px-4 py-4 space-y-3">
+                {/* ✅ Archive Evidence */}
+                <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Archive Evidence</div>
+                    <button
+                      type="button"
+                      onClick={() => (selected?.ledger_id ? loadArchiveEvidence(selected.ledger_id) : null)}
+                      disabled={!selected?.ledger_id || evidenceLoading}
+                      className={[
+                        "rounded-full border px-3 py-1.5 text-[11px] font-semibold transition",
+                        !selected?.ledger_id || evidenceLoading
+                          ? "border-slate-800 bg-slate-950/30 text-slate-500 cursor-not-allowed"
+                          : "border-slate-800 bg-slate-950/50 text-slate-200 hover:border-slate-700 hover:text-slate-100",
+                      ].join(" ")}
+                    >
+                      {evidenceLoading ? "Loading…" : "Refresh"}
+                    </button>
+                  </div>
+
+                  {evidenceError ? (
+                    <div className="mt-3 text-[11px] text-red-400 bg-red-950/40 border border-red-800/60 rounded-xl px-3 py-2">
+                      {evidenceError}
+                    </div>
+                  ) : null}
+
+                  <div className="mt-3 rounded-xl border border-slate-900 bg-black/25 p-3">
+                    <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Minute Book</div>
+                    <div className="mt-1 text-[11px] text-slate-300">
+                      Entry:{" "}
+                      <span className="font-mono text-[10px] text-slate-200">
+                        {evidence.minute_book_entry_id ? clamp(evidence.minute_book_entry_id, 16) : "—"}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-[10px] text-slate-500">
+                      {evidence.minute_book_title ? clamp(evidence.minute_book_title, 60) : "No minute book entry detected for this lane."}
+                    </div>
+
+                    <div className="mt-3 text-[10px] uppercase tracking-[0.22em] text-slate-500">Supporting Docs</div>
+                    {evidence.supporting_docs.length ? (
+                      <div className="mt-2 space-y-2">
+                        {evidence.supporting_docs.slice(0, 5).map((d) => (
+                          <div key={d.id} className="rounded-lg border border-slate-900 bg-black/30 p-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-[11px] text-slate-200">{d.doc_type ?? "document"}</div>
+                              <div className="text-[10px] text-slate-500">{fmt(d.uploaded_at)}</div>
+                            </div>
+                            <div className="mt-1 font-mono text-[10px] text-slate-400 break-all">
+                              {d.file_path ?? "—"}
+                            </div>
+                            <div className="mt-1 text-[10px] text-slate-500">
+                              Hash: <span className="font-mono">{d.file_hash ? clamp(d.file_hash, 18) : "—"}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="mt-2 text-[10px] text-slate-500">
+                        No supporting_documents found for this entry (yet). That usually means the archive function created the entry but didn’t register pointers.
+                      </div>
+                    )}
+
+                    <div className="mt-3 text-[10px] uppercase tracking-[0.22em] text-slate-500">Verified Registry</div>
+                    {evidence.verified_document ? (
+                      <div className="mt-2 rounded-lg border border-slate-900 bg-black/30 p-2">
+                        <div className="text-[11px] text-slate-200">
+                          {evidence.verified_document.verification_level ?? "verified"}
+                        </div>
+                        <div className="mt-1 font-mono text-[10px] text-slate-400 break-all">
+                          {evidence.verified_document.storage_bucket ?? "—"} · {evidence.verified_document.storage_path ?? "—"}
+                        </div>
+                        <div className="mt-1 text-[10px] text-slate-500">
+                          Hash:{" "}
+                          <span className="font-mono">
+                            {evidence.verified_document.file_hash ? clamp(evidence.verified_document.file_hash, 18) : "—"}
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="mt-2 text-[10px] text-slate-500">
+                        No verified_documents row for this record yet (this is why “seal/verify” feels missing).
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mt-2 text-[10px] text-slate-500">
+                    This panel shows the *actual* bucket/path pointers so you don’t have to guess where SANDBOX artifacts landed.
+                  </div>
+                </div>
+
                 {/* AXIOM */}
                 <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
                   <div className="flex items-center justify-between">
