@@ -7,25 +7,21 @@ const SERVICE_ROLE_KEY =
 
 if (!SUPABASE_URL || !SERVICE_ROLE_KEY) throw new Error("Missing Supabase env");
 
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-  global: { fetch },
-});
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
 
 const MINUTE_BOOK_BUCKET = Deno.env.get("MINUTE_BOOK_BUCKET") ?? "minute_book";
+// Signed PDF is currently landing in minute_book in your prod, so keep default = minute_book
 const SIGNED_PDF_BUCKET = Deno.env.get("SIGNED_PDF_BUCKET") ?? MINUTE_BOOK_BUCKET;
 
-const DEFAULT_DOMAIN_KEY =
-  Deno.env.get("DEFAULT_MINUTE_BOOK_DOMAIN_KEY") ?? "governance";
-const DEFAULT_SECTION_NAME =
-  Deno.env.get("DEFAULT_MINUTE_BOOK_SECTION_NAME") ?? "Governance";
+const DEFAULT_DOMAIN_KEY = Deno.env.get("DEFAULT_MINUTE_BOOK_DOMAIN_KEY") ?? "governance";
+const DEFAULT_SECTION_NAME = Deno.env.get("DEFAULT_MINUTE_BOOK_SECTION_NAME") ?? "Governance";
 
-const SEAL_RPC_NAME =
-  Deno.env.get("SEAL_RPC_NAME") ?? "seal_governance_record_for_archive";
+// Optional RPC (non-blocking)
+const SEAL_RPC_NAME = Deno.env.get("SEAL_RPC_NAME") ?? "seal_governance_record_for_archive";
 
 const corsHeaders: HeadersInit = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
@@ -57,50 +53,49 @@ type ReqBody = {
   domain_key?: string;
   section_name?: string;
 
-  // bucket where signed pdf lives (optional override)
   signed_bucket?: string;
 };
 
-async function findSignedObjectPathInBucket(
-  bucket: string,
-  recordId: string,
-): Promise<{ bucket: string; path: string } | null> {
-  const pattern = `%${recordId}%-signed.pdf`;
-  const { data, error } = await supabase
-    .from("storage.objects")
-    .select("bucket_id, name, created_at")
-    .eq("bucket_id", bucket)
-    .ilike("name", pattern)
-    .order("created_at", { ascending: false })
-    .limit(1);
-
-  if (error) {
-    console.warn("storage.objects search error:", error.message);
-    return null;
-  }
-
-  const row = data?.[0];
-  if (!row?.bucket_id || !row?.name) return null;
-  return { bucket: row.bucket_id as string, path: row.name as string };
-}
-
 async function findSignedObjectPathAnyBucket(
   recordId: string,
+  preferredBuckets: string[],
 ): Promise<{ bucket: string; path: string } | null> {
-  const pattern = `%${recordId}%-signed.pdf`;
-  const { data, error } = await supabase
-    .from("storage.objects")
-    .select("bucket_id, name, created_at")
+  const pattern = `%${recordId}%-signed.pdf%`;
+
+  // 1) Try preferred buckets first (fast path)
+  for (const b of preferredBuckets) {
+    const { data, error } = await supabase
+      .schema("storage")
+      .from("objects")
+      .select("bucket_id,name,created_at")
+      .eq("bucket_id", b)
+      .ilike("name", pattern)
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (error) {
+      console.warn("storage.objects search error:", error.message);
+      continue;
+    }
+    const row = data?.[0];
+    if (row?.bucket_id && row?.name) return { bucket: row.bucket_id as string, path: row.name as string };
+  }
+
+  // 2) Fallback: search ANY bucket (still bounded)
+  const { data: anyData, error: anyErr } = await supabase
+    .schema("storage")
+    .from("objects")
+    .select("bucket_id,name,created_at")
     .ilike("name", pattern)
     .order("created_at", { ascending: false })
     .limit(1);
 
-  if (error) {
-    console.warn("storage.objects ANY-bucket search error:", error.message);
+  if (anyErr) {
+    console.warn("storage.objects any-bucket search error:", anyErr.message);
     return null;
   }
 
-  const row = data?.[0];
+  const row = anyData?.[0];
   if (!row?.bucket_id || !row?.name) return null;
   return { bucket: row.bucket_id as string, path: row.name as string };
 }
@@ -123,10 +118,11 @@ serve(async (req) => {
     return json({ ok: false, error: "Provide envelope_id (preferred) or record_id" }, 400);
   }
 
-  // 1) Load envelope if provided
+  // 1) Load envelope (if provided) to resolve record_id + base storage_path
   let record_id = record_id_in;
   let envelope_storage_path = "";
   let envelope_status = "";
+
   if (envelope_id) {
     const { data: env, error: envErr } = await supabase
       .from("signature_envelopes")
@@ -144,7 +140,7 @@ serve(async (req) => {
 
   if (!record_id) return json({ ok: false, error: "Could not resolve record_id" }, 400);
 
-  // 2) Load ledger (truth source)
+  // 2) Load governance record (truth source for lane + entity)
   const { data: ledger, error: ledErr } = await supabase
     .from("governance_ledger")
     .select("id, title, entity_id, is_test")
@@ -170,42 +166,31 @@ serve(async (req) => {
   const entity_key = asString(ent?.slug);
   if (!entity_key) return json({ ok: false, error: "Could not resolve entity_key from entities.slug", entity_id }, 400);
 
-  // 4) Determine signed pdf path (robust)
-  const requested_bucket = asString(body.signed_bucket);
+  // 4) Determine signed pdf path (DO NOT mutate envelope; it is immutable once completed)
+  const signed_bucket = asString(body.signed_bucket) || SIGNED_PDF_BUCKET;
 
-  let signed_bucket = requested_bucket || SIGNED_PDF_BUCKET;
   let signed_path = "";
-
-  // If envelope has a base storage path, derive "-signed.pdf" first
   if (envelope_storage_path && envelope_storage_path.toLowerCase().endsWith(".pdf")) {
-    const derived = envelope_storage_path.replace(/\.pdf$/i, "-signed.pdf");
-    // Try in the chosen bucket
-    const { data: obj } = await supabase
-      .from("storage.objects")
-      .select("name")
-      .eq("bucket_id", signed_bucket)
-      .eq("name", derived)
-      .maybeSingle();
-    if (obj?.name) signed_path = derived;
+    signed_path = envelope_storage_path.replace(/\.pdf$/i, "-signed.pdf");
   }
 
-  // Bucket fallback search order
+  // Verify derived path exists (storage schema correct)
+  if (signed_path) {
+    const { data: obj, error: objErr } = await supabase
+      .schema("storage")
+      .from("objects")
+      .select("name")
+      .eq("bucket_id", signed_bucket)
+      .eq("name", signed_path)
+      .maybeSingle();
+
+    if (objErr) console.warn("object verify error:", objErr.message);
+    if (!obj?.name) signed_path = "";
+  }
+
+  // If not found, search storage.objects properly
   if (!signed_path) {
-    const candidates = [
-      requested_bucket,                 // explicit override first
-      SIGNED_PDF_BUCKET,                // env configured
-      MINUTE_BOOK_BUCKET,               // canonical minute_book
-    ].filter((b): b is string => !!b);
-
-    let found: { bucket: string; path: string } | null = null;
-    for (const b of candidates) {
-      found = await findSignedObjectPathInBucket(b, record_id);
-      if (found) break;
-    }
-
-    // Last resort: any bucket
-    if (!found) found = await findSignedObjectPathAnyBucket(record_id);
-
+    const found = await findSignedObjectPathAnyBucket(record_id, [signed_bucket, MINUTE_BOOK_BUCKET]);
     if (!found) {
       return json(
         {
@@ -213,21 +198,23 @@ serve(async (req) => {
           error: "Failed to locate signed PDF in storage",
           record_id,
           envelope_id: envelope_id || null,
-          hint:
-            `Searched buckets: ${[requested_bucket, SIGNED_PDF_BUCKET, MINUTE_BOOK_BUCKET].filter(Boolean).join(", ")} (and ANY bucket). ` +
-            `Expected pattern: *${record_id}*-signed.pdf`,
+          hint: `Searched buckets: ${signed_bucket}, ${MINUTE_BOOK_BUCKET} (and ANY bucket). Expected pattern: *${record_id}*-signed.pdf`,
         },
         404,
       );
     }
-
-    signed_bucket = found.bucket;
     signed_path = found.path;
+    // IMPORTANT: download from the bucket where it actually exists
+    // (found.bucket may differ from signed_bucket)
+    // We set signed_bucket to found.bucket below
+    (body as any).signed_bucket = found.bucket;
   }
+
+  const final_bucket = asString((body as any).signed_bucket) || signed_bucket;
 
   // 5) Download signed PDF bytes
   const { data: signedBlob, error: dlErr } = await supabase.storage
-    .from(signed_bucket)
+    .from(final_bucket)
     .download(signed_path);
 
   if (dlErr || !signedBlob) {
@@ -236,7 +223,7 @@ serve(async (req) => {
         ok: false,
         error: "Failed to download signed PDF",
         details: dlErr?.message ?? "{}",
-        signed_bucket,
+        signed_bucket: final_bucket,
         signed_path,
       },
       500,
@@ -246,7 +233,7 @@ serve(async (req) => {
   const signedBytes = new Uint8Array(await signedBlob.arrayBuffer());
   const pdf_base64 = base64FromBytes(signedBytes);
 
-  // 6) Call archive-save-document
+  // 6) Call archive-save-document (Minute Book + supporting_documents + pointers)
   const domain_key = asString(body.domain_key) || DEFAULT_DOMAIN_KEY;
   const section_name = asString(body.section_name) || DEFAULT_SECTION_NAME;
 
@@ -278,19 +265,11 @@ serve(async (req) => {
     );
   }
 
-  // 7) Best-effort seal (non-blocking)
+  // 7) Best-effort seal into verified registry (non-blocking)
   let seal_result: unknown = null;
-  {
-    const { data: sealData, error: sealErr } = await supabase.rpc(SEAL_RPC_NAME as any, {
-      record_id,
-    } as any);
-
-    if (sealErr) {
-      console.warn("seal rpc failed (non-blocking):", sealErr.message);
-    } else {
-      seal_result = sealData;
-    }
-  }
+  const { data: sealData, error: sealErr } = await supabase.rpc(SEAL_RPC_NAME as any, { record_id } as any);
+  if (sealErr) console.warn("seal rpc failed (non-blocking):", sealErr.message);
+  else seal_result = sealData;
 
   return json({
     ok: true,
@@ -298,7 +277,7 @@ serve(async (req) => {
     envelope_id: envelope_id || null,
     envelope_status: envelope_status || null,
     lane_is_test,
-    signed_bucket,
+    signed_bucket: final_bucket,
     signed_path,
     minute_book_bucket: MINUTE_BOOK_BUCKET,
     archive_save_result: saveRes ?? null,
