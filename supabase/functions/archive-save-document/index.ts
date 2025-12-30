@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { decodeBase64 } from "https://deno.land/std@0.224.0/encoding/base64.ts";
 
 type ReqBody = {
   source_record_id: string; // governance_ledger.id
@@ -8,7 +9,7 @@ type ReqBody = {
   title: string;
 
   entity_id: string; // uuid
-  entity_key: string; // entity_key_enum label: "holdings" | "lounge" | "real-estate"
+  entity_key: string; // entity_key_enum label (e.g., "holdings" | "lounge" | "real-estate")
   is_test?: boolean;
 
   domain_key: string; // e.g. "governance"
@@ -20,19 +21,14 @@ type ReqBody = {
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY =
-  Deno.env.get("SERVICE_ROLE_KEY") ??
-  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-  global: { fetch },
-});
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  // IMPORTANT: allow x-client-info (Supabase JS sends it)
-  "Access-Control-Allow-Headers":
-    "authorization, apikey, content-type, x-client-info, x-supabase-api-version",
 };
 
 function json(x: unknown, status = 200) {
@@ -52,25 +48,15 @@ function safeSlug(input: string) {
 }
 
 function b64ToBytes(b64: string): Uint8Array {
-  // remove accidental data: prefix if present
   const clean = b64.includes(",") ? b64.split(",").pop()! : b64;
-  const bin = atob(clean);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
+  // std decodeBase64 returns Uint8Array
+  return decodeBase64(clean);
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const hash = await crypto.subtle.digest("SHA-256", bytes);
   const arr = new Uint8Array(hash);
-  return Array.from(arr)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-function isAlreadyExistsError(msg: string) {
-  const m = (msg || "").toLowerCase();
-  return m.includes("already exists") || m.includes("duplicate") || m.includes("409");
+  return Array.from(arr).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 serve(async (req) => {
@@ -102,10 +88,9 @@ serve(async (req) => {
     // Deterministic, lane-safe path
     const lanePrefix = is_test ? "sandbox" : "rot";
     const titleSlug = safeSlug(body.title) || "document";
-    const storage_path =
-      `${lanePrefix}/${body.entity_key}/${body.domain_key}/${body.source_record_id}/${titleSlug}.pdf`;
+    const storage_path = `${lanePrefix}/${body.entity_key}/${body.domain_key}/${body.source_record_id}/${titleSlug}.pdf`;
 
-    // 1) Minute book entry (idempotent by entity_id + source_record_id + is_test)
+    // 1) Minute book entry (idempotent by (entity_id, source_record_id, is_test))
     const { data: existingEntry, error: existingErr } = await supabase
       .from("minute_book_entries")
       .select("id, storage_path, pdf_hash")
@@ -115,10 +100,7 @@ serve(async (req) => {
       .maybeSingle();
 
     if (existingErr) {
-      return json(
-        { ok: false, error: "minute_book_entries select failed", details: existingErr.message },
-        500,
-      );
+      return json({ ok: false, error: "minute_book_entries select failed", details: existingErr.message }, 500);
     }
 
     let entryId = existingEntry?.id as string | undefined;
@@ -136,7 +118,7 @@ serve(async (req) => {
           entry_type,
           entry_date,
           is_test,
-          storage_path,
+          storage_path, // keep entry pointers hot
           pdf_hash: file_hash,
         })
         .select("id")
@@ -159,18 +141,14 @@ serve(async (req) => {
 
         if (updEntry.error) {
           return json(
-            {
-              ok: false,
-              error: "minute_book_entries pointer repair failed",
-              details: updEntry.error.message,
-            },
+            { ok: false, error: "minute_book_entries pointer repair failed", details: updEntry.error.message },
             500,
           );
         }
       }
     }
 
-    // 2) Upload the PDF (idempotent, no overwrite)
+    // 2) Upload the PDF (idempotent: if object exists, we don’t overwrite)
     const { data: existingObj, error: objErr } = await supabase
       .schema("storage")
       .from("objects")
@@ -190,7 +168,7 @@ serve(async (req) => {
         upsert: false,
       });
 
-      if (up.error && !isAlreadyExistsError(up.error.message || "")) {
+      if (up.error && !String(up.error.message || "").toLowerCase().includes("already exists")) {
         return json({ ok: false, error: "storage upload failed", details: up.error.message }, 500);
       }
     }
@@ -204,10 +182,7 @@ serve(async (req) => {
       .maybeSingle();
 
     if (primaryErr) {
-      return json(
-        { ok: false, error: "supporting_documents select failed", details: primaryErr.message },
-        500,
-      );
+      return json({ ok: false, error: "supporting_documents select failed", details: primaryErr.message }, 500);
     }
 
     if (!primaryDoc) {
@@ -227,13 +202,9 @@ serve(async (req) => {
         .single();
 
       if (docIns.error) {
-        return json(
-          { ok: false, error: "supporting_documents insert failed", details: docIns.error.message },
-          500,
-        );
+        return json({ ok: false, error: "supporting_documents insert failed", details: docIns.error.message }, 500);
       }
     } else {
-      // Repair if pointers regressed
       const needsRepair =
         !primaryDoc.storage_path ||
         primaryDoc.storage_path !== storage_path ||
@@ -254,10 +225,7 @@ serve(async (req) => {
           .eq("id", primaryDoc.id);
 
         if (upd.error) {
-          return json(
-            { ok: false, error: "supporting_documents repair failed", details: upd.error.message },
-            500,
-          );
+          return json({ ok: false, error: "supporting_documents repair failed", details: upd.error.message }, 500);
         }
       }
     }
