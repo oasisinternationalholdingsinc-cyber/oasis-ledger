@@ -9,7 +9,10 @@ type ReqBody = {
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, apikey, content-type",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+  // IMPORTANT: supabase-js sends x-client-info; must be allowed or browser blocks
+  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
 const json = (x: unknown, status = 200) =>
@@ -22,9 +25,7 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-  global: { fetch },
-});
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
 
 function asBool(v: unknown, fallback = false) {
   if (typeof v === "boolean") return v;
@@ -49,17 +50,23 @@ serve(async (req) => {
       .maybeSingle();
 
     if (env.error || !env.data) {
-      return json({ ok: false, error: "signature_envelopes row not found", details: env.error }, 404);
+      return json(
+        { ok: false, error: "signature_envelopes row not found", details: env.error ?? null },
+        404
+      );
     }
 
     const record_id = (env.data as any).record_id as string;
-    const status = (env.data as any).status as string | null;
+    const status = ((env.data as any).status as string | null) ?? null;
 
     if (status !== "completed") {
-      return json({ ok: false, error: "Envelope is not completed yet.", envelope_status: status }, 400);
+      return json(
+        { ok: false, error: "Envelope is not completed yet.", envelope_status: status },
+        400
+      );
     }
 
-    // 2) Delegate to archive-save-document (idempotent / repair-capable)
+    // 2) Delegate to archive-save-document (idempotent/repair-capable)
     const { data, error } = await supabase.functions.invoke("archive-save-document", {
       body: { record_id, envelope_id, is_test },
     });
@@ -69,7 +76,10 @@ serve(async (req) => {
     }
 
     if (!data?.ok) {
-      return json({ ok: false, error: data?.error ?? "archive-save-document failed", details: data }, 500);
+      return json(
+        { ok: false, error: data?.error ?? "archive-save-document failed", details: data ?? null },
+        500
+      );
     }
 
     return json({
@@ -77,7 +87,7 @@ serve(async (req) => {
       record_id,
       envelope_id,
       minute_book_entry_id: data.minute_book_entry_id ?? null,
-      already_archived: false,
+      already_archived: data.already_archived ?? false,
       sealed: data.sealed ?? null,
       verified_document: data.verified_document ?? null,
     });
