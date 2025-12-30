@@ -3,9 +3,11 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 type ReqBody = {
-  envelope_id: string;          // signature_envelopes.id
-  record_id?: string;           // governance_ledger.id (optional; can be derived)
-  is_test?: boolean;            // lane flag (optional; can be derived)
+  record_id?: string;     // governance_ledger.id (optional; can be derived from envelope)
+  envelope_id: string;    // signature_envelopes.id
+  is_test?: boolean;      // lane flag (optional; defaults from envelope/ledger)
+  domain_key?: string;    // optional
+  section_name?: string;  // optional
 };
 
 const cors = {
@@ -36,10 +38,10 @@ serve(async (req) => {
       return json({ ok: false, error: "envelope_id is required" }, 400);
     }
 
-    // 1) Load envelope, derive record_id + is_test if missing
+    // 1) Load envelope + sanity
     const { data: env, error: envErr } = await supabase
       .from("signature_envelopes")
-      .select("id, record_id, entity_id, status, is_test")
+      .select("id, record_id, status, is_test")
       .eq("id", body.envelope_id)
       .maybeSingle();
 
@@ -47,7 +49,7 @@ serve(async (req) => {
     if (!env) return json({ ok: false, error: "signature_envelope not found" }, 404);
 
     const record_id = body.record_id ?? env.record_id;
-    if (!record_id) return json({ ok: false, error: "envelope.record_id is NULL" }, 400);
+    if (!record_id) return json({ ok: false, error: "record_id could not be determined" }, 400);
 
     if (env.status !== "completed") {
       return json(
@@ -56,9 +58,9 @@ serve(async (req) => {
       );
     }
 
-    const is_test = body.is_test ?? env.is_test ?? false;
+    const is_test = Boolean(body.is_test ?? env.is_test ?? false);
 
-    // 2) Call archive-save-document (service role)
+    // 2) Call archive-save-document (service_role)
     const resp = await fetch(`${SUPABASE_URL}/functions/v1/archive-save-document`, {
       method: "POST",
       headers: {
@@ -70,15 +72,20 @@ serve(async (req) => {
         record_id,
         envelope_id: env.id,
         is_test,
-        domain_key: "resolutions-minutes",
-        section_name: "Resolutions & Minutes",
+        domain_key: body.domain_key,         // optional; archive-save-document validates/falls back
+        section_name: body.section_name,     // optional
       }),
     });
 
     const out = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
+    if (!resp.ok || !out?.ok) {
       return json(
-        { ok: false, error: "archive-save-document failed", status: resp.status, details: out },
+        {
+          ok: false,
+          error: "archive-save-document failed",
+          status: resp.status,
+          details: out,
+        },
         500,
       );
     }
