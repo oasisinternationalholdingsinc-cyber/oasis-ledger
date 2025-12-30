@@ -1,12 +1,11 @@
-// supabase/functions/archive-signed-resolution/index.ts
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 type ReqBody = {
-  record_id: string;      // governance_ledger.id
-  envelope_id: string;    // signature_envelopes.id
-  is_test?: boolean;      // optional lane hint
+  envelope_id: string;          // signature_envelopes.id
+  record_id?: string;           // governance_ledger.id (optional; can be derived)
+  is_test?: boolean;            // lane flag (optional; can be derived)
 };
 
 const cors = {
@@ -33,11 +32,11 @@ serve(async (req) => {
     if (req.method !== "POST") return json({ ok: false, error: "Use POST" }, 405);
 
     const body = (await req.json().catch(() => null)) as ReqBody | null;
-    if (!body?.record_id || !body?.envelope_id) {
-      return json({ ok: false, error: "record_id and envelope_id are required" }, 400);
+    if (!body?.envelope_id) {
+      return json({ ok: false, error: "envelope_id is required" }, 400);
     }
 
-    // 1) Load envelope + validate
+    // 1) Load envelope, derive record_id + is_test if missing
     const { data: env, error: envErr } = await supabase
       .from("signature_envelopes")
       .select("id, record_id, entity_id, status, is_test")
@@ -47,9 +46,8 @@ serve(async (req) => {
     if (envErr) return json({ ok: false, error: envErr.message }, 500);
     if (!env) return json({ ok: false, error: "signature_envelope not found" }, 404);
 
-    if (env.record_id !== body.record_id) {
-      return json({ ok: false, error: "envelope_id does not match record_id" }, 400);
-    }
+    const record_id = body.record_id ?? env.record_id;
+    if (!record_id) return json({ ok: false, error: "envelope.record_id is NULL" }, 400);
 
     if (env.status !== "completed") {
       return json(
@@ -60,7 +58,7 @@ serve(async (req) => {
 
     const is_test = body.is_test ?? env.is_test ?? false;
 
-    // 2) Call archive-save-document (service_role)
+    // 2) Call archive-save-document (service role)
     const resp = await fetch(`${SUPABASE_URL}/functions/v1/archive-save-document`, {
       method: "POST",
       headers: {
@@ -69,8 +67,8 @@ serve(async (req) => {
         apikey: SERVICE_ROLE_KEY,
       },
       body: JSON.stringify({
-        record_id: body.record_id,
-        envelope_id: body.envelope_id,
+        record_id,
+        envelope_id: env.id,
         is_test,
         domain_key: "resolutions-minutes",
         section_name: "Resolutions & Minutes",
@@ -78,7 +76,6 @@ serve(async (req) => {
     });
 
     const out = await resp.json().catch(() => ({}));
-
     if (!resp.ok) {
       return json(
         { ok: false, error: "archive-save-document failed", status: resp.status, details: out },

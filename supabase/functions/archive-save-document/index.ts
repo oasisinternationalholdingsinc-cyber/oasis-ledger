@@ -1,12 +1,11 @@
-// supabase/functions/archive-save-document/index.ts
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 type ReqBody = {
   record_id: string;          // governance_ledger.id
-  envelope_id?: string;       // signature_envelopes.id (recommended)
-  is_test?: boolean;          // lane flag (must match ledger/envelope)
+  envelope_id?: string;       // signature_envelopes.id (optional but recommended)
+  is_test?: boolean;          // lane flag
   domain_key?: string;
   section_name?: string;
   title?: string;
@@ -42,7 +41,7 @@ serve(async (req) => {
 
     const record_id = body.record_id;
 
-    // 1) Load ledger record
+    // 1) Load ledger record (source of truth)
     const { data: ledger, error: ledgerErr } = await supabase
       .from("governance_ledger")
       .select("id, entity_id, title, record_type, status, created_by, is_test")
@@ -53,36 +52,23 @@ serve(async (req) => {
     if (!ledger) return json({ ok: false, error: "governance_ledger record not found" }, 404);
     if (!ledger.entity_id) return json({ ok: false, error: "governance_ledger.entity_id is NULL" }, 400);
 
-    const entity_id = ledger.entity_id as string;
+    const is_test = body.is_test ?? ledger.is_test ?? false;
 
-    // 2) Load entity (slug is used for entity_key enum + path)
+    // 2) Load entity slug
     const { data: ent, error: entErr } = await supabase
       .from("entities")
       .select("id, slug, name")
-      .eq("id", entity_id)
+      .eq("id", ledger.entity_id)
       .maybeSingle();
 
     if (entErr) return json({ ok: false, error: entErr.message }, 500);
     if (!ent?.slug) return json({ ok: false, error: "entities.slug not found for entity_id" }, 400);
 
-    const entity_slug = String(ent.slug);
-    const laneIsTest = Boolean(ledger.is_test);
+    const entity_id = ledger.entity_id;
+    const entity_slug = ent.slug;
+    const lanePrefix = is_test ? "sandbox" : "rot";
 
-    // Enforce lane match (prevents cross-lane accidental writes)
-    if (typeof body.is_test === "boolean" && body.is_test !== laneIsTest) {
-      return json(
-        {
-          ok: false,
-          error: "Lane mismatch: body.is_test does not match governance_ledger.is_test",
-          details: { body_is_test: body.is_test, ledger_is_test: laneIsTest },
-        },
-        409,
-      );
-    }
-
-    const lanePrefix = laneIsTest ? "sandbox" : "rot";
-
-    // 3) Optional: load envelope for pointers
+    // 3) Optional envelope (preferred pointers for signed PDFs)
     let envelope: any = null;
     if (body.envelope_id) {
       const { data: env, error: envErr } = await supabase
@@ -93,35 +79,17 @@ serve(async (req) => {
 
       if (envErr) return json({ ok: false, error: envErr.message }, 500);
       if (!env) return json({ ok: false, error: "signature_envelope not found" }, 404);
-
-      if (env.record_id !== record_id) {
-        return json({ ok: false, error: "envelope_id does not match record_id" }, 400);
-      }
-      if (env.entity_id !== entity_id) {
-        return json({ ok: false, error: "envelope.entity_id does not match ledger.entity_id" }, 400);
-      }
-      if (Boolean(env.is_test) !== laneIsTest) {
-        return json(
-          {
-            ok: false,
-            error: "Lane mismatch: envelope.is_test does not match governance_ledger.is_test",
-            details: { envelope_is_test: env.is_test, ledger_is_test: laneIsTest },
-          },
-          409,
-        );
-      }
-
       envelope = env;
     }
 
-    // 4) created_by is required for supporting_documents owner fields
-    const created_by = (ledger.created_by ?? envelope?.created_by ?? null) as string | null;
+    // 4) created_by must be present (supporting_documents needs non-null owner/uploaded_by)
+    const created_by = ledger.created_by ?? envelope?.created_by ?? null;
     if (!created_by) {
       return json(
         {
           ok: false,
           error: "Ledger missing created_by (needed for supporting_documents)",
-          hint: "Ensure governance_ledger.created_by is set (uuid) for this record.",
+          hint: "Set governance_ledger.created_by for this record OR ensure envelope.created_by is a real UUID.",
         },
         400,
       );
@@ -129,25 +97,24 @@ serve(async (req) => {
 
     // 5) Resolve archive fields
     const title = body.title ?? ledger.title ?? "Governance Record";
-    const entry_type = (ledger.record_type ?? "resolution") as any;
+    const entry_type = (ledger.record_type ?? "resolution") as string;
 
     const domain_key = body.domain_key ?? "resolutions-minutes";
     const section_name = body.section_name ?? "Resolutions & Minutes";
 
-    // 6) Idempotent find Minute Book entry (per lane)
+    // 6) Find existing minute_book entry (idempotent repair)
     const { data: existingEntry, error: existingErr } = await supabase
       .from("minute_book_entries")
-      .select("id, storage_path, pdf_hash, source_record_id, source_envelope_id, domain_key, section_name, is_test")
+      .select("id, storage_path, pdf_hash, source_record_id, source_envelope_id, domain_key, is_test")
       .eq("source_record_id", record_id)
-      .eq("is_test", laneIsTest)
+      .eq("is_test", is_test)
       .maybeSingle();
 
     if (existingErr) return json({ ok: false, error: existingErr.message }, 500);
 
-    // 7) Primary path + hash (prefer envelope pointers)
+    // 7) Primary pointers (prefer signed envelope pointers)
     const primaryPath =
-      envelope?.storage_path ??
-      `${lanePrefix}/${entity_slug}/${domain_key}/${record_id}.pdf`;
+      envelope?.storage_path ?? `${lanePrefix}/${entity_slug}/${domain_key}/${record_id}.pdf`;
 
     const primaryHash = envelope?.storage_hash ?? null;
 
@@ -159,17 +126,17 @@ serve(async (req) => {
         .from("minute_book_entries")
         .insert({
           entity_id,
-          entity_key: entity_slug as any, // enum label must match slug
+          entity_key: entity_slug as any,
           domain_key,
           section_name,
-          entry_type,
+          entry_type: entry_type as any,
           title,
           source: envelope ? "signed_resolution" : "system_generated",
           source_record_id: record_id,
           source_envelope_id: envelope?.id ?? null,
           storage_path: primaryPath,
           pdf_hash: primaryHash,
-          is_test: laneIsTest,
+          is_test,
           created_by,
         })
         .select("id")
@@ -185,7 +152,6 @@ serve(async (req) => {
       if (!existingEntry.pdf_hash && primaryHash) patch.pdf_hash = primaryHash;
       if (!existingEntry.source_envelope_id && envelope?.id) patch.source_envelope_id = envelope.id;
       if (existingEntry.domain_key !== domain_key) patch.domain_key = domain_key;
-      if (existingEntry.section_name !== section_name) patch.section_name = section_name;
 
       if (Object.keys(patch).length) {
         const { error: upErr } = await supabase
@@ -197,10 +163,10 @@ serve(async (req) => {
       }
     }
 
-    // 9) Ensure supporting_documents for primary PDF (Reader relies on this)
+    // 9) Ensure supporting_documents exists for primary PDF pointer
     const { data: existingDoc, error: docErr } = await supabase
       .from("supporting_documents")
-      .select("id, file_path")
+      .select("id")
       .eq("entry_id", entry_id)
       .eq("file_path", primaryPath)
       .maybeSingle();
@@ -210,43 +176,33 @@ serve(async (req) => {
     if (!existingDoc) {
       const file_name = primaryPath.split("/").pop() ?? `${record_id}.pdf`;
 
-      const { error: docInsErr } = await supabase
-        .from("supporting_documents")
-        .insert({
-          entry_id,
-          entity_key: entity_slug as any,
-          section: section_name as any, // must be valid for your section enum; if not, change to a known valid enum label
-          file_path: primaryPath,
-          file_name,
-          doc_type: "pdf",
-          mime_type: "application/pdf",
-          file_hash: primaryHash,
-          signature_envelope_id: envelope?.id ?? null,
-          uploaded_by: created_by,
-          owner_id: created_by,
-          metadata: {
-            bucket: MINUTE_BOOK_BUCKET,
-            lane: lanePrefix,
-            entity_slug,
-            source_table: "signature_envelopes",
-            envelope_id: envelope?.id ?? null,
-          },
-        });
+      // IMPORTANT: avoid enum mismatch on supporting_documents.section by storing section_name in metadata
+      const { error: docInsErr } = await supabase.from("supporting_documents").insert({
+        entry_id,
+        entity_key: entity_slug as any,
+        file_path: primaryPath,
+        file_name,
+        doc_type: "pdf",
+        mime_type: "application/pdf",
+        file_hash: primaryHash,
+        signature_envelope_id: envelope?.id ?? null,
+        uploaded_by: created_by,
+        owner_id: created_by,
+        metadata: {
+          bucket: MINUTE_BOOK_BUCKET,
+          lane: lanePrefix,
+          entity_slug,
+          section_name,
+          domain_key,
+          source_table: "signature_envelopes",
+          envelope_id: envelope?.id ?? null,
+        },
+      });
 
-      if (docInsErr) {
-        return json(
-          {
-            ok: false,
-            error: docInsErr.message,
-            hint:
-              "If this fails on supporting_documents.section enum, use a known-valid enum label for section and store display section_name in metadata instead.",
-          },
-          500,
-        );
-      }
+      if (docInsErr) return json({ ok: false, error: docInsErr.message }, 500);
     }
 
-    // 10) Upsert verified_documents (canonical pointer: minute_book_entries)
+    // 10) Upsert verified_documents (canonical: source_table=minute_book_entries, source_record_id=entry_id)
     const { data: existingVerified, error: verSelErr } = await supabase
       .from("verified_documents")
       .select("id, storage_path, file_hash")
@@ -257,27 +213,25 @@ serve(async (req) => {
     if (verSelErr) return json({ ok: false, error: verSelErr.message }, 500);
 
     if (!existingVerified) {
-      const { error: verInsErr } = await supabase
-        .from("verified_documents")
-        .insert({
-          entity_id,
-          entity_slug,
-          entity_key: entity_slug as any,
-          document_class: "minute_book" as any,
-          title,
-          source_table: "minute_book_entries",
-          source_record_id: entry_id,
-          storage_bucket: MINUTE_BOOK_BUCKET,
-          storage_path: primaryPath,
-          file_hash: primaryHash,
-          mime_type: "application/pdf",
-          envelope_id: envelope?.id ?? null,
-          signed_at: envelope?.completed_at ?? null,
-          created_by,
-          updated_by: created_by,
-          is_archived: true,
-          document_purpose: "governance_archive",
-        });
+      const { error: verInsErr } = await supabase.from("verified_documents").insert({
+        entity_id,
+        entity_slug,
+        entity_key: entity_slug as any,
+        document_class: "minute_book" as any,
+        title,
+        source_table: "minute_book_entries",
+        source_record_id: entry_id,
+        storage_bucket: MINUTE_BOOK_BUCKET,
+        storage_path: primaryPath,
+        file_hash: primaryHash,
+        mime_type: "application/pdf",
+        envelope_id: envelope?.id ?? null,
+        signed_at: envelope?.completed_at ?? null,
+        created_by,
+        updated_by: created_by,
+        is_archived: true,
+        document_purpose: "governance_archive",
+      });
 
       if (verInsErr) return json({ ok: false, error: verInsErr.message }, 500);
     } else {
@@ -303,7 +257,7 @@ serve(async (req) => {
       verified_source_record_id: entry_id,
       storage_bucket: MINUTE_BOOK_BUCKET,
       storage_path: primaryPath,
-      is_test: laneIsTest,
+      is_test,
     });
   } catch (e) {
     return json({ ok: false, error: String((e as any)?.message ?? e) }, 500);
