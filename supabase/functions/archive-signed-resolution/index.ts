@@ -29,12 +29,17 @@ const json = (x: unknown, s = 200) =>
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
 
-async function bestEffortUpdateSignatureEnvelope(envelopeId: string, patch: Record<string, any>) {
+function extractActorIdFromJwt(authHeader: string | null): string | null {
   try {
-    const { error } = await supabase.from("signature_envelopes").update(patch).eq("id", envelopeId);
-    return !error;
+    if (!authHeader) return null;
+    const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const payloadJson = atob(parts[1].replace(/-/g, "+").replace(/_/g, "/"));
+    const payload = JSON.parse(payloadJson);
+    return typeof payload?.sub === "string" ? payload.sub : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -48,8 +53,13 @@ serve(async (req) => {
       return json({ ok: false, error: "envelope_id or record_id required" }, 400);
     }
 
-    // 1) Resolve envelope + record
-    let resolvedRecordId: string | null = record_id ?? null;
+    const actor_id = extractActorIdFromJwt(req.headers.get("authorization"));
+    if (!actor_id) {
+      return json({ ok: false, error: "Missing/invalid Authorization (actor_id)" }, 401);
+    }
+
+    // 1) Resolve envelope (optional)
+    let resolvedRecordId = record_id ?? null;
     let envRow: any = null;
 
     if (envelope_id) {
@@ -69,7 +79,7 @@ serve(async (req) => {
 
     if (!resolvedRecordId) return json({ ok: false, error: "Unable to resolve record_id" }, 400);
 
-    // 2) Lane truth comes from governance_ledger
+    // 2) Ledger is lane truth
     const { data: ledger, error: ledErr } = await supabase
       .from("governance_ledger")
       .select("id, title, entity_id, is_test")
@@ -88,18 +98,16 @@ serve(async (req) => {
     if (entErr) return json({ ok: false, error: entErr.message }, 500);
     if (!entity) return json({ ok: false, error: "Entity not found" }, 400);
 
-    // 3) Locate signed PDF path (your envelopes store it in storage_path)
-    // Bucket is canonical in your project: minute_book
+    // 3) Signed PDF path (bucket is always minute_book in your system)
     let signedPath: string | null = envRow?.storage_path ?? null;
 
     if (!signedPath) {
-      // fallback: find latest pdf containing record id in minute_book bucket
       const { data: obj, error } = await supabase
         .schema("storage")
         .from("objects")
         .select("name")
         .eq("bucket_id", MINUTE_BOOK_BUCKET)
-        .ilike("name", `%${resolvedRecordId}%`)
+        .ilike("name", `%${resolvedRecordId}%.pdf%`)
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();
@@ -110,37 +118,43 @@ serve(async (req) => {
       signedPath = obj.name;
     }
 
-    if (!signedPath) return json({ ok: false, error: "Unable to resolve signed PDF path" }, 500);
+    // 4) Download PDF
+    const { data: blob, error: dlErr } = await supabase.storage
+      .from(MINUTE_BOOK_BUCKET)
+      .download(signedPath);
 
-    // 4) Download signed pdf bytes
-    const { data: blob, error: dlErr } = await supabase.storage.from(MINUTE_BOOK_BUCKET).download(signedPath);
     if (dlErr || !blob) return json({ ok: false, error: "Failed to download signed PDF" }, 500);
 
     const pdfBytes = new Uint8Array(await blob.arrayBuffer());
     const pdfBase64 = encodeBase64(pdfBytes);
 
-    // 5) Archive-save-document (idempotent/repair). Also creates supporting_documents row.
-    const { data: archiveRes, error: archiveErr } = await supabase.functions.invoke("archive-save-document", {
-      body: {
-        source_record_id: resolvedRecordId,
-        pdf_base64: pdfBase64,
-        title: ledger.title ?? "Signed Resolution",
-        entity_id: ledger.entity_id,
-        entity_key: entity.slug,
-        is_test: Boolean(ledger.is_test),
-        domain_key: "governance",
-        section_name: "Governance",
-        entry_type: "resolution",
+    // 5) Archive-save-document (idempotent / repair)
+    const { data: archiveRes, error: archiveErr } = await supabase.functions.invoke(
+      "archive-save-document",
+      {
+        body: {
+          source_record_id: resolvedRecordId,
+          pdf_base64: pdfBase64,
+          title: ledger.title ?? "Signed Resolution",
+          entity_id: ledger.entity_id,
+          entity_key: entity.slug,
+          is_test: Boolean(ledger.is_test),
+          domain_key: "governance",
+          section_name: "Governance",
+          entry_type: "resolution",
+          bucket: MINUTE_BOOK_BUCKET,
 
-        // critical for supporting_documents linkage:
-        signature_envelope_id: envelope_id ?? null,
-        doc_type: "signed_resolution",
-        section: "governance",
+          actor_id,
+          signature_envelope_id: envRow?.id ?? null,
+        },
       },
-    });
+    );
 
     if (archiveErr) {
-      return json({ ok: false, error: "archive-save-document failed", details: archiveErr.message }, 500);
+      return json(
+        { ok: false, error: "archive-save-document failed", details: archiveErr.message },
+        500,
+      );
     }
 
     // 6) Seal (non-blocking)
@@ -150,18 +164,6 @@ serve(async (req) => {
       seal = data ?? null;
     } catch {
       seal = null;
-    }
-
-    // 7) Best-effort backfill envelope with evidence pointers (DO NOT try to change is_test/status)
-    if (envelope_id) {
-      await bestEffortUpdateSignatureEnvelope(envelope_id, {
-        minute_book_entry_id: archiveRes?.entry_id ?? null,
-        minute_book_storage_path: archiveRes?.storage?.path ?? null,
-        minute_book_pdf_hash: archiveRes?.storage?.file_hash ?? null,
-        verified_document_id: seal?.verified_document_id ?? null,
-        verified_storage_path: seal?.verified_storage_path ?? null,
-        verified_hash: seal?.verified_hash ?? null,
-      });
     }
 
     return json({
