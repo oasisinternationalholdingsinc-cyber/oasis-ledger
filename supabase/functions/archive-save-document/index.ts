@@ -4,23 +4,23 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { decodeBase64 } from "https://deno.land/std@0.224.0/encoding/base64.ts";
 
 type ReqBody = {
-  source_record_id: string;     // governance_ledger.id
-  pdf_base64: string;           // base64 bytes (no data: prefix)
+  source_record_id: string; // governance_ledger.id
+  pdf_base64: string; // base64 PDF (no data: prefix)
   title: string;
 
-  entity_id: string;            // uuid
-  entity_key: string;           // entity_key_enum label: "holdings" | "lounge" | "real-estate"
+  entity_id: string; // uuid
+  entity_key: string; // entity_key_enum label
   is_test?: boolean;
 
-  domain_key: string;           // e.g. "governance"
-  section_name?: string;        // display label (minute_book_entries)
-  entry_type?: string;          // entry_type_enum label; default "resolution"
-  entry_date?: string;          // YYYY-MM-DD
-  bucket?: string;              // default "minute_book"
+  domain_key: string; // e.g. "governance"
+  section_name?: string; // e.g. "Governance"
+  entry_type?: string; // entry_type_enum label; default "resolution"
+  entry_date?: string; // YYYY-MM-DD
+  bucket?: string; // default "minute_book"
 
-  // ✅ REQUIRED for supporting_documents (because service_role => auth.uid() NULL)
-  actor_id: string;             // auth.users.id (uuid)
-  signature_envelope_id?: string; // signature_envelopes.id (uuid)
+  // REQUIRED for supporting_documents because uploaded_by/owner_id are NOT NULL
+  uploader_id: string; // a real user uuid (e.g. governance_ledger.created_by)
+  signature_envelope_id?: string; // optional
 };
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -35,12 +35,11 @@ const cors = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-function json(x: unknown, status = 200) {
-  return new Response(JSON.stringify(x, null, 2), {
+const json = (x: unknown, status = 200) =>
+  new Response(JSON.stringify(x, null, 2), {
     status,
     headers: { ...cors, "Content-Type": "application/json" },
   });
-}
 
 function safeSlug(input: string) {
   return (input || "")
@@ -58,7 +57,8 @@ function b64ToBytes(b64: string): Uint8Array {
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const hash = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  const arr = new Uint8Array(hash);
+  return Array.from(arr).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 serve(async (req) => {
@@ -80,9 +80,7 @@ serve(async (req) => {
     if (!body.entity_id) return json({ ok: false, error: "entity_id required" }, 400);
     if (!body.entity_key) return json({ ok: false, error: "entity_key required" }, 400);
     if (!body.domain_key) return json({ ok: false, error: "domain_key required" }, 400);
-
-    // ✅ critical: needed for supporting_documents NOT NULL columns
-    if (!body.actor_id) return json({ ok: false, error: "actor_id required" }, 400);
+    if (!body.uploader_id) return json({ ok: false, error: "uploader_id required" }, 400);
 
     // Decode + hash
     const pdfBytes = b64ToBytes(body.pdf_base64);
@@ -90,14 +88,14 @@ serve(async (req) => {
     const file_size = pdfBytes.byteLength;
     const mime_type = "application/pdf";
 
-    // Lane-safe deterministic path
+    // Deterministic, lane-safe path for minute_book bucket
     const lanePrefix = is_test ? "sandbox" : "rot";
     const titleSlug = safeSlug(body.title) || "document";
     const storage_path =
       `${lanePrefix}/${body.entity_key}/${body.domain_key}/${body.source_record_id}/${titleSlug}.pdf`;
 
-    // 1) Minute book entry idempotent by (entity_id, source_record_id, is_test)
-    const { data: existingEntry, error: existingErr } = await supabase
+    // 1) Upsert minute_book_entries (idempotent by entity_id + source_record_id + is_test)
+    const { data: existingEntry, error: selErr } = await supabase
       .from("minute_book_entries")
       .select("id, storage_path, pdf_hash")
       .eq("entity_id", body.entity_id)
@@ -105,8 +103,8 @@ serve(async (req) => {
       .eq("is_test", is_test)
       .maybeSingle();
 
-    if (existingErr) {
-      return json({ ok: false, error: "minute_book_entries select failed", details: existingErr.message }, 500);
+    if (selErr) {
+      return json({ ok: false, error: "minute_book_entries select failed", details: selErr.message }, 500);
     }
 
     let entryId = existingEntry?.id as string | undefined;
@@ -116,7 +114,7 @@ serve(async (req) => {
         .from("minute_book_entries")
         .insert({
           entity_id: body.entity_id,
-          entity_key: body.entity_key, // enum label
+          entity_key: body.entity_key,
           domain_key: body.domain_key,
           section_name,
           title: body.title,
@@ -126,6 +124,8 @@ serve(async (req) => {
           is_test,
           storage_path,
           pdf_hash: file_hash,
+          source: "signed_resolution",
+          source_envelope_id: body.signature_envelope_id ?? null,
         })
         .select("id")
         .single();
@@ -135,20 +135,28 @@ serve(async (req) => {
       }
       entryId = ins.data.id as string;
     } else {
-      // Repair pointers if missing
-      if (!existingEntry?.storage_path || !existingEntry?.pdf_hash) {
-        const updEntry = await supabase
+      // repair pointers if missing/wrong
+      const needsRepair =
+        !existingEntry.storage_path ||
+        existingEntry.storage_path !== storage_path ||
+        !existingEntry.pdf_hash;
+
+      if (needsRepair) {
+        const upd = await supabase
           .from("minute_book_entries")
           .update({ storage_path, pdf_hash: file_hash })
           .eq("id", entryId);
 
-        if (updEntry.error) {
-          return json({ ok: false, error: "minute_book_entries pointer repair failed", details: updEntry.error.message }, 500);
+        if (upd.error) {
+          return json(
+            { ok: false, error: "minute_book_entries repair failed", details: upd.error.message },
+            500,
+          );
         }
       }
     }
 
-    // 2) Upload object if missing
+    // 2) Upload to storage (no overwrite)
     const { data: existingObj, error: objErr } = await supabase
       .schema("storage")
       .from("objects")
@@ -157,9 +165,7 @@ serve(async (req) => {
       .eq("name", storage_path)
       .maybeSingle();
 
-    if (objErr) {
-      return json({ ok: false, error: "storage.objects select failed", details: objErr.message }, 500);
-    }
+    if (objErr) return json({ ok: false, error: "storage.objects select failed", details: objErr.message }, 500);
 
     if (!existingObj) {
       const up = await supabase.storage.from(bucket).upload(storage_path, pdfBytes, {
@@ -173,50 +179,76 @@ serve(async (req) => {
       }
     }
 
-    // 3) supporting_documents PRIMARY POINTER (your schema)
-    //    - file_path is the pointer your UI needs
-    //    - uploaded_by/owner_id must be set explicitly (service_role => auth.uid() NULL)
-    const { data: existingDoc, error: docSelErr } = await supabase
+    // 3) supporting_documents PRIMARY pointer (THIS fixes Reader)
+    // Your supporting_documents schema uses file_path + requires uploaded_by/owner_id.
+    const { data: sdExisting, error: sdSelErr } = await supabase
       .from("supporting_documents")
       .select("id, file_path, file_hash")
       .eq("entry_id", entryId)
-      .eq("file_path", storage_path)
+      .order("uploaded_at", { ascending: false })
+      .limit(1)
       .maybeSingle();
 
-    if (docSelErr) {
-      return json({ ok: false, error: "supporting_documents select failed", details: docSelErr.message }, 500);
+    if (sdSelErr) {
+      return json({ ok: false, error: "supporting_documents select failed", details: sdSelErr.message }, 500);
     }
 
-    if (!existingDoc) {
-      const docIns = await supabase
+    if (!sdExisting) {
+      const sdIns = await supabase
         .from("supporting_documents")
         .insert({
           entry_id: entryId,
-          entity_key: body.entity_key,     // enum
-          section: body.domain_key,        // ⚠ assumes enum contains "governance" etc (your domain keys)
+          entity_key: body.entity_key,
+          section: section_name,
           file_path: storage_path,
           file_name: `${titleSlug}.pdf`,
           doc_type: "primary",
+          uploaded_by: body.uploader_id,
+          owner_id: body.uploader_id,
           file_hash,
           mime_type,
           file_size,
           signature_envelope_id: body.signature_envelope_id ?? null,
-          uploaded_by: body.actor_id,
-          owner_id: body.actor_id,
-          metadata: {},
+          metadata: { bucket },
         })
         .select("id")
         .single();
 
-      if (docIns.error) {
-        return json({ ok: false, error: "supporting_documents insert failed", details: docIns.error.message }, 500);
+      if (sdIns.error) {
+        return json({ ok: false, error: "supporting_documents insert failed", details: sdIns.error.message }, 500);
+      }
+    } else {
+      const needsSdRepair =
+        !sdExisting.file_path ||
+        sdExisting.file_path !== storage_path ||
+        !sdExisting.file_hash ||
+        sdExisting.file_hash !== file_hash;
+
+      if (needsSdRepair) {
+        const sdUpd = await supabase
+          .from("supporting_documents")
+          .update({
+            file_path: storage_path,
+            file_name: `${titleSlug}.pdf`,
+            file_hash,
+            mime_type,
+            file_size,
+            metadata: { bucket },
+          })
+          .eq("id", sdExisting.id);
+
+        if (sdUpd.error) {
+          return json({ ok: false, error: "supporting_documents repair failed", details: sdUpd.error.message }, 500);
+        }
       }
     }
 
     return json({
       ok: true,
       entry_id: entryId,
-      storage: { bucket, path: storage_path, file_hash, file_size, mime_type },
+      bucket,
+      storage_path,
+      file_hash,
       lane: is_test ? "SANDBOX" : "ROT",
     });
   } catch (e: any) {
