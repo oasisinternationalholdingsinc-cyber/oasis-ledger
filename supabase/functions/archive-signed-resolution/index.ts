@@ -10,23 +10,16 @@ type ReqBody = {
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY =
-  Deno.env.get("SERVICE_ROLE_KEY") ??
-  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-  global: { fetch },
-});
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
 
 const MINUTE_BOOK_BUCKET = "minute_book";
 const SEAL_RPC = "seal_governance_record_for_archive";
 
-/* =========================
-   ENTERPRISE CORS (FIXED)
-   ========================= */
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
@@ -36,41 +29,17 @@ const json = (x: unknown, s = 200) =>
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
 
-async function bestEffortUpdateSignatureEnvelope(
-  envelopeId: string,
-  patch: Record<string, any>,
-) {
-  try {
-    const { error } = await supabase
-      .from("signature_envelopes")
-      .update(patch)
-      .eq("id", envelopeId);
-    return !error;
-  } catch {
-    return false;
-  }
-}
-
 serve(async (req) => {
   try {
-    /* ========= CORS PRE-FLIGHT ========= */
-    if (req.method === "OPTIONS") {
-      return new Response("ok", { headers: corsHeaders });
-    }
-
-    if (req.method !== "POST") {
-      return json({ ok: false, error: "POST only" }, 405);
-    }
+    if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+    if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);
 
     const { envelope_id, record_id } = (await req.json()) as ReqBody;
     if (!envelope_id && !record_id) {
-      return json(
-        { ok: false, error: "envelope_id or record_id required" },
-        400,
-      );
+      return json({ ok: false, error: "envelope_id or record_id required" }, 400);
     }
 
-    /* ========= 1) Resolve Envelope / Record ========= */
+    // 1) Resolve envelope + record
     let resolvedRecordId = record_id ?? null;
     let envRow: any = null;
 
@@ -83,31 +52,23 @@ serve(async (req) => {
 
       if (error) return json({ ok: false, error: error.message }, 500);
       if (!env) return json({ ok: false, error: "Envelope not found" }, 404);
-      if (env.status !== "completed") {
-        return json(
-          { ok: false, error: "Envelope not completed" },
-          400,
-        );
-      }
+      if (env.status !== "completed") return json({ ok: false, error: "Envelope not completed" }, 400);
 
       envRow = env;
       resolvedRecordId = resolvedRecordId ?? env.record_id ?? null;
     }
 
-    if (!resolvedRecordId) {
-      return json({ ok: false, error: "Unable to resolve record_id" }, 400);
-    }
+    if (!resolvedRecordId) return json({ ok: false, error: "Unable to resolve record_id" }, 400);
 
-    /* ========= 2) Ledger = Lane Truth ========= */
+    // 2) Ledger is lane truth
     const { data: ledger, error: ledErr } = await supabase
       .from("governance_ledger")
-      .select("id, title, entity_id, is_test")
+      .select("id, title, entity_id, is_test, created_by")
       .eq("id", resolvedRecordId)
       .maybeSingle();
 
     if (ledErr) return json({ ok: false, error: ledErr.message }, 500);
-    if (!ledger)
-      return json({ ok: false, error: "Ledger record not found" }, 404);
+    if (!ledger) return json({ ok: false, error: "Ledger record not found" }, 404);
 
     const { data: entity, error: entErr } = await supabase
       .from("entities")
@@ -116,112 +77,98 @@ serve(async (req) => {
       .maybeSingle();
 
     if (entErr) return json({ ok: false, error: entErr.message }, 500);
-    if (!entity)
-      return json({ ok: false, error: "Entity not found" }, 400);
+    if (!entity) return json({ ok: false, error: "Entity not found" }, 400);
 
-    /* ========= 3) Locate Signed PDF ========= */
+    // 3) Locate signed PDF pointers
     let signedBucket: string | null = envRow?.storage_bucket ?? null;
     let signedPath: string | null = envRow?.storage_path ?? null;
 
-    if (!signedPath) {
+    // fallback search if envelope row lacks pointers
+    if (!signedBucket || !signedPath) {
       const { data: obj, error } = await supabase
         .schema("storage")
         .from("objects")
         .select("bucket_id, name")
-        .ilike("name", `%${resolvedRecordId}%.pdf%`)
+        .ilike("name", `%${resolvedRecordId}%`)
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();
 
       if (error) return json({ ok: false, error: error.message }, 500);
-      if (!obj)
-        return json(
-          { ok: false, error: "Signed PDF not found in storage" },
-          404,
-        );
+      if (!obj) return json({ ok: false, error: "Signed PDF not found in storage" }, 404);
 
-      signedBucket = obj.bucket_id;
-      signedPath = obj.name;
+      signedBucket = (obj as any).bucket_id;
+      signedPath = (obj as any).name;
     }
 
     if (!signedBucket || !signedPath) {
-      return json(
-        { ok: false, error: "Unable to resolve signed PDF pointers" },
-        500,
-      );
+      return json({ ok: false, error: "Unable to resolve signed PDF pointers" }, 500);
     }
 
-    /* ========= 4) Download PDF ========= */
-    const { data: blob, error: dlErr } = await supabase.storage
-      .from(signedBucket)
-      .download(signedPath);
-
-    if (dlErr || !blob) {
-      return json(
-        { ok: false, error: "Failed to download signed PDF" },
-        500,
-      );
-    }
+    // 4) Download signed PDF
+    const { data: blob, error: dlErr } = await supabase.storage.from(signedBucket).download(signedPath);
+    if (dlErr || !blob) return json({ ok: false, error: "Failed to download signed PDF" }, 500);
 
     const pdfBytes = new Uint8Array(await blob.arrayBuffer());
     const pdfBase64 = encodeBase64(pdfBytes);
 
-    /* ========= 5) Archive (Idempotent / Repair) ========= */
-    const { data: archiveRes, error: archiveErr } =
-      await supabase.functions.invoke("archive-save-document", {
-        body: {
-          source_record_id: resolvedRecordId,
-          pdf_base64: pdfBase64,
-          title: ledger.title ?? "Signed Resolution",
-          entity_id: ledger.entity_id,
-          entity_key: entity.slug,
-          is_test: Boolean(ledger.is_test),
-          domain_key: "governance",
-          section_name: "Governance",
-          entry_type: "resolution",
-          bucket: MINUTE_BOOK_BUCKET,
-        },
-      });
-
-    if (archiveErr) {
+    // 5) Archive (idempotent + repair)
+    // IMPORTANT: supporting_documents requires uploaded_by/owner_id -> pass ledger.created_by if available
+    const uploadedBy = (ledger as any).created_by ?? null;
+    if (!uploadedBy) {
       return json(
         {
           ok: false,
-          error: "archive-save-document failed",
-          details: archiveErr.message,
+          error:
+            "Ledger created_by is NULL; cannot create supporting_documents (uploaded_by/owner_id required). Populate governance_ledger.created_by or pass uploaded_by another way.",
         },
+        400,
+      );
+    }
+
+    const { data: archiveRes, error: archiveErr } = await supabase.functions.invoke("archive-save-document", {
+      body: {
+        source_record_id: resolvedRecordId,
+        pdf_base64: pdfBase64,
+        title: (ledger as any).title ?? "Signed Resolution",
+
+        entity_id: (ledger as any).entity_id,
+        entity_key: (entity as any).slug,
+        is_test: Boolean((ledger as any).is_test),
+
+        domain_key: "governance",
+        section: "governance",
+        section_name: "Governance",
+        entry_type: "resolution",
+        bucket: MINUTE_BOOK_BUCKET,
+
+        uploaded_by: uploadedBy,
+        owner_id: uploadedBy,
+        signature_envelope_id: envelope_id ?? null,
+      },
+    });
+
+    if (archiveErr) {
+      return json(
+        { ok: false, error: "archive-save-document failed", details: archiveErr.message },
         500,
       );
     }
 
-    /* ========= 6) Seal (Non-blocking) ========= */
+    // 6) Seal (non-blocking)
     let seal: any = null;
     try {
-      const { data } = await supabase.rpc(SEAL_RPC, {
-        record_id: resolvedRecordId,
-      });
+      const { data } = await supabase.rpc(SEAL_RPC, { record_id: resolvedRecordId });
       seal = data ?? null;
     } catch {
       seal = null;
     }
 
-    /* ========= 7) Best-effort Envelope Backfill ========= */
-    if (envelope_id) {
-      await bestEffortUpdateSignatureEnvelope(envelope_id, {
-        minute_book_entry_id: archiveRes?.entry_id ?? null,
-        minute_book_storage_path: archiveRes?.storage?.path ?? null,
-        minute_book_pdf_hash: archiveRes?.storage?.file_hash ?? null,
-        verified_document_id: seal?.verified_document_id ?? null,
-        verified_storage_path: seal?.verified_storage_path ?? null,
-        verified_hash: seal?.verified_hash ?? null,
-      });
-    }
-
     return json({
       ok: true,
       record_id: resolvedRecordId,
-      lane: ledger.is_test ? "SANDBOX" : "ROT",
-      entity: entity.slug,
+      lane: (ledger as any).is_test ? "SANDBOX" : "ROT",
+      entity: (entity as any).slug,
       signed_pdf: { bucket: signedBucket, path: signedPath },
       minute_book: archiveRes,
       seal,
