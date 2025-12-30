@@ -1,29 +1,31 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
-import { encodeBase64 } from "https://deno.land/std@0.224.0/encoding/base64.ts";
 
 type ReqBody = {
-  source_record_id: string; // governance_ledger.id
-  pdf_base64: string; // base64 PDF bytes (no data: prefix)
+  source_record_id: string;          // governance_ledger.id
+  pdf_base64: string;                // base64 (no data: prefix)
   title: string;
 
-  entity_id: string; // uuid
-  entity_key: string; // entities.slug (must match entity_key_enum labels)
+  entity_id: string;                 // uuid
+  entity_key: string;                // entities.slug (enum label)
   is_test?: boolean;
 
-  domain_key: string; // e.g. "governance"
-  section_name?: string; // e.g. "Governance"
-  entry_type?: string; // e.g. "resolution"
-  entry_date?: string; // YYYY-MM-DD
-  bucket?: string; // default minute_book
+  domain_key: string;                // e.g. "governance"
+  section_name?: string;             // default "Governance"
+  entry_type?: string;               // default "resolution"
+  entry_date?: string;               // YYYY-MM-DD
+  bucket?: string;                   // default minute_book
 };
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY =
-  Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  Deno.env.get("SERVICE_ROLE_KEY") ??
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+  global: { fetch },
+});
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -49,58 +51,81 @@ function safeSlug(input: string) {
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const hash = await crypto.subtle.digest("SHA-256", bytes);
-  const arr = new Uint8Array(hash);
-  return Array.from(arr).map((b) => b.toString(16).padStart(2, "0")).join("");
+  return Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 serve(async (req) => {
   try {
     if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-    if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);
+    if (req.method !== "POST")
+      return json({ ok: false, error: "POST only" }, 405);
 
     const body = (await req.json()) as ReqBody;
 
     const bucket = body.bucket ?? "minute_book";
     const entry_type = body.entry_type ?? "resolution";
     const section_name = body.section_name ?? "Governance";
-    const entry_date = body.entry_date ?? new Date().toISOString().slice(0, 10);
+    const entry_date =
+      body.entry_date ?? new Date().toISOString().slice(0, 10);
     const is_test = Boolean(body.is_test);
 
-    if (!body.source_record_id) return json({ ok: false, error: "source_record_id required" }, 400);
-    if (!body.pdf_base64) return json({ ok: false, error: "pdf_base64 required" }, 400);
-    if (!body.title) return json({ ok: false, error: "title required" }, 400);
-    if (!body.entity_id) return json({ ok: false, error: "entity_id required" }, 400);
-    if (!body.entity_key) return json({ ok: false, error: "entity_key required" }, 400);
-    if (!body.domain_key) return json({ ok: false, error: "domain_key required" }, 400);
+    /* -------------------------------------------------
+     * Validate input (strict)
+     * ------------------------------------------------- */
+    if (!body.source_record_id)
+      return json({ ok: false, error: "source_record_id required" }, 400);
+    if (!body.pdf_base64)
+      return json({ ok: false, error: "pdf_base64 required" }, 400);
+    if (!body.title)
+      return json({ ok: false, error: "title required" }, 400);
+    if (!body.entity_id)
+      return json({ ok: false, error: "entity_id required" }, 400);
+    if (!body.entity_key)
+      return json({ ok: false, error: "entity_key required" }, 400);
+    if (!body.domain_key)
+      return json({ ok: false, error: "domain_key required" }, 400);
 
-    // Decode pdf bytes
-    const pdfBytes = Uint8Array.from(atob(body.pdf_base64), (c) => c.charCodeAt(0));
+    /* -------------------------------------------------
+     * Decode PDF + hash
+     * ------------------------------------------------- */
+    const pdfBytes = Uint8Array.from(
+      atob(body.pdf_base64),
+      (c) => c.charCodeAt(0)
+    );
+
     const file_hash = await sha256Hex(pdfBytes);
     const file_size = pdfBytes.byteLength;
     const mime_type = "application/pdf";
 
-    // Deterministic storage path (lane-aware, id-based)
+    /* -------------------------------------------------
+     * Deterministic storage path (lane-safe)
+     * ------------------------------------------------- */
     const lanePrefix = is_test ? "sandbox" : "rot";
     const titleSlug = safeSlug(body.title) || "document";
+
     const storage_path = `${lanePrefix}/${body.entity_key}/${body.domain_key}/${body.source_record_id}/${titleSlug}.pdf`;
 
-    // 1) Ensure minute_book_entries (idempotent)
+    /* -------------------------------------------------
+     * 1) Minute Book entry (IDEMPOTENT)
+     * ------------------------------------------------- */
     const { data: existingEntry } = await supabase
       .from("minute_book_entries")
-      .select("id, entity_id, entity_key, domain_key, title, source_record_id, is_test")
+      .select("id")
       .eq("source_record_id", body.source_record_id)
       .eq("entity_id", body.entity_id)
       .eq("is_test", is_test)
       .maybeSingle();
 
-    let entryId = existingEntry?.id as string | undefined;
+    let entry_id = existingEntry?.id;
 
-    if (!entryId) {
+    if (!entry_id) {
       const ins = await supabase
         .from("minute_book_entries")
         .insert({
           entity_id: body.entity_id,
-          entity_key: body.entity_key, // enum label expected
+          entity_key: body.entity_key,
           domain_key: body.domain_key,
           section_name,
           title: body.title,
@@ -112,13 +137,18 @@ serve(async (req) => {
         .select("id")
         .single();
 
-      if (ins.error) {
-        return json({ ok: false, error: "minute_book_entries insert failed", details: ins.error.message }, 500);
-      }
-      entryId = ins.data.id as string;
+      if (ins.error)
+        return json(
+          { ok: false, error: "minute_book_entries insert failed", details: ins.error.message },
+          500
+        );
+
+      entry_id = ins.data.id;
     }
 
-    // 2) Ensure storage object exists (idempotent)
+    /* -------------------------------------------------
+     * 2) Storage object (IDEMPOTENT)
+     * ------------------------------------------------- */
     const { data: obj } = await supabase
       .schema("storage")
       .from("objects")
@@ -128,30 +158,39 @@ serve(async (req) => {
       .maybeSingle();
 
     if (!obj) {
-      const up = await supabase.storage.from(bucket).upload(storage_path, pdfBytes, {
-        contentType: mime_type,
-        cacheControl: "3600",
-        upsert: false,
-      });
+      const up = await supabase.storage.from(bucket).upload(
+        storage_path,
+        pdfBytes,
+        {
+          contentType: mime_type,
+          cacheControl: "3600",
+          upsert: false,
+        }
+      );
 
-      if (up.error && !String(up.error.message || "").toLowerCase().includes("already exists")) {
-        return json({ ok: false, error: "storage upload failed", details: up.error.message }, 500);
+      if (up.error && !up.error.message?.toLowerCase().includes("exists")) {
+        return json(
+          { ok: false, error: "storage upload failed", details: up.error.message },
+          500
+        );
       }
     }
 
-    // 3) Ensure PRIMARY supporting_documents row (idempotent)
+    /* -------------------------------------------------
+     * 3) Primary supporting document (AUTHORITATIVE)
+     * ------------------------------------------------- */
     const { data: primaryDoc } = await supabase
       .from("supporting_documents")
       .select("id, storage_path, file_hash")
-      .eq("entry_id", entryId)
+      .eq("entry_id", entry_id)
       .eq("role", "primary")
       .maybeSingle();
 
     if (!primaryDoc) {
-      const docIns = await supabase
+      const ins = await supabase
         .from("supporting_documents")
         .insert({
-          entry_id: entryId,
+          entry_id,
           role: "primary",
           storage_bucket: bucket,
           storage_path,
@@ -163,12 +202,17 @@ serve(async (req) => {
         .select("id")
         .single();
 
-      if (docIns.error) {
-        return json({ ok: false, error: "supporting_documents insert failed", details: docIns.error.message }, 500);
-      }
+      if (ins.error)
+        return json(
+          { ok: false, error: "supporting_documents insert failed", details: ins.error.message },
+          500
+        );
     } else {
-      // Backfill if regressed/missing pointers
-      if (!primaryDoc.storage_path || primaryDoc.file_hash !== file_hash) {
+      // Repair / backfill (enterprise safety)
+      if (
+        primaryDoc.storage_path !== storage_path ||
+        primaryDoc.file_hash !== file_hash
+      ) {
         const upd = await supabase
           .from("supporting_documents")
           .update({
@@ -181,16 +225,27 @@ serve(async (req) => {
           })
           .eq("id", primaryDoc.id);
 
-        if (upd.error) {
-          return json({ ok: false, error: "supporting_documents update failed", details: upd.error.message }, 500);
-        }
+        if (upd.error)
+          return json(
+            { ok: false, error: "supporting_documents update failed", details: upd.error.message },
+            500
+          );
       }
     }
 
+    /* -------------------------------------------------
+     * Done
+     * ------------------------------------------------- */
     return json({
       ok: true,
-      entry_id: entryId,
-      storage: { bucket, path: storage_path, file_hash, file_size, mime_type },
+      entry_id,
+      storage: {
+        bucket,
+        path: storage_path,
+        file_hash,
+        file_size,
+        mime_type,
+      },
       projection: {
         entity_key: body.entity_key,
         domain_key: body.domain_key,
