@@ -3,15 +3,14 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 type ReqBody = {
-  record_id: string; // governance_ledger.id
-  envelope_id: string; // signature_envelopes.id
-  is_test?: boolean; // lane flag
+  record_id: string;     // governance_ledger.id
+  envelope_id: string;   // signature_envelopes.id
+  is_test?: boolean;     // lane flag
 };
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  // IMPORTANT: supabase-js sends x-client-info; must be allowed or browser blocks
   "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
   "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
@@ -24,17 +23,19 @@ const json = (x: unknown, status = 200) =>
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY =
-  Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  Deno.env.get("SERVICE_ROLE_KEY") ??
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+  global: { fetch },
+});
 
 function asBool(v: unknown, fallback = false) {
-  if (typeof v === "boolean") return v;
-  return fallback;
+  return typeof v === "boolean" ? v : fallback;
 }
 
 async function tryRpc(fn: string, args: any) {
-  return await supabase.rpc(fn as any, args as any);
+  return supabase.rpc(fn as any, args as any);
 }
 
 serve(async (req) => {
@@ -43,113 +44,99 @@ serve(async (req) => {
   try {
     const body = (await req.json()) as ReqBody;
 
-    const record_id = (body?.record_id ?? "").trim();
-    const envelope_id = (body?.envelope_id ?? "").trim();
+    const record_id = body?.record_id?.trim();
+    const envelope_id = body?.envelope_id?.trim();
     const is_test = asBool(body?.is_test, false);
 
     if (!record_id) return json({ ok: false, error: "record_id is required" }, 400);
     if (!envelope_id) return json({ ok: false, error: "envelope_id is required" }, 400);
 
-    // 0) Ensure envelope exists + completed (defensive)
+    /* ------------------------------------------------------------
+       0) Load envelope (MUST be completed)
+    ------------------------------------------------------------ */
     const env = await supabase
       .from("signature_envelopes")
-      .select("id, record_id, status")
+      .select("id, record_id, status, created_by")
       .eq("id", envelope_id)
       .maybeSingle();
 
-    if (env.error || !env.data) {
-      return json(
-        { ok: false, error: "signature_envelopes row not found", details: env.error ?? null },
-        404
-      );
+    if (!env.data || env.error) {
+      return json({ ok: false, error: "signature_envelopes not found", details: env.error }, 404);
     }
 
-    const envRecordId = (env.data as any).record_id as string;
-    const envStatus = ((env.data as any).status as string | null) ?? null;
-
-    if (envRecordId !== record_id) {
-      return json(
-        {
-          ok: false,
-          error: "Envelope record_id mismatch",
-          envelope_record_id: envRecordId,
-          request_record_id: record_id,
-        },
-        400
-      );
+    if (env.data.record_id !== record_id) {
+      return json({ ok: false, error: "Envelope record mismatch" }, 400);
     }
 
-    if (envStatus !== "completed") {
-      return json(
-        { ok: false, error: "Envelope is not completed yet.", envelope_status: envStatus },
-        400
-      );
+    if (env.data.status !== "completed") {
+      return json({ ok: false, error: "Envelope not completed" }, 400);
     }
 
-    // 1) Load ledger basics (keep selects conservative)
+    /* ------------------------------------------------------------
+       1) Load ledger (NO mutation)
+    ------------------------------------------------------------ */
     const gl = await supabase
       .from("governance_ledger")
       .select("id, title, entity_id, created_by, is_test")
       .eq("id", record_id)
       .maybeSingle();
 
-    if (gl.error || !gl.data) {
-      return json({ ok: false, error: "governance_ledger row not found", details: gl.error ?? null }, 404);
+    if (!gl.data || gl.error) {
+      return json({ ok: false, error: "governance_ledger not found", details: gl.error }, 404);
     }
 
-    const entity_id = (gl.data as any).entity_id as string | null;
-    const title = ((gl.data as any).title as string | null) ?? "Untitled Resolution";
+    const entity_id = gl.data.entity_id;
+    const title = gl.data.title ?? "Untitled Resolution";
 
     if (!entity_id) {
+      return json({ ok: false, error: "Ledger missing entity_id" }, 500);
+    }
+
+    /* ------------------------------------------------------------
+       2) Resolve ACTOR (CRITICAL FIX)
+    ------------------------------------------------------------ */
+    const actor_uid = env.data.created_by ?? gl.data.created_by;
+
+    if (!actor_uid) {
       return json(
-        { ok: false, error: "Ledger missing entity_id (required for minute_book_entries)" },
-        500
+        {
+          ok: false,
+          error: "Missing actor_uid (envelope.created_by and ledger.created_by are NULL)",
+        },
+        400
       );
     }
 
-    // 2) Resolve entity_key enum label (best-effort)
-    // Expect public.organization_entities exists in your schema.
-    let entity_key: string | null = null;
-    let entity_slug: string | null = null;
-
+    /* ------------------------------------------------------------
+       3) Resolve entity_key
+    ------------------------------------------------------------ */
     const ent = await supabase
       .from("organization_entities")
       .select("id, slug, entity_key")
       .eq("id", entity_id)
       .maybeSingle();
 
-    if (!ent.error && ent.data) {
-      entity_slug = (ent.data as any).slug ?? null;
-      entity_key = (ent.data as any).entity_key ?? entity_slug ?? null;
-    }
-
+    const entity_key = ent.data?.entity_key ?? ent.data?.slug;
     if (!entity_key) {
-      return json(
-        {
-          ok: false,
-          error:
-            "Unable to resolve entity_key for minute_book_entries (organization_entities lookup failed).",
-          details: ent.error ?? null,
-        },
-        500
-      );
+      return json({ ok: false, error: "Unable to resolve entity_key" }, 500);
     }
 
-    // 3) Find/create minute_book_entries row (lane-safe, idempotent)
+    /* ------------------------------------------------------------
+       4) Find / create minute_book_entries (idempotent)
+    ------------------------------------------------------------ */
     const existing = await supabase
       .from("minute_book_entries")
-      .select("id, title, is_test")
+      .select("id")
       .eq("source_record_id", record_id)
       .eq("is_test", is_test)
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
 
-    let minute_book_entry_id: string | null = (existing.data as any)?.id ?? null;
+    let minute_book_entry_id = existing.data?.id ?? null;
     const already_archived = !!minute_book_entry_id;
 
     if (!minute_book_entry_id) {
-      // FK requires domain_key exist in governance_domains(key)
       const gd = await supabase
         .from("governance_domains")
         .select("key")
@@ -158,34 +145,17 @@ serve(async (req) => {
         .limit(1)
         .maybeSingle();
 
-      const domain_key = (gd.data as any)?.key ?? null;
-      if (!domain_key) {
-        return json(
-          {
-            ok: false,
-            error:
-              "No active governance_domains found. Seed governance_domains (key/label/active) before archiving, or FK will fail.",
-          },
-          500
-        );
+      if (!gd.data?.key) {
+        return json({ ok: false, error: "No active governance_domains" }, 500);
       }
-
-      const section = await supabase
-        .from("governance_domain_sections")
-        .select("default_section")
-        .eq("domain_key", domain_key)
-        .limit(1)
-        .maybeSingle();
-
-      const section_name = (section.data as any)?.default_section ?? "General";
 
       const ins = await supabase
         .from("minute_book_entries")
         .insert({
           entity_id,
-          entity_key, // enum label must match your entity_key_enum
-          domain_key,
-          section_name,
+          entity_key,
+          domain_key: gd.data.key,
+          section_name: "General",
           title,
           source_record_id: record_id,
           is_test,
@@ -194,21 +164,16 @@ serve(async (req) => {
         .select("id")
         .single();
 
-      if (ins.error || !ins.data) {
-        return json(
-          {
-            ok: false,
-            error: "Failed to create minute_book_entries row",
-            details: ins.error ?? null,
-          },
-          500
-        );
+      if (ins.error) {
+        return json({ ok: false, error: "Failed to create minute_book_entry", details: ins.error }, 500);
       }
 
-      minute_book_entry_id = (ins.data as any).id as string;
+      minute_book_entry_id = ins.data.id;
     }
 
-    // 4) Seal/render archive PDF (idempotent) — supports multiple param name variants
+    /* ------------------------------------------------------------
+       5) Seal archive PDF (RPC)
+    ------------------------------------------------------------ */
     let seal = await tryRpc("seal_governance_record_for_archive", {
       record_id,
       envelope_id,
@@ -224,32 +189,21 @@ serve(async (req) => {
     }
 
     if (seal.error) {
-      // Don’t hide this — this is the core of “No storage path on primary document”
-      return json(
-        { ok: false, error: "seal_governance_record_for_archive failed", details: seal.error ?? null },
-        500
-      );
+      return json({ ok: false, error: "seal_governance_record_for_archive failed", details: seal.error }, 500);
     }
 
     const sealed = seal.data ?? {};
-    const storage_bucket = sealed.storage_bucket ?? sealed.bucket ?? null;
-    const storage_path = sealed.storage_path ?? sealed.path ?? null;
-    const file_hash = sealed.file_hash ?? sealed.hash ?? null;
+    const storage_bucket = sealed.storage_bucket;
+    const storage_path = sealed.storage_path;
+    const file_hash = sealed.file_hash;
 
     if (!storage_bucket || !storage_path || !file_hash) {
-      return json(
-        {
-          ok: false,
-          error: "Seal did not return storage_bucket/storage_path/file_hash (cannot register primary pointers).",
-          details: sealed,
-        },
-        500
-      );
+      return json({ ok: false, error: "Seal missing storage pointers", details: sealed }, 500);
     }
 
-    // 5) Register primary PDF pointer as supporting_documents (idempotent-ish)
-    // If your table has a uniqueness rule, this will behave as upsert by “insert and ignore duplicates” at DB layer.
-    // If not, it still won’t break anything; worst case duplicates, but your UI can pick latest.
+    /* ------------------------------------------------------------
+       6) supporting_documents (EXPLICIT ACTOR)
+    ------------------------------------------------------------ */
     const file_name = storage_path.split("/").pop() ?? "resolution.pdf";
 
     const sd = await supabase.from("supporting_documents").insert({
@@ -259,29 +213,29 @@ serve(async (req) => {
       file_name,
       file_hash,
       mime_type: "application/pdf",
-      file_size: null,
       signature_envelope_id: envelope_id,
       verified: true,
       registry_visible: true,
+      uploaded_by: actor_uid,
+      owner_id: actor_uid,
     });
 
-    // don’t hard-fail if your schema has uniqueness preventing duplicates
     if (sd.error) {
-      // log but continue — the seal + verified registry are the critical pieces
-      console.warn("supporting_documents insert error:", sd.error);
+      console.warn("supporting_documents insert warning:", sd.error);
     }
 
-    // 6) Ensure verified_documents row exists (uses source_record_id — NOT source_entry_id)
-    const vdExisting = await supabase
+    /* ------------------------------------------------------------
+       7) verified_documents (source_record_id)
+    ------------------------------------------------------------ */
+    const vd = await supabase
       .from("verified_documents")
-      .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
+      .select("id")
       .eq("source_record_id", record_id)
-      .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
 
-    if (!vdExisting.data) {
-      const vdIns = await supabase.from("verified_documents").insert({
+    if (!vd.data) {
+      const ins = await supabase.from("verified_documents").insert({
         source_record_id: record_id,
         entity_id,
         is_test,
@@ -291,21 +245,10 @@ serve(async (req) => {
         verification_level: "SEALED",
       });
 
-      if (vdIns.error) {
-        return json(
-          { ok: false, error: "Failed to create verified_documents row", details: vdIns.error ?? null },
-          500
-        );
+      if (ins.error) {
+        return json({ ok: false, error: "Failed to create verified_documents", details: ins.error }, 500);
       }
     }
-
-    const vdFinal = await supabase
-      .from("verified_documents")
-      .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
-      .eq("source_record_id", record_id)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
 
     return json({
       ok: true,
@@ -314,8 +257,7 @@ serve(async (req) => {
       is_test,
       minute_book_entry_id,
       already_archived,
-      sealed: { storage_bucket, storage_path, file_hash, raw: sealed },
-      verified_document: vdFinal.data ?? null,
+      sealed: { storage_bucket, storage_path, file_hash },
     });
   } catch (e: any) {
     return json({ ok: false, error: e?.message ?? "Unhandled error" }, 500);
