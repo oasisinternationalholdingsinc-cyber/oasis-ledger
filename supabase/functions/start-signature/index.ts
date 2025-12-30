@@ -1,4 +1,5 @@
 // supabase/functions/start-signature/index.ts
+import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -14,96 +15,87 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
   global: { fetch },
 });
 
-// Base URL for calling other edge functions (like odp-pdf-engine)
-const EDGE_BASE = (SUPABASE_URL ?? "").replace(/\/rest\/v1$/, "");
+const EDGE_BASE = SUPABASE_URL.replace(/\/rest\/v1$/, "");
+
+const cors = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers":
+    "Content-Type, Authorization, apikey, x-client-info",
+};
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers":
-        "Content-Type, Authorization, apikey, x-client-info",
-    },
+    headers: { ...cors, "Content-Type": "application/json" },
   });
 }
 
+type PartyInput = {
+  signer_email: string;
+  signer_name: string;
+  role?: string; // "signer" | "viewer" etc
+  signing_order?: number;
+};
+
+type ReqBody = {
+  record_id: string;      // governance_ledger.id
+  entity_slug: string;    // entities.slug (must match record.entity_id)
+  parties: PartyInput[];  // at least 1
+};
+
 serve(async (req) => {
-  // CORS preflight
-  if (req.method === "OPTIONS") {
-    return new Response("ok", {
-      status: 200,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers":
-          "Content-Type, Authorization, apikey, x-client-info",
-      },
-    });
-  }
+  if (req.method === "OPTIONS") return json({ ok: true });
+  if (req.method !== "POST") return json({ ok: false, error: "Use POST" }, 405);
 
-  if (req.method !== "POST") {
-    return json({ ok: false, error: "Use POST" }, 405);
-  }
-
-  // ---------------------------------------------------------------------------
-  // Parse body
-  // ---------------------------------------------------------------------------
-  let body: any;
+  let body: ReqBody;
   try {
-    body = await req.json();
+    body = (await req.json()) as ReqBody;
   } catch {
     return json({ ok: false, error: "Invalid JSON body" }, 400);
   }
 
-  const { document_id, entity_slug, record_title, parties } = body ?? {};
+  const { record_id, entity_slug, parties } = body ?? ({} as ReqBody);
 
-  if (!document_id || !entity_slug) {
-    return json(
-      {
-        ok: false,
-        error: "document_id and entity_slug are required",
-      },
-      400,
-    );
+  if (!record_id || !entity_slug) {
+    return json({ ok: false, error: "record_id and entity_slug are required" }, 400);
   }
 
   if (!Array.isArray(parties) || parties.length === 0) {
-    return json(
-      {
-        ok: false,
-        error: "At least one signer (parties[]) is required",
-      },
-      400,
-    );
+    return json({ ok: false, error: "At least one signer (parties[]) is required" }, 400);
+  }
+
+  // basic normalization
+  const normalizedParties = parties
+    .map((p, i) => ({
+      signer_email: String(p.signer_email ?? "").trim().toLowerCase(),
+      signer_name: String(p.signer_name ?? "").trim(),
+      role: (p.role ?? "signer").trim(),
+      signing_order: Number.isFinite(p.signing_order) ? Number(p.signing_order) : i + 1,
+    }))
+    .filter((p) => p.signer_email && p.signer_name);
+
+  if (normalizedParties.length === 0) {
+    return json({ ok: false, error: "parties[] missing valid signer_email/signer_name" }, 400);
   }
 
   try {
-    // -----------------------------------------------------------------------
-    // 1) Load the governance record (ledger row)
-    // -----------------------------------------------------------------------
+    // ---------------------------------------------------------------------
+    // 1) Load governance record (source of truth for entity + lane)
+    // ---------------------------------------------------------------------
     const { data: record, error: recErr } = await supabase
       .from("governance_ledger")
-      .select("id, title, entity_id")
-      .eq("id", document_id)
+      .select("id, title, entity_id, is_test, created_by")
+      .eq("id", record_id)
       .single();
 
     if (recErr || !record) {
-      console.error("governance_ledger fetch error", recErr);
-      return json(
-        {
-          ok: false,
-          error: "Record not found in governance_ledger",
-        },
-        404,
-      );
+      return json({ ok: false, error: "Governance record not found" }, 404);
     }
 
-    // -----------------------------------------------------------------------
-    // 2) Load the entity (by slug)
-    // -----------------------------------------------------------------------
+    // ---------------------------------------------------------------------
+    // 2) Load entity by slug + verify it matches the record.entity_id
+    // ---------------------------------------------------------------------
     const { data: entity, error: entErr } = await supabase
       .from("entities")
       .select("id, slug, name")
@@ -111,261 +103,238 @@ serve(async (req) => {
       .single();
 
     if (entErr || !entity) {
-      console.error("entities fetch error", entErr);
+      return json({ ok: false, error: "Entity not found" }, 404);
+    }
+
+    if (entity.id !== record.entity_id) {
       return json(
         {
           ok: false,
-          error: "Entity not found for given slug",
+          error:
+            "Entity mismatch: entity_slug does not match governance_ledger.entity_id",
+          details: { record_entity_id: record.entity_id, provided_entity_id: entity.id },
         },
-        404,
+        409,
       );
     }
 
-    // -----------------------------------------------------------------------
-    // 3) Find the latest governance_document for this record (if any)
-    // -----------------------------------------------------------------------
-    const { data: doc, error: docErr } = await supabase
-      .from("governance_documents")
-      .select("id, storage_path")
+    const laneIsTest = Boolean(record.is_test);
+
+    // ---------------------------------------------------------------------
+    // 3) If a COMPLETED envelope already exists, do NOT touch it (immutability).
+    //    Return it so Forge can show Archive Now.
+    // ---------------------------------------------------------------------
+    const { data: completedEnvelope } = await supabase
+      .from("signature_envelopes")
+      .select("id, status")
       .eq("record_id", record.id)
+      .eq("entity_id", entity.id)
+      .eq("status", "completed")
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
 
-    if (docErr) {
-      console.error("governance_documents fetch error", docErr);
-    }
-
-    // storage_path is usually like "minute_book/OIH/Folder/File.pdf"
-    const storagePath = doc?.storage_path ?? null;
-
-    // supporting_document_path relative to the bucket:
-    // e.g. "OIH/Folder/File.pdf"
-    let supportingDocumentPath: string | null = null;
-    if (storagePath) {
-      supportingDocumentPath = storagePath.replace(/^minute_book\//, "");
-    }
-
-    if (!supportingDocumentPath) {
-      console.warn(
-        "start-signature: no supporting document found for record_id",
-        record.id,
-      );
-    }
-
-    // -----------------------------------------------------------------------
-    // 4) Create the envelope (link to record + entity + minute_book path)
-    // -----------------------------------------------------------------------
-    const envelopeTitle =
-      record.title ?? record_title ?? "Oasis Governance Record";
-
-    const envelopeMetadata = {
-      entity_slug: entity.slug,
-      entity_name: entity.name,
-      record_id: record.id,
-      record_title: envelopeTitle,
-      storage_path: storagePath,
-      created_by: "ci-forge",
-      created_at: new Date().toISOString(),
-    };
-
-    const { data: envelope, error: envErr } = await supabase
-      .from("signature_envelopes")
-      .insert({
-        title: envelopeTitle,
-        entity_id: entity.id,
+    if (completedEnvelope?.id) {
+      return json({
+        ok: true,
+        envelope_id: completedEnvelope.id,
         record_id: record.id,
-        status: "pending",
-        metadata: envelopeMetadata,
-        supporting_document_path: supportingDocumentPath,
-      })
-      .select("id")
-      .single();
-
-    if (envErr || !envelope) {
-      console.error("signature_envelopes insert error", envErr);
-      return json(
-        {
-          ok: false,
-          error: "Failed to create envelope",
-          details: envErr,
-        },
-        500,
-      );
+        entity_slug: entity.slug,
+        reused: true,
+        reason: "envelope_already_completed",
+      });
     }
 
-    const envelopeId: string = envelope.id;
+    // ---------------------------------------------------------------------
+    // 4) Reuse latest pending/in_progress envelope (enterprise rule)
+    //    (safe to update lane flag if needed because it's NOT completed)
+    // ---------------------------------------------------------------------
+    const { data: existingEnvelope } = await supabase
+      .from("signature_envelopes")
+      .select("id, status, is_test")
+      .eq("record_id", record.id)
+      .eq("entity_id", entity.id)
+      .in("status", ["pending", "in_progress"])
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
 
-    // -----------------------------------------------------------------------
-    // 4.5) Trigger odp-pdf-engine to generate Oasis-styled base PDF
-    //      This is non-fatal if it fails.
-    // -----------------------------------------------------------------------
-    if (EDGE_BASE) {
-      try {
-        const engineRes = await fetch(
-          `${EDGE_BASE}/functions/v1/odp-pdf-engine`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              apikey: SERVICE_ROLE_KEY,
-              Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
-            },
-            body: JSON.stringify({
-              record_id: record.id,
-              envelope_id: envelopeId,
-            }),
-          },
-        );
+    let envelopeId: string;
+    let reused = false;
 
-        if (!engineRes.ok) {
-          const text = await engineRes.text().catch(() => "");
-          console.error(
-            "odp-pdf-engine call failed (non-fatal)",
-            engineRes.status,
-            text,
-          );
-        } else {
-          console.log(
-            "✅ odp-pdf-engine successfully triggered for envelope",
-            envelopeId,
-          );
-        }
-      } catch (engineErr) {
-        console.error("Error calling odp-pdf-engine (non-fatal)", engineErr);
+    if (existingEnvelope?.id) {
+      envelopeId = existingEnvelope.id;
+      reused = true;
+
+      // keep lane aligned (ONLY for non-completed envelopes)
+      if (existingEnvelope.is_test !== laneIsTest) {
+        await supabase
+          .from("signature_envelopes")
+          .update({ is_test: laneIsTest })
+          .eq("id", envelopeId);
       }
     } else {
-      console.error("EDGE_BASE missing; cannot call odp-pdf-engine");
-    }
+      // -------------------------------------------------------------------
+      // 5) Create a new envelope (lane-safe at creation)
+      // -------------------------------------------------------------------
+      // OPTIONAL: find latest governance document path for context, if you use it
+      const { data: doc } = await supabase
+        .from("governance_documents")
+        .select("storage_path")
+        .eq("record_id", record.id)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
-    // -----------------------------------------------------------------------
-    // 5) Insert signature_parties rows
-    // -----------------------------------------------------------------------
-    const partyRows = (parties as any[]).map((p, idx) => ({
-      envelope_id: envelopeId,
-      email: p.signer_email,
-      display_name: p.signer_name,
-      role: p.role ?? "signer",
-      signing_order: p.signing_order ?? idx + 1,
-      status: "pending",
-    }));
+      const supportingPath = doc?.storage_path
+        ? String(doc.storage_path).replace(/^minute_book\//, "")
+        : null;
 
-    const { data: insertedParties, error: partiesErr } = await supabase
-      .from("signature_parties")
-      .insert(partyRows)
-      .select("id, email, display_name, role, signing_order");
-
-    if (partiesErr || !insertedParties || insertedParties.length === 0) {
-      console.error("signature_parties insert error", partiesErr);
-      return json(
-        {
-          ok: false,
-          error: "Failed to create signature parties",
-        },
-        500,
-      );
-    }
-
-    const primaryParty = insertedParties[0];
-
-    // -----------------------------------------------------------------------
-    // 6) Queue a background job in signature_jobs (for send-signature-invite)
-    // -----------------------------------------------------------------------
-    try {
-      const primaryEmail = String(primaryParty.email || "").toLowerCase();
-      const primaryName =
-        primaryParty.display_name || primaryEmail || "Signer";
-
-      const { error: jobErr } = await supabase
-        .from("signature_jobs")
+      const { data: envelope, error: envErr } = await supabase
+        .from("signature_envelopes")
         .insert({
-          envelope_id: envelopeId,
+          title: record.title ?? "Oasis Governance Record",
+          entity_id: entity.id,
           record_id: record.id,
-          entity_slug: entity.slug,
-          signer_email: primaryEmail,
-          signer_name: primaryName,
-          status: "pending", // default anyway, but explicit is fine
-        });
+          status: "pending",
+          is_test: laneIsTest,
+          supporting_document_path: supportingPath,
+          metadata: {
+            entity_slug: entity.slug,
+            entity_name: entity.name,
+            record_id: record.id,
+            is_test: laneIsTest,
+            created_by: "ci-forge",
+            created_at: new Date().toISOString(),
+          },
+        })
+        .select("id")
+        .single();
 
-      if (jobErr) {
-        console.error(
-          "❌ signature_jobs insert error (non-fatal for client):",
-          jobErr,
-        );
-      } else {
-        console.log(
-          "✅ Queued signature_jobs item for envelope:",
-          envelopeId,
-        );
+      if (envErr || !envelope) {
+        return json({ ok: false, error: "Failed to create envelope" }, 500);
       }
-    } catch (jobErr) {
-      console.error(
-        "❌ Unexpected error inserting into signature_jobs (non-fatal):",
-        jobErr,
-      );
+
+      envelopeId = envelope.id;
+
+      // -------------------------------------------------------------------
+      // 6) Generate the signing PDF (NON-ARCHIVE) — wiring unchanged
+      // -------------------------------------------------------------------
+      // (don’t block on it; but do attempt)
+      await fetch(`${EDGE_BASE}/functions/v1/odp-pdf-engine`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+        },
+        body: JSON.stringify({
+          record_id: record.id,
+          envelope_id: envelopeId,
+          is_test: laneIsTest,
+        }),
+      }).catch(() => {});
     }
 
-    // -----------------------------------------------------------------------
-    // 7) Queue an email job in signature_email_queue (legacy / extra)
-    // -----------------------------------------------------------------------
-    const { error: queueErr } = await supabase
-      .from("signature_email_queue")
-      .insert({
+    // ---------------------------------------------------------------------
+    // 7) Insert signature parties (avoid duplicates if UI retries)
+    // ---------------------------------------------------------------------
+    // We’ll do: existing emails for this envelope → insert only missing.
+    const { data: existingParties } = await supabase
+      .from("signature_parties")
+      .select("email")
+      .eq("envelope_id", envelopeId);
+
+    const existingEmails = new Set(
+      (existingParties ?? [])
+        .map((r: any) => String(r.email ?? "").trim().toLowerCase())
+        .filter(Boolean),
+    );
+
+    const toInsert = normalizedParties
+      .filter((p) => !existingEmails.has(p.signer_email))
+      .map((p) => ({
+        envelope_id: envelopeId,
+        email: p.signer_email,
+        display_name: p.signer_name,
+        role: p.role ?? "signer",
+        signing_order: p.signing_order,
+        status: "pending",
+      }));
+
+    let insertedParties: Array<{ id: string; email: string; display_name: string }> = [];
+    if (toInsert.length > 0) {
+      const { data } = await supabase
+        .from("signature_parties")
+        .insert(toInsert)
+        .select("id, email, display_name");
+      insertedParties = (data ?? []) as any;
+    }
+
+    // ---------------------------------------------------------------------
+    // 8) Queue email + job for the “primary” signer (wiring unchanged)
+    //    Rule: if we inserted someone new, use the first inserted.
+    //          otherwise, fall back to the first signer input (lookup existing party id)
+    // ---------------------------------------------------------------------
+    let primaryParty:
+      | { id: string; email: string; display_name: string }
+      | null = insertedParties[0] ?? null;
+
+    if (!primaryParty) {
+      const primaryEmail = normalizedParties[0].signer_email;
+      const { data: existingPrimary } = await supabase
+        .from("signature_parties")
+        .select("id, email, display_name")
+        .eq("envelope_id", envelopeId)
+        .eq("email", primaryEmail)
+        .maybeSingle();
+      if (existingPrimary?.id) primaryParty = existingPrimary as any;
+    }
+
+    if (primaryParty) {
+      await supabase.from("signature_jobs").insert({
+        envelope_id: envelopeId,
+        record_id: record.id,
+        entity_slug: entity.slug,
+        signer_email: primaryParty.email,
+        signer_name: primaryParty.display_name,
+        status: "pending",
+      });
+
+      await supabase.from("signature_email_queue").insert({
         envelope_id: envelopeId,
         party_id: primaryParty.id,
         to_email: primaryParty.email,
         to_name: primaryParty.display_name,
-        document_title: envelopeTitle,
+        document_title: record.title,
         status: "pending",
         attempts: 0,
       });
-
-    if (queueErr) {
-      console.error("signature_email_queue insert error", queueErr);
-      // non-fatal; worker + direct link can still be used
     }
 
-    // -----------------------------------------------------------------------
-    // 8) Log envelope_created event (optional but nice for audit)
-    // -----------------------------------------------------------------------
-    const { error: eventErr } = await supabase
-      .from("signature_events")
-      .insert({
-        envelope_id: envelopeId,
-        event_type: "created",
-        metadata: {
-          entity_id: entity.id,
-          entity_slug: entity.slug,
-          record_id: record.id,
-          storage_path: storagePath,
-          supporting_document_path: supportingDocumentPath,
-        },
-      });
+    // ---------------------------------------------------------------------
+    // 9) Audit event (wiring unchanged)
+    // ---------------------------------------------------------------------
+    await supabase.from("signature_events").insert({
+      envelope_id: envelopeId,
+      event_type: reused ? "reused" : "created",
+      metadata: {
+        record_id: record.id,
+        entity_slug: entity.slug,
+        is_test: laneIsTest,
+      },
+    });
 
-    if (eventErr) {
-      console.error("signature_events insert error", eventErr);
-    }
-
-    // -----------------------------------------------------------------------
-    // SUCCESS
-    // -----------------------------------------------------------------------
     return json({
       ok: true,
       envelope_id: envelopeId,
       record_id: record.id,
       entity_slug: entity.slug,
-      storage_path: storagePath,
-      supporting_document_path: supportingDocumentPath,
+      is_test: laneIsTest,
+      reused,
     });
   } catch (e) {
-    console.error("Unexpected error in start-signature", e);
-    return json(
-      {
-        ok: false,
-        error: "Unexpected server error",
-        details: String(e),
-      },
-      500,
-    );
+    console.error("start-signature error", e);
+    return json({ ok: false, error: "Unexpected server error" }, 500);
   }
 });
