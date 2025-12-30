@@ -563,7 +563,7 @@ export default function ForgeClient() {
         }
       }
 
-      // 3) verified registry (may be missing; that’s what we want to surface)
+      // 3) verified registry
       const vd = await supabase
         .from("verified_documents")
         .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
@@ -650,8 +650,6 @@ export default function ForgeClient() {
           record_id: selected.ledger_id,
           entity_slug: selected.entity_slug,
           parties,
-
-          // optional extras
           entity_id: selected.entity_id,
           is_test: isTest,
           cc_emails: ccEmails
@@ -967,7 +965,10 @@ export default function ForgeClient() {
                         </div>
 
                         <div className="flex flex-col items-end gap-2">
-                          <div className={["h-2.5 w-2.5 rounded-full", riskLightClasses(risk)].join(" ")} title={riskLabel(risk)} />
+                          <div
+                            className={["h-2.5 w-2.5 rounded-full", riskLightClasses(risk)].join(" ")}
+                            title={riskLabel(risk)}
+                          />
                           <div className="text-[10px] text-slate-500">
                             {q.parties_signed ?? 0}/{q.parties_total ?? 0}
                           </div>

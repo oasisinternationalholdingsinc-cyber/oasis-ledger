@@ -3,17 +3,13 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 type ReqBody = {
-  record_id?: string;     // governance_ledger.id (optional; can be derived from envelope)
-  envelope_id: string;    // signature_envelopes.id
-  is_test?: boolean;      // lane flag (optional; defaults from envelope/ledger)
-  domain_key?: string;    // optional
-  section_name?: string;  // optional
+  envelope_id: string; // signature_envelopes.id
+  is_test?: boolean;
 };
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Allow-Headers": "authorization, apikey, content-type",
 };
 
 const json = (x: unknown, status = 200) =>
@@ -26,72 +22,66 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+  global: { fetch },
+});
+
+function asBool(v: unknown, fallback = false) {
+  if (typeof v === "boolean") return v;
+  return fallback;
+}
 
 serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+
   try {
-    if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-    if (req.method !== "POST") return json({ ok: false, error: "Use POST" }, 405);
+    const body = (await req.json()) as ReqBody;
+    const envelope_id = (body?.envelope_id ?? "").trim();
+    const is_test = asBool(body?.is_test, false);
 
-    const body = (await req.json().catch(() => null)) as ReqBody | null;
-    if (!body?.envelope_id) {
-      return json({ ok: false, error: "envelope_id is required" }, 400);
-    }
+    if (!envelope_id) return json({ ok: false, error: "envelope_id is required" }, 400);
 
-    // 1) Load envelope + sanity
-    const { data: env, error: envErr } = await supabase
+    // 1) Load envelope
+    const env = await supabase
       .from("signature_envelopes")
-      .select("id, record_id, status, is_test")
-      .eq("id", body.envelope_id)
+      .select("id, record_id, status")
+      .eq("id", envelope_id)
       .maybeSingle();
 
-    if (envErr) return json({ ok: false, error: envErr.message }, 500);
-    if (!env) return json({ ok: false, error: "signature_envelope not found" }, 404);
-
-    const record_id = body.record_id ?? env.record_id;
-    if (!record_id) return json({ ok: false, error: "record_id could not be determined" }, 400);
-
-    if (env.status !== "completed") {
-      return json(
-        { ok: false, error: "envelope is not completed; cannot archive yet", status: env.status },
-        400,
-      );
+    if (env.error || !env.data) {
+      return json({ ok: false, error: "signature_envelopes row not found", details: env.error }, 404);
     }
 
-    const is_test = Boolean(body.is_test ?? env.is_test ?? false);
+    const record_id = (env.data as any).record_id as string;
+    const status = (env.data as any).status as string | null;
 
-    // 2) Call archive-save-document (service_role)
-    const resp = await fetch(`${SUPABASE_URL}/functions/v1/archive-save-document`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
-        apikey: SERVICE_ROLE_KEY,
-      },
-      body: JSON.stringify({
-        record_id,
-        envelope_id: env.id,
-        is_test,
-        domain_key: body.domain_key,         // optional; archive-save-document validates/falls back
-        section_name: body.section_name,     // optional
-      }),
+    if (status !== "completed") {
+      return json({ ok: false, error: "Envelope is not completed yet.", envelope_status: status }, 400);
+    }
+
+    // 2) Delegate to archive-save-document (idempotent / repair-capable)
+    const { data, error } = await supabase.functions.invoke("archive-save-document", {
+      body: { record_id, envelope_id, is_test },
     });
 
-    const out = await resp.json().catch(() => ({}));
-    if (!resp.ok || !out?.ok) {
-      return json(
-        {
-          ok: false,
-          error: "archive-save-document failed",
-          status: resp.status,
-          details: out,
-        },
-        500,
-      );
+    if (error) {
+      return json({ ok: false, error: "archive-save-document failed", details: error }, 500);
     }
 
-    return json({ ok: true, ...out });
-  } catch (e) {
-    return json({ ok: false, error: String((e as any)?.message ?? e) }, 500);
+    if (!data?.ok) {
+      return json({ ok: false, error: data?.error ?? "archive-save-document failed", details: data }, 500);
+    }
+
+    return json({
+      ok: true,
+      record_id,
+      envelope_id,
+      minute_book_entry_id: data.minute_book_entry_id ?? null,
+      already_archived: false,
+      sealed: data.sealed ?? null,
+      verified_document: data.verified_document ?? null,
+    });
+  } catch (e: any) {
+    return json({ ok: false, error: e?.message ?? "Unhandled error" }, 500);
   }
 });
