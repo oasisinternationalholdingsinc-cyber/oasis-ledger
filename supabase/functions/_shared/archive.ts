@@ -15,45 +15,46 @@ export function json(data: unknown, status = 200) {
   });
 }
 
-function mustEnv(name: string): string {
-  const v = Deno.env.get(name);
-  if (!v) throw new Error(`Missing ${name}`);
-  return v;
-}
-
-export function getServiceClient(): SupabaseClient {
-  const SUPABASE_URL = mustEnv("SUPABASE_URL");
+function getEnv() {
+  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
   const SERVICE_ROLE_KEY =
     Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-  if (!SERVICE_ROLE_KEY) {
-    throw new Error("Missing SERVICE_ROLE_KEY / SUPABASE_SERVICE_ROLE_KEY");
-  }
+  if (!SUPABASE_URL) throw new Error("Missing SUPABASE_URL");
+  if (!SERVICE_ROLE_KEY) throw new Error("Missing SERVICE_ROLE_KEY / SUPABASE_SERVICE_ROLE_KEY");
 
-  return createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
+  return { SUPABASE_URL, SERVICE_ROLE_KEY };
 }
 
-/**
- * Service-role → service-role invocation, used only for internal delegation
- * (e.g., archive-signed-resolution → archive-save-document).
- */
+export function getServiceClient(): SupabaseClient {
+  const { SUPABASE_URL, SERVICE_ROLE_KEY } = getEnv();
+
+  // ✅ Enterprise: FORCE headers so DB sees service_role in request.jwt.claim.role
+  return createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+    global: {
+      fetch,
+      headers: {
+        apikey: SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+      },
+    },
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+}
+
 export async function invokeEdgeFunction(
   fnName: string,
   body: unknown,
 ): Promise<{ ok: boolean; status: number; text: string; json?: any }> {
-  const SUPABASE_URL = mustEnv("SUPABASE_URL");
-  const SERVICE_ROLE_KEY =
-    Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-
-  if (!SERVICE_ROLE_KEY) {
-    throw new Error("Missing SERVICE_ROLE_KEY / SUPABASE_SERVICE_ROLE_KEY");
-  }
+  const { SUPABASE_URL, SERVICE_ROLE_KEY } = getEnv();
 
   const url = `${SUPABASE_URL}/functions/v1/${fnName}`;
   const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      // ✅ Enterprise: FORCE both headers for function gateway consistency
+      apikey: SERVICE_ROLE_KEY,
       Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
     },
     body: JSON.stringify(body),
@@ -64,7 +65,7 @@ export async function invokeEdgeFunction(
   try {
     parsed = text ? JSON.parse(text) : undefined;
   } catch {
-    // keep as text
+    // keep text
   }
 
   return { ok: res.ok, status: res.status, text, json: parsed };
