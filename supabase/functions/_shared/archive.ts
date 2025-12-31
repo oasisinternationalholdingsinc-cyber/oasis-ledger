@@ -1,45 +1,75 @@
 // supabase/functions/_shared/archive.ts
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
-export type ArchiveInputs = {
-  ledgerId: string;               // governance_ledger.id
-  envelopeId?: string | null;     // signature_envelopes.id (optional)
-  isTest?: boolean;               // lane flag (optional)
-  actorUserId?: string | null;    // optional fallback for uploaded_by/owner_id
-};
+export type ArchiveLane = "rot" | "sandbox";
 
 export type SealResult = {
   ok: boolean;
-  status?: string;
-
-  // canonical archive artifact (must exist for CI-Archive Reader)
-  storage_bucket?: string;
-  storage_path?: string;
-  file_hash?: string;
-
-  // optional ids produced by backend
-  verified_document_id?: string;
-  minute_book_entry_id?: string;
-};
-
-export type ArchiveOutcome = {
-  ok: boolean;
   ledger_id: string;
-  envelope_id?: string | null;
+  entity_id: string;
+  entity_key: string; // entities.slug casted to entity_key_enum
+  is_test: boolean;
 
-  minute_book_entry_id?: string;
-  supporting_document_id?: string;
+  // Verified artifact (the one portals should verify)
+  storage_bucket: string;
+  storage_path: string;
+  file_hash: string;
+
   verified_document_id?: string;
-
-  storage_bucket?: string;
-  storage_path?: string;
-  file_hash?: string;
-
-  repaired?: boolean;
-  details?: unknown;
+  status?: string;
 };
 
-export function getServiceClient() {
+export const cors = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+  "Access-Control-Allow-Headers":
+    "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
+};
+
+export function json(x: unknown, status = 200) {
+  return new Response(JSON.stringify(x, null, 2), {
+    status,
+    headers: { ...cors, "Content-Type": "application/json" },
+  });
+}
+
+// Extract caller uid (preferred) from Authorization: Bearer <user_jwt>
+export function getCallerUid(req: Request): string | null {
+  const auth = req.headers.get("authorization") || req.headers.get("Authorization");
+  if (!auth?.toLowerCase().startsWith("bearer ")) return null;
+
+  const token = auth.slice(7).trim();
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+
+  try {
+    const payloadJson = atob(parts[1].replace(/-/g, "+").replace(/_/g, "/"));
+    const payload = JSON.parse(payloadJson);
+    return typeof payload.sub === "string" ? payload.sub : null;
+  } catch {
+    return null;
+  }
+}
+
+export function getLane(is_test?: boolean): ArchiveLane {
+  return is_test ? "sandbox" : "rot";
+}
+
+export function minuteBookPrimaryPath(entityKey: string, section: string, ledgerId: string, suffix = "") {
+  // keep your existing convention: holdings/Resolutions/<ledgerId>-signed.pdf, etc.
+  // NOTE: section values are doc_section_enum labels (case-sensitive in UI list, but stored as enum)
+  // Your existing storage uses "Resolutions" (capital R). Keep it consistent.
+  const safeSection = section; // expected e.g. "Resolutions"
+  return `${entityKey}/${safeSection}/${ledgerId}${suffix}.pdf`;
+}
+
+export function fileNameFromPath(p: string) {
+  const ix = p.lastIndexOf("/");
+  return ix >= 0 ? p.slice(ix + 1) : p;
+}
+
+export function makeServiceClient() {
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
   const SERVICE_ROLE_KEY =
     Deno.env.get("SERVICE_ROLE_KEY") ??
@@ -51,334 +81,12 @@ export function getServiceClient() {
   });
 }
 
-function lastPathToken(p: string) {
-  const parts = p.split("/").filter(Boolean);
-  return parts.length ? parts[parts.length - 1] : p;
-}
-
-function normalizeLanePrefix(isTest?: boolean) {
-  // If you ever decide to store in a lane prefix, do it here.
-  // For now your minute_book paths are already canonical (e.g. holdings/Resolutions/...).
-  return isTest ? "sandbox" : "rot";
-}
-
-export async function archiveGovernanceRecord(
-  supabase: ReturnType<typeof getServiceClient>,
-  input: ArchiveInputs,
-): Promise<ArchiveOutcome> {
-  const ledgerId = input.ledgerId;
-  const envelopeId = input.envelopeId ?? null;
-
-  // 1) Load governance_ledger (need entity_id, created_by, title, is_test)
-  const { data: gl, error: glErr } = await supabase
-    .from("governance_ledger")
-    .select("id, entity_id, title, created_by, is_test, approved_by_council, archived, locked, status")
-    .eq("id", ledgerId)
-    .maybeSingle();
-
-  if (glErr) {
-    return { ok: false, ledger_id: ledgerId, envelope_id: envelopeId, details: glErr };
-  }
-  if (!gl) {
-    return { ok: false, ledger_id: ledgerId, envelope_id: envelopeId, details: "governance_ledger not found" };
-  }
-
-  // 2) Resolve entity_key from entities.slug
-  const { data: ent, error: entErr } = await supabase
-    .from("entities")
-    .select("slug")
-    .eq("id", gl.entity_id)
-    .maybeSingle();
-
-  if (entErr) {
-    return { ok: false, ledger_id: ledgerId, envelope_id: envelopeId, details: entErr };
-  }
-  if (!ent?.slug) {
-    return { ok: false, ledger_id: ledgerId, envelope_id: envelopeId, details: "entities.slug missing" };
-  }
-
-  const entityKey = ent.slug; // must cast to entity_key_enum in SQL inserts
-
-  // 3) Call sealer RPC (must return storage_bucket/storage_path/file_hash)
-  // NOTE: Your DB function MUST be enterprise-grade and idempotent.
-  const { data: seal, error: sealErr } = await supabase.rpc(
-    "seal_governance_record_for_archive",
-    { p_ledger_id: ledgerId },
-  );
-
-  if (sealErr) {
-    return {
-      ok: false,
-      ledger_id: ledgerId,
-      envelope_id: envelopeId,
-      details: { step: "seal_governance_record_for_archive", error: sealErr },
-    };
-  }
-
-  const sealRes = (seal ?? {}) as SealResult;
-
-  // If your SQL returns jsonb with those keys, we use them directly.
-  const storageBucket = sealRes.storage_bucket;
-  const storagePath = sealRes.storage_path;
-  const fileHash = sealRes.file_hash;
-  const verifiedDocumentId = sealRes.verified_document_id;
-
-  if (!storageBucket || !storagePath) {
-    return {
-      ok: false,
-      ledger_id: ledgerId,
-      envelope_id: envelopeId,
-      details: { step: "seal_result_missing_storage_pointers", seal: sealRes },
-    };
-  }
-
-  // 4) Ensure/repair minute_book_entries row (idempotent)
-  // domain_key: keep it stable/canonical (you used 'governance' in your screenshot)
-  const domainKey = "governance";
-
-  // Try find existing entry by source_record_id
-  const { data: mbeExisting, error: mbeFindErr } = await supabase
-    .from("minute_book_entries")
-    .select("id, entity_id, entity_key, domain_key, title, is_test, source_record_id")
-    .eq("source_record_id", ledgerId)
-    .maybeSingle();
-
-  if (mbeFindErr) {
-    return { ok: false, ledger_id: ledgerId, envelope_id: envelopeId, details: mbeFindErr };
-  }
-
-  let entryId = mbeExisting?.id as string | undefined;
-
-  if (!entryId) {
-    const { data: mbeIns, error: mbeInsErr } = await supabase
-      .from("minute_book_entries")
-      .insert({
-        entity_id: gl.entity_id,
-        entity_key: entityKey,     // enum cast happens server-side; slug must match enum label
-        domain_key: domainKey,
-        title: gl.title,
-        is_test: !!gl.is_test,
-        source_record_id: ledgerId,
-      })
-      .select("id")
-      .single();
-
-    if (mbeInsErr) {
-      return {
-        ok: false,
-        ledger_id: ledgerId,
-        envelope_id: envelopeId,
-        details: { step: "insert_minute_book_entries", error: mbeInsErr },
-      };
-    }
-    entryId = mbeIns.id;
-  }
-
-  // 5) Ensure/repair PRIMARY supporting_documents row (THIS fixes CI-Archive Reader)
-  // supporting_documents requires uploaded_by + owner_id NOT NULL, metadata NOT NULL
-  // Prefer governance_ledger.created_by; if missing, fall back to actorUserId (from client) or envelope-created-by.
-  let fallbackUserId: string | null = input.actorUserId ?? null;
-
-  if (!fallbackUserId && envelopeId) {
-    const { data: env, error: envErr } = await supabase
-      .from("signature_envelopes")
-      .select("id, created_by")
-      .eq("id", envelopeId)
-      .maybeSingle();
-    if (!envErr && env?.created_by) fallbackUserId = env.created_by as string;
-  }
-
-  const uploader = (gl.created_by as string | null) ?? fallbackUserId;
-  if (!uploader) {
-    return {
-      ok: false,
-      ledger_id: ledgerId,
-      envelope_id: envelopeId,
-      details: {
-        step: "missing_uploaded_by",
-        message:
-          "governance_ledger.created_by is NULL and no actorUserId/envelope.created_by fallback was provided. Need a non-null uploaded_by/owner_id for supporting_documents.",
-      },
-    };
-  }
-
-  const fileName = lastPathToken(storagePath);
-
-  // section enum: you confirmed doc_section_enum exists; pick canonical label you use in UI
-  const section = "Resolutions"; // matches your stored paths holdings/Resolutions/...
-  const docType = "primary";
-  const version = 1;
-
-  // Does a primary doc already exist for this entry?
-  const { data: sdExisting, error: sdFindErr } = await supabase
-    .from("supporting_documents")
-    .select("id, file_path, file_hash")
-    .eq("entry_id", entryId)
-    .eq("doc_type", docType)
-    .eq("version", version)
-    .maybeSingle();
-
-  if (sdFindErr) {
-    return { ok: false, ledger_id: ledgerId, envelope_id: envelopeId, details: sdFindErr };
-  }
-
-  let supportingDocumentId: string | undefined;
-
-  if (!sdExisting?.id) {
-    const { data: sdIns, error: sdInsErr } = await supabase
-      .from("supporting_documents")
-      .insert({
-        entry_id: entryId,
-        entity_key: entityKey,           // enum label must match entity_key_enum
-        section,                         // doc_section_enum
-        file_path: storagePath,
-        file_name: fileName,
-        doc_type: docType,
-        version,
-        uploaded_by: uploader,
-        owner_id: uploader,
-        file_hash: fileHash ?? null,
-        signature_envelope_id: envelopeId,
-        metadata: {
-          source: "archive-save-document",
-          bucket: storageBucket,
-          path: storagePath,
-          file_hash: fileHash ?? null,
-          ledger_id: ledgerId,
-          envelope_id: envelopeId,
-          lane: normalizeLanePrefix(!!gl.is_test),
-        },
-        verified: true,
-        registry_visible: true,
-        uploaded_at: new Date().toISOString(),
-      })
-      .select("id")
-      .single();
-
-    if (sdInsErr) {
-      return {
-        ok: false,
-        ledger_id: ledgerId,
-        envelope_id: envelopeId,
-        details: { step: "insert_supporting_documents", error: sdInsErr },
-      };
-    }
-
-    supportingDocumentId = sdIns.id;
-  } else {
-    supportingDocumentId = sdExisting.id;
-
-    // repair missing pointers/hash if needed
-    const needsRepair =
-      !sdExisting.file_path ||
-      sdExisting.file_path !== storagePath ||
-      (!sdExisting.file_hash && !!fileHash);
-
-    if (needsRepair) {
-      const { error: sdUpErr } = await supabase
-        .from("supporting_documents")
-        .update({
-          file_path: storagePath,
-          file_name: fileName,
-          file_hash: fileHash ?? sdExisting.file_hash ?? null,
-          signature_envelope_id: envelopeId,
-          verified: true,
-          registry_visible: true,
-          metadata: {
-            source: "archive-save-document-repair",
-            bucket: storageBucket,
-            path: storagePath,
-            file_hash: fileHash ?? null,
-            ledger_id: ledgerId,
-            envelope_id: envelopeId,
-            lane: normalizeLanePrefix(!!gl.is_test),
-          },
-        })
-        .eq("id", supportingDocumentId);
-
-      if (sdUpErr) {
-        return {
-          ok: false,
-          ledger_id: ledgerId,
-          envelope_id: envelopeId,
-          details: { step: "repair_supporting_documents", error: sdUpErr },
-        };
-      }
-    }
-  }
-
-  // 6) Ensure verified_documents row exists (idempotent)
-  if (!verifiedDocumentId) {
-    // If sealer didn’t create it, we upsert it here (based on your verified_documents columns).
-    const { data: vdExisting, error: vdFindErr } = await supabase
-      .from("verified_documents")
-      .select("id")
-      .eq("source_record_id", ledgerId)
-      .maybeSingle();
-
-    if (vdFindErr) {
-      return { ok: false, ledger_id: ledgerId, envelope_id: envelopeId, details: vdFindErr };
-    }
-
-    if (!vdExisting?.id) {
-      const { data: vdIns, error: vdInsErr } = await supabase
-        .from("verified_documents")
-        .insert({
-          source_record_id: ledgerId,
-          storage_bucket: storageBucket,
-          storage_path: storagePath,
-          file_hash: fileHash ?? null,
-        })
-        .select("id")
-        .single();
-
-      if (vdInsErr) {
-        return {
-          ok: false,
-          ledger_id: ledgerId,
-          envelope_id: envelopeId,
-          details: { step: "insert_verified_documents", error: vdInsErr },
-        };
-      }
-
-      return {
-        ok: true,
-        ledger_id: ledgerId,
-        envelope_id: envelopeId,
-        minute_book_entry_id: entryId,
-        supporting_document_id: supportingDocumentId,
-        verified_document_id: vdIns.id,
-        storage_bucket: storageBucket,
-        storage_path: storagePath,
-        file_hash: fileHash ?? undefined,
-        repaired: !!sdExisting?.id,
-      };
-    }
-
-    return {
-      ok: true,
-      ledger_id: ledgerId,
-      envelope_id: envelopeId,
-      minute_book_entry_id: entryId,
-      supporting_document_id: supportingDocumentId,
-      verified_document_id: vdExisting.id,
-      storage_bucket: storageBucket,
-      storage_path: storagePath,
-      file_hash: fileHash ?? undefined,
-      repaired: !!sdExisting?.id,
-    };
-  }
-
-  return {
-    ok: true,
-    ledger_id: ledgerId,
-    envelope_id: envelopeId,
-    minute_book_entry_id: entryId,
-    supporting_document_id: supportingDocumentId,
-    verified_document_id: verifiedDocumentId,
-    storage_bucket: storageBucket,
-    storage_path: storagePath,
-    file_hash: fileHash ?? undefined,
-    repaired: !!sdExisting?.id,
-  };
+// Map governance record_type -> doc_section_enum (match your enum labels list)
+export function mapRecordTypeToSection(recordType: string | null): string {
+  const rt = (recordType ?? "").toLowerCase();
+  if (rt.includes("resolution")) return "Resolutions";
+  if (rt.includes("bylaw")) return "Bylaws";
+  if (rt.includes("register")) return "Registers";
+  if (rt.includes("share")) return "ShareCertificates";
+  return "Resolutions";
 }

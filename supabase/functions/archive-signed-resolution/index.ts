@@ -1,86 +1,62 @@
 // supabase/functions/archive-signed-resolution/index.ts
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { archiveGovernanceRecord, getServiceClient } from "../_shared/archive.ts";
+
+import { cors, json, makeServiceClient } from "../_shared/archive.ts";
 
 type ReqBody = {
-  envelope_id: string;     // signature_envelopes.id
-  is_test?: boolean;
-  actor_user_id?: string;  // optional fallback for uploaded_by/owner_id
+  envelope_id: string; // signature_envelopes.id
 };
-
-const cors = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
-  "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
-};
-
-const json = (x: unknown, status = 200) =>
-  new Response(JSON.stringify(x, null, 2), {
-    status,
-    headers: { ...cors, "Content-Type": "application/json" },
-  });
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-  if (req.method !== "POST") return json({ ok: false, error: "POST required" }, 405);
 
   try {
     const body = (await req.json()) as ReqBody;
+    if (!body?.envelope_id) return json({ ok: false, error: "missing envelope_id" }, 400);
 
-    if (!body?.envelope_id) {
-      return json({ ok: false, error: "envelope_id is required" }, 400);
-    }
+    const supabase = makeServiceClient();
 
-    const supabase = getServiceClient();
-
-    // Load envelope; MUST have record_id (ledger id) and be completed.
+    // Load envelope; schema reality: envelope points to ledger via record_id (NOT source_record_id)
     const { data: env, error: envErr } = await supabase
       .from("signature_envelopes")
       .select("id, record_id, status")
       .eq("id", body.envelope_id)
-      .maybeSingle();
+      .single();
 
-    if (envErr) {
-      return json({ ok: false, step: "load_envelope", error: envErr }, 500);
-    }
-    if (!env?.record_id) {
-      return json(
-        { ok: false, step: "load_envelope", error: "signature_envelopes.record_id missing" },
-        400,
-      );
-    }
+    if (envErr || !env) return json({ ok: false, step: "load_signature_envelope", error: envErr?.message ?? "not found" }, 404);
+
     if (String(env.status).toLowerCase() !== "completed") {
-      return json(
-        { ok: false, step: "validate_envelope", error: "envelope not completed", status: env.status },
-        400,
-      );
+      return json({ ok: false, step: "validate_envelope_status", error: "Envelope not completed", status: env.status }, 400);
     }
 
-    const out = await archiveGovernanceRecord(supabase, {
-      ledgerId: env.record_id as string,
-      envelopeId: body.envelope_id,
-      isTest: body.is_test,
-      actorUserId: body.actor_user_id ?? null,
+    // Delegate to archive-save-document (single canonical path)
+    const { data, error } = await supabase.functions.invoke("archive-save-document", {
+      body: {
+        record_id: env.record_id,
+        envelope_id: env.id,
+      },
     });
 
-    if (!out.ok) {
-      return json(
-        {
-          ok: false,
-          step: "archive-signed-resolution",
-          ledger_id: env.record_id,
-          envelope_id: body.envelope_id,
-          error: "archive_failed",
-          details: out.details ?? out,
-        },
-        500,
-      );
+    if (error) {
+      return json({
+        ok: false,
+        step: "archive-signed-resolution",
+        ledger_id: env.record_id,
+        envelope_id: env.id,
+        error: "invoke_archive_save_document: non-2xx",
+        archive_save_document: error,
+      }, 500);
     }
 
-    return json(out, 200);
+    return json({
+      ok: true,
+      step: "archive-signed-resolution",
+      ledger_id: env.record_id,
+      envelope_id: env.id,
+      result: data,
+    });
   } catch (e) {
-    return json({ ok: false, step: "archive-signed-resolution", error: String(e) }, 500);
+    return json({ ok: false, error: String(e) }, 500);
   }
 });
