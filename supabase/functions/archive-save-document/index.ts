@@ -4,7 +4,7 @@ import { corsHeaders, json, getServiceClient } from "../_shared/archive.ts";
 
 type ReqBody = {
   record_id: string; // governance_ledger.id
-  is_test?: boolean; // optional; SQL is source-of-truth
+  is_test?: boolean; // optional; SQL should derive from ledger, but we pass for traceability
 };
 
 serve(async (req) => {
@@ -12,12 +12,13 @@ serve(async (req) => {
   if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);
 
   try {
-    const { record_id }: ReqBody = await req.json();
+    const { record_id, is_test }: ReqBody = await req.json();
     if (!record_id) return json({ ok: false, error: "Missing record_id" }, 400);
 
     const supabase = getServiceClient();
 
-    // ✅ Single source of truth: SQL does deterministic render + hash + verified_documents + ledger lock
+    // Canonical seal surface: SQL does deterministic render + verified registry + ledger lock
+    // IMPORTANT: keep args stable; do NOT introduce guessed params.
     const { data, error } = await supabase.rpc("seal_governance_record_for_archive", {
       p_ledger_id: record_id,
     });
@@ -34,15 +35,12 @@ serve(async (req) => {
       );
     }
 
-    // NOTE:
-    // Minute Book registration + supporting_documents primary pointers
-    // should remain inside your existing enterprise SQL/edge pipeline.
-    // (Per your “no rewiring” rule.)
     return json(
       {
         ok: true,
         step: "archive-save-document",
         record_id,
+        is_test: typeof is_test === "boolean" ? is_test : null,
         sealed: data,
       },
       200,

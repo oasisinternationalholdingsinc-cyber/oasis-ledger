@@ -4,7 +4,7 @@ import { corsHeaders, json, getServiceClient, invokeEdgeFunction } from "../_sha
 
 type ReqBody = {
   envelope_id: string; // signature_envelopes.id
-  is_test?: boolean;   // optional override; otherwise uses envelope.is_test
+  is_test?: boolean;   // if omitted, we use envelope.is_test
 };
 
 serve(async (req) => {
@@ -17,7 +17,7 @@ serve(async (req) => {
 
     const supabase = getServiceClient();
 
-    // ✅ Schema truth: signature_envelopes.record_id = governance_ledger.id
+    // Schema truth: signature_envelopes.record_id is the governance_ledger.id
     const { data: env, error: envErr } = await supabase
       .from("signature_envelopes")
       .select("id, record_id, status, completed_at, is_test")
@@ -53,7 +53,7 @@ serve(async (req) => {
     const ledger_id = env.record_id as string;
     const lane = typeof is_test === "boolean" ? is_test : !!env.is_test;
 
-    // Delegate to canonical sealer surface
+    // Delegate to canonical sealer surface (service-role -> service-role)
     const downstream = await invokeEdgeFunction("archive-save-document", {
       record_id: ledger_id,
       is_test: lane,
@@ -67,7 +67,10 @@ serve(async (req) => {
           ledger_id,
           envelope_id,
           error: "invoke_archive_save_document: non-2xx",
-          archive_save_document: { status: downstream.status, body: downstream.json ?? downstream.text },
+          archive_save_document: {
+            status: downstream.status,
+            body: downstream.json ?? downstream.text,
+          },
         },
         500,
       );
@@ -86,11 +89,7 @@ serve(async (req) => {
     );
   } catch (e) {
     return json(
-      {
-        ok: false,
-        step: "archive-signed-resolution",
-        error: e instanceof Error ? e.message : String(e),
-      },
+      { ok: false, step: "archive-signed-resolution", error: e instanceof Error ? e.message : String(e) },
       500,
     );
   }
