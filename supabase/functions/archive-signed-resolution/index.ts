@@ -4,7 +4,7 @@ import { corsHeaders, json, getServiceClient, invokeEdgeFunction } from "../_sha
 
 type ReqBody = {
   envelope_id: string; // signature_envelopes.id
-  is_test?: boolean;   // optional override; otherwise uses envelope.is_test
+  is_test?: boolean;   // lane flag (optional; if omitted we use envelope.is_test)
 };
 
 serve(async (req) => {
@@ -17,7 +17,6 @@ serve(async (req) => {
 
     const supabase = getServiceClient();
 
-    // ✅ schema-correct: signature_envelopes.record_id is the ledger id
     const { data: env, error: envErr } = await supabase
       .from("signature_envelopes")
       .select("id, record_id, status, completed_at, is_test")
@@ -25,19 +24,33 @@ serve(async (req) => {
       .maybeSingle();
 
     if (envErr) {
-      return json({ ok: false, step: "load_signature_envelopes", error: envErr.message, details: envErr }, 500);
+      return json(
+        { ok: false, step: "load_signature_envelopes", error: envErr.message, details: envErr },
+        500,
+      );
     }
-    if (!env) return json({ ok: false, step: "load_signature_envelopes", error: "Envelope not found" }, 404);
-
+    if (!env) {
+      return json({ ok: false, step: "load_signature_envelopes", error: "Envelope not found" }, 404);
+    }
     if (env.status !== "completed") {
       return json(
-        { ok: false, step: "validate_envelope_completed", error: "Envelope not completed", envelope: env },
+        {
+          ok: false,
+          step: "validate_envelope_completed",
+          error: "Envelope not completed",
+          envelope: { id: env.id, status: env.status, completed_at: env.completed_at },
+        },
         400,
       );
     }
     if (!env.record_id) {
       return json(
-        { ok: false, step: "validate_envelope_record_id", error: "Envelope missing record_id (ledger id)" },
+        {
+          ok: false,
+          step: "validate_envelope_record_id",
+          error: "Envelope missing record_id (ledger id)",
+          envelope: { id: env.id },
+        },
         500,
       );
     }
@@ -45,7 +58,6 @@ serve(async (req) => {
     const ledger_id = env.record_id as string;
     const lane = typeof is_test === "boolean" ? is_test : !!env.is_test;
 
-    // ✅ delegate to the canonical sealer surface (service_role -> service_role)
     const downstream = await invokeEdgeFunction("archive-save-document", {
       record_id: ledger_id,
       is_test: lane,
@@ -59,7 +71,10 @@ serve(async (req) => {
           ledger_id,
           envelope_id,
           error: "invoke_archive_save_document: non-2xx",
-          archive_save_document: { status: downstream.status, body: downstream.json ?? downstream.text },
+          archive_save_document: {
+            status: downstream.status,
+            body: downstream.json ?? downstream.text,
+          },
         },
         500,
       );
@@ -78,7 +93,11 @@ serve(async (req) => {
     );
   } catch (e) {
     return json(
-      { ok: false, step: "archive-signed-resolution", error: e instanceof Error ? e.message : String(e) },
+      {
+        ok: false,
+        step: "archive-signed-resolution",
+        error: e instanceof Error ? e.message : String(e),
+      },
       500,
     );
   }

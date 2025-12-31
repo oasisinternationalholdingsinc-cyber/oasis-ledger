@@ -26,10 +26,6 @@ export function getServiceClient(): SupabaseClient {
   return createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
 }
 
-/**
- * Call another Edge Function as service_role (server-to-server).
- * This is critical for TRUTH LANE LOCKED flows.
- */
 export async function invokeEdgeFunction(
   fnName: string,
   body: unknown,
@@ -46,7 +42,7 @@ export async function invokeEdgeFunction(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      // ✅ ensure downstream is service_role
+      // ✅ Must be service_role so TRUTH locks allow promotion
       Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
     },
     body: JSON.stringify(body),
@@ -57,7 +53,7 @@ export async function invokeEdgeFunction(
   try {
     parsed = text ? JSON.parse(text) : undefined;
   } catch {
-    // keep text only
+    // leave as text
   }
 
   return { ok: res.ok, status: res.status, text, json: parsed };

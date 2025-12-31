@@ -4,7 +4,7 @@ import { corsHeaders, json, getServiceClient } from "../_shared/archive.ts";
 
 type ReqBody = {
   record_id: string; // governance_ledger.id
-  is_test?: boolean; // informational only (lane is enforced by DB + views)
+  is_test?: boolean; // lane flag (informational; DB is source of truth)
 };
 
 serve(async (req) => {
@@ -17,28 +17,39 @@ serve(async (req) => {
 
     const supabase = getServiceClient();
 
-    // ✅ canonical DB sealer (must be schema-correct and service_role-allowed)
     const { data, error } = await supabase.rpc("seal_governance_record_for_archive", {
       p_ledger_id: record_id,
     });
 
     if (error) {
       return json(
-        { ok: false, step: "seal_governance_record_for_archive", error: error.message, details: error },
+        {
+          ok: false,
+          step: "seal_governance_record_for_archive",
+          error: error.message,
+          details: error,
+        },
         500,
       );
     }
 
-    // NOTE:
-    // Your enterprise pipeline can extend here:
-    // - generate deterministic archive artifact
-    // - upsert verified_documents(source_record_id)
-    // - upsert minute_book_entries + supporting_documents pointers (idempotent repair)
-    // Keep that logic in THIS service_role function if desired.
-    return json({ ok: true, step: "archive-save-document", record_id, is_test: !!is_test, sealed: data }, 200);
+    return json(
+      {
+        ok: true,
+        step: "archive-save-document",
+        record_id,
+        is_test: !!is_test,
+        sealed: data,
+      },
+      200,
+    );
   } catch (e) {
     return json(
-      { ok: false, step: "archive-save-document", error: e instanceof Error ? e.message : String(e) },
+      {
+        ok: false,
+        step: "archive-save-document",
+        error: e instanceof Error ? e.message : String(e),
+      },
       500,
     );
   }
