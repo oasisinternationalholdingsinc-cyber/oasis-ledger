@@ -1,86 +1,107 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { makeServiceClient } from "../_shared/archive.ts";
+import { corsHeaders, json, getServiceClient, invokeEdgeFunction } from "../_shared/archive.ts";
 
-type ReqBody = { envelope_id: string };
-
-const cors = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
-  "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
+type ReqBody = {
+  envelope_id: string; // signature_envelopes.id
+  is_test?: boolean;   // lane flag (optional; if omitted we use envelope.is_test)
 };
 
-const json = (x: unknown, status = 200) =>
-  new Response(JSON.stringify(x, null, 2), {
-    status,
-    headers: { ...cors, "Content-Type": "application/json" },
-  });
-
 serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);
 
   try {
-    const body = (await req.json()) as ReqBody;
-    const envelope_id = body?.envelope_id;
+    const { envelope_id, is_test }: ReqBody = await req.json();
     if (!envelope_id) return json({ ok: false, error: "Missing envelope_id" }, 400);
 
-    const supabase = makeServiceClient();
+    const supabase = getServiceClient();
 
-    // 1) Load envelope
+    // ✅ IMPORTANT: your schema uses signature_envelopes.record_id (ledger id),
+    // NOT source_record_id
     const { data: env, error: envErr } = await supabase
       .from("signature_envelopes")
-      .select("id, status, source_record_id, record_id, completed_at")
+      .select("id, record_id, status, completed_at, is_test")
       .eq("id", envelope_id)
-      .single();
+      .maybeSingle();
 
-    if (envErr) throw new Error(`Load signature_envelopes failed: ${envErr.message}`);
-
-    const status = String(env.status ?? "");
-    if (status !== "completed") {
+    if (envErr) {
       return json(
-        { ok: false, error: "Envelope not completed", envelope_id, status },
+        { ok: false, step: "load_signature_envelopes", error: envErr.message, details: envErr },
+        500,
+      );
+    }
+    if (!env) {
+      return json({ ok: false, step: "load_signature_envelopes", error: "Envelope not found" }, 404);
+    }
+    if (env.status !== "completed") {
+      return json(
+        {
+          ok: false,
+          step: "validate_envelope_completed",
+          error: "Envelope not completed",
+          envelope: { id: env.id, status: env.status, completed_at: env.completed_at },
+        },
         400,
       );
     }
-
-    const record_id = (env.source_record_id ?? env.record_id) as string | null;
-    if (!record_id) {
-      throw new Error("Envelope missing source_record_id/record_id");
-    }
-
-    // 2) Call archive-save-document (same deployment, service_role)
-    const url = Deno.env.get("SUPABASE_URL")!;
-    const serviceKey =
-      Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-
-    const resp = await fetch(`${url}/functions/v1/archive-save-document`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${serviceKey}`,
-        apikey: serviceKey,
-      },
-      body: JSON.stringify({ record_id }),
-    });
-
-    const out = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-      throw new Error(
-        `archive-save-document failed (${resp.status}): ${JSON.stringify(out)}`,
+    if (!env.record_id) {
+      return json(
+        {
+          ok: false,
+          step: "validate_envelope_record_id",
+          error: "Envelope missing record_id (ledger id)",
+          envelope: { id: env.id },
+        },
+        500,
       );
     }
 
-    return json({
-      ok: true,
-      envelope_id,
-      record_id,
-      archived: out,
+    const ledger_id = env.record_id as string;
+    const lane = typeof is_test === "boolean" ? is_test : !!env.is_test;
+
+    // Delegate to canonical sealer surface
+    const downstream = await invokeEdgeFunction("archive-save-document", {
+      record_id: ledger_id,
+      is_test: lane,
     });
+
+    if (!downstream.ok) {
+      // Return the real body so you see the true SQL error immediately
+      return json(
+        {
+          ok: false,
+          step: "archive-signed-resolution",
+          ledger_id,
+          envelope_id,
+          error: "invoke_archive_save_document: Edge Function returned a non-2xx status code",
+          archive_save_document: {
+            status: downstream.status,
+            body: downstream.json ?? downstream.text,
+          },
+        },
+        500,
+      );
+    }
+
+    return json(
+      {
+        ok: true,
+        step: "archive-signed-resolution",
+        ledger_id,
+        envelope_id,
+        is_test: lane,
+        archive_save_document: downstream.json ?? downstream.text,
+      },
+      200,
+    );
   } catch (e) {
     return json(
-      { ok: false, error: "archive-signed-resolution failed", details: { message: String(e) } },
+      {
+        ok: false,
+        step: "archive-signed-resolution",
+        error: e instanceof Error ? e.message : String(e),
+      },
       500,
     );
   }

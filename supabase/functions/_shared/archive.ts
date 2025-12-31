@@ -1,34 +1,60 @@
-import { createClient } from "jsr:@supabase/supabase-js@2";
+import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { createClient, type SupabaseClient } from "jsr:@supabase/supabase-js@2";
 
-export type SealResult = {
-  status: string;
-  ledger_id: string;
-  verified_document_id: string;
-  storage_bucket: string;
-  storage_path: string;
-  file_hash: string;
-  file_size?: number;
-  mime_type?: string;
+export const corsHeaders: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
-export function makeServiceClient() {
-  const url = Deno.env.get("SUPABASE_URL")!;
-  const key =
-    Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-  return createClient(url, key, { global: { fetch } });
+export function json(data: unknown, status = 200) {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
 }
 
-export async function sealLedgerForArchive(
-  supabase: ReturnType<typeof makeServiceClient>,
-  ledgerId: string,
-) {
-  const { data, error } = await supabase.rpc("seal_governance_record_for_archive", {
-    p_ledger_id: ledgerId,
+export function getServiceClient(): SupabaseClient {
+  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+  const SERVICE_ROLE_KEY =
+    Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+
+  if (!SUPABASE_URL) throw new Error("Missing SUPABASE_URL");
+  if (!SERVICE_ROLE_KEY) throw new Error("Missing SERVICE_ROLE_KEY / SUPABASE_SERVICE_ROLE_KEY");
+
+  return createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
+}
+
+export async function invokeEdgeFunction(
+  fnName: string,
+  body: unknown,
+): Promise<{ ok: boolean; status: number; text: string; json?: any }> {
+  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+  const SERVICE_ROLE_KEY =
+    Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+
+  if (!SUPABASE_URL) throw new Error("Missing SUPABASE_URL");
+  if (!SERVICE_ROLE_KEY) throw new Error("Missing SERVICE_ROLE_KEY / SUPABASE_SERVICE_ROLE_KEY");
+
+  const url = `${SUPABASE_URL}/functions/v1/${fnName}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      // Call as service_role so TRUTH LANE LOCKED is satisfied
+      Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+    },
+    body: JSON.stringify(body),
   });
 
-  if (error) {
-    throw new Error(`seal_governance_record_for_archive failed: ${error.message}`);
+  const text = await res.text();
+  let parsed: any = undefined;
+  try {
+    parsed = text ? JSON.parse(text) : undefined;
+  } catch {
+    // leave as text
   }
 
-  return data as SealResult;
+  return { ok: res.ok, status: res.status, text, json: parsed };
 }
