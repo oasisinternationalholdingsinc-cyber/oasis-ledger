@@ -1,224 +1,153 @@
 // supabase/functions/archive-save-document/index.ts
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-
 import {
-  cors,
+  corsHeaders,
   json,
-  getCallerUid,
-  makeServiceClient,
-  mapRecordTypeToSection,
+  serviceClient,
+  resolveActorUserId,
+  getEntityKeyFromEntityId,
   minuteBookPrimaryPath,
-  fileNameFromPath,
+  ensureMinuteBookEntry,
+  upsertSupportingPrimary,
 } from "../_shared/archive.ts";
 
 type ReqBody = {
-  record_id: string;          // governance_ledger.id
-  envelope_id?: string;       // signature_envelopes.id (optional)
-  is_test?: boolean;          // lane hint (optional)
+  record_id: string;        // governance_ledger.id
+  envelope_id?: string;     // signature_envelopes.id (optional)
 };
 
 const MINUTE_BOOK_BUCKET = "minute_book";
 const SEAL_RPC = "seal_governance_record_for_archive";
 
 serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
-    const body = (await req.json()) as ReqBody;
-    if (!body?.record_id) return json({ ok: false, error: "missing record_id" }, 400);
+    const sb = serviceClient();
+    const body = (await req.json().catch(() => ({}))) as Partial<ReqBody>;
 
-    const supabase = makeServiceClient();
+    if (!body.record_id) return json({ ok: false, error: "Missing record_id" }, 400);
 
-    // Caller uid (best), else fallback to governance_ledger.created_by
-    const callerUid = getCallerUid(req);
-
-    // Load ledger row (schema-aligned)
-    const { data: gl, error: glErr } = await supabase
+    // Load ledger row
+    const { data: gl, error: glErr } = await sb
       .from("governance_ledger")
-      .select("id, entity_id, title, record_type, created_by, is_test, approved_by_council, archived, locked, status")
+      .select("id, entity_id, title, is_test, created_by, approved_by_council, status")
       .eq("id", body.record_id)
       .single();
 
-    if (glErr || !gl) return json({ ok: false, step: "load_governance_ledger", error: glErr?.message ?? "not found" }, 404);
+    if (glErr || !gl) return json({ ok: false, error: "Ledger not found", details: glErr }, 404);
 
-    const actorUid = callerUid ?? gl.created_by ?? null;
-    if (!actorUid) {
+    // Actor: prefer real user from bearer JWT; fallback to ledger.created_by; final fallback = null (but we require for supporting_documents)
+    const actorFromJwt = await resolveActorUserId(req, sb);
+    const actor = actorFromJwt ?? (gl.created_by ? String(gl.created_by) : null);
+    if (!actor) {
       return json({
         ok: false,
-        step: "resolve_actor_uid",
-        error: "Missing actor uid: call from app (user JWT) or ensure governance_ledger.created_by is set",
+        error: "Cannot resolve actor user id (needed for supporting_documents.uploaded_by/owner_id). Send request with Authorization bearer user JWT.",
       }, 400);
     }
 
-    // Resolve entity_key from entities.slug (casted in SQL on insert)
-    const { data: ent, error: entErr } = await supabase
-      .from("entities")
-      .select("id, slug")
-      .eq("id", gl.entity_id)
-      .single();
+    // Seal + get deterministic archive pointers (bucket/path/hash) + verified_documents upsert
+    const { data: sealed, error: sealErr } = await sb.rpc(SEAL_RPC, { p_ledger_id: body.record_id });
+    if (sealErr || !sealed) {
+      return json({ ok: false, step: SEAL_RPC, error: sealErr?.message ?? "seal failed", details: sealErr }, 500);
+    }
 
-    if (entErr || !ent?.slug) return json({ ok: false, step: "resolve_entity_key", error: entErr?.message ?? "entity not found" }, 500);
+    const storage_bucket = sealed.storage_bucket as string | null;
+    const storage_path = sealed.storage_path as string | null;
+    const file_hash = sealed.file_hash as string | null;
 
-    const entity_key = ent.slug; // will be cast to entity_key_enum by DB via ::public.entity_key_enum in SQL, or store as text if column is enum-compatible
+    if (!storage_bucket || !storage_path || !file_hash) {
+      return json({ ok: false, error: "Seal did not return bucket/path/hash", sealed }, 500);
+    }
 
-    // ---- SEAL (must be service_role-safe) ----
-    const { data: sealData, error: sealErr } = await supabase.rpc(SEAL_RPC, {
-      p_ledger_id: gl.id,
+    // Download sealed artifact
+    const dl = await sb.storage.from(storage_bucket).download(storage_path);
+    if (dl.error || !dl.data) {
+      return json({ ok: false, error: "Failed to download sealed PDF", details: dl.error }, 500);
+    }
+    const bytes = new Uint8Array(await dl.data.arrayBuffer());
+
+    // Derive entity_key enum from entities.slug
+    const entity_key = await getEntityKeyFromEntityId(String(gl.entity_id), sb);
+
+    // Section enum label (doc_section_enum). Use the canonical label you already have.
+    const section = "Resolutions";
+
+    // Upload/copy into minute_book bucket using your canonical path
+    const mbPath = minuteBookPrimaryPath(entity_key, section, body.record_id, true);
+    const up = await sb.storage.from(MINUTE_BOOK_BUCKET).upload(mbPath, bytes, {
+      contentType: "application/pdf",
+      upsert: true,
+    });
+    if (up.error) {
+      return json({ ok: false, error: "Failed to upload to minute_book", details: up.error }, 500);
+    }
+
+    // Ensure minute_book_entries exists
+    const entry_id = await ensureMinuteBookEntry({
+      sb,
+      entity_id: String(gl.entity_id),
+      entity_key,                 // entity_key_enum
+      domain_key: "governance",    // your minute_book_entries.domain_key (text)
+      title: String(gl.title ?? "Untitled"),
+      is_test: Boolean(gl.is_test),
+      source_record_id: body.record_id,
     });
 
-    if (sealErr) {
-      return json({
-        ok: false,
-        step: "seal_governance_record_for_archive",
-        error: sealErr.message,
-        details: sealErr,
-      }, 500);
+    // Resolve envelope_id if missing
+    let envelope_id = body.envelope_id ?? null;
+    if (!envelope_id) {
+      const { data: envRow } = await sb
+        .from("signature_envelopes")
+        .select("id")
+        .eq("record_id", body.record_id)
+        .order("created_at", { ascending: false })
+        .limit(1);
+      envelope_id = envRow?.[0]?.id ?? null;
     }
 
-    // Expect seal to return storage pointers + hash for verified registry
-    const seal = sealData as {
-      ok?: boolean;
-      status?: string;
-      ledger_id?: string;
-      entity_id?: string;
-      entity_key?: string;
-      is_test?: boolean;
-      storage_bucket?: string;
-      storage_path?: string;
-      file_hash?: string;
-      verified_document_id?: string;
-    };
-
-    // If your current SQL seal returns only status, you MUST upgrade it to return these.
-    if (!seal?.storage_bucket || !seal?.storage_path || !seal?.file_hash) {
-      return json({
-        ok: false,
-        step: "seal_result_invalid",
-        error: "seal_governance_record_for_archive must return storage_bucket, storage_path, file_hash",
-        seal,
-      }, 500);
-    }
-
-    // ---- Ensure Minute Book Entry ----
-    const domain_key = "governance"; // your minute_book_entries.domain_key is TEXT, required
-    const { data: mbeRow, error: mbeErr } = await supabase
-      .from("minute_book_entries")
-      .upsert({
-        entity_id: gl.entity_id,
-        entity_key: entity_key,       // enum in DB
-        domain_key,
-        title: gl.title,
-        is_test: gl.is_test ?? body.is_test ?? false,
-        source_record_id: gl.id,
-      }, { onConflict: "source_record_id" })
-      .select("id, entity_id, entity_key, domain_key, title, is_test, source_record_id")
-      .single();
-
-    if (mbeErr || !mbeRow) {
-      return json({ ok: false, step: "upsert_minute_book_entry", error: mbeErr?.message ?? "failed" }, 500);
-    }
-
-    // ---- Primary evidence path in minute_book bucket ----
-    // Use your established convention: section enum labels like "Resolutions"
-    const section = mapRecordTypeToSection(gl.record_type ?? "resolution");
-
-    // Prefer SIGNED PDF if envelope_id exists; otherwise use deterministic archive artifact as primary
-    const suffix = body.envelope_id ? "-signed" : "";
-    const primaryPath = minuteBookPrimaryPath(entity_key, section, gl.id, suffix);
-    const primaryName = fileNameFromPath(primaryPath);
-
-    // If the signed PDF already exists (your storage screenshot shows it does), do NOT copy again.
-    // Otherwise, copy the sealed artifact into minute_book bucket to make CI-Archive Reader work.
-    const needsCopy = !body.envelope_id; // for deterministic archive-as-primary; adjust if you want copy always
-
-    if (needsCopy) {
-      // Copy from sealed bucket/path -> minute_book/primaryPath
-      // NOTE: this uses the Storage API; permissions are service role.
-      const { error: copyErr } = await supabase.storage
-        .from(MINUTE_BOOK_BUCKET)
-        .copy(`${seal.storage_path}`, primaryPath); // <-- if seal.storage_bucket is NOT minute_book, you must download+upload. See note below.
-
-      // If your seal artifacts live in a different bucket (governance_sandbox), Supabase Storage copy() cannot cross buckets.
-      // In that case: download from seal bucket and upload to minute_book.
-      if (copyErr) {
-        // Attempt cross-bucket download+upload fallback:
-        const { data: dl, error: dlErr } = await supabase.storage
-          .from(seal.storage_bucket)
-          .download(seal.storage_path);
-
-        if (dlErr || !dl) {
-          return json({ ok: false, step: "download_sealed_artifact", error: dlErr?.message ?? "download failed" }, 500);
-        }
-
-        const ab = await dl.arrayBuffer();
-        const { error: upErr } = await supabase.storage
-          .from(MINUTE_BOOK_BUCKET)
-          .upload(primaryPath, ab, { contentType: "application/pdf", upsert: true });
-
-        if (upErr) {
-          return json({ ok: false, step: "upload_primary_to_minute_book", error: upErr.message }, 500);
-        }
-      }
-    }
-
-    // ---- Ensure Supporting Document primary row (THIS is what Reader needs) ----
-    // supporting_documents schema (from your screenshot):
-    // entry_id, entity_key(enum), section(enum doc_section_enum), file_path(text), file_name(text),
-    // doc_type(text nullable), version(int NOT NULL), uploaded_by(uuid NOT NULL), owner_id(uuid NOT NULL),
-    // uploaded_at(timestamptz NOT NULL), metadata(jsonb NOT NULL), file_hash(text nullable), signature_envelope_id uuid nullable, registry_visible bool, verified bool
-    const { data: sdRow, error: sdErr } = await supabase
-      .from("supporting_documents")
-      .upsert({
-        entry_id: mbeRow.id,
-        entity_key: entity_key,        // enum
-        section: section,              // doc_section_enum
-        file_path: primaryPath,
-        file_name: primaryName,
-        doc_type: "primary",
-        version: 1,
-        uploaded_by: actorUid,
-        owner_id: actorUid,
-        file_hash: seal.file_hash,     // ✅ hash included
-        signature_envelope_id: body.envelope_id ?? null,
-        verified: true,
-        registry_visible: true,
-        uploaded_at: new Date().toISOString(),
-        metadata: {
-          source: "archive-save-document",
-          ledger_id: gl.id,
-          sealed: {
-            storage_bucket: seal.storage_bucket,
-            storage_path: seal.storage_path,
-            file_hash: seal.file_hash,
-            verified_document_id: seal.verified_document_id ?? null,
-          },
-          primary: {
-            bucket: MINUTE_BOOK_BUCKET,
-            path: primaryPath,
-          },
-        },
-      }, {
-        // choose your real unique index/constraint if you have one; this is safest generic:
-        onConflict: "entry_id,file_path",
-      })
-      .select("id, entry_id, file_path, file_hash, verified, registry_visible")
-      .single();
-
-    if (sdErr || !sdRow) {
-      return json({ ok: false, step: "upsert_supporting_documents_primary", error: sdErr?.message ?? "failed" }, 500);
-    }
+    // Upsert/repair supporting_documents primary row
+    await upsertSupportingPrimary({
+      sb,
+      entry_id,
+      entity_key,
+      section,
+      file_path: mbPath,
+      file_name: mbPath.split("/").pop() ?? `${body.record_id}-signed.pdf`,
+      file_hash,
+      mime_type: "application/pdf",
+      file_size: bytes.byteLength,
+      signature_envelope_id: envelope_id,
+      uploaded_by: actor,
+      owner_id: actor,
+      metadata: {
+        source: "archive-save-document",
+        ledger_id: body.record_id,
+        envelope_id,
+        sealed_bucket: storage_bucket,
+        sealed_path: storage_path,
+        sealed_hash: file_hash,
+        is_test: Boolean(gl.is_test),
+      },
+    });
 
     return json({
       ok: true,
-      step: "archive-save-document",
-      ledger_id: gl.id,
-      minute_book_entry_id: mbeRow.id,
-      supporting_document_id: sdRow.id,
-      primary: { bucket: MINUTE_BOOK_BUCKET, path: primaryPath, hash: seal.file_hash },
-      verified: { bucket: seal.storage_bucket, path: seal.storage_path, hash: seal.file_hash, id: seal.verified_document_id ?? null },
+      record_id: body.record_id,
+      entry_id,
+      minute_book_bucket: MINUTE_BOOK_BUCKET,
+      minute_book_path: mbPath,
+      verified: {
+        storage_bucket,
+        storage_path,
+        file_hash,
+        verified_document_id: sealed.verified_document_id ?? null,
+      },
+      sealed_status: sealed.status ?? null,
     });
   } catch (e) {
-    return json({ ok: false, error: String(e) }, 500);
+    return json({ ok: false, error: String(e?.message ?? e), stack: String(e?.stack ?? "") }, 500);
   }
 });

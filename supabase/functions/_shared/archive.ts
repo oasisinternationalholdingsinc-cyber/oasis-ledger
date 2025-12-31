@@ -1,92 +1,168 @@
 // supabase/functions/_shared/archive.ts
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
-export type ArchiveLane = "rot" | "sandbox";
-
-export type SealResult = {
-  ok: boolean;
-  ledger_id: string;
-  entity_id: string;
-  entity_key: string; // entities.slug casted to entity_key_enum
-  is_test: boolean;
-
-  // Verified artifact (the one portals should verify)
-  storage_bucket: string;
-  storage_path: string;
-  file_hash: string;
-
-  verified_document_id?: string;
-  status?: string;
-};
-
-export const cors = {
+export const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers":
-    "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
   "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
-export function json(x: unknown, status = 200) {
-  return new Response(JSON.stringify(x, null, 2), {
+export function json(data: unknown, status = 200) {
+  return new Response(JSON.stringify(data, null, 2), {
     status,
-    headers: { ...cors, "Content-Type": "application/json" },
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
 }
 
-// Extract caller uid (preferred) from Authorization: Bearer <user_jwt>
-export function getCallerUid(req: Request): string | null {
-  const auth = req.headers.get("authorization") || req.headers.get("Authorization");
-  if (!auth?.toLowerCase().startsWith("bearer ")) return null;
-
-  const token = auth.slice(7).trim();
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-
-  try {
-    const payloadJson = atob(parts[1].replace(/-/g, "+").replace(/_/g, "/"));
-    const payload = JSON.parse(payloadJson);
-    return typeof payload.sub === "string" ? payload.sub : null;
-  } catch {
-    return null;
-  }
+export function getEnv(name: string) {
+  const v = Deno.env.get(name);
+  if (!v) throw new Error(`Missing env: ${name}`);
+  return v;
 }
 
-export function getLane(is_test?: boolean): ArchiveLane {
-  return is_test ? "sandbox" : "rot";
-}
-
-export function minuteBookPrimaryPath(entityKey: string, section: string, ledgerId: string, suffix = "") {
-  // keep your existing convention: holdings/Resolutions/<ledgerId>-signed.pdf, etc.
-  // NOTE: section values are doc_section_enum labels (case-sensitive in UI list, but stored as enum)
-  // Your existing storage uses "Resolutions" (capital R). Keep it consistent.
-  const safeSection = section; // expected e.g. "Resolutions"
-  return `${entityKey}/${safeSection}/${ledgerId}${suffix}.pdf`;
-}
-
-export function fileNameFromPath(p: string) {
-  const ix = p.lastIndexOf("/");
-  return ix >= 0 ? p.slice(ix + 1) : p;
-}
-
-export function makeServiceClient() {
-  const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-  const SERVICE_ROLE_KEY =
+export function serviceClient() {
+  const url = getEnv("SUPABASE_URL");
+  const key =
     Deno.env.get("SERVICE_ROLE_KEY") ??
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ??
+    "";
+  if (!key) throw new Error("Missing SERVICE_ROLE_KEY / SUPABASE_SERVICE_ROLE_KEY");
 
-  return createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-    global: { fetch },
-    auth: { persistSession: false },
-  });
+  return createClient(url, key, { global: { fetch } });
 }
 
-// Map governance record_type -> doc_section_enum (match your enum labels list)
-export function mapRecordTypeToSection(recordType: string | null): string {
-  const rt = (recordType ?? "").toLowerCase();
-  if (rt.includes("resolution")) return "Resolutions";
-  if (rt.includes("bylaw")) return "Bylaws";
-  if (rt.includes("register")) return "Registers";
-  if (rt.includes("share")) return "ShareCertificates";
-  return "Resolutions";
+export async function resolveActorUserId(req: Request, sb = serviceClient()): Promise<string | null> {
+  const auth = req.headers.get("authorization") ?? "";
+  const token = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7) : "";
+  if (!token) return null;
+
+  // service-role client can validate token
+  const { data, error } = await sb.auth.getUser(token);
+  if (error || !data?.user?.id) return null;
+  return data.user.id;
+}
+
+export async function getEntityKeyFromEntityId(entity_id: string, sb = serviceClient()): Promise<string> {
+  const { data, error } = await sb
+    .from("entities")
+    .select("slug")
+    .eq("id", entity_id)
+    .single();
+
+  if (error || !data?.slug) throw new Error(`Could not resolve entity slug for entity_id=${entity_id}`);
+  // must match your enum labels (holdings/lounge/real_estate etc.)
+  return String(data.slug);
+}
+
+export function minuteBookPrimaryPath(entity_key: string, section: string, ledger_id: string, signed = true) {
+  // Keep your existing convention
+  // NOTE: your bucket is `minute_book`, and you already have holdings/Resolutions/<id>-signed.pdf
+  const sec = section; // use enum label case (ex: "Resolutions")
+  return `${entity_key}/${sec}/${ledger_id}${signed ? "-signed" : ""}.pdf`;
+}
+
+export async function ensureMinuteBookEntry(opts: {
+  sb: ReturnType<typeof serviceClient>;
+  entity_id: string;
+  entity_key: string;
+  domain_key: string;
+  title: string;
+  is_test: boolean;
+  source_record_id: string; // governance_ledger.id
+}) {
+  const { sb, entity_id, entity_key, domain_key, title, is_test, source_record_id } = opts;
+
+  // Try find existing
+  const { data: existing } = await sb
+    .from("minute_book_entries")
+    .select("id")
+    .eq("source_record_id", source_record_id)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (existing && existing.length > 0) return existing[0].id as string;
+
+  // Create
+  const { data: ins, error } = await sb
+    .from("minute_book_entries")
+    .insert({
+      entity_id,
+      entity_key,       // entity_key_enum
+      domain_key,       // text (your schema)
+      title,
+      is_test,
+      source_record_id,
+    })
+    .select("id")
+    .single();
+
+  if (error || !ins?.id) throw new Error(`minute_book_entries insert failed: ${error?.message ?? "no id"}`);
+  return ins.id as string;
+}
+
+export async function upsertSupportingPrimary(opts: {
+  sb: ReturnType<typeof serviceClient>;
+  entry_id: string;
+  entity_key: string;        // entity_key_enum
+  section: string;           // doc_section_enum (ex: "Resolutions")
+  file_path: string;         // path inside minute_book bucket
+  file_name: string;
+  file_hash: string | null;
+  mime_type: string | null;
+  file_size: number | null;
+  signature_envelope_id: string | null;
+  uploaded_by: string;
+  owner_id: string;
+  metadata: Record<string, unknown>;
+}) {
+  const {
+    sb, entry_id, entity_key, section, file_path, file_name, file_hash, mime_type, file_size,
+    signature_envelope_id, uploaded_by, owner_id, metadata,
+  } = opts;
+
+  // Your table has no storage_bucket column. `file_path` is the canonical pointer.
+  // Use doc_type='primary' and version=1.
+  const payload = {
+    entry_id,
+    entity_key,
+    section,
+    file_path,
+    file_name,
+    doc_type: "primary",
+    version: 1,
+    uploaded_by,
+    uploaded_at: new Date().toISOString(),
+    owner_id,
+    file_hash,
+    mime_type,
+    file_size,
+    signature_envelope_id,
+    metadata: metadata ?? {},
+    verified: true,
+    registry_visible: true,
+  };
+
+  // Prefer "do nothing" if you have unique constraints; otherwise insert new.
+  // Many of your installs use unique (entry_id, doc_type, version) or similar.
+  const { error } = await sb.from("supporting_documents").insert(payload);
+  if (!error) return;
+
+  // fallback: if insert failed due to conflict/uniqueness, try update by selecting the latest primary
+  const { data: row } = await sb
+    .from("supporting_documents")
+    .select("id")
+    .eq("entry_id", entry_id)
+    .eq("doc_type", "primary")
+    .order("uploaded_at", { ascending: false })
+    .limit(1);
+
+  if (!row || row.length === 0) throw new Error(`supporting_documents insert failed: ${error.message}`);
+
+  const { error: updErr } = await sb
+    .from("supporting_documents")
+    .update(payload)
+    .eq("id", row[0].id);
+
+  if (updErr) throw new Error(`supporting_documents update failed: ${updErr.message}`);
 }
