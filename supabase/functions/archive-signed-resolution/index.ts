@@ -4,7 +4,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 
 type ReqBody = {
   envelope_id: string; // signature_envelopes.id
-  is_test?: boolean;   // lane flag (forwarded only)
+  is_test?: boolean;
 };
 
 const cors = {
@@ -65,13 +65,9 @@ serve(async (req) => {
       );
     }
 
-    // 2) Delegate to archive-save-document
-    // IMPORTANT: forward the caller JWT so archive-save-document can derive actor_uid.
-    const callerAuth = req.headers.get("authorization") ?? "";
-
+    // 2) Delegate to archive-save-document (idempotent/repair-capable)
     const { data, error } = await supabase.functions.invoke("archive-save-document", {
       body: { record_id, envelope_id, is_test },
-      headers: callerAuth ? { authorization: callerAuth } : undefined,
     });
 
     if (error) {
@@ -89,9 +85,9 @@ serve(async (req) => {
       ok: true,
       record_id,
       envelope_id,
-      is_test,
       minute_book_entry_id: data.minute_book_entry_id ?? null,
-      sealed: data.sealed ?? null,
+      already_archived: data.already_archived ?? false,
+      seal: data.seal ?? null,
       verified_document: data.verified_document ?? null,
     });
   } catch (e: any) {
