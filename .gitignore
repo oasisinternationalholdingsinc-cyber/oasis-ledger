@@ -44,3 +44,7 @@ yarn-error.log*
 
 src/src/
 
+
+# Supabase CLI temp
+supabase/.temp/
+
