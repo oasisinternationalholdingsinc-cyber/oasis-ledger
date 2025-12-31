@@ -1,8 +1,8 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { sbAdmin } from "../_shared/archive.ts";
+import { makeServiceClient } from "../_shared/archive.ts";
 
-type ReqBody = { envelope_id: string; is_test?: boolean };
+type ReqBody = { envelope_id: string };
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -23,46 +23,65 @@ serve(async (req) => {
 
   try {
     const body = (await req.json()) as ReqBody;
-    if (!body?.envelope_id) return json({ ok: false, error: "envelope_id required" }, 400);
+    const envelope_id = body?.envelope_id;
+    if (!envelope_id) return json({ ok: false, error: "Missing envelope_id" }, 400);
 
-    const supabase = sbAdmin();
+    const supabase = makeServiceClient();
 
-    // Pull envelope + ledger_id (adjust select names if your columns differ)
+    // 1) Load envelope
     const { data: env, error: envErr } = await supabase
       .from("signature_envelopes")
-      .select("id, status, record_id")
-      .eq("id", body.envelope_id)
+      .select("id, status, source_record_id, record_id, completed_at")
+      .eq("id", envelope_id)
       .single();
 
-    if (envErr) {
-      return json({ ok: false, step: "load_envelope", error: envErr.message, details: envErr }, 500);
+    if (envErr) throw new Error(`Load signature_envelopes failed: ${envErr.message}`);
+
+    const status = String(env.status ?? "");
+    if (status !== "completed") {
+      return json(
+        { ok: false, error: "Envelope not completed", envelope_id, status },
+        400,
+      );
     }
 
-    if (!env?.record_id) {
-      return json({ ok: false, step: "load_envelope", error: "envelope.record_id is null" }, 500);
+    const record_id = (env.source_record_id ?? env.record_id) as string | null;
+    if (!record_id) {
+      throw new Error("Envelope missing source_record_id/record_id");
     }
 
-    if (String(env.status).toLowerCase() !== "completed") {
-      return json({ ok: false, step: "envelope_status", error: `Envelope not completed: ${env.status}` }, 400);
+    // 2) Call archive-save-document (same deployment, service_role)
+    const url = Deno.env.get("SUPABASE_URL")!;
+    const serviceKey =
+      Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+    const resp = await fetch(`${url}/functions/v1/archive-save-document`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${serviceKey}`,
+        apikey: serviceKey,
+      },
+      body: JSON.stringify({ record_id }),
+    });
+
+    const out = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      throw new Error(
+        `archive-save-document failed (${resp.status}): ${JSON.stringify(out)}`,
+      );
     }
 
-    // ✅ Delegate to archive-save-document (single source of truth)
-    const { data: saved, error: saveErr } = await supabase.functions.invoke(
-      "archive-save-document",
-      { body: { record_id: env.record_id, is_test: body.is_test } },
-    );
-
-    if (saveErr) {
-      return json({
-        ok: false,
-        step: "archive-signed-resolution",
-        error: `invoke_archive_save_document: ${saveErr.message ?? "Edge Function returned a non-2xx status code"}`,
-        details: saveErr,
-      }, 500);
-    }
-
-    return json({ ok: true, step: "archive-signed-resolution", envelope_id: env.id, record_id: env.record_id, result: saved });
+    return json({
+      ok: true,
+      envelope_id,
+      record_id,
+      archived: out,
+    });
   } catch (e) {
-    return json({ ok: false, step: "archive-signed-resolution", error: String(e?.message ?? e) }, 500);
+    return json(
+      { ok: false, error: "archive-signed-resolution failed", details: { message: String(e) } },
+      500,
+    );
   }
 });
