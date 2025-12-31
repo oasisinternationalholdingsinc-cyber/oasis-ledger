@@ -1,73 +1,53 @@
-// supabase/functions/archive-signed-resolution/index.ts
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { cors, json, readJson, getServiceClient } from "../_shared/archive.ts";
+import { archiveLedgerEnterprise, getServiceClient } from "../_shared/archive.ts";
 
 type ReqBody = {
   envelope_id: string; // signature_envelopes.id
 };
+
+const cors = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
+};
+
+const json = (x: unknown, status = 200) =>
+  new Response(JSON.stringify(x, null, 2), {
+    status,
+    headers: { ...cors, "Content-Type": "application/json" },
+  });
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);
 
   try {
-    const body = await readJson<ReqBody>(req);
-    const envelopeId = body.envelope_id?.trim();
-    if (!envelopeId) return json({ ok: false, error: "Missing envelope_id" }, 400);
+    const body = (await req.json()) as ReqBody;
+    if (!body?.envelope_id) return json({ ok: false, error: "envelope_id required" }, 400);
 
-    const sb = getServiceClient();
+    const supabase = getServiceClient();
 
-    // 1) Load envelope + resolve governance record_id
-    const { data: env, error: envErr } = await sb
+    // Load envelope -> ledger_id
+    const { data: env, error: envErr } = await supabase
       .from("signature_envelopes")
-      .select("id, record_id, status, completed_at")
-      .eq("id", envelopeId)
-      .maybeSingle();
+      .select("id, record_id, status")
+      .eq("id", body.envelope_id)
+      .single();
 
-    if (envErr) throw new Error(`load_envelope: ${envErr.message}`);
-    if (!env) return json({ ok: false, error: `Envelope not found: ${envelopeId}` }, 404);
+    if (envErr) throw envErr;
+    if (!env?.record_id) return json({ ok: false, error: "Envelope missing record_id" }, 500);
 
-    if (env.status !== "completed") {
-      return json(
-        {
-          ok: false,
-          error: "Envelope not completed",
-          envelope_id: envelopeId,
-          status: env.status,
-          completed_at: env.completed_at,
-        },
-        400,
-      );
-    }
-
-    const recordId = env.record_id as string;
-    if (!recordId) return json({ ok: false, error: "Envelope missing record_id" }, 500);
-
-    // 2) Delegate ALL archive logic to archive-save-document (single source of truth)
-    const { data: result, error: invokeErr } = await sb.functions.invoke("archive-save-document", {
-      body: { record_id: recordId },
+    const result = await archiveLedgerEnterprise({
+      supabase,
+      ledger_id: env.record_id,
+      envelope_id: env.id,
     });
 
-    if (invokeErr) {
-      throw new Error(`invoke_archive_save_document: ${invokeErr.message}`);
-    }
-
-    return json({
-      ok: true,
-      step: "archived_via_archive_save_document",
-      envelope_id: envelopeId,
-      record_id: recordId,
-      result,
-    });
+    if (!result.ok) return json({ ok: false, step: "archive-signed-resolution", ...result }, 500);
+    return json({ ok: true, step: "archive-signed-resolution", ...result }, 200);
   } catch (e) {
-    return json(
-      {
-        ok: false,
-        step: "archive-signed-resolution",
-        error: (e as Error).message ?? String(e),
-      },
-      500,
-    );
+    return json({ ok: false, step: "archive-signed-resolution", error: (e as any)?.message ?? "unknown" }, 500);
   }
 });
