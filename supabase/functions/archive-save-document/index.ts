@@ -4,7 +4,7 @@ import { corsHeaders, json, getServiceClient } from "../_shared/archive.ts";
 
 type ReqBody = {
   record_id: string; // governance_ledger.id
-  is_test?: boolean; // lane flag (informational; DB is source of truth)
+  is_test?: boolean; // informational; SQL is source of truth
 };
 
 serve(async (req) => {
@@ -17,6 +17,7 @@ serve(async (req) => {
 
     const supabase = getServiceClient();
 
+    // ✅ Single source of truth (must: seal + verified_documents + return pointers)
     const { data, error } = await supabase.rpc("seal_governance_record_for_archive", {
       p_ledger_id: record_id,
     });

@@ -15,34 +15,49 @@ export function json(data: unknown, status = 200) {
   });
 }
 
+function mustEnv(name: string): string {
+  const v = Deno.env.get(name);
+  if (!v) throw new Error(`Missing ${name}`);
+  return v;
+}
+
 export function getServiceClient(): SupabaseClient {
-  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+  const SUPABASE_URL = mustEnv("SUPABASE_URL");
   const SERVICE_ROLE_KEY =
     Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-  if (!SUPABASE_URL) throw new Error("Missing SUPABASE_URL");
-  if (!SERVICE_ROLE_KEY) throw new Error("Missing SERVICE_ROLE_KEY / SUPABASE_SERVICE_ROLE_KEY");
+  if (!SERVICE_ROLE_KEY) {
+    throw new Error("Missing SERVICE_ROLE_KEY / SUPABASE_SERVICE_ROLE_KEY");
+  }
 
+  // supabase-js will send:
+  // - apikey: <SERVICE_ROLE_KEY>
+  // - Authorization: Bearer <SERVICE_ROLE_KEY>
   return createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
 }
 
+/**
+ * Service-role -> service-role Edge Function invoke (function-to-function).
+ * IMPORTANT: pass BOTH Authorization + apikey as service_role.
+ */
 export async function invokeEdgeFunction(
   fnName: string,
   body: unknown,
 ): Promise<{ ok: boolean; status: number; text: string; json?: any }> {
-  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+  const SUPABASE_URL = mustEnv("SUPABASE_URL");
   const SERVICE_ROLE_KEY =
     Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-  if (!SUPABASE_URL) throw new Error("Missing SUPABASE_URL");
-  if (!SERVICE_ROLE_KEY) throw new Error("Missing SERVICE_ROLE_KEY / SUPABASE_SERVICE_ROLE_KEY");
+  if (!SERVICE_ROLE_KEY) {
+    throw new Error("Missing SERVICE_ROLE_KEY / SUPABASE_SERVICE_ROLE_KEY");
+  }
 
   const url = `${SUPABASE_URL}/functions/v1/${fnName}`;
   const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      // ✅ Must be service_role so TRUTH locks allow promotion
+      apikey: SERVICE_ROLE_KEY,
       Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
     },
     body: JSON.stringify(body),
@@ -53,7 +68,7 @@ export async function invokeEdgeFunction(
   try {
     parsed = text ? JSON.parse(text) : undefined;
   } catch {
-    // leave as text
+    // keep text
   }
 
   return { ok: res.ok, status: res.status, text, json: parsed };
