@@ -1,57 +1,64 @@
+// supabase/functions/archive-save-document/index.ts
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { corsHeaders, json, getServiceClient } from "../_shared/archive.ts";
+import { archiveGovernanceRecord, getServiceClient } from "../_shared/archive.ts";
 
 type ReqBody = {
-  record_id: string; // governance_ledger.id
-  is_test?: boolean; // informational; SQL is source of truth
+  ledger_id: string;           // governance_ledger.id
+  envelope_id?: string;        // signature_envelopes.id (optional)
+  is_test?: boolean;           // optional lane flag
+  actor_user_id?: string;      // optional fallback for uploaded_by/owner_id (from client session)
 };
 
+const cors = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
+};
+
+const json = (x: unknown, status = 200) =>
+  new Response(JSON.stringify(x, null, 2), {
+    status,
+    headers: { ...cors, "Content-Type": "application/json" },
+  });
+
 serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
-  if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);
+  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+  if (req.method !== "POST") return json({ ok: false, error: "POST required" }, 405);
 
   try {
-    const { record_id, is_test }: ReqBody = await req.json();
-    if (!record_id) return json({ ok: false, error: "Missing record_id" }, 400);
+    const body = (await req.json()) as ReqBody;
+
+    if (!body?.ledger_id) {
+      return json({ ok: false, error: "ledger_id is required" }, 400);
+    }
 
     const supabase = getServiceClient();
 
-    // ✅ Single source of truth (must: seal + verified_documents + return pointers)
-    const { data, error } = await supabase.rpc("seal_governance_record_for_archive", {
-      p_ledger_id: record_id,
+    const out = await archiveGovernanceRecord(supabase, {
+      ledgerId: body.ledger_id,
+      envelopeId: body.envelope_id ?? null,
+      isTest: body.is_test,
+      actorUserId: body.actor_user_id ?? null,
     });
 
-    if (error) {
+    if (!out.ok) {
       return json(
         {
           ok: false,
-          step: "seal_governance_record_for_archive",
-          error: error.message,
-          details: error,
+          step: "archive-save-document",
+          ledger_id: body.ledger_id,
+          envelope_id: body.envelope_id ?? null,
+          error: "archive_failed",
+          details: out.details ?? out,
         },
         500,
       );
     }
 
-    return json(
-      {
-        ok: true,
-        step: "archive-save-document",
-        record_id,
-        is_test: !!is_test,
-        sealed: data,
-      },
-      200,
-    );
+    return json(out, 200);
   } catch (e) {
-    return json(
-      {
-        ok: false,
-        step: "archive-save-document",
-        error: e instanceof Error ? e.message : String(e),
-      },
-      500,
-    );
+    return json({ ok: false, step: "archive-save-document", error: String(e) }, 500);
   }
 });
