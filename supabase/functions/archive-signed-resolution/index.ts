@@ -4,7 +4,7 @@ import { corsHeaders, json, getServiceClient, invokeEdgeFunction } from "../_sha
 
 type ReqBody = {
   envelope_id: string; // signature_envelopes.id
-  is_test?: boolean;   // lane flag (optional; if omitted we use envelope.is_test)
+  is_test?: boolean;   // optional override; if omitted we use envelope.is_test
 };
 
 serve(async (req) => {
@@ -17,8 +17,7 @@ serve(async (req) => {
 
     const supabase = getServiceClient();
 
-    // ✅ IMPORTANT: your schema uses signature_envelopes.record_id (ledger id),
-    // NOT source_record_id
+    // ✅ Canonical: signature_envelopes.record_id is the governance_ledger.id
     const { data: env, error: envErr } = await supabase
       .from("signature_envelopes")
       .select("id, record_id, status, completed_at, is_test")
@@ -27,12 +26,12 @@ serve(async (req) => {
 
     if (envErr) {
       return json(
-        { ok: false, step: "load_signature_envelopes", error: envErr.message, details: envErr },
+        { ok: false, step: "load_signature_envelope", error: envErr.message, details: envErr },
         500,
       );
     }
     if (!env) {
-      return json({ ok: false, step: "load_signature_envelopes", error: "Envelope not found" }, 404);
+      return json({ ok: false, step: "load_signature_envelope", error: "Envelope not found" }, 404);
     }
     if (env.status !== "completed") {
       return json(
@@ -57,24 +56,24 @@ serve(async (req) => {
       );
     }
 
-    const ledger_id = env.record_id as string;
+    const ledger_id = String(env.record_id);
     const lane = typeof is_test === "boolean" ? is_test : !!env.is_test;
 
-    // Delegate to canonical sealer surface
+    // Delegate to the canonical sealer + minute book repair surface
     const downstream = await invokeEdgeFunction("archive-save-document", {
       record_id: ledger_id,
       is_test: lane,
+      envelope_id: env.id, // pass through for supporting_documents.signature_envelope_id (optional)
     });
 
     if (!downstream.ok) {
-      // Return the real body so you see the true SQL error immediately
       return json(
         {
           ok: false,
           step: "archive-signed-resolution",
           ledger_id,
           envelope_id,
-          error: "invoke_archive_save_document: Edge Function returned a non-2xx status code",
+          error: "invoke_archive_save_document: non-2xx",
           archive_save_document: {
             status: downstream.status,
             body: downstream.json ?? downstream.text,
