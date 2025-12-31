@@ -4,7 +4,7 @@ import { corsHeaders, json, getServiceClient } from "../_shared/archive.ts";
 
 type ReqBody = {
   record_id: string; // governance_ledger.id
-  is_test?: boolean; // optional: must match ledger if provided
+  is_test?: boolean; // optional; SQL is source-of-truth
 };
 
 serve(async (req) => {
@@ -12,40 +12,12 @@ serve(async (req) => {
   if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);
 
   try {
-    const { record_id, is_test }: ReqBody = await req.json();
+    const { record_id }: ReqBody = await req.json();
     if (!record_id) return json({ ok: false, error: "Missing record_id" }, 400);
 
     const supabase = getServiceClient();
 
-    // ✅ Lane safety (optional strict check)
-    if (typeof is_test === "boolean") {
-      const { data: gl, error: glErr } = await supabase
-        .from("governance_ledger")
-        .select("id, is_test")
-        .eq("id", record_id)
-        .maybeSingle();
-
-      if (glErr) {
-        return json({ ok: false, step: "load_governance_ledger", error: glErr.message, details: glErr }, 500);
-      }
-      if (!gl) return json({ ok: false, step: "load_governance_ledger", error: "Ledger record not found" }, 404);
-
-      const lane = !!(gl as any).is_test;
-      if (lane !== is_test) {
-        return json(
-          {
-            ok: false,
-            step: "validate_lane",
-            error: "Lane mismatch (is_test does not match governance_ledger.is_test)",
-            expected: lane,
-            provided: is_test,
-          },
-          400,
-        );
-      }
-    }
-
-    // ✅ Canonical: deterministic render + verified_documents + ledger lock happens here
+    // ✅ Single source of truth: SQL does deterministic render + hash + verified_documents + ledger lock
     const { data, error } = await supabase.rpc("seal_governance_record_for_archive", {
       p_ledger_id: record_id,
     });
@@ -62,6 +34,10 @@ serve(async (req) => {
       );
     }
 
+    // NOTE:
+    // Minute Book registration + supporting_documents primary pointers
+    // should remain inside your existing enterprise SQL/edge pipeline.
+    // (Per your “no rewiring” rule.)
     return json(
       {
         ok: true,
