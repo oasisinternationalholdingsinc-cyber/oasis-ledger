@@ -1,13 +1,9 @@
-// supabase/functions/archive-signed-resolution/index.ts
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { runArchiveSaveDocument } from "../_shared/archive.ts";
+import { sealAndRepairArchive } from "../_shared/archive.ts";
 
-type ReqBody = {
-  envelope_id: string; // signature_envelopes.id
-  is_test?: boolean;
-};
+type ReqBody = { envelope_id: string; is_test?: boolean };
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -17,83 +13,47 @@ const cors = {
 };
 
 const json = (x: unknown, status = 200) =>
-  new Response(JSON.stringify(x, null, 2), {
-    status,
-    headers: { ...cors, "Content-Type": "application/json" },
-  });
+  new Response(JSON.stringify(x, null, 2), { status, headers: { ...cors, "Content-Type": "application/json" } });
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-  if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
 
-  let body: ReqBody;
   try {
-    body = await req.json();
-  } catch {
-    return json({ ok: false, error: "Invalid JSON body" }, 400);
-  }
+    const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+    const SERVICE_ROLE_KEY =
+      Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-  if (!body?.envelope_id) return json({ ok: false, error: "envelope_id is required" }, 400);
+    const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
 
-  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-  const SERVICE_ROLE_KEY =
-    Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    const body = (await req.json()) as ReqBody;
+    if (!body?.envelope_id) return json({ ok: false, error: "Missing envelope_id" }, 400);
 
-  if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
-    return json({ ok: false, error: "Missing SUPABASE_URL or SERVICE_ROLE_KEY" }, 500);
-  }
+    // 1) Validate envelope completed + resolve record_id
+    const { data: env, error: envErr } = await supabase
+      .from("signature_envelopes")
+      .select("id,status,record_id")
+      .eq("id", body.envelope_id)
+      .single();
 
-  const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-    global: { fetch },
-    auth: { persistSession: false },
-  });
+    if (envErr) return json({ ok: false, error: "Envelope not found", details: envErr.message }, 404);
 
-  // 1) Validate envelope completed + resolve record_id
-  const { data: env, error: envErr } = await supabase
-    .from("signature_envelopes")
-    .select("id, status, record_id, is_test, completed_at")
-    .eq("id", body.envelope_id)
-    .maybeSingle();
+    if (env.status !== "completed") {
+      return json({ ok: false, error: "Envelope not completed", status: env.status }, 409);
+    }
 
-  if (envErr) return json({ ok: false, error: envErr.message }, 500);
-  if (!env) return json({ ok: false, error: "Envelope not found" }, 404);
+    const record_id = env.record_id;
+    if (!record_id) return json({ ok: false, error: "Envelope missing record_id" }, 500);
 
-  if (env.status !== "completed") {
-    return json(
-      {
-        ok: false,
-        error: "Envelope is not completed",
-        details: { status: env.status, completed_at: env.completed_at ?? null },
-      },
-      409
-    );
-  }
-
-  const record_id = env.record_id;
-  if (!record_id) return json({ ok: false, error: "Envelope missing record_id" }, 500);
-
-  // 2) Lane handling: prefer ledger lane, but we can pass a hint
-  const laneHint = typeof env.is_test === "boolean" ? env.is_test : !!body.is_test;
-
-  // 3) Call the same archive logic (NO HTTP)
-  const result = await runArchiveSaveDocument(
-    { SUPABASE_URL, SERVICE_ROLE_KEY },
-    record_id,
-    laneHint
-  );
-
-  if (!result.ok && result.warnings?.includes("Ledger record not found")) {
-    return json({ ok: false, error: "Ledger record not found", record_id }, 404);
-  }
-  if (!result.ok) return json(result, 500);
-
-  return json(
-    {
-      ok: true,
-      envelope_id: env.id,
+    // 2) NO HTTP CALL. Use same canonical archive path.
+    const out = await sealAndRepairArchive({
+      supabase,
       record_id,
-      archive: result,
-    },
-    200
-  );
+      is_test: body.is_test,
+    });
+
+    if (!out.ok) return json(out, 500);
+    return json({ ok: true, envelope_id: body.envelope_id, ...out }, 200);
+  } catch (e) {
+    return json({ ok: false, error: "Unhandled error", details: String(e) }, 500);
+  }
 });

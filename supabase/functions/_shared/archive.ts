@@ -1,225 +1,112 @@
-// supabase/functions/_shared/archive.ts
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
-export type ArchiveResult = {
+export type Supa = ReturnType<typeof createClient>;
+
+export type SealResult = {
   ok: boolean;
   record_id: string;
-  is_test: boolean;
-
-  // from seal_governance_record_for_archive
-  storage_bucket?: string;
-  storage_path?: string;
-  file_hash?: string;
-  verified_document_id?: string;
-
-  // minute book
-  minute_book_entry_id?: string;
-
-  repaired?: {
-    minute_book_entry: boolean;
-    supporting_primary: boolean;
-    verified_document: boolean;
-  };
-
-  warnings?: string[];
+  verified_document_id?: string | null;
+  storage_bucket?: string | null;
+  storage_path?: string | null;
+  file_hash?: string | null;
+  minute_book_entry_id?: string | null;
+  note?: string | null;
 };
 
-export type ArchiveContext = {
-  SUPABASE_URL: string;
-  SERVICE_ROLE_KEY: string;
-};
+export async function sealAndRepairArchive(params: {
+  supabase: Supa;
+  record_id: string;
+  // optionally passed if you want to force/validate lane; most lane safety is inside SQL.
+  is_test?: boolean;
+}) {
+  const { supabase, record_id } = params;
 
-const MINUTE_BOOK_BUCKET = "minute_book";
-const SEAL_RPC = "seal_governance_record_for_archive";
-
-// You said this is now the canonical, lane-safe, idempotent function.
-// We call it and then “repair” the registry pointers around it.
-export async function runArchiveSaveDocument(
-  ctx: ArchiveContext,
-  record_id: string,
-  is_test: boolean
-): Promise<ArchiveResult> {
-  const supabase = createClient(ctx.SUPABASE_URL, ctx.SERVICE_ROLE_KEY, {
-    global: { fetch },
-    auth: { persistSession: false },
-  });
-
-  const warnings: string[] = [];
-  const repaired = {
-    minute_book_entry: false,
-    supporting_primary: false,
-    verified_document: false,
-  };
-
-  // 1) Load ledger row (need entity_id + title; also ensures record exists)
-  const { data: ledger, error: ledgerErr } = await supabase
-    .from("governance_ledger")
-    .select("id, title, entity_id, is_test, created_at")
-    .eq("id", record_id)
-    .maybeSingle();
-
-  if (ledgerErr) {
-    return { ok: false, record_id, is_test, warnings: [ledgerErr.message] };
-  }
-  if (!ledger) {
-    // This is the clean, meaningful 404 you WANT (record not found)
-    return { ok: false, record_id, is_test, warnings: ["Ledger record not found"] };
-  }
-
-  // force lane from DB if caller passed nothing / wrong
-  const lane = typeof ledger.is_test === "boolean" ? ledger.is_test : is_test;
-
-  // 2) Seal via canonical SQL function (idempotent)
-  // NOTE: your finalized function takes p_ledger_id (per our checkpoint).
-  const { data: seal, error: sealErr } = await supabase.rpc(SEAL_RPC, {
+  // 1) Seal via canonical SQL function (idempotent + lane safe)
+  const { data: sealed, error: sealErr } = await supabase.rpc("seal_governance_record_for_archive", {
     p_ledger_id: record_id,
   });
 
   if (sealErr) {
-    return {
-      ok: false,
-      record_id,
-      is_test: lane,
-      warnings: [`seal rpc failed: ${sealErr.message}`],
-    };
+    return { ok: false as const, step: "seal_governance_record_for_archive", error: sealErr.message, details: sealErr };
   }
 
-  // Expecting seal to return storage pointers + hash + verified_document id
-  // We stay defensive in case the return keys differ slightly.
-  const storage_bucket = seal?.storage_bucket ?? MINUTE_BOOK_BUCKET;
-  const storage_path = seal?.storage_path;
-  const file_hash = seal?.file_hash ?? seal?.hash ?? seal?.pdf_hash;
-  const verified_document_id = seal?.verified_document_id ?? seal?.verified_id;
+  // Expect sealed to include storage_bucket/storage_path/file_hash + verified_document_id (per your finalized function)
+  const storage_bucket = sealed?.storage_bucket ?? null;
+  const storage_path = sealed?.storage_path ?? null;
+  const file_hash = sealed?.file_hash ?? null;
+  const verified_document_id = sealed?.verified_document_id ?? null;
 
-  if (!storage_path) warnings.push("seal rpc returned no storage_path");
-  if (!file_hash) warnings.push("seal rpc returned no file_hash");
+  // 2) Repair/create minute_book_entries + primary supporting_documents pointers (idempotent repair)
+  // NOTE: This assumes your archive-save-document logic already knows how to upsert/repair:
+  // - minute_book_entries
+  // - supporting_documents "primary" row
+  // - verified_documents consistency (source_record_id)
+  //
+  // If you moved that logic to SQL already, call that RPC here instead.
+  // Otherwise, keep minimal “repair” here.
 
-  // 3) Ensure minute_book_entries row exists (or repair) for this record
-  // Minimal, enterprise-safe: create if missing; update pointers if present.
-  const { data: existingEntry, error: entryLookupErr } = await supabase
+  // Load governance record for metadata to create minute book entry if missing
+  const { data: ledger, error: ledErr } = await supabase
+    .from("governance_ledger")
+    .select("id,title,entity_id,is_test,created_at")
+    .eq("id", record_id)
+    .single();
+
+  if (ledErr) {
+    return { ok: false as const, step: "load_governance_ledger", error: ledErr.message, details: ledErr };
+  }
+
+  // Ensure minute_book_entries row exists (upsert by source_record_id)
+  const domain_key = "governance";
+  const entry_type = "resolution";
+
+  const { data: mbe, error: mbeErr } = await supabase
     .from("minute_book_entries")
-    .select("id, source_record_id, is_test")
-    .eq("source_record_id", record_id)
-    .maybeSingle();
-
-  if (entryLookupErr) {
-    warnings.push(`minute_book_entries lookup error: ${entryLookupErr.message}`);
-  }
-
-  let minute_book_entry_id = existingEntry?.id as string | undefined;
-
-  if (!minute_book_entry_id) {
-    // NOTE: you confirmed minute_book_entries requires entity_id, domain_key, etc.
-    // We use a conservative domain_key and let your UI organize by domain/section.
-    const { data: insertedEntry, error: entryInsErr } = await supabase
-      .from("minute_book_entries")
-      .insert({
+    .upsert(
+      {
+        source_record_id: record_id,
+        title: ledger.title,
+        domain_key,
+        entry_type,
         entity_id: ledger.entity_id,
-        source_record_id: record_id,
-        title: ledger.title,
-        domain_key: "governance",
-        section: "Governance",
-        entry_type: "resolution",
-        is_test: lane,
-        entry_date: new Date().toISOString().slice(0, 10),
-      })
-      .select("id")
-      .single();
+        is_test: ledger.is_test,
+      },
+      { onConflict: "source_record_id" }
+    )
+    .select("id")
+    .single();
 
-    if (entryInsErr) {
-      warnings.push(`minute_book_entries insert error: ${entryInsErr.message}`);
-    } else {
-      minute_book_entry_id = insertedEntry.id;
-      repaired.minute_book_entry = true;
-    }
-  } else {
-    // ensure lane is correct
-    const { error: entryUpErr } = await supabase
-      .from("minute_book_entries")
-      .update({ is_test: lane })
-      .eq("id", minute_book_entry_id);
-
-    if (entryUpErr) warnings.push(`minute_book_entries lane update error: ${entryUpErr.message}`);
+  if (mbeErr) {
+    return { ok: false as const, step: "upsert_minute_book_entries", error: mbeErr.message, details: mbeErr };
   }
 
-  // 4) Ensure supporting_documents “primary” row exists + has storage pointers
-  // Your CI-Archive Reader depends on supporting_documents primary pointers.
-  // We "repair" by upserting/patching the primary row.
-  if (minute_book_entry_id && storage_path) {
-    const { data: primaryDoc, error: primaryLookupErr } = await supabase
-      .from("supporting_documents")
-      .select("id, storage_path, pdf_hash, is_primary")
-      .eq("source_record_id", record_id)
-      .eq("is_primary", true)
-      .maybeSingle();
-
-    if (primaryLookupErr) {
-      warnings.push(`supporting_documents lookup error: ${primaryLookupErr.message}`);
-    }
-
-    if (!primaryDoc) {
-      const { error: primaryInsErr } = await supabase.from("supporting_documents").insert({
-        source_record_id: record_id,
-        entry_id: minute_book_entry_id,
-        title: ledger.title,
-        bucket: storage_bucket,
-        storage_path,
-        pdf_hash: file_hash ?? null,
+  // Ensure primary supporting_documents row exists with pointers
+  // (registry UI depends on this row)
+  const { error: sdErr } = await supabase
+    .from("supporting_documents")
+    .upsert(
+      {
+        entry_id: mbe.id,
         is_primary: true,
-      });
+        storage_bucket,
+        storage_path,
+        file_hash,
+        title: ledger.title,
+      },
+      { onConflict: "entry_id,is_primary" }
+    );
 
-      if (primaryInsErr) {
-        warnings.push(`supporting_documents primary insert error: ${primaryInsErr.message}`);
-      } else {
-        repaired.supporting_primary = true;
-      }
-    } else {
-      // patch missing pointers (idempotent repair)
-      const patch: Record<string, unknown> = {};
-      if (!primaryDoc.storage_path) patch.storage_path = storage_path;
-      if (!primaryDoc.pdf_hash && file_hash) patch.pdf_hash = file_hash;
-
-      if (Object.keys(patch).length > 0) {
-        const { error: primaryUpErr } = await supabase
-          .from("supporting_documents")
-          .update(patch)
-          .eq("id", primaryDoc.id);
-
-        if (primaryUpErr) {
-          warnings.push(`supporting_documents primary patch error: ${primaryUpErr.message}`);
-        } else {
-          repaired.supporting_primary = true;
-        }
-      }
-    }
-  }
-
-  // 5) Verified registry consistency
-  // Your seal RPC already inserts/repairs verified_documents (source_record_id).
-  // Here we just sanity-check it exists when verified_document_id wasn’t returned.
-  if (!verified_document_id) {
-    const { data: vd, error: vdErr } = await supabase
-      .from("verified_documents")
-      .select("id")
-      .eq("source_record_id", record_id)
-      .maybeSingle();
-
-    if (vdErr) warnings.push(`verified_documents lookup error: ${vdErr.message}`);
-    if (vd?.id) repaired.verified_document = true;
-  } else {
-    repaired.verified_document = true;
+  if (sdErr) {
+    return { ok: false as const, step: "upsert_supporting_documents_primary", error: sdErr.message, details: sdErr };
   }
 
   return {
-    ok: true,
+    ok: true as const,
     record_id,
-    is_test: lane,
+    verified_document_id,
     storage_bucket,
     storage_path,
     file_hash,
-    verified_document_id,
-    minute_book_entry_id,
-    repaired,
-    warnings: warnings.length ? warnings : undefined,
+    minute_book_entry_id: mbe.id,
   };
 }
