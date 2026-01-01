@@ -10,11 +10,9 @@ const corsHeaders = {
   "Access-Control-Allow-Headers":
     "authorization, apikey, content-type, x-client-info",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
-/* ---------------------------------------------
-   Helpers
---------------------------------------------- */
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body, null, 2), {
     status,
@@ -30,27 +28,21 @@ const SERVICE_ROLE_KEY =
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
-  throw new Error("Missing Supabase env vars");
+  throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
 }
 
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
+  global: { fetch },
 });
 
-/* ---------------------------------------------
-   Types
---------------------------------------------- */
 type ReqBody = {
   record_id: string; // governance_ledger.id
-  is_test?: boolean;
-  trigger?: string;
+  trigger?: string;  // optional (for logs)
 };
 
-/* ---------------------------------------------
-   Handler
---------------------------------------------- */
 serve(async (req) => {
-  /* ---- OPTIONS (CORS preflight) ---- */
+  // CORS preflight
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
@@ -66,74 +58,31 @@ serve(async (req) => {
     return json({ ok: false, error: "Invalid JSON body" }, 400);
   }
 
-  const { record_id, is_test = false } = body;
-
+  const record_id = body?.record_id?.trim();
   if (!record_id) {
     return json({ ok: false, error: "record_id is required" }, 400);
   }
 
-  /* ---------------------------------------------
-     Core: Seal via canonical SQL
-     (single source of truth)
-  --------------------------------------------- */
   try {
     const { data, error } = await supabase.rpc(
       "seal_governance_record_for_archive",
-      {
-        p_ledger_id: record_id,
-      }
+      { p_ledger_id: record_id },
     );
 
     if (error) {
       console.error("seal_governance_record_for_archive error", error);
       return json(
-        {
-          ok: false,
-          error: `Archive seal failed: ${error.message}`,
-        },
-        500
+        { ok: false, error: `Archive seal failed: ${error.message}` },
+        500,
       );
     }
 
-    if (!data) {
-      return json(
-        {
-          ok: false,
-          error: "Archive seal failed: no data returned",
-        },
-        500
-      );
-    }
-
-    /* ---------------------------------------------
-       Expected RPC return (you already validated this)
-       {
-         minute_book_entry_id,
-         verified_document_id,
-         storage_bucket,
-         storage_path,
-         file_hash,
-         repaired
-       }
-    --------------------------------------------- */
-
-    return json({
-      ok: true,
-      minute_book_entry_id: data.minute_book_entry_id ?? null,
-      verified_document_id: data.verified_document_id ?? null,
-      storage_bucket: data.storage_bucket ?? null,
-      storage_path: data.storage_path ?? null,
-      file_hash: data.file_hash ?? null,
-      repaired: data.repaired ?? false,
-    });
+    return json({ ok: true, result: data });
   } catch (e: any) {
-    console.error("archive-save-document fatal error", e);
+    console.error("archive-save-document fatal", e);
     return json(
-      {
-        ok: false,
-        error: `Archive save failed: ${e?.message ?? "unknown error"}`,
-      },
-      500
+      { ok: false, error: `Archive save failed: ${e?.message ?? "unknown error"}` },
+      500,
     );
   }
 });
