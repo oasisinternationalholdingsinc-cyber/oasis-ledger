@@ -22,8 +22,7 @@ export const json = (x: unknown, status = 200) =>
   });
 
 export function serviceClient(req: Request) {
-  // service_role for writes, but we still pass through the user JWT
-  // so we can recover user id for uploaded_by/owner_id fields.
+  // service_role for DB writes, but preserve the user's JWT so we can read auth.getUser()
   const authHeader = req.headers.get("authorization") ?? "";
   return createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     global: { headers: { authorization: authHeader } },
@@ -46,35 +45,35 @@ export async function pickMinuteBookPdfPath(
   ledgerId: string,
   entityKey: string,
 ) {
-  // Prefer signed PDF, then fallback to any PDF for that ledgerId.
-  // Your storage shows: holdings/Resolutions/<ledgerId>-signed.pdf
+  // ✅ Canonical is lowercase "resolutions" (but keep legacy fallback)
   const patterns = [
-    `${entityKey}/Resolutions/${ledgerId}-signed.pdf`,
     `${entityKey}/resolutions/${ledgerId}-signed.pdf`,
-    `${entityKey}/Resolutions/${ledgerId}.pdf`,
     `${entityKey}/resolutions/${ledgerId}.pdf`,
+    `${entityKey}/Resolutions/${ledgerId}-signed.pdf`,
+    `${entityKey}/Resolutions/${ledgerId}.pdf`,
   ];
 
   for (const exact of patterns) {
     const { data } = await supabase
       .from("storage.objects")
-      .select("name, created_at")
+      .select("id, name, created_at")
       .eq("bucket_id", MINUTE_BOOK_BUCKET)
       .eq("name", exact)
       .order("created_at", { ascending: false })
       .limit(1);
 
-    if (data?.[0]?.name) return data[0].name as string;
+    if (data?.[0]?.name) return { path: data[0].name as string, objectId: data[0].id as string };
   }
 
   // Loose fallback: newest object containing ledgerId under entityKey/
   const { data: loose } = await supabase
     .from("storage.objects")
-    .select("name, created_at")
+    .select("id, name, created_at")
     .eq("bucket_id", MINUTE_BOOK_BUCKET)
     .ilike("name", `${entityKey}/%${ledgerId}%`)
     .order("created_at", { ascending: false })
     .limit(1);
 
-  return loose?.[0]?.name ?? null;
+  if (loose?.[0]?.name) return { path: loose[0].name as string, objectId: loose[0].id as string };
+  return { path: null, objectId: null };
 }
