@@ -52,12 +52,10 @@ type ArchiveSignedResolutionResponse = {
 
 type ArchiveSaveDocumentResponse = {
   ok: boolean;
-  step?: string;
-  record_id?: string;
   minute_book_entry_id?: string;
-  primary_file_path?: string | null;
-  supporting_primary_inserted?: number;
-  seal_result?: any;
+  verified_document_id?: string;
+  already_archived?: boolean;
+  repaired?: boolean;
   error?: string;
 };
 
@@ -149,6 +147,7 @@ async function extractFnError(err: any): Promise<string> {
     const anyErr = err as any;
     const ctx = anyErr?.context;
     const resp: Response | undefined = ctx?.response;
+
     if (resp && typeof resp.text === "function") {
       const t = await resp.text();
       if (t?.trim()) return t;
@@ -157,17 +156,6 @@ async function extractFnError(err: any): Promise<string> {
     // ignore
   }
   return err?.message || "Request failed.";
-}
-
-// Download from Storage and open PDF in a new tab (works even if bucket is private)
-async function openStoragePdf(bucket: string, path: string) {
-  const { data, error } = await supabase.storage.from(bucket).download(path);
-  if (error) throw new Error(error.message);
-
-  const blobUrl = URL.createObjectURL(data);
-  window.open(blobUrl, "_blank", "noopener,noreferrer");
-  // optional cleanup
-  setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
 }
 
 export default function ForgeClient() {
@@ -190,9 +178,8 @@ export default function ForgeClient() {
   const [isStarting, setIsStarting] = useState(false);
   const [isSendingInvite, setIsSendingInvite] = useState(false);
   const [isArchiving, setIsArchiving] = useState(false);
-  const [isRepairing, setIsRepairing] = useState(false);
+  const [isResealing, setIsResealing] = useState(false);
   const [isOpeningArchive, setIsOpeningArchive] = useState(false);
-  const [isOpeningVerified, setIsOpeningVerified] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
@@ -207,7 +194,7 @@ export default function ForgeClient() {
   const [portal, setPortal] = useState<PortalUrls>({});
   const [portalError, setPortalError] = useState<string | null>(null);
 
-  // Archive Evidence (minute_book + supporting_docs + verified)
+  // ✅ Archive Evidence (minute_book + supporting_docs + verified)
   const [evidenceLoading, setEvidenceLoading] = useState(false);
   const [evidenceError, setEvidenceError] = useState<string | null>(null);
   const [evidence, setEvidence] = useState<ArchiveEvidence>({
@@ -299,7 +286,7 @@ export default function ForgeClient() {
 
   const selected = visibleQueue.find((q) => q.ledger_id === selectedId) ?? visibleQueue[0] ?? null;
 
-  // Clear portal when switching records
+  // Clear any previous portal info when switching records
   useEffect(() => {
     setPortal({});
     setPortalError(null);
@@ -368,42 +355,15 @@ export default function ForgeClient() {
     </span>
   );
 
-  const laneBadge = () => {
-    const signed = selected?.envelope_status === "completed";
-    const archived = !!evidence.minute_book_entry_id;
-
-    // Signed ≠ Archived explanation badge (this is what kept biting us)
-    return (
-      <div className="mt-2 rounded-xl border border-slate-900 bg-black/25 px-3 py-2">
-        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Lane + Lifecycle</div>
-        <div className="mt-1 text-[11px] text-slate-300">
-          Env: <span className="font-semibold text-slate-100">{isTest ? "SANDBOX" : "RoT"}</span> ·{" "}
-          Signed:{" "}
-          <span className={signed ? "text-emerald-300 font-semibold" : "text-slate-400"}>
-            {signed ? "Yes" : "No"}
-          </span>{" "}
-          · Archived:{" "}
-          <span className={archived ? "text-emerald-300 font-semibold" : "text-amber-200 font-semibold"}>
-            {archived ? "Yes" : "Not yet"}
-          </span>
-        </div>
-        <div className="mt-1 text-[10px] text-slate-500">
-          <span className="text-amber-200 font-semibold">Signed ≠ Archived</span>. Signing completes the envelope;{" "}
-          archiving generates deterministic archive-grade artifacts (PDF + hash) and registers pointers in CI-Archive.
-        </div>
-      </div>
-    );
-  };
-
   function flashError(msg: string) {
     console.error(msg);
     setError(msg);
-    setTimeout(() => setError(null), 7000);
+    setTimeout(() => setError(null), 6500);
   }
 
   function flashInfo(msg: string) {
     setInfo(msg);
-    setTimeout(() => setInfo(null), 5000);
+    setTimeout(() => setInfo(null), 5200);
   }
 
   function flashAxiomError(msg: string) {
@@ -573,7 +533,7 @@ export default function ForgeClient() {
   }, [selected?.ledger_id]);
 
   // --------------------------
-  // Archive Evidence loader (minute book + supporting docs + verified)
+  // ✅ Archive Evidence loader (minute book + supporting docs + verified)
   // --------------------------
   async function loadArchiveEvidence(recordId: string) {
     setEvidenceLoading(true);
@@ -583,7 +543,7 @@ export default function ForgeClient() {
       // 1) minute book entry (lane-safe)
       const mbe = await supabase
         .from("minute_book_entries")
-        .select("id, title, is_test")
+        .select("id, title, is_test, created_at")
         .eq("source_record_id", recordId)
         .eq("is_test", isTest)
         .order("created_at", { ascending: false })
@@ -660,10 +620,94 @@ export default function ForgeClient() {
 
   const alreadyArchived = !!evidence.minute_book_entry_id;
 
-  const primaryDocPath = useMemo(() => {
-    const primary = evidence.supporting_docs.find((d) => (d.doc_type ?? "").toLowerCase() === "primary");
-    return primary?.file_path ?? null;
-  }, [evidence.supporting_docs]);
+  // --------------------------
+  // ✅ View Archive PDF (prefers Verified registry; falls back to Minute Book primary)
+  // --------------------------
+  async function openStorageObject(bucket: string, path: string) {
+    // Create a signed URL and open it in new tab
+    const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, 60);
+    if (error || !data?.signedUrl) {
+      throw new Error(error?.message || "Unable to create signed URL.");
+    }
+    window.open(data.signedUrl, "_blank", "noopener,noreferrer");
+  }
+
+  async function onViewArchivePdf() {
+    setError(null);
+    setInfo(null);
+
+    if (!selected?.ledger_id) return;
+
+    setIsOpeningArchive(true);
+    try {
+      // 1) If verified registry exists -> open verified artifact
+      if (evidence.verified_document?.storage_bucket && evidence.verified_document?.storage_path) {
+        await openStorageObject(evidence.verified_document.storage_bucket, evidence.verified_document.storage_path);
+        flashInfo("Opened Verified archive PDF.");
+        return;
+      }
+
+      // 2) Else: open minute_book primary supporting doc
+      const primary = evidence.supporting_docs.find((d) => d.doc_type === "primary" && d.file_path);
+      if (primary?.file_path) {
+        await openStorageObject("minute_book", primary.file_path);
+        flashInfo("Opened Minute Book render (primary).");
+        return;
+      }
+
+      flashError("No archive PDF pointer found yet (Verified or Minute Book primary). Try Re-seal/Repair.");
+    } catch (e: any) {
+      console.error("onViewArchivePdf error", e);
+      flashError(e?.message || "Unable to open archive PDF.");
+    } finally {
+      setIsOpeningArchive(false);
+    }
+  }
+
+  // --------------------------
+  // ✅ Repair-safe Re-seal (idempotent): calls archive-save-document
+  // --------------------------
+  async function onRepairReseal() {
+    setError(null);
+    setInfo(null);
+
+    if (!selected?.ledger_id) return;
+    if (selected.envelope_status !== "completed") {
+      flashError("Re-seal/Repair requires a completed envelope.");
+      return;
+    }
+
+    setIsResealing(true);
+    try {
+      const { data, error } = await supabase.functions.invoke("archive-save-document", {
+        body: {
+          record_id: selected.ledger_id,
+          is_test: isTest,
+          trigger: "forge-reseal-repair",
+        },
+      });
+
+      if (error) {
+        const msg = await extractFnError(error);
+        throw new Error(msg);
+      }
+
+      const res = data as ArchiveSaveDocumentResponse;
+      if (!res?.ok) {
+        flashError(res?.error ?? "Re-seal/repair failed.");
+        return;
+      }
+
+      flashInfo(res.repaired ? "Re-seal repaired pointers + registry." : "Re-seal completed.");
+      await loadArchiveEvidence(selected.ledger_id);
+      await refreshQueueKeepSelection(selected.ledger_id);
+    } catch (e: any) {
+      console.error("onRepairReseal error", e);
+      flashError(e?.message || "Re-seal/repair failed.");
+    } finally {
+      setIsResealing(false);
+    }
+  }
 
   // --------------------------
   // Actions (wiring preserved)
@@ -714,6 +758,7 @@ export default function ForgeClient() {
       }
 
       const res = data as StartSignatureResponse;
+
       if (!res?.ok) {
         flashError(res?.error ?? "Unable to start envelope.");
         return;
@@ -753,6 +798,7 @@ export default function ForgeClient() {
       }
 
       const res = data as SendInviteResponse;
+
       if (!res?.ok) {
         flashError(res?.error ?? "Unable to send invite.");
         return;
@@ -796,6 +842,7 @@ export default function ForgeClient() {
       }
 
       const res = data as ArchiveSignedResolutionResponse;
+
       if (!res?.ok) {
         flashError(res?.error ?? "Unable to archive signed resolution.");
         return;
@@ -803,94 +850,12 @@ export default function ForgeClient() {
 
       flashInfo(res.already_archived ? "Already archived." : "Archived into CI-Archive Minute Book.");
       await refreshQueueKeepSelection(selected.ledger_id);
-
-      // refresh evidence so pointers show immediately
       await loadArchiveEvidence(selected.ledger_id);
     } catch (err: any) {
       console.error("archive-signed-resolution error", err);
       flashError(err?.message || "Unable to archive signed resolution.");
     } finally {
       setIsArchiving(false);
-    }
-  }
-
-  // ✅ Repair-safe re-seal (idempotent): calls archive-save-document directly
-  async function onRepairReseal() {
-    setError(null);
-    setInfo(null);
-
-    if (!selected?.ledger_id) {
-      flashError("No record selected.");
-      return;
-    }
-
-    setIsRepairing(true);
-    try {
-      const { data, error } = await supabase.functions.invoke("archive-save-document", {
-        body: {
-          record_id: selected.ledger_id,
-          envelope_id: selected.envelope_id ?? null,
-        },
-      });
-
-      if (error) {
-        const msg = await extractFnError(error);
-        throw new Error(msg);
-      }
-
-      const res = data as ArchiveSaveDocumentResponse;
-      if (!res?.ok) {
-        flashError(res?.error ?? "Repair/Re-seal failed.");
-        return;
-      }
-
-      flashInfo("Repair/Re-seal complete (idempotent). Evidence refreshed.");
-      await loadArchiveEvidence(selected.ledger_id);
-    } catch (e: any) {
-      console.error("archive-save-document repair error", e);
-      flashError(e?.message || "Repair/Re-seal failed.");
-    } finally {
-      setIsRepairing(false);
-    }
-  }
-
-  // ✅ View Archive PDF (minute_book render) — uses supporting_documents.primary.file_path
-  async function onViewArchivePdf() {
-    if (!primaryDocPath) {
-      flashError("No minute_book primary PDF pointer found yet. Run Archive Now or Repair/Re-seal.");
-      return;
-    }
-
-    setIsOpeningArchive(true);
-    try {
-      await openStoragePdf("minute_book", primaryDocPath);
-      flashInfo("Opened Archive PDF.");
-    } catch (e: any) {
-      console.error("open minute_book pdf error", e);
-      flashError(e?.message || "Unable to open Archive PDF.");
-    } finally {
-      setIsOpeningArchive(false);
-    }
-  }
-
-  // Optional: Open Verified PDF (uses verified_documents.storage_bucket/path)
-  async function onOpenVerifiedPdf() {
-    const b = evidence.verified_document?.storage_bucket ?? null;
-    const p = evidence.verified_document?.storage_path ?? null;
-    if (!b || !p) {
-      flashError("No verified document pointer found yet.");
-      return;
-    }
-
-    setIsOpeningVerified(true);
-    try {
-      await openStoragePdf(b, p);
-      flashInfo("Opened Verified PDF.");
-    } catch (e: any) {
-      console.error("open verified pdf error", e);
-      flashError(e?.message || "Unable to open Verified PDF.");
-    } finally {
-      setIsOpeningVerified(false);
     }
   }
 
@@ -1004,6 +969,18 @@ export default function ForgeClient() {
     >
       {label}
     </button>
+  );
+
+  const laneBadge = () => (
+    <div className="mt-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3">
+      <div className="text-[10px] uppercase tracking-[0.22em] text-amber-200">Lane Clarification</div>
+      <div className="mt-2 text-[11px] text-slate-200">
+        <span className="font-semibold text-amber-200">Signed ≠ Archived.</span>{" "}
+        Signing completes the envelope. Archiving creates the Minute Book registry entry, generates the archive-grade
+        render + hash, and (when available) writes the Verified registry pointers. If your Registry pointers ever go
+        missing, use <span className="font-semibold text-amber-200">Re-seal/Repair</span> (idempotent).
+      </div>
+    </div>
   );
 
   return (
@@ -1123,7 +1100,6 @@ export default function ForgeClient() {
                   <span className="text-slate-300">{selected?.envelope_status ?? "—"}</span> • Env:{" "}
                   <span className="text-slate-300">{isTest ? "SANDBOX" : "RoT"}</span>
                 </div>
-                {laneBadge()}
               </div>
 
               <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
@@ -1212,32 +1188,44 @@ export default function ForgeClient() {
                                 : "border-amber-500/60 bg-amber-500/10 text-amber-200 hover:bg-amber-500/15",
                             ].join(" ")}
                           >
-                            {isArchiving
-                              ? "Archiving…"
-                              : alreadyArchived
-                              ? "Archive now (Already archived)"
-                              : "Archive now"}
+                            {isArchiving ? "Archiving…" : alreadyArchived ? "Archive now (Already archived)" : "Archive now"}
                           </button>
 
-                          {/* ✅ Repair-safe re-seal */}
+                          {/* ✅ View Archive PDF */}
+                          <button
+                            type="button"
+                            onClick={onViewArchivePdf}
+                            disabled={!selected?.ledger_id || isOpeningArchive}
+                            className={[
+                              "w-full rounded-xl px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
+                              !selected?.ledger_id || isOpeningArchive
+                                ? "border-slate-800 bg-slate-950/30 text-slate-500 cursor-not-allowed"
+                                : "border-slate-700 bg-slate-950/60 text-slate-200 hover:border-emerald-500/40 hover:text-slate-100",
+                            ].join(" ")}
+                          >
+                            {isOpeningArchive ? "Opening…" : "View Archive PDF"}
+                          </button>
+
+                          {/* ✅ Repair-safe Re-seal */}
                           <button
                             type="button"
                             onClick={onRepairReseal}
-                            disabled={isRepairing || !selected.ledger_id}
+                            disabled={!selected?.ledger_id || selected?.envelope_status !== "completed" || isResealing}
                             className={[
                               "w-full rounded-xl px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
-                              isRepairing
+                              !selected?.ledger_id || selected?.envelope_status !== "completed" || isResealing
                                 ? "border-slate-800 bg-slate-950/30 text-slate-500 cursor-not-allowed"
                                 : "border-cyan-500/50 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/15",
                             ].join(" ")}
-                            title="Idempotent repair: re-seal and ensure minute_book pointers + verified registry consistency."
                           >
-                            {isRepairing ? "Repairing…" : "Repair / Re-seal (Idempotent)"}
+                            {isResealing ? "Repairing…" : "Re-seal / Repair (Idempotent)"}
                           </button>
                         </div>
 
+                        {laneBadge()}
+
                         <div className="mt-3 text-[11px] text-slate-500">
-                          Forge is signature-only. Archive happens after completion and produces archive-quality PDF + hash + registry pointers.
+                          Forge is signature-only. Archive happens after completion and produces archive-quality PDF + hash.
                         </div>
                       </div>
                     </div>
@@ -1271,7 +1259,7 @@ export default function ForgeClient() {
               </div>
 
               <div className="h-full overflow-y-auto px-4 py-4 space-y-3">
-                {/* ✅ Archive Evidence + View Archive PDF */}
+                {/* ✅ Archive Evidence */}
                 <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
                   <div className="flex items-center justify-between">
                     <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Archive Evidence</div>
@@ -1305,42 +1293,7 @@ export default function ForgeClient() {
                       </span>
                     </div>
                     <div className="mt-1 text-[10px] text-slate-500">
-                      {evidence.minute_book_title
-                        ? clamp(evidence.minute_book_title, 60)
-                        : "No minute book entry detected for this lane."}
-                    </div>
-
-                    <div className="mt-3 grid grid-cols-1 gap-2">
-                      {/* ✅ View Archive PDF (minute_book render) */}
-                      <button
-                        type="button"
-                        onClick={onViewArchivePdf}
-                        disabled={!primaryDocPath || isOpeningArchive}
-                        className={[
-                          "w-full rounded-xl px-3 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
-                          !primaryDocPath || isOpeningArchive
-                            ? "border-slate-800 bg-slate-950/30 text-slate-500 cursor-not-allowed"
-                            : "border-emerald-500/40 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/15",
-                        ].join(" ")}
-                        title={primaryDocPath ? `minute_book/${primaryDocPath}` : "No primary minute_book pointer yet"}
-                      >
-                        {isOpeningArchive ? "Opening…" : "View Archive PDF"}
-                      </button>
-
-                      {/* Optional: open verified PDF */}
-                      <button
-                        type="button"
-                        onClick={onOpenVerifiedPdf}
-                        disabled={!evidence.verified_document?.storage_bucket || !evidence.verified_document?.storage_path || isOpeningVerified}
-                        className={[
-                          "w-full rounded-xl px-3 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
-                          !evidence.verified_document?.storage_bucket || !evidence.verified_document?.storage_path || isOpeningVerified
-                            ? "border-slate-800 bg-slate-950/30 text-slate-500 cursor-not-allowed"
-                            : "border-amber-500/50 bg-amber-500/10 text-amber-200 hover:bg-amber-500/15",
-                        ].join(" ")}
-                      >
-                        {isOpeningVerified ? "Opening…" : "Open Verified PDF"}
-                      </button>
+                      {evidence.minute_book_title ? clamp(evidence.minute_book_title, 60) : "No minute book entry detected for this lane."}
                     </div>
 
                     <div className="mt-3 text-[10px] uppercase tracking-[0.22em] text-slate-500">Supporting Docs</div>
@@ -1374,27 +1327,25 @@ export default function ForgeClient() {
                           {evidence.verified_document.verification_level ?? "verified"}
                         </div>
                         <div className="mt-1 font-mono text-[10px] text-slate-400 break-all">
-                          {evidence.verified_document.storage_bucket ?? "—"} ·{" "}
-                          {evidence.verified_document.storage_path ?? "—"}
+                          {evidence.verified_document.storage_bucket ?? "—"} · {evidence.verified_document.storage_path ?? "—"}
                         </div>
                         <div className="mt-1 text-[10px] text-slate-500">
                           Hash:{" "}
                           <span className="font-mono">
-                            {evidence.verified_document.file_hash
-                              ? clamp(evidence.verified_document.file_hash, 18)
-                              : "—"}
+                            {evidence.verified_document.file_hash ? clamp(evidence.verified_document.file_hash, 18) : "—"}
                           </span>
                         </div>
                       </div>
                     ) : (
                       <div className="mt-2 text-[10px] text-slate-500">
-                        No verified_documents row for this record yet.
+                        No verified_documents row for this record yet. Use Archive Now or Re-seal/Repair.
                       </div>
                     )}
                   </div>
 
                   <div className="mt-2 text-[10px] text-slate-500">
                     This panel shows the *actual* bucket/path pointers so you don’t have to guess where SANDBOX artifacts landed.
+                    Storage paths are case-sensitive (e.g., <span className="font-mono">Resolutions</span> vs <span className="font-mono">resolutions</span>).
                   </div>
                 </div>
 
@@ -1558,7 +1509,7 @@ export default function ForgeClient() {
 
                       <a
                         href="/ci-sign"
-                        className="flex-1 text-center rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-2 text-[11px] font-semibold text-slate-200 hover:border-slate-700 hover:text-slate-100 transition"
+                        className="flex-1 text-center rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-2 text-[11px] font-semibold text-slate-200 hover:border-amber-500/40 hover:text-slate-100 transition"
                       >
                         CI-Sign
                       </a>
