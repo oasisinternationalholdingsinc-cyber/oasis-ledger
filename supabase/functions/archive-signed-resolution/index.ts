@@ -2,70 +2,126 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers":
-    "authorization, apikey, content-type, x-client-info",
+type ReqBody = {
+  envelope_id: string;
+  is_test?: boolean;
 };
 
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), {
+const cors = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST,OPTIONS",
+  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
+};
+
+const json = (x: unknown, status = 200) =>
+  new Response(JSON.stringify(x, null, 2), {
     status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    headers: { ...cors, "Content-Type": "application/json" },
   });
 
 serve(async (req) => {
-  /* 🔴 CRITICAL: preflight must always succeed */
+  // ------------------------
+  // CORS / Preflight
+  // ------------------------
   if (req.method === "OPTIONS") {
-    return new Response("ok", { status: 200, headers: corsHeaders });
+    return new Response("ok", { headers: cors });
+  }
+
+  if (req.method !== "POST") {
+    return json({ ok: false, error: "Method not allowed" }, 405);
   }
 
   try {
-    const { envelope_id, is_test } = await req.json();
+    // ------------------------
+    // Parse request
+    // ------------------------
+    const body = (await req.json()) as ReqBody;
+    const { envelope_id, is_test = false } = body ?? {};
 
     if (!envelope_id) {
       return json({ ok: false, error: "Missing envelope_id" }, 400);
     }
 
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-      { global: { fetch } }
-    );
+    // ------------------------
+    // Supabase client (service role)
+    // ------------------------
+    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+    const serviceRoleKey =
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ??
+      Deno.env.get("SERVICE_ROLE_KEY")!;
 
-    // 🔐 Resolve ledger_id from envelope
-    const { data: env, error: envErr } = await supabase
+    const supabase = createClient(supabaseUrl, serviceRoleKey, {
+      global: { headers: { Authorization: req.headers.get("authorization")! } },
+    });
+
+    // ------------------------
+    // Load envelope (source of truth)
+    // ------------------------
+    const { data: envelope, error: envErr } = await supabase
       .from("signature_envelopes")
-      .select("record_id")
+      .select("id, record_id, status, completed_at")
       .eq("id", envelope_id)
       .maybeSingle();
 
-    if (envErr || !env?.record_id) {
+    if (envErr || !envelope) {
       return json({ ok: false, error: "Envelope not found" }, 404);
     }
 
-    // 🔁 Delegate to canonical archive
-    const { data, error } = await supabase.functions.invoke(
-      "archive-save-document",
-      {
-        body: {
-          record_id: env.record_id,
-          is_test,
-          trigger: "archive-signed-resolution",
-        },
-      }
-    );
-
-    if (error) {
+    if (envelope.status !== "completed") {
       return json(
-        { ok: false, error: error.message ?? "Archive failed" },
-        500
+        { ok: false, error: "Envelope not completed" },
+        400,
       );
     }
 
-    return json({ ok: true, ...data });
-  } catch (e: any) {
-    return json({ ok: false, error: e.message }, 500);
+    const ledgerId = envelope.record_id;
+
+    if (!ledgerId) {
+      return json(
+        { ok: false, error: "Envelope missing record_id" },
+        500,
+      );
+    }
+
+    // ------------------------
+    // Delegate ALL sealing to SQL (canonical)
+    // ------------------------
+    const { data: seal, error: sealErr } = await supabase.rpc(
+      "seal_governance_record_for_archive",
+      {
+        p_ledger_id: ledgerId,
+        p_is_test: is_test,
+      },
+    );
+
+    if (sealErr) {
+      console.error("seal_governance_record_for_archive failed", sealErr);
+      return json(
+        { ok: false, error: "Archive seal failed" },
+        500,
+      );
+    }
+
+    /**
+     * seal_governance_record_for_archive is responsible for:
+     * - generating archive-grade PDF
+     * - writing minute_book_entries
+     * - inserting/upserting verified_documents
+     * - locking governance_ledger
+     * - returning storage pointers
+     */
+
+    return json({
+      ok: true,
+      already_archived: seal?.already_archived ?? false,
+      minute_book_entry_id: seal?.minute_book_entry_id ?? null,
+      verified_document_id: seal?.verified_document_id ?? null,
+    });
+  } catch (err) {
+    console.error("archive-signed-resolution fatal error", err);
+    return json(
+      { ok: false, error: "Unexpected archive error" },
+      500,
+    );
   }
 });
