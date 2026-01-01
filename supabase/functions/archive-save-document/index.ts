@@ -13,6 +13,9 @@ const corsHeaders = {
   "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
+/* ---------------------------------------------
+   Helpers
+--------------------------------------------- */
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body, null, 2), {
     status,
@@ -28,7 +31,7 @@ const SERVICE_ROLE_KEY =
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
-  throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
+  throw new Error("Missing Supabase env vars");
 }
 
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
@@ -36,20 +39,21 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
   global: { fetch },
 });
 
+/* ---------------------------------------------
+   Types
+--------------------------------------------- */
 type ReqBody = {
   record_id: string; // governance_ledger.id
-  trigger?: string;  // optional (for logs)
+  is_test?: boolean;
+  trigger?: string;
 };
 
+/* ---------------------------------------------
+   Handler
+--------------------------------------------- */
 serve(async (req) => {
-  // CORS preflight
-  if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: corsHeaders });
-  }
-
-  if (req.method !== "POST") {
-    return json({ ok: false, error: "Method not allowed" }, 405);
-  }
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
 
   let body: ReqBody;
   try {
@@ -58,16 +62,13 @@ serve(async (req) => {
     return json({ ok: false, error: "Invalid JSON body" }, 400);
   }
 
-  const record_id = body?.record_id?.trim();
-  if (!record_id) {
-    return json({ ok: false, error: "record_id is required" }, 400);
-  }
+  const { record_id } = body;
+  if (!record_id) return json({ ok: false, error: "record_id is required" }, 400);
 
   try {
-    const { data, error } = await supabase.rpc(
-      "seal_governance_record_for_archive",
-      { p_ledger_id: record_id },
-    );
+    const { data, error } = await supabase.rpc("seal_governance_record_for_archive", {
+      p_ledger_id: record_id,
+    });
 
     if (error) {
       console.error("seal_governance_record_for_archive error", error);
@@ -77,9 +78,23 @@ serve(async (req) => {
       );
     }
 
-    return json({ ok: true, result: data });
+    if (!data) {
+      return json({ ok: false, error: "Archive seal failed: no data returned" }, 500);
+    }
+
+    // data is jsonb from SQL
+    return json({
+      ok: true,
+      status: data.status ?? null,
+      ledger_id: data.ledger_id ?? record_id,
+      verified_document_id: data.verified_document_id ?? null,
+      storage_bucket: data.storage_bucket ?? null,
+      storage_path: data.storage_path ?? null,
+      file_hash: data.file_hash ?? null,
+      repaired: data.repaired ?? false,
+    });
   } catch (e: any) {
-    console.error("archive-save-document fatal", e);
+    console.error("archive-save-document fatal error", e);
     return json(
       { ok: false, error: `Archive save failed: ${e?.message ?? "unknown error"}` },
       500,
