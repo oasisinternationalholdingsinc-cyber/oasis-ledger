@@ -14,16 +14,16 @@ const cors = {
   "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
-function json(payload: unknown, status = 200) {
-  return new Response(JSON.stringify(payload, null, 2), {
+const json = (x: unknown, status = 200) =>
+  new Response(JSON.stringify(x, null, 2), {
     status,
     headers: { ...cors, "Content-Type": "application/json" },
   });
-}
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY =
-  Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  Deno.env.get("SERVICE_ROLE_KEY") ??
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
   global: { fetch },
@@ -37,30 +37,24 @@ function requireUUID(v: unknown, field: string) {
   return v;
 }
 
-function serializeError(err: any) {
-  return {
-    message: err?.message ?? String(err),
-    name: err?.name,
-    code: err?.code,
-    details: err?.details,
-    hint: err?.hint,
-    stack: err?.stack,
-  };
-}
-
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-  if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
+  if (req.method !== "POST") {
+    return json({ ok: false, error: "Method not allowed" }, 405);
+  }
 
   try {
     const body = (await req.json()) as ReqBody;
-    const record_id = requireUUID(body?.record_id, "record_id");
+    const record_id = requireUUID(body.record_id, "record_id");
 
     const { data, error } = await supabase
       .rpc("seal_governance_record_for_archive", { p_ledger_id: record_id })
-      .single();
+      .maybeSingle();
 
     if (error) throw error;
+    if (!data) {
+      throw new Error("seal_governance_record_for_archive returned no row");
+    }
 
     return json({
       ok: true,
@@ -76,7 +70,7 @@ serve(async (req) => {
       {
         ok: false,
         error: err?.message ?? "archive-save-document failed",
-        details: serializeError(err),
+        details: err,
       },
       500
     );
