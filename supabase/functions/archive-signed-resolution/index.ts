@@ -6,25 +6,27 @@ type ReqBody = {
   envelope_id: string; // signature_envelopes.id
 };
 
-const corsHeaders = {
+const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
   "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
   "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
-  "Access-Control-Max-Age": "86400",
 };
 
 const json = (x: unknown, status = 200) =>
   new Response(JSON.stringify(x, null, 2), {
     status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    headers: { ...cors, "Content-Type": "application/json" },
   });
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-const SEAL_RPC = "seal_governance_record_for_archive";
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+  global: { fetch },
+  auth: { persistSession: false, autoRefreshToken: false },
+});
 
 function requireUUID(v: unknown, field: string) {
   if (typeof v !== "string" || !/^[0-9a-fA-F-]{36}$/.test(v)) {
@@ -34,47 +36,51 @@ function requireUUID(v: unknown, field: string) {
 }
 
 serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
-  if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
+  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
 
   try {
     const body = (await req.json()) as ReqBody;
     const envelope_id = requireUUID(body.envelope_id, "envelope_id");
 
-    const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-      global: { fetch },
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
-
-    // 1) Load envelope → get the ledger record id
-    const { data: envRow, error: envErr } = await supabase
+    // 1) Load envelope → record_id (governance_ledger.id)
+    const { data: env, error: envErr } = await supabase
       .from("signature_envelopes")
       .select("id, record_id, status")
       .eq("id", envelope_id)
       .maybeSingle();
 
-    if (envErr) return json({ ok: false, error: envErr.message, details: envErr }, 500);
-    if (!envRow) return json({ ok: false, error: "Envelope not found" }, 404);
-    if (!envRow.record_id) return json({ ok: false, error: "Envelope missing record_id" }, 400);
-
-    const status = String(envRow.status ?? "").toLowerCase();
-    if (status !== "completed") {
-      return json(
-        { ok: false, error: `Envelope not completed (status=${envRow.status ?? "null"})` },
-        409,
-      );
+    if (envErr) throw envErr;
+    if (!env) throw new Error("Envelope not found");
+    if (!env.record_id) throw new Error("Envelope missing record_id");
+    if (env.status !== "completed") {
+      throw new Error(`Archive blocked: envelope status is '${env.status}', expected 'completed'`);
     }
 
-    // 2) Seal via canonical RPC (does ALL idempotent writes)
-    const { data, error } = await supabase.rpc(SEAL_RPC, { p_ledger_id: envRow.record_id });
+    // 2) Seal by record_id
+    const { data, error } = await supabase
+      .rpc("seal_governance_record_for_archive", { p_ledger_id: env.record_id })
+      .single();
 
-    if (error) {
-      return json({ ok: false, error: error.message, details: error }, 500);
-    }
+    if (error) throw error;
 
-    const row = Array.isArray(data) ? data[0] : data;
-    return json({ ok: true, envelope_id, record_id: envRow.record_id, result: row });
-  } catch (e) {
-    return json({ ok: false, error: e?.message ?? String(e) }, 400);
+    return json({
+      ok: true,
+      envelope_id: env.id,
+      record_id: env.record_id,
+      storage_bucket: data.storage_bucket,
+      storage_path: data.storage_path,
+      file_hash: data.file_hash,
+      verified_document_id: data.verified_document_id,
+      minute_book_entry_id: data.minute_book_entry_id,
+    });
+  } catch (err: any) {
+    return json(
+      {
+        ok: false,
+        error: err?.message ?? "archive-signed-resolution failed",
+        details: err,
+      },
+      500
+    );
   }
 });
