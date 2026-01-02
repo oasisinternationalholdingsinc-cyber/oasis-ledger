@@ -4,7 +4,8 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Allow-Headers":
+    "authorization, apikey, content-type, x-client-info",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
@@ -16,17 +17,17 @@ const json = (body: unknown, status = 200) =>
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY =
-  Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-
-if (!SUPABASE_URL || !SERVICE_ROLE_KEY) throw new Error("Missing Supabase env vars");
+  Deno.env.get("SERVICE_ROLE_KEY") ??
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
+  global: { fetch },
 });
 
 type ReqBody = {
   record_id: string; // governance_ledger.id
-  is_test?: boolean; // informational only; lane is read from governance_ledger
+  is_test?: boolean; // ignored by RPC (lane comes from ledger), but OK for logging
   trigger?: string;
 };
 
@@ -41,7 +42,7 @@ serve(async (req) => {
     return json({ ok: false, error: "Invalid JSON body" }, 400);
   }
 
-  const { record_id } = body;
+  const record_id = (body.record_id ?? "").trim();
   if (!record_id) return json({ ok: false, error: "record_id is required" }, 400);
 
   try {
@@ -54,22 +55,22 @@ serve(async (req) => {
       return json({ ok: false, error: `Archive seal failed: ${error.message}` }, 500);
     }
 
-    if (!data) {
-      return json({ ok: false, error: "Archive seal failed: no data returned" }, 500);
-    }
+    const res = (data ?? null) as any;
+    if (!res) return json({ ok: false, error: "Archive seal failed: no data returned" }, 500);
 
+    // pass-through normalized
     return json({
       ok: true,
-      status: data.status ?? null,
-      minute_book_entry_id: data.minute_book_entry_id ?? null, // if you add later
-      verified_document_id: data.verified_document_id ?? null,
-      storage_bucket: data.storage_bucket ?? null,
-      storage_path: data.storage_path ?? null,
-      file_hash: data.file_hash ?? null,
-      repaired: data.status === "repaired_seal",
+      status: res.status ?? null,
+      ledger_id: res.ledger_id ?? record_id,
+      verified_document_id: res.verified_document_id ?? null,
+      storage_bucket: res.storage_bucket ?? null,
+      storage_path: res.storage_path ?? null,
+      file_hash: res.file_hash ?? null,
+      repaired: res.repaired ?? false,
     });
-  } catch (e: any) {
-    console.error("archive-save-document fatal error", e);
+  } catch (e) {
+    console.error("archive-save-document fatal", e);
     return json({ ok: false, error: `Archive save failed: ${e?.message ?? "unknown error"}` }, 500);
   }
 });
