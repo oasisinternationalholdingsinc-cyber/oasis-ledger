@@ -3,8 +3,8 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 type ReqBody = {
-  record_id: string;     // governance_ledger.id
-  is_test?: boolean;     // optional; we also read from governance_ledger if omitted
+  record_id: string;      // governance_ledger.id
+  actor_uid?: string;     // who to stamp uploaded_by/owner_id (defaults to Abbas)
 };
 
 const cors = {
@@ -23,218 +23,285 @@ const json = (x: unknown, status = 200) =>
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const SUPABASE_ANON_KEY =
-  Deno.env.get("SUPABASE_ANON_KEY") ?? Deno.env.get("ANON_KEY") ?? "";
 
-// Your canonical SQL function
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+  global: { fetch },
+});
+
 const SEAL_RPC = "seal_governance_record_for_archive";
 
-type SealResult = {
-  storage_bucket: string;
-  storage_path: string;
-  file_hash: string | null;
-  verified_document_id: string | null;
-  minute_book_entry_id: string | null;
-};
+// Your user id (used when actor_uid not passed)
+const DEFAULT_ACTOR_UID = "ac35a784-b5ce-4f2a-a5de-a5acd04955e7";
 
-function getBearer(req: Request) {
-  const h = req.headers.get("authorization") || req.headers.get("Authorization") || "";
-  const m = h.match(/^Bearer\s+(.+)$/i);
-  return m?.[1] ?? null;
-}
+// Minute book “domain taxonomy” in prod
+const DOMAIN_KEY = "governance";      // exists in governance_domains (Resolutions & Minutes)
+const SECTION_NAME = "Resolutions";   // display grouping
+const SOURCE_ALLOWED = "signed_resolution"; // passes chk_minute_book_source
+const BUCKET_MINUTE_BOOK = "minute_book";
 
-async function requireUserId(req: Request): Promise<string> {
-  const token = getBearer(req);
-  if (!token) throw new Error("Missing Authorization Bearer token");
-
-  // Prefer a real verification via auth.getUser if anon key is available.
-  if (SUPABASE_ANON_KEY) {
-    const authClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      global: { headers: { Authorization: `Bearer ${token}` } },
-    });
-    const { data, error } = await authClient.auth.getUser();
-    if (error || !data?.user?.id) throw new Error("Invalid session");
-    return data.user.id;
-  }
-
-  // Fallback: decode JWT "sub" (not ideal, but prevents NULL attribution).
-  const parts = token.split(".");
-  if (parts.length < 2) throw new Error("Invalid JWT");
-  const payload = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
-  if (!payload?.sub) throw new Error("JWT missing sub");
-  return String(payload.sub);
+function firstRow(data: unknown): any | null {
+  if (!data) return null;
+  if (Array.isArray(data)) return data[0] ?? null;
+  if (typeof data === "object") return data as any;
+  return null;
 }
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-  if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
 
   try {
-    const actorUid = await requireUserId(req);
-
     const body = (await req.json()) as ReqBody;
     const record_id = String(body.record_id || "").trim();
-    if (!record_id) return json({ ok: false, error: "record_id is required" }, 400);
+    const actor_uid = String(body.actor_uid || DEFAULT_ACTOR_UID).trim();
 
-    const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
+    if (!record_id) return json({ ok: false, error: "record_id required" }, 400);
 
-    // 1) Load governance_ledger row (title/entity/is_test)
-    const { data: gl, error: glErr } = await admin
+    // 1) Load ledger + entity slug (needed for entity_key_enum + entity_id)
+    const { data: gl, error: glErr } = await supabase
       .from("governance_ledger")
-      .select("id,title,entity_id,is_test,status,archived,locked")
+      .select("id,title,entity_id,is_test,approved_by_council,archived,locked,status")
       .eq("id", record_id)
       .maybeSingle();
 
-    if (glErr) throw glErr;
-    if (!gl) return json({ ok: false, error: "governance_ledger not found" }, 404);
+    if (glErr) return json({ ok: false, error: "load governance_ledger failed", details: glErr }, 500);
+    if (!gl) return json({ ok: false, error: "ledger not found" }, 404);
 
-    // 2) Derive entity_slug -> entity_key_enum
-    const { data: ent, error: entErr } = await admin
+    const { data: ent, error: entErr } = await supabase
       .from("entities")
-      .select("slug")
+      .select("id,slug")
       .eq("id", gl.entity_id)
       .maybeSingle();
 
-    if (entErr) throw entErr;
-    const entity_slug = String(ent?.slug || "");
-    if (!entity_slug) throw new Error("Could not resolve entity slug");
+    if (entErr) return json({ ok: false, error: "load entities failed", details: entErr }, 500);
+    if (!ent?.slug) return json({ ok: false, error: "entity slug missing for ledger.entity_id" }, 500);
 
-    // entity_key_enum is castable from slug (holdings/lounge/real-estate) in your DB
-    const entity_key = entity_slug;
+    const entity_slug = String(ent.slug);
+    const entity_id = String(ent.id);
+    const title = String(gl.title ?? "Untitled");
 
-    const lane_is_test = typeof body.is_test === "boolean" ? body.is_test : !!gl.is_test;
+    // 2) Seal (single source of truth) — IMPORTANT: correct arg name
+    const { data: sealData, error: sealErr } = await supabase.rpc(SEAL_RPC, {
+      p_ledger_id: record_id,
+    });
 
-    // 3) Seal via SQL (idempotent, lane-safe)
-    // Your function signature might be either (uuid) or (p_ledger_id uuid). We support both.
-    let seal: SealResult | null = null;
-
-    {
-      const try1 = await admin.rpc(SEAL_RPC, { p_ledger_id: record_id });
-      if (!try1.error && try1.data) seal = (Array.isArray(try1.data) ? try1.data[0] : try1.data) as SealResult;
-
-      if (!seal) {
-        const try2 = await admin.rpc(SEAL_RPC, { record_id });
-        if (!try2.error && try2.data) seal = (Array.isArray(try2.data) ? try2.data[0] : try2.data) as SealResult;
-      }
+    if (sealErr) {
+      return json({ ok: false, error: "seal rpc failed", details: sealErr }, 500);
     }
 
-    if (!seal?.storage_bucket || !seal?.storage_path) {
+    const seal = firstRow(sealData);
+    const storage_bucket = seal?.storage_bucket ?? seal?.bucket ?? seal?.bucket_id ?? null;
+    const storage_path = seal?.storage_path ?? seal?.path ?? null;
+    const file_hash = seal?.file_hash ?? seal?.pdf_hash ?? null;
+    const verified_document_id = seal?.verified_document_id ?? null;
+    const minute_book_entry_id = seal?.minute_book_entry_id ?? null;
+
+    // If seal returns no pointers, we can still repair from storage.objects by searching for a pdf containing record_id.
+    // But this SHOULD NOT happen if the RPC is correct. Still, we fail loudly with context.
+    if (!storage_bucket || !storage_path) {
       return json(
-        { ok: false, error: "Seal did not return storage pointers", details: seal },
+        {
+          ok: false,
+          error: "seal did not return storage pointers",
+          details: {
+            seal_preview: seal,
+            hint: "Check RPC return columns & ensure rpc arg is { p_ledger_id }",
+          },
+        },
         500,
       );
     }
 
-    // 4) Upsert minute_book_entries (domain_key MUST be 'governance', source MUST pass chk_minute_book_source)
-    const entry_date = (new Date()).toISOString().slice(0, 10); // YYYY-MM-DD
-    const mbeTitle = String(gl.title || "Untitled");
+    // 3) Upsert minute_book_entries (idempotent) — must respect your unique key:
+    // minute_book_entries_entity_key_entry_date_title_key
+    //
+    // We choose entry_date as COALESCE(gl.signed_at?, gl.created_at?, now()) BUT we only have title + record.
+    // To keep it stable and avoid duplicates, we prefer:
+    // - if already exists for source_record_id, update it
+    // - else upsert using (entity_key, entry_date::date, title) with entry_date = today (UTC)
+    //
+    // Since you already created rows successfully with entry_date = current date, we do same.
+    const entry_date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC date)
 
-    const { data: mbeUpsert, error: mbeErr } = await admin
+    // Try find existing entry by source_record_id first
+    const { data: mbeExisting, error: mbeFindErr } = await supabase
       .from("minute_book_entries")
-      .upsert(
-        {
-          entity_id: gl.entity_id,
-          entity_key,                 // enum cast in DB
-          entry_date,                 // NOT NULL
-          entry_type: "resolution",   // entry_type_enum default is ok; explicit is safer
-          title: mbeTitle,            // NOT NULL
-          domain_key: "governance",   // FK-safe (matches your list)
-          section_name: "Resolutions",
-          source: "signed_resolution", // passes chk_minute_book_source
-          source_record_id: gl.id,
-          storage_path: seal.storage_path,
-          pdf_hash: seal.file_hash,
-          is_test: lane_is_test,
-          registry_status: "active",
-        },
-        { onConflict: "entity_key,entry_date,title" },
-      )
-      .select("id,source_record_id,storage_path,domain_key,source")
+      .select("id,entry_date,title,entity_key,is_test,storage_path,source_record_id")
+      .eq("source_record_id", record_id)
+      .limit(1)
       .maybeSingle();
 
-    if (mbeErr) throw mbeErr;
-    const entry_id = mbeUpsert?.id as string;
-
-    // 5) Ensure primary supporting_documents pointer exists (uploaded_by + owner_id required)
-    const { data: existingPrimary, error: primChkErr } = await admin
-      .from("supporting_documents")
-      .select("id")
-      .eq("entry_id", entry_id)
-      .eq("doc_type", "primary")
-      .limit(1);
-
-    if (primChkErr) throw primChkErr;
-
-    if (!existingPrimary || existingPrimary.length === 0) {
-      const file_name = seal.storage_path.split("/").pop() || `${gl.id}.pdf`;
-
-      const { error: insErr } = await admin.from("supporting_documents").insert({
-        entry_id,
-        entity_key,                 // entity_key_enum
-        section: "resolutions",     // doc_section_enum (you already proved this value works)
-        file_path: seal.storage_path,
-        file_name,
-        doc_type: "primary",
-        version: 1,
-        uploaded_by: actorUid,
-        uploaded_at: new Date().toISOString(),
-        owner_id: actorUid,
-        file_hash: seal.file_hash,
-        mime_type: "application/pdf",
-        verified: true,
-        registry_visible: true,
-        metadata: {},               // NOT NULL jsonb
-      });
-
-      if (insErr) throw insErr;
+    if (mbeFindErr) {
+      return json({ ok: false, error: "minute_book_entries lookup failed", details: mbeFindErr }, 500);
     }
 
-    // 6) Ensure verified_documents exists for this record/path (title is NOT NULL)
-    // We DO NOT write generated cols. We only insert when missing.
-    const { data: vdExisting, error: vdChkErr } = await admin
+    let mbe_id: string | null = mbeExisting?.id ?? null;
+
+    if (mbe_id) {
+      // Update existing
+      const { error: mbeUpdErr } = await supabase
+        .from("minute_book_entries")
+        .update({
+          entity_id,
+          is_test: !!gl.is_test,
+          domain_key: DOMAIN_KEY,
+          section_name: SECTION_NAME,
+          source: SOURCE_ALLOWED,
+          source_record_id: record_id,
+          storage_path: storage_path,
+          pdf_hash: file_hash,
+          // keep entry_date/title as-is to preserve unique key stability
+        })
+        .eq("id", mbe_id);
+
+      if (mbeUpdErr) return json({ ok: false, error: "minute_book_entries update failed", details: mbeUpdErr }, 500);
+    } else {
+      // Insert with ON CONFLICT emulation: use upsert on the unique key columns
+      // Supabase upsert needs explicit onConflict string.
+      const { data: mbeIns, error: mbeInsErr } = await supabase
+        .from("minute_book_entries")
+        .upsert(
+          {
+            entity_id,
+            entity_key: entity_slug, // casts to entity_key_enum (holdings/lounge/real-estate)
+            entry_date,
+            entry_type: "resolution", // entry_type_enum
+            title,
+            is_test: !!gl.is_test,
+            domain_key: DOMAIN_KEY,
+            section_name: SECTION_NAME,
+            source: SOURCE_ALLOWED, // passes chk_minute_book_source
+            source_record_id: record_id,
+            storage_path,
+            pdf_hash: file_hash,
+            registry_status: "active",
+          } as any,
+          { onConflict: "entity_key,entry_date,title" },
+        )
+        .select("id")
+        .limit(1)
+        .maybeSingle();
+
+      if (mbeInsErr) {
+        return json(
+          {
+            ok: false,
+            error: "minute_book_entries upsert failed",
+            details: mbeInsErr,
+            hint: "If this is duplicate-key, it already exists; run a lookup by source_record_id.",
+          },
+          500,
+        );
+      }
+
+      mbe_id = mbeIns?.id ?? null;
+    }
+
+    if (!mbe_id) {
+      return json({ ok: false, error: "minute_book_entries id missing after upsert" }, 500);
+    }
+
+    // 4) Ensure primary supporting_documents pointer exists (idempotent)
+    const { data: primaryExisting, error: pFindErr } = await supabase
+      .from("supporting_documents")
+      .select("id")
+      .eq("entry_id", mbe_id)
+      .eq("doc_type", "primary")
+      .limit(1)
+      .maybeSingle();
+
+    if (pFindErr) return json({ ok: false, error: "supporting_documents lookup failed", details: pFindErr }, 500);
+
+    let primary_doc_id: string | null = primaryExisting?.id ?? null;
+
+    if (!primary_doc_id) {
+      const { data: pIns, error: pInsErr } = await supabase
+        .from("supporting_documents")
+        .insert({
+          entry_id: mbe_id,
+          entity_key: entity_slug,         // entity_key_enum
+          section: "resolutions",          // doc_section_enum (you already used this successfully)
+          file_path: storage_path,
+          file_name: storage_path.split("/").pop() ?? `${record_id}.pdf`,
+          doc_type: "primary",
+          version: 1,
+          uploaded_by: actor_uid,          // NOT NULL
+          uploaded_at: new Date().toISOString(),
+          owner_id: actor_uid,             // NOT NULL
+          file_hash: file_hash,
+          mime_type: "application/pdf",
+          verified: true,
+          registry_visible: true,
+          metadata: {},                    // NOT NULL jsonb
+        } as any)
+        .select("id")
+        .limit(1)
+        .maybeSingle();
+
+      if (pInsErr) return json({ ok: false, error: "supporting_documents insert failed", details: pInsErr }, 500);
+
+      primary_doc_id = pIns?.id ?? null;
+    }
+
+    // 5) Ensure verified_documents row exists pointing to minute_book storage pointers (idempotent)
+    const { data: vdExisting, error: vdFindErr } = await supabase
       .from("verified_documents")
       .select("id")
-      .eq("source_record_id", gl.id)
-      .eq("storage_bucket", "minute_book")
-      .eq("storage_path", seal.storage_path)
-      .limit(1);
+      .eq("source_record_id", record_id)
+      .eq("storage_bucket", BUCKET_MINUTE_BOOK)
+      .eq("storage_path", storage_path)
+      .limit(1)
+      .maybeSingle();
 
-    if (vdChkErr) throw vdChkErr;
+    if (vdFindErr) return json({ ok: false, error: "verified_documents lookup failed", details: vdFindErr }, 500);
 
-    if (!vdExisting || vdExisting.length === 0) {
-      const { error: vdInsErr } = await admin.from("verified_documents").insert({
-        entity_id: gl.entity_id,
-        entity_slug,
-        document_class: "resolution",
-        title: mbeTitle,                 // NOT NULL
-        source_table: "governance_ledger",
-        source_record_id: gl.id,
-        storage_bucket: "minute_book",
-        storage_path: seal.storage_path,
-        file_hash: seal.file_hash,
-        mime_type: "application/pdf",
-        verification_level: "certified",
-        is_archived: true,
-      });
-      if (vdInsErr) throw vdInsErr;
+    let verified_id: string | null = vdExisting?.id ?? verified_document_id ?? null;
+
+    if (!vdExisting?.id) {
+      const { data: vdIns, error: vdInsErr } = await supabase
+        .from("verified_documents")
+        .insert({
+          entity_id,
+          entity_slug,
+          document_class: "resolution",          // enum document_class
+          title,                                // NOT NULL
+          source_table: "governance_ledger",
+          source_record_id: record_id,
+          storage_bucket: BUCKET_MINUTE_BOOK,
+          storage_path,
+          file_hash: file_hash,
+          mime_type: "application/pdf",
+          verification_level: "certified",       // enum verification_level
+          is_archived: true,
+          document_type: "other",
+        } as any)
+        .select("id")
+        .limit(1)
+        .maybeSingle();
+
+      if (vdInsErr) return json({ ok: false, error: "verified_documents insert failed", details: vdInsErr }, 500);
+
+      verified_id = vdIns?.id ?? null;
     }
 
     return json({
       ok: true,
-      record_id: gl.id,
+      record_id,
       entity_slug,
-      is_test: lane_is_test,
-      sealed: {
-        storage_bucket: seal.storage_bucket,
-        storage_path: seal.storage_path,
-        file_hash: seal.file_hash,
-        verified_document_id: seal.verified_document_id,
-        minute_book_entry_id: seal.minute_book_entry_id,
+      is_test: !!gl.is_test,
+      seal: {
+        storage_bucket,
+        storage_path,
+        file_hash,
+        verified_document_id: verified_id,
+        minute_book_entry_id: mbe_id,
       },
-      minute_book_entry_id: entry_id,
+      repaired: {
+        minute_book_entry_id: mbe_id,
+        primary_doc_id,
+        verified_document_id: verified_id,
+      },
     });
   } catch (e) {
-    console.error("archive-save-document error", e);
-    return json({ ok: false, error: (e as Error).message ?? String(e) }, 500);
+    return json({ ok: false, error: "unhandled", details: String(e?.message ?? e) }, 500);
   }
 });
