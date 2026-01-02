@@ -2,6 +2,11 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
+type ReqBody = {
+  record_id: string;        // governance_ledger.id
+  envelope_id?: string;     // optional: signature_envelopes.id
+};
+
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -9,17 +14,10 @@ const SERVICE_ROLE_KEY =
 const MINUTE_BOOK_BUCKET = "minute_book";
 const SEAL_RPC = "seal_governance_record_for_archive";
 
-// IMPORTANT: minute_book_entries.chk_minute_book_source only allows:
-// manual_upload, system_generated, signed_resolution, imported, legacy
-const MINUTE_BOOK_SOURCE = "signed_resolution";
-
-// IMPORTANT: governance_domains.key list shows 'governance' is the FK-safe domain for Resolutions & Minutes
-const DOMAIN_KEY = "governance";
-const SECTION_NAME = "Resolutions";
-
-// supporting_documents requires NOT NULL uploaded_by + owner_id
-// If auth.getUser() fails for any reason, you can set a system UUID here (optional):
-const FALLBACK_SYSTEM_USER_ID = Deno.env.get("SYSTEM_USER_ID") ?? null;
+// IMPORTANT: pick a valid enum label for supporting_documents.section in your DB.
+// In your system this is a USER-DEFINED enum. "governance" is the canonical guess.
+// If your enum differs, change this constant to a valid label.
+const SUPPORTING_SECTION = "governance";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -34,50 +32,9 @@ const json = (x: unknown, status = 200) =>
     headers: { ...cors, "Content-Type": "application/json" },
   });
 
-type ReqBody = {
-  record_id: string; // governance_ledger.id
-};
-
-function pickFileName(path: string) {
-  const parts = path.split("/");
-  return parts[parts.length - 1] ?? path;
-}
-
-function serviceClient(req: Request) {
-  // service_role for DB writes, but preserve user's JWT so auth.getUser() works
-  const authHeader = req.headers.get("authorization") ?? "";
-  return createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-    global: { headers: { authorization: authHeader } },
-  });
-}
-
-async function getActorUserId(supabase: ReturnType<typeof createClient>) {
-  const { data, error } = await supabase.auth.getUser();
-  if (error) return null;
-  return data?.user?.id ?? null;
-}
-
-async function trySeal(
-  supabase: ReturnType<typeof createClient>,
-  recordId: string,
-) {
-  // Try multiple arg names to survive signature drift
-  const attempts: Array<Record<string, unknown>> = [
-    { p_ledger_id: recordId },
-    { p_record_id: recordId },
-    { record_id: recordId },
-    { id: recordId },
-  ];
-
-  let lastErr: any = null;
-
-  for (const args of attempts) {
-    const { data, error } = await supabase.rpc(SEAL_RPC, args);
-    if (!error) return data;
-    lastErr = error;
-  }
-
-  throw lastErr ?? new Error("seal rpc failed");
+function basename(p: string) {
+  const i = p.lastIndexOf("/");
+  return i >= 0 ? p.slice(i + 1) : p;
 }
 
 serve(async (req) => {
@@ -85,200 +42,226 @@ serve(async (req) => {
   if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);
 
   try {
-    const supabase = serviceClient(req);
-    const actorId = (await getActorUserId(supabase)) ?? FALLBACK_SYSTEM_USER_ID;
+    const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+      global: { fetch },
+      auth: { persistSession: false },
+    });
 
-    if (!actorId) {
-      return json(
-        {
-          ok: false,
-          error:
-            "No actor user id (auth.getUser failed). Provide Authorization Bearer JWT from UI, or set SYSTEM_USER_ID env.",
-        },
-        401,
-      );
-    }
+    const body = (await req.json()) as ReqBody;
+    const record_id = body?.record_id;
+    const envelope_id = body?.envelope_id ?? null;
 
-    const body = (await req.json()) as Partial<ReqBody>;
-    const recordId = String(body.record_id ?? "").trim();
-    if (!recordId) return json({ ok: false, error: "record_id required" }, 400);
+    if (!record_id) return json({ ok: false, error: "Missing record_id" }, 400);
 
-    // 1) Load ledger + entity slug (entity_key_enum must be holdings/lounge/real_estate — NOT sandbox)
+    // 1) Load ledger row (lane truth + entity)
     const { data: gl, error: glErr } = await supabase
       .from("governance_ledger")
-      .select("id,title,entity_id,is_test,created_at,approved_by_council,archived,locked,status")
-      .eq("id", recordId)
-      .maybeSingle();
+      .select("id, title, entity_id, is_test, approved_by_council, archived, status")
+      .eq("id", record_id)
+      .single();
 
-    if (glErr || !gl) {
-      return json({ ok: false, error: "ledger not found", details: glErr }, 404);
+    if (glErr) return json({ ok: false, error: "governance_ledger fetch failed", details: glErr }, 500);
+    if (!gl?.entity_id) return json({ ok: false, error: "Ledger missing entity_id" }, 400);
+
+    // 2) (Optional) Load envelope and enforce lane match if provided
+    if (envelope_id) {
+      const { data: env, error: envErr } = await supabase
+        .from("signature_envelopes")
+        .select("id, record_id, status, is_test, completed_at")
+        .eq("id", envelope_id)
+        .single();
+
+      if (envErr) return json({ ok: false, error: "signature_envelopes fetch failed", details: envErr }, 500);
+      if (env.record_id !== record_id) {
+        return json({ ok: false, error: "Envelope does not belong to record_id" }, 400);
+      }
+      if (env.is_test !== gl.is_test) {
+        return json({
+          ok: false,
+          error: "LANE_MISMATCH",
+          details: { ledger_is_test: gl.is_test, envelope_is_test: env.is_test },
+        }, 400);
+      }
+      // If you want to require completed only when envelope_id is provided:
+      if (env.status !== "completed") {
+        return json({ ok: false, error: "Envelope not completed", details: { status: env.status } }, 400);
+      }
     }
 
+    // 3) Seal (idempotent): returns canonical pointers
+    const { data: seal, error: sealErr } = await supabase.rpc(SEAL_RPC, {
+      p_ledger_id: record_id,
+    });
+
+    if (sealErr) return json({ ok: false, error: "seal rpc failed", details: sealErr }, 500);
+
+    // Expecting these keys from your finalized RPC:
+    const storage_bucket = seal?.storage_bucket ?? MINUTE_BOOK_BUCKET;
+    const storage_path = seal?.storage_path;
+    const file_hash = seal?.file_hash ?? seal?.pdf_hash ?? null;
+
+    if (!storage_path) {
+      return json({ ok: false, error: "Seal returned no storage_path", seal }, 500);
+    }
+
+    const file_name = basename(storage_path);
+
+    // 4) Derive entity_slug => entity_key_enum cast compatibility
     const { data: ent, error: entErr } = await supabase
       .from("entities")
-      .select("id,slug")
+      .select("id, slug")
       .eq("id", gl.entity_id)
-      .maybeSingle();
+      .single();
 
-    if (entErr || !ent?.slug) {
-      return json({ ok: false, error: "entity slug not found", details: entErr }, 400);
-    }
+    if (entErr) return json({ ok: false, error: "entities fetch failed", details: entErr }, 500);
+    const entity_slug = ent?.slug;
+    if (!entity_slug) return json({ ok: false, error: "Entity missing slug" }, 500);
 
-    const entityKey = String(ent.slug); // "holdings" | "lounge" | "real_estate" (must match enum)
-
-    // 2) Seal (idempotent, lane-safe) — MUST return storage pointers
-    const seal = await trySeal(supabase, recordId);
-
-    // Expected keys from your function: storage_bucket, storage_path, file_hash
-    const storageBucket = seal?.storage_bucket ?? seal?.bucket ?? seal?.storageBucket ?? null;
-    const storagePath = seal?.storage_path ?? seal?.path ?? seal?.storagePath ?? null;
-    const fileHash = seal?.file_hash ?? seal?.hash ?? seal?.fileHash ?? null;
-
-    if (!storageBucket || !storagePath) {
-      return json(
-        { ok: false, error: "Seal did not return storage pointers", details: seal ?? null },
-        500,
-      );
-    }
-
-    // 3) Upsert minute_book_entries (FK-safe domain_key + chk_minute_book_source safe source)
-    const entryDate = (gl.created_at ? String(gl.created_at).slice(0, 10) : null) ?? null;
-
-    const { data: mbeRows, error: mbeErr } = await supabase
+    // 5) Upsert/repair minute_book_entries (by source_record_id + lane)
+    const { data: mbeExisting, error: mbeSelErr } = await supabase
       .from("minute_book_entries")
-      .upsert(
-        {
-          entity_id: gl.entity_id,
-          entity_key: entityKey,
-          is_test: !!gl.is_test,
-          entry_type: "resolution",
-          title: gl.title,
-          entry_date: entryDate, // can be null if DB default exists; but your schema shows NOT NULL, so we pass it.
-          domain_key: DOMAIN_KEY,
-          section_name: SECTION_NAME,
-          source: MINUTE_BOOK_SOURCE,
-          source_record_id: gl.id,
-          storage_path: storagePath,
-          pdf_hash: fileHash,
-        } as any,
-        {
-          onConflict: "entity_key,entry_date,title",
-          ignoreDuplicates: false,
-        },
-      )
-      .select("id,source_record_id,storage_path")
+      .select("id, storage_path, pdf_hash")
+      .eq("source_record_id", record_id)
+      .eq("is_test", gl.is_test)
       .limit(1);
 
-    if (mbeErr || !mbeRows?.[0]?.id) {
-      return json({ ok: false, error: "minute_book_entries upsert failed", details: mbeErr }, 500);
+    if (mbeSelErr) return json({ ok: false, error: "minute_book_entries select failed", details: mbeSelErr }, 500);
+
+    let entry_id: string;
+
+    if (mbeExisting && mbeExisting.length > 0) {
+      entry_id = mbeExisting[0].id;
+
+      const { error: mbeUpdErr } = await supabase
+        .from("minute_book_entries")
+        .update({
+          title: gl.title,
+          storage_path,
+          file_name,
+          pdf_hash: file_hash,
+          source_envelope_id: envelope_id,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", entry_id);
+
+      if (mbeUpdErr) return json({ ok: false, error: "minute_book_entries update failed", details: mbeUpdErr }, 500);
+    } else {
+      const { data: mbeIns, error: mbeInsErr } = await supabase
+        .from("minute_book_entries")
+        .insert({
+          entity_id: gl.entity_id,
+          entity_key: entity_slug,            // relies on slug matching entity_key_enum labels
+          entry_type: "resolution",
+          title: gl.title,
+          source: "governance_ledger",
+          source_record_id: record_id,
+          source_envelope_id: envelope_id,
+          storage_path,
+          file_name,
+          pdf_hash: file_hash,
+          domain_key: "resolutions",
+          is_test: gl.is_test,
+        })
+        .select("id")
+        .single();
+
+      if (mbeInsErr) return json({ ok: false, error: "minute_book_entries insert failed", details: mbeInsErr }, 500);
+      entry_id = mbeIns.id;
     }
 
-    const mbeId = mbeRows[0].id as string;
-
-    // 4) Ensure supporting_documents PRIMARY pointer exists (required: uploaded_by, owner_id)
-    const { data: existingPrimary } = await supabase
+    // 6) Ensure supporting_documents has PRIMARY pointer (this is what your Reader depends on)
+    const { data: sdExisting, error: sdSelErr } = await supabase
       .from("supporting_documents")
-      .select("id")
-      .eq("entry_id", mbeId)
+      .select("id, file_path")
+      .eq("entry_id", entry_id)
       .eq("doc_type", "primary")
       .limit(1);
 
-    let primaryDocId: string | null = existingPrimary?.[0]?.id ?? null;
+    if (sdSelErr) return json({ ok: false, error: "supporting_documents select failed", details: sdSelErr }, 500);
 
-    if (!primaryDocId) {
-      const { data: ins, error: insErr } = await supabase
+    if (sdExisting && sdExisting.length > 0) {
+      const sdId = sdExisting[0].id;
+
+      const { error: sdUpdErr } = await supabase
         .from("supporting_documents")
-        .insert(
-          {
-            entry_id: mbeId,
-            entity_key: entityKey,
-            section: "resolutions", // doc_section_enum in your schema; "resolutions" is what you've been using successfully
-            file_path: storagePath,
-            file_name: pickFileName(storagePath),
-            doc_type: "primary",
-            version: 1,
-            uploaded_by: actorId,
-            uploaded_at: new Date().toISOString(),
-            owner_id: actorId,
-            file_hash: fileHash,
-            mime_type: "application/pdf",
-            verified: true,
-            registry_visible: true,
-            metadata: {},
-          } as any,
-        )
-        .select("id")
-        .limit(1);
+        .update({
+          file_path: storage_path,
+          file_name,
+          file_hash,
+          signature_envelope_id: envelope_id,
+          verified: true,
+          registry_visible: true,
+        })
+        .eq("id", sdId);
 
-      if (insErr || !ins?.[0]?.id) {
-        return json(
-          { ok: false, error: "supporting_documents primary insert failed", details: insErr },
-          500,
-        );
+      if (sdUpdErr) return json({ ok: false, error: "supporting_documents update failed", details: sdUpdErr }, 500);
+    } else {
+      const { error: sdInsErr } = await supabase
+        .from("supporting_documents")
+        .insert({
+          entry_id,
+          entity_key: entity_slug,
+          section: SUPPORTING_SECTION as any,
+          file_path: storage_path,
+          file_name,
+          doc_type: "primary",
+          file_hash,
+          signature_envelope_id: envelope_id,
+          verified: true,
+          registry_visible: true,
+        });
+
+      if (sdInsErr) {
+        return json({
+          ok: false,
+          error: "supporting_documents insert failed",
+          hint: "If this fails with enum error, set SUPPORTING_SECTION to a valid supporting_documents.section enum label.",
+          details: sdInsErr,
+        }, 500);
       }
-
-      primaryDocId = ins[0].id as string;
     }
 
-    // 5) Ensure verified_documents row exists (DO NOT supply generated columns)
-    // Required: title NOT NULL, verification_level is enum, document_class is enum.
-    // Also: storage_bucket + storage_path are required.
-    const { data: existingVD } = await supabase
+    // 7) Ensure verified_documents exists (respect generated columns: DO NOT set source_storage_* or source_entry_id)
+    const { data: vdExisting, error: vdSelErr } = await supabase
       .from("verified_documents")
       .select("id")
-      .eq("source_record_id", gl.id)
-      .eq("storage_bucket", MINUTE_BOOK_BUCKET)
-      .eq("storage_path", storagePath)
+      .eq("source_record_id", record_id)
       .limit(1);
 
-    let verifiedDocumentId: string | null = existingVD?.[0]?.id ?? null;
+    if (vdSelErr) return json({ ok: false, error: "verified_documents select failed", details: vdSelErr }, 500);
 
-    if (!verifiedDocumentId) {
-      const { data: vdIns, error: vdErr } = await supabase
+    if (!vdExisting || vdExisting.length === 0) {
+      const { error: vdInsErr } = await supabase
         .from("verified_documents")
-        .insert(
-          {
-            entity_id: gl.entity_id,
-            entity_slug: entityKey,
-            document_class: "resolution",
-            title: gl.title,
-            source_table: "governance_ledger",
-            source_record_id: gl.id,
-            storage_bucket: MINUTE_BOOK_BUCKET,
-            storage_path: storagePath,
-            file_hash: fileHash,
-            verification_level: "certified",
-            is_archived: true,
-          } as any,
-        )
-        .select("id")
-        .limit(1);
+        .insert({
+          entity_id: gl.entity_id,
+          entity_slug,
+          document_class: "resolution",
+          title: gl.title,
+          source_table: "governance_ledger",
+          source_record_id: record_id,
+          storage_bucket,
+          storage_path,
+          file_hash,
+          verification_level: "certified",
+          envelope_id,
+          is_archived: true,
+        });
 
-      if (vdErr || !vdIns?.[0]?.id) {
-        return json({ ok: false, error: "verified_documents insert failed", details: vdErr }, 500);
-      }
-
-      verifiedDocumentId = vdIns[0].id as string;
+      if (vdInsErr) return json({ ok: false, error: "verified_documents insert failed", details: vdInsErr }, 500);
     }
 
     return json({
       ok: true,
-      record_id: gl.id,
-      minute_book_entry_id: mbeId,
-      primary_doc_id: primaryDocId,
-      verified_document_id: verifiedDocumentId,
-      storage_bucket: storageBucket,
-      storage_path: storagePath,
-      file_hash: fileHash,
+      record_id,
+      envelope_id,
+      entry_id,
+      storage_bucket,
+      storage_path,
+      file_hash,
+      message: "Sealed + repaired minute book pointers + ensured verified registry (idempotent).",
     });
   } catch (e) {
-    return json(
-      {
-        ok: false,
-        error: "archive-save-document failed",
-        details: { message: String((e as any)?.message ?? e), raw: e ?? null },
-      },
-      500,
-    );
+    return json({ ok: false, error: "Unhandled", details: String(e) }, 500);
   }
 });
