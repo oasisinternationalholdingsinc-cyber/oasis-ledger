@@ -2,11 +2,14 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
+/* -----------------------------
+   CORS
+----------------------------- */
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, apikey, content-type, x-client-info",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
 const json = (body: unknown, status = 200) =>
@@ -15,20 +18,44 @@ const json = (body: unknown, status = 200) =>
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
 
+/* -----------------------------
+   Env
+----------------------------- */
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ??
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
+  throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
+}
 
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
   global: { fetch },
 });
 
+/* -----------------------------
+   Types
+----------------------------- */
 type ReqBody = {
   record_id: string; // governance_ledger.id
-  is_test?: boolean; // ignored by RPC (lane comes from ledger), but OK for logging
   trigger?: string;
+  is_test?: boolean; // accepted for UI parity; canonical SQL derives lane from record
+};
+
+type SealResult = {
+  status?: string; // e.g. "sealed" | "already_sealed" | "repaired"
+  ledger_id?: string;
+
+  minute_book_entry_id?: string | null;
+  verified_document_id?: string | null;
+
+  storage_bucket?: string | null;
+  storage_path?: string | null;
+  file_hash?: string | null;
+
+  repaired?: boolean | null;
 };
 
 serve(async (req) => {
@@ -46,31 +73,43 @@ serve(async (req) => {
   if (!record_id) return json({ ok: false, error: "record_id is required" }, 400);
 
   try {
+    // Canonical: ONE source of truth
     const { data, error } = await supabase.rpc("seal_governance_record_for_archive", {
       p_ledger_id: record_id,
     });
 
     if (error) {
-      console.error("seal_governance_record_for_archive error", error);
-      return json({ ok: false, error: `Archive seal failed: ${error.message}` }, 500);
+      console.error("seal_governance_record_for_archive error:", error);
+      return json(
+        { ok: false, error: `Archive seal failed: ${error.message}` },
+        500,
+      );
     }
 
-    const res = (data ?? null) as any;
-    if (!res) return json({ ok: false, error: "Archive seal failed: no data returned" }, 500);
+    const r: SealResult = (data as any) ?? {};
+    if (!r || (!r.ledger_id && !r.storage_path && !r.verified_document_id)) {
+      return json({ ok: false, error: "Archive seal failed: no usable data returned" }, 500);
+    }
 
-    // pass-through normalized
     return json({
       ok: true,
-      status: res.status ?? null,
-      ledger_id: res.ledger_id ?? record_id,
-      verified_document_id: res.verified_document_id ?? null,
-      storage_bucket: res.storage_bucket ?? null,
-      storage_path: res.storage_path ?? null,
-      file_hash: res.file_hash ?? null,
-      repaired: res.repaired ?? false,
+      status: r.status ?? null,
+      ledger_id: r.ledger_id ?? record_id,
+
+      minute_book_entry_id: r.minute_book_entry_id ?? null,
+      verified_document_id: r.verified_document_id ?? null,
+
+      storage_bucket: r.storage_bucket ?? null,
+      storage_path: r.storage_path ?? null,
+      file_hash: r.file_hash ?? null,
+
+      repaired: !!r.repaired,
     });
   } catch (e) {
-    console.error("archive-save-document fatal", e);
-    return json({ ok: false, error: `Archive save failed: ${e?.message ?? "unknown error"}` }, 500);
+    console.error("archive-save-document fatal:", e);
+    return json(
+      { ok: false, error: `Archive save failed: ${e instanceof Error ? e.message : "unknown error"}` },
+      500,
+    );
   }
 });
