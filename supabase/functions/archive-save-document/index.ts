@@ -9,32 +9,15 @@ type ReqBody = {
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers":
-    "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
   "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
-function json(data: unknown, status = 200) {
-  return new Response(JSON.stringify(data, null, 2), {
+const json = (x: unknown, status = 200) =>
+  new Response(JSON.stringify(x, null, 2), {
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
-}
-
-function requireUUID(value: unknown, field: string) {
-  if (typeof value !== "string" || !/^[0-9a-fA-F-]{36}$/.test(value)) {
-    throw new Error(`Invalid ${field}`);
-  }
-  return value;
-}
-
-function requireAuthHeader(req: Request) {
-  const auth = req.headers.get("authorization") ?? req.headers.get("Authorization");
-  if (!auth || !auth.toLowerCase().startsWith("bearer ")) {
-    throw new Error("Missing Authorization Bearer token");
-  }
-  return auth;
-}
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY =
@@ -42,14 +25,19 @@ const SERVICE_ROLE_KEY =
 
 const SEAL_RPC = "seal_governance_record_for_archive";
 
+function requireUUID(v: unknown, field: string) {
+  if (typeof v !== "string" || !/^[0-9a-fA-F-]{36}$/.test(v)) {
+    throw new Error(`Invalid ${field}`);
+  }
+  return v;
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
 
   try {
-    // Require browser auth (authority)
-    requireAuthHeader(req);
-
-    const body = (await req.json().catch(() => ({}))) as Partial<ReqBody>;
+    const body = (await req.json()) as ReqBody;
     const record_id = requireUUID(body.record_id, "record_id");
 
     const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
@@ -58,27 +46,14 @@ serve(async (req) => {
     });
 
     const { data, error } = await supabase.rpc(SEAL_RPC, { p_ledger_id: record_id });
-    if (error) throw new Error(error.message);
+
+    if (error) {
+      return json({ ok: false, error: error.message, details: error }, 500);
+    }
 
     const row = Array.isArray(data) ? data[0] : data;
-    if (!row) throw new Error("Seal RPC returned no rows");
-
-    return json({
-      ok: true,
-      record_id,
-      minute_book_entry_id: row.minute_book_entry_id ?? null,
-      verified_document_id: row.verified_document_id ?? null,
-      storage_bucket: row.storage_bucket ?? null,
-      storage_path: row.storage_path ?? null,
-      file_hash: row.file_hash ?? null,
-    });
-  } catch (err: any) {
-    return json(
-      {
-        ok: false,
-        error: err?.message ?? "archive-save-document failed",
-      },
-      500,
-    );
+    return json({ ok: true, result: row });
+  } catch (e) {
+    return json({ ok: false, error: e?.message ?? String(e) }, 400);
   }
 });
