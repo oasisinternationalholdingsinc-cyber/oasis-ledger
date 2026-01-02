@@ -9,7 +9,8 @@ type ReqBody = {
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Allow-Headers":
+    "authorization, apikey, content-type, x-client-info",
   "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
@@ -35,6 +36,43 @@ function requireUUID(v: unknown, field: string) {
   return v;
 }
 
+async function callArchiveSaveDocument(record_id: string) {
+  const url = `${SUPABASE_URL}/functions/v1/archive-save-document`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      // Use service role for both headers to keep it simple + consistent.
+      authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+      apikey: SERVICE_ROLE_KEY,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ record_id }),
+  });
+
+  const text = await res.text();
+  let parsed: any = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // keep raw text
+  }
+
+  if (!res.ok) {
+    const msg =
+      parsed?.error ||
+      parsed?.message ||
+      `archive-save-document HTTP ${res.status}`;
+    const detail = parsed ?? text;
+    const err = new Error(msg);
+    (err as any).detail = detail;
+    (err as any).status = res.status;
+    throw err;
+  }
+
+  return parsed ?? text;
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
 
@@ -53,34 +91,29 @@ serve(async (req) => {
     if (!env) throw new Error("Envelope not found");
     if (!env.record_id) throw new Error("Envelope missing record_id");
     if (env.status !== "completed") {
-      throw new Error(`Archive blocked: envelope status is '${env.status}', expected 'completed'`);
+      throw new Error(
+        `Archive blocked: envelope status is '${env.status}', expected 'completed'`,
+      );
     }
 
-    // 2) Seal by record_id
-    const { data, error } = await supabase
-      .rpc("seal_governance_record_for_archive", { p_ledger_id: env.record_id })
-      .single();
-
-    if (error) throw error;
+    // 2) Delegate to archive-save-document (single enterprise path)
+    const result = await callArchiveSaveDocument(env.record_id);
 
     return json({
       ok: true,
       envelope_id: env.id,
       record_id: env.record_id,
-      storage_bucket: data.storage_bucket,
-      storage_path: data.storage_path,
-      file_hash: data.file_hash,
-      verified_document_id: data.verified_document_id,
-      minute_book_entry_id: data.minute_book_entry_id,
+      result,
     });
   } catch (err: any) {
     return json(
       {
         ok: false,
         error: err?.message ?? "archive-signed-resolution failed",
-        details: err,
+        status: err?.status,
+        detail: err?.detail,
       },
-      500
+      500,
     );
   }
 });

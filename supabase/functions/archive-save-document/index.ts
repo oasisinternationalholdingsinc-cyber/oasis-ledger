@@ -3,21 +3,23 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 type ReqBody = {
-  record_id: string;   // governance_ledger.id
+  record_id: string; // governance_ledger.id
 };
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Allow-Headers":
+    "authorization, apikey, content-type, x-client-info",
   "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
-const json = (x: unknown, status = 200) =>
-  new Response(JSON.stringify(x, null, 2), {
+function json(payload: unknown, status = 200) {
+  return new Response(JSON.stringify(payload, null, 2), {
     status,
     headers: { ...cors, "Content-Type": "application/json" },
   });
+}
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY =
@@ -35,12 +37,24 @@ function requireUUID(v: unknown, field: string) {
   return v;
 }
 
+function serializeError(err: any) {
+  return {
+    message: err?.message ?? String(err),
+    name: err?.name,
+    code: err?.code,
+    details: err?.details,
+    hint: err?.hint,
+    stack: err?.stack,
+  };
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+  if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
 
   try {
     const body = (await req.json()) as ReqBody;
-    const record_id = requireUUID(body.record_id, "record_id");
+    const record_id = requireUUID(body?.record_id, "record_id");
 
     const { data, error } = await supabase
       .rpc("seal_governance_record_for_archive", { p_ledger_id: record_id })
@@ -50,6 +64,7 @@ serve(async (req) => {
 
     return json({
       ok: true,
+      record_id,
       storage_bucket: data.storage_bucket,
       storage_path: data.storage_path,
       file_hash: data.file_hash,
@@ -61,7 +76,7 @@ serve(async (req) => {
       {
         ok: false,
         error: err?.message ?? "archive-save-document failed",
-        details: err,
+        details: serializeError(err),
       },
       500
     );
