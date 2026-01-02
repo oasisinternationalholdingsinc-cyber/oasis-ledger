@@ -9,8 +9,7 @@ type ReqBody = {
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers":
-    "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
   "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
@@ -22,8 +21,7 @@ const json = (x: unknown, status = 200) =>
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY =
-  Deno.env.get("SERVICE_ROLE_KEY") ??
-  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
   global: { fetch },
@@ -39,9 +37,7 @@ function requireUUID(v: unknown, field: string) {
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-  if (req.method !== "POST") {
-    return json({ ok: false, error: "Method not allowed" }, 405);
-  }
+  if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
 
   try {
     const body = (await req.json()) as ReqBody;
@@ -52,9 +48,7 @@ serve(async (req) => {
       .maybeSingle();
 
     if (error) throw error;
-    if (!data) {
-      throw new Error("seal_governance_record_for_archive returned no row");
-    }
+    if (!data) throw new Error("seal_governance_record_for_archive returned no row");
 
     return json({
       ok: true,
@@ -64,6 +58,8 @@ serve(async (req) => {
       file_hash: data.file_hash,
       verified_document_id: data.verified_document_id,
       minute_book_entry_id: data.minute_book_entry_id,
+      already_archived: data.already_archived ?? null,
+      repaired: data.repaired ?? null,
     });
   } catch (err: any) {
     return json(

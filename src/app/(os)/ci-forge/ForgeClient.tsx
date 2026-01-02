@@ -103,10 +103,11 @@ type ArchiveEvidence = {
   minute_book_entry_id: string | null;
   minute_book_title: string | null;
   minute_book_is_test: boolean | null;
+  minute_book_storage_path: string | null;
   supporting_docs: Array<{
     id: string;
     doc_type: string | null;
-    file_path: string | null;
+    file_path: string | null; // ✅ supporting_documents uses file_path (no storage_bucket column)
     file_name: string | null;
     file_hash: string | null;
     mime_type: string | null;
@@ -159,7 +160,7 @@ async function extractFnError(err: any): Promise<string> {
 }
 
 export default function ForgeClient() {
-  const { activeEntity } = useEntity();
+  const { activeEntity } = useEntity(); // "holdings" | "lounge" | "real-estate" (slug)
   const { env } = useOsEnv(); // "ROT" | "SANDBOX"
   const isTest = env === "SANDBOX";
 
@@ -201,6 +202,7 @@ export default function ForgeClient() {
     minute_book_entry_id: null,
     minute_book_title: null,
     minute_book_is_test: null,
+    minute_book_storage_path: null,
     supporting_docs: [],
     verified_document: null,
   });
@@ -543,7 +545,7 @@ export default function ForgeClient() {
       // 1) minute book entry (lane-safe)
       const mbe = await supabase
         .from("minute_book_entries")
-        .select("id, title, is_test, created_at")
+        .select("id, title, is_test, storage_path, created_at")
         .eq("source_record_id", recordId)
         .eq("is_test", isTest)
         .order("created_at", { ascending: false })
@@ -569,7 +571,7 @@ export default function ForgeClient() {
         else supporting_docs = ((sd.data ?? []) as any) ?? [];
       }
 
-      // 3) verified registry
+      // 3) verified registry (lane is derived via record_id linkage + archive function)
       const vd = await supabase
         .from("verified_documents")
         .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
@@ -584,6 +586,7 @@ export default function ForgeClient() {
         minute_book_entry_id: minuteBookEntryId,
         minute_book_title: (mbe.data as any)?.title ?? null,
         minute_book_is_test: (mbe.data as any)?.is_test ?? null,
+        minute_book_storage_path: (mbe.data as any)?.storage_path ?? null,
         supporting_docs,
         verified_document: (vd.data as any) ?? null,
       });
@@ -594,6 +597,7 @@ export default function ForgeClient() {
         minute_book_entry_id: null,
         minute_book_title: null,
         minute_book_is_test: null,
+        minute_book_storage_path: null,
         supporting_docs: [],
         verified_document: null,
       });
@@ -608,6 +612,7 @@ export default function ForgeClient() {
         minute_book_entry_id: null,
         minute_book_title: null,
         minute_book_is_test: null,
+        minute_book_storage_path: null,
         supporting_docs: [],
         verified_document: null,
       });
@@ -618,13 +623,12 @@ export default function ForgeClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.ledger_id, isTest]);
 
-  const alreadyArchived = !!evidence.minute_book_entry_id;
+  const alreadyArchived = !!evidence.minute_book_entry_id || !!evidence.verified_document?.id;
 
   // --------------------------
   // ✅ View Archive PDF (prefers Verified registry; falls back to Minute Book primary)
   // --------------------------
   async function openStorageObject(bucket: string, path: string) {
-    // Create a signed URL and open it in new tab
     const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, 60);
     if (error || !data?.signedUrl) {
       throw new Error(error?.message || "Unable to create signed URL.");
@@ -640,18 +644,25 @@ export default function ForgeClient() {
 
     setIsOpeningArchive(true);
     try {
-      // 1) If verified registry exists -> open verified artifact
+      // 1) Verified registry artifact (authoritative when present)
       if (evidence.verified_document?.storage_bucket && evidence.verified_document?.storage_path) {
         await openStorageObject(evidence.verified_document.storage_bucket, evidence.verified_document.storage_path);
         flashInfo("Opened Verified archive PDF.");
         return;
       }
 
-      // 2) Else: open minute_book primary supporting doc
+      // 2) Minute Book primary supporting doc (bucket is minute_book; path stored in supporting_documents.file_path)
       const primary = evidence.supporting_docs.find((d) => d.doc_type === "primary" && d.file_path);
       if (primary?.file_path) {
         await openStorageObject("minute_book", primary.file_path);
         flashInfo("Opened Minute Book render (primary).");
+        return;
+      }
+
+      // 3) Minute book entry storage_path (some deployments store the primary path here)
+      if (evidence.minute_book_storage_path) {
+        await openStorageObject("minute_book", evidence.minute_book_storage_path);
+        flashInfo("Opened Minute Book render (entry).");
         return;
       }
 
@@ -977,8 +988,8 @@ export default function ForgeClient() {
       <div className="mt-2 text-[11px] text-slate-200">
         <span className="font-semibold text-amber-200">Signed ≠ Archived.</span>{" "}
         Signing completes the envelope. Archiving creates the Minute Book registry entry, generates the archive-grade
-        render + hash, and (when available) writes the Verified registry pointers. If your Registry pointers ever go
-        missing, use <span className="font-semibold text-amber-200">Re-seal/Repair</span> (idempotent).
+        render + hash, and writes the Verified registry pointers. If pointers ever go missing, use{" "}
+        <span className="font-semibold text-amber-200">Re-seal/Repair</span> (idempotent).
       </div>
     </div>
   );
@@ -992,7 +1003,8 @@ export default function ForgeClient() {
         </div>
         <h1 className="mt-1 text-lg font-semibold text-amber-300">Execution — Signature-required</h1>
         <p className="mt-1 text-[11px] text-slate-400">
-          Entity-scoped via OS selector. Environment-scoped via OS env toggle (is_test). Forge is signature-only; archive artifacts are produced after completion.
+          Entity-scoped via OS selector. Environment-scoped via OS env toggle (is_test). Forge is signature-only; archive
+          artifacts are produced after completion.
         </p>
       </div>
 
@@ -1191,7 +1203,6 @@ export default function ForgeClient() {
                             {isArchiving ? "Archiving…" : alreadyArchived ? "Archive now (Already archived)" : "Archive now"}
                           </button>
 
-                          {/* ✅ View Archive PDF */}
                           <button
                             type="button"
                             onClick={onViewArchivePdf}
@@ -1206,7 +1217,6 @@ export default function ForgeClient() {
                             {isOpeningArchive ? "Opening…" : "View Archive PDF"}
                           </button>
 
-                          {/* ✅ Repair-safe Re-seal */}
                           <button
                             type="button"
                             onClick={onRepairReseal}
