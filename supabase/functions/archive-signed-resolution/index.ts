@@ -1,51 +1,48 @@
-// supabase/functions/archive-signed-resolution/index.ts
 import { serve } from "https://deno.land/std/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import {
+  cors,
+  json,
+  getServiceClient,
+  requireUUID,
+  SEAL_RPC,
+} from "../_shared/archive.ts";
 
 serve(async (req) => {
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { headers: cors });
+  }
+
   try {
-    const { envelope_id } = await req.json();
-    if (!envelope_id) throw new Error("envelope_id required");
+    const body = await req.json();
+    const envelope_id = requireUUID(body.envelope_id, "envelope_id");
 
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-    );
+    const supabase = getServiceClient();
 
-    // resolve ledger_id
-    const { data: env, error } = await supabase
+    const { data: env, error: envErr } = await supabase
       .from("signature_envelopes")
       .select("record_id")
       .eq("id", envelope_id)
       .single();
 
-    if (error || !env?.record_id) {
+    if (envErr || !env?.record_id) {
       throw new Error("Envelope not linked to ledger record");
     }
 
-    const { data, error: sealErr } = await supabase
-      .rpc("seal_governance_record_for_archive", {
-        p_ledger_id: env.record_id,
-      })
+    const { data, error } = await supabase
+      .rpc(SEAL_RPC, { p_ledger_id: env.record_id })
       .single();
 
-    if (sealErr) throw sealErr;
+    if (error) throw error;
 
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        minute_book_entry_id: data.minute_book_entry_id,
-        verified_document_id: data.verified_document_id,
-      }),
-      { headers: { "Content-Type": "application/json" } }
-    );
+    return json({
+      ok: true,
+      minute_book_entry_id: data.minute_book_entry_id,
+      verified_document_id: data.verified_document_id,
+    });
   } catch (err: any) {
-    return new Response(
-      JSON.stringify({
-        ok: false,
-        error: err.message ?? "archive-signed-resolution failed",
-      }),
-      { status: 500 }
+    return json(
+      { ok: false, error: err.message ?? "archive-signed-resolution failed" },
+      500
     );
   }
 });
