@@ -21,59 +21,16 @@ export const json = (x: unknown, status = 200) =>
     headers: { ...cors, "Content-Type": "application/json" },
   });
 
-export function serviceClient(req: Request) {
-  // service_role for DB writes, but preserve the user's JWT so we can read auth.getUser()
-  const authHeader = req.headers.get("authorization") ?? "";
+export function getServiceClient() {
   return createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-    global: { headers: { authorization: authHeader } },
+    global: { fetch },
+    auth: { persistSession: false, autoRefreshToken: false },
   });
 }
 
-export async function getActorUserId(supabase: ReturnType<typeof createClient>) {
-  const { data, error } = await supabase.auth.getUser();
-  if (error) return null;
-  return data?.user?.id ?? null;
-}
-
-export function pickFileName(path: string) {
-  const parts = path.split("/");
-  return parts[parts.length - 1] ?? path;
-}
-
-export async function pickMinuteBookPdfPath(
-  supabase: ReturnType<typeof createClient>,
-  ledgerId: string,
-  entityKey: string,
-) {
-  // ✅ Canonical is lowercase "resolutions" (but keep legacy fallback)
-  const patterns = [
-    `${entityKey}/resolutions/${ledgerId}-signed.pdf`,
-    `${entityKey}/resolutions/${ledgerId}.pdf`,
-    `${entityKey}/Resolutions/${ledgerId}-signed.pdf`,
-    `${entityKey}/Resolutions/${ledgerId}.pdf`,
-  ];
-
-  for (const exact of patterns) {
-    const { data } = await supabase
-      .from("storage.objects")
-      .select("id, name, created_at")
-      .eq("bucket_id", MINUTE_BOOK_BUCKET)
-      .eq("name", exact)
-      .order("created_at", { ascending: false })
-      .limit(1);
-
-    if (data?.[0]?.name) return { path: data[0].name as string, objectId: data[0].id as string };
+export function requireUUID(id: unknown, field: string) {
+  if (typeof id !== "string" || !/^[0-9a-fA-F-]{36}$/.test(id)) {
+    throw new Error(`Invalid ${field}`);
   }
-
-  // Loose fallback: newest object containing ledgerId under entityKey/
-  const { data: loose } = await supabase
-    .from("storage.objects")
-    .select("id, name, created_at")
-    .eq("bucket_id", MINUTE_BOOK_BUCKET)
-    .ilike("name", `${entityKey}/%${ledgerId}%`)
-    .order("created_at", { ascending: false })
-    .limit(1);
-
-  if (loose?.[0]?.name) return { path: loose[0].name as string, objectId: loose[0].id as string };
-  return { path: null, objectId: null };
+  return id;
 }

@@ -6,10 +6,6 @@ type ReqBody = {
   envelope_id: string; // signature_envelopes.id
 };
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SERVICE_ROLE_KEY =
-  Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
@@ -23,66 +19,92 @@ const json = (x: unknown, status = 200) =>
     headers: { ...cors, "Content-Type": "application/json" },
   });
 
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const SERVICE_ROLE_KEY =
+  Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+const SEAL_RPC = "seal_governance_record_for_archive";
+
+function isUuid(v: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+}
+
 serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-  if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);
-
-  const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
-
   try {
-    const body = (await req.json().catch(() => ({}))) as Partial<ReqBody>;
-    const envelope_id = (body.envelope_id ?? "").trim();
-    if (!envelope_id) return json({ ok: false, error: "Missing envelope_id" }, 400);
+    if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+    if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
 
-    // 1) Load envelope and validate it is completed
+    const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+      global: { fetch },
+      auth: { persistSession: false },
+    });
+
+    const body = (await req.json().catch(() => null)) as ReqBody | null;
+    if (!body?.envelope_id || !isUuid(body.envelope_id)) {
+      return json({ ok: false, error: "Missing/invalid envelope_id" }, 400);
+    }
+
+    // Minimal envelope read: we only need (status, record_id).
+    // IMPORTANT: in your schema, signature_envelopes.record_id = governance_ledger.id
     const { data: env, error: envErr } = await supabase
       .from("signature_envelopes")
-      .select("id, record_id, status, is_test")
-      .eq("id", envelope_id)
-      .single();
+      .select("id,status,record_id,completed_at,is_test")
+      .eq("id", body.envelope_id)
+      .maybeSingle();
 
-    if (envErr || !env) return json({ ok: false, error: "Envelope not found", details: envErr }, 404);
-
-    if (env.status !== "completed") {
+    if (envErr) {
       return json(
-        { ok: false, error: "Envelope not completed", envelope_id, status: env.status },
+        { ok: false, error: "Failed to read signature_envelopes", details: { message: envErr.message, code: envErr.code } },
+        500,
+      );
+    }
+
+    if (!env) return json({ ok: false, error: "Envelope not found" }, 404);
+
+    if (!env.record_id || !isUuid(env.record_id)) {
+      return json({ ok: false, error: "Envelope missing record_id (ledger id)" }, 500);
+    }
+
+    if (String(env.status).toLowerCase() !== "completed") {
+      return json(
+        {
+          ok: false,
+          error: "Envelope is not completed",
+          envelope: { id: env.id, status: env.status, completed_at: env.completed_at ?? null },
+        },
         400,
       );
     }
 
-    const record_id = String(env.record_id);
+    // Single source of truth: SQL function handles lane-safe is_test from governance_ledger.
+    const { data, error } = await supabase.rpc(SEAL_RPC, { p_ledger_id: env.record_id });
 
-    // 2) Delegate to archive-save-document (idempotent)
-    // Instead of HTTP-calling another function, we just repeat the core action:
-    // call seal rpc + repair pointers by calling the save-function endpoint is optional.
-    // Simpler: call the RPC-based save function as a separate edge call from the client.
-    //
-    // Here we DO the minimal enterprise delegation by invoking archive-save-document via HTTP:
-    const url = `${SUPABASE_URL}/functions/v1/archive-save-document`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        // service role is allowed to call internal function endpoints
-        authorization: `Bearer ${SERVICE_ROLE_KEY}`,
-        apikey: SERVICE_ROLE_KEY,
-      },
-      body: JSON.stringify({ record_id }),
-    });
-
-    const payload = await res.json().catch(() => null);
-    if (!res.ok) {
-      return json({ ok: false, error: "archive-save-document failed", details: payload }, 500);
+    if (error) {
+      return json(
+        {
+          ok: false,
+          error: "seal_governance_record_for_archive failed",
+          details: { message: error.message, code: error.code, hint: error.hint },
+          envelope: { id: env.id, record_id: env.record_id, is_test: env.is_test ?? null },
+        },
+        500,
+      );
     }
+
+    const row = Array.isArray(data) ? data[0] : data;
 
     return json({
       ok: true,
-      envelope_id,
-      record_id,
-      delegated: true,
-      result: payload,
+      envelope_id: env.id,
+      record_id: env.record_id,
+      // helpful debug signal (doesn't affect logic)
+      envelope_is_test: env.is_test ?? null,
+      result: row ?? data,
     });
   } catch (e) {
-    return json({ ok: false, error: "archive-signed-resolution failed", details: { message: String(e) } }, 500);
+    return json(
+      { ok: false, error: "archive-signed-resolution crashed", details: { message: e?.message ?? String(e) } },
+      500,
+    );
   }
 });
