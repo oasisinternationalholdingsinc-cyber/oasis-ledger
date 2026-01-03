@@ -5,7 +5,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 type ReqBody = {
   ledger_id?: string;
   record_id?: string; // legacy compatibility
-  actor_id?: string;  // optional override
+  actor_id?: string;  // optional override (operator/debug only)
 };
 
 const cors = {
@@ -27,38 +27,36 @@ const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ??
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
+const isUuid = (s: string) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    .test(s);
+
 serve(async (req) => {
+  const reqId = req.headers.get("x-sb-request-id") ?? null;
+
   try {
     if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-    if (req.method !== "POST") {
-      return json({ ok: false, error: "POST only" }, 405);
-    }
+    if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);
 
     // --- Auth required (actor resolution is mandatory) ---
     const authHeader =
-      req.headers.get("authorization") ??
-      req.headers.get("Authorization");
+      req.headers.get("authorization") ?? req.headers.get("Authorization");
 
     const jwt =
       authHeader && authHeader.startsWith("Bearer ")
         ? authHeader.slice(7)
         : null;
 
-    if (!jwt) {
-      return json(
-        { ok: false, error: "Auth session missing" },
-        401,
-      );
-    }
-
     const body = (await req.json().catch(() => ({}))) as ReqBody;
 
     // Accept both ledger_id and legacy record_id
     const ledgerId = (body.ledger_id ?? body.record_id)?.trim();
-    if (!ledgerId) {
-      return json({ ok: false, error: "ledger_id required" }, 400);
+    if (!ledgerId) return json({ ok: false, error: "ledger_id required" }, 400);
+    if (!isUuid(ledgerId)) {
+      return json({ ok: false, error: "ledger_id must be a uuid" }, 400);
     }
 
+    // Service-role client for RPC + auth.getUser
     const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
       global: { fetch },
       auth: { persistSession: false },
@@ -66,8 +64,15 @@ serve(async (req) => {
 
     // Resolve actor
     let actorId = body.actor_id?.trim() ?? null;
+    if (actorId && !isUuid(actorId)) {
+      return json({ ok: false, error: "actor_id must be a uuid" }, 400);
+    }
 
     if (!actorId) {
+      if (!jwt) {
+        return json({ ok: false, error: "Auth session missing" }, 401);
+      }
+
       const { data: userRes, error: userErr } =
         await supabaseAdmin.auth.getUser(jwt);
 
@@ -81,7 +86,7 @@ serve(async (req) => {
       actorId = userRes.user.id;
     }
 
-    // --- Canonical archive / reseal call ---
+    // --- Canonical enterprise sealer call ---
     const { data, error } = await supabaseAdmin.rpc(
       "seal_governance_record_for_archive",
       {
@@ -94,8 +99,9 @@ serve(async (req) => {
       return json(
         {
           ok: false,
-          error: error.message ?? "archive failed",
+          error: error.message ?? "seal failed",
           details: error,
+          request_id: reqId,
         },
         500,
       );
@@ -112,7 +118,7 @@ serve(async (req) => {
       file_hash: row?.file_hash ?? null,
       verified_document_id: row?.verified_document_id ?? null,
       minute_book_entry_id: row?.minute_book_entry_id ?? null,
-      raw: data ?? null,
+      request_id: reqId,
     });
   } catch (e) {
     return json(
@@ -120,6 +126,7 @@ serve(async (req) => {
         ok: false,
         error: "archive-save-document failed",
         details: String(e),
+        request_id: reqId,
       },
       500,
     );
