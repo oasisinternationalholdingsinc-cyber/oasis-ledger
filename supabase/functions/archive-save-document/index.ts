@@ -3,9 +3,7 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 type ReqBody = {
-  ledger_id?: string; // canonical
-  record_id?: string; // backward compat
-  actor_id?: string;  // optional override (normally derived from auth session)
+  ledger_id?: string;
 };
 
 const cors = {
@@ -23,95 +21,68 @@ const json = (x: unknown, status = 200) =>
   });
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_ANON_KEY =
-  Deno.env.get("SUPABASE_ANON_KEY") ?? Deno.env.get("SUPABASE_ANON_PUBLIC_KEY")!;
-
-const SEAL_API_RPC = "seal_governance_record_for_archive_api";
+const SERVICE_ROLE_KEY =
+  Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 serve(async (req) => {
   try {
-    // Preflight
     if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-
-    // Must be POST for mutations
-    if (req.method !== "POST") {
+    if (req.method !== "POST")
       return json({ ok: false, error: "POST required" }, 405);
-    }
 
-    // Parse body
-    let body: ReqBody = {};
-    try {
-      body = (await req.json()) as ReqBody;
-    } catch {
-      body = {};
-    }
-
-    const ledgerId = body.ledger_id ?? body.record_id;
-    if (!ledgerId) return json({ ok: false, error: "ledger_id required" }, 400);
-
-    // Auth: require a real session
+    // Auth header must be present so we can resolve actor_id
     const authHeader = req.headers.get("authorization") ?? "";
-    if (!authHeader) return json({ ok: false, error: "Auth session missing!" }, 401);
+    if (!authHeader.toLowerCase().startsWith("bearer ")) {
+      return json({ ok: false, error: "Auth session missing!" }, 401);
+    }
 
-    const userClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      global: {
-        fetch,
-        headers: {
-          Authorization: authHeader,
-          apikey: req.headers.get("apikey") ?? SUPABASE_ANON_KEY,
-        },
-      },
-      auth: {
-        persistSession: false,
-        autoRefreshToken: false,
-        detectSessionInUrl: false,
-      },
+    const body = (await req.json().catch(() => ({}))) as ReqBody;
+    const ledger_id = body.ledger_id?.trim();
+    if (!ledger_id) return json({ ok: false, error: "ledger_id required" }, 400);
+
+    // Service-role client for RPC + writes
+    const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+      global: { fetch },
+      auth: { persistSession: false },
     });
 
-    // Resolve actor
-    let actorId = body.actor_id ?? null;
+    // Resolve actor from the incoming JWT (so supporting_documents uploaded_by/owner_id is valid)
+    const authed = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+      global: { fetch, headers: { authorization: authHeader } },
+      auth: { persistSession: false },
+    });
 
-    if (!actorId) {
-      const { data: userData, error: userErr } = await userClient.auth.getUser();
-      if (userErr || !userData?.user?.id) {
-        return json(
-          { ok: false, error: "Auth session missing!", details: userErr?.message ?? null },
-          401,
-        );
-      }
-      actorId = userData.user.id;
+    const { data: userData, error: userErr } = await authed.auth.getUser();
+    if (userErr || !userData?.user?.id) {
+      return json(
+        { ok: false, error: "Auth session missing!", details: userErr?.message },
+        401,
+      );
     }
+    const actor_id = userData.user.id;
 
-    // Call the stable API wrapper (SECURITY DEFINER JSON wrapper)
-    const { data, error } = await userClient.rpc(SEAL_API_RPC, {
-      p_ledger_id: ledgerId,
-      p_actor_id: actorId,
+    // ✅ IMPORTANT: call the API wrapper that matches your DB signature
+    // public.seal_governance_record_for_archive_api(p_ledger_id uuid, p_actor_id uuid) returns jsonb
+    const { data, error } = await admin.rpc("seal_governance_record_for_archive_api", {
+      p_ledger_id: ledger_id,
+      p_actor_id: actor_id,
     });
 
     if (error) {
       return json(
         {
           ok: false,
-          error: error.message ?? "seal failed",
-          details: {
-            code: error.code ?? null,
-            hint: (error as any).hint ?? null,
-            details: (error as any).details ?? null,
-          },
+          error: error.message,
+          details: { code: error.code, hint: error.hint, details: error.details },
         },
         500,
       );
     }
 
-    // data is jsonb from the wrapper
-    return json(data ?? { ok: true }, 200);
+    return json({ ok: true, ...data }, 200);
   } catch (e) {
     return json(
-      {
-        ok: false,
-        error: "archive-save-document failed",
-        details: String(e?.message ?? e),
-      },
+      { ok: false, error: "archive-save-document failed", details: String(e) },
       500,
     );
   }
