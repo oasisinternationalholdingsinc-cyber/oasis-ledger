@@ -44,31 +44,31 @@ serve(async (req) => {
       return json({ ok: false, error: "Missing SUPABASE_URL or SERVICE_ROLE_KEY" }, 500);
     }
 
-    // 3) Resolve actor from caller JWT (required for supporting_documents uploaded_by/owner_id)
-    const authHeader = req.headers.get("authorization") ?? "";
-    const userClient = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_ANON_KEY") ?? "", {
-      global: { fetch },
-      auth: { persistSession: false },
-      headers: authHeader ? { Authorization: authHeader } : {},
-    });
-
-    const { data: userData, error: userErr } = await userClient.auth.getUser();
-    if (userErr) throw userErr;
-
-    const actorId = userData?.user?.id;
-    if (!actorId) {
-      return json(
-        { ok: false, error: "Actor could not be resolved (auth required)" },
-        401
-      );
-    }
-
-    // 4) Service role RPC call (canonical)
+    // 3) Service role client (canonical)
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
       global: { fetch },
       auth: { persistSession: false },
     });
 
+    // 4) Resolve actor from the caller JWT using service role (reliable in Edge)
+    const authHeader = req.headers.get("authorization") ?? "";
+    const token = authHeader.toLowerCase().startsWith("bearer ")
+      ? authHeader.slice(7).trim()
+      : "";
+
+    if (!token) {
+      return json({ ok: false, error: "Auth session missing!" }, 401);
+    }
+
+    const { data: userData, error: userErr } = await admin.auth.getUser(token);
+    if (userErr) throw userErr;
+
+    const actorId = userData?.user?.id;
+    if (!actorId) {
+      return json({ ok: false, error: "Actor could not be resolved" }, 401);
+    }
+
+    // 5) Seal + repair (idempotent) — requires p_actor_id for supporting_documents ownership fields
     const { data, error } = await admin.rpc("seal_governance_record_for_archive", {
       p_ledger_id: ledgerId,
       p_actor_id: actorId,
