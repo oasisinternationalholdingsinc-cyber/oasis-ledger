@@ -303,7 +303,6 @@ export default function CIAlchemyPage() {
     const q = query.trim().toLowerCase();
     if (q) {
       list = list.filter((d) => {
-        // ✅ SAFEST: avoids template literal backslash/newline copy-paste issues (Turbopack parse error)
         const hay = [d.title ?? "", d.draft_text ?? ""].join("\n").toLowerCase();
         return hay.includes(q);
       });
@@ -375,6 +374,10 @@ export default function CIAlchemyPage() {
       flashError("Add a title or some context before running CI-Alchemy.");
       return;
     }
+    if (selectedDraft && !canMutateSelected) {
+      flashError("This draft is locked (finalized/ledger-linked). Create a new draft to run Alchemy.");
+      return;
+    }
 
     const baseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -390,6 +393,77 @@ export default function CIAlchemyPage() {
 
       const accessToken = sessionData?.session?.access_token;
       if (!accessToken) return flashError("Not authenticated. Please log in (OS auth gate).");
+
+      // ✅ IMPORTANT: Ensure we have a REAL governance_drafts row to write into.
+      // This prevents reloadDrafts() from wiping the editor after the flash.
+      const ensureDraftRow = async (): Promise<string> => {
+        if (selectedId) return selectedId;
+
+        // Create a minimal draft row so Alchemy output has a stable DB home.
+        const { data: entityRow, error: entityErr } = await supabase
+          .from("entities")
+          .select("id, name, slug")
+          .eq("slug", activeEntity)
+          .single();
+
+        if (entityErr || !entityRow) throw entityErr ?? new Error("Entity not found.");
+
+        const basePayload: any = {
+          entity_id: entityRow.id as string,
+          entity_slug: activeEntity,
+          entity_name: entityRow.name as string,
+          title: title.trim() || "(untitled)",
+          draft_text: body || "",
+          record_type: "resolution",
+          status: "draft" as DraftStatus,
+          is_test: isSandbox,
+        };
+
+        const insertTry = await supabase
+          .from("governance_drafts")
+          .insert(basePayload)
+          .select(
+            `
+              id, entity_id, entity_slug, entity_name, title, record_type, draft_text,
+              status, created_at, updated_at, finalized_record_id, is_test
+            `
+          )
+          .single();
+
+        if (insertTry.error) {
+          if (isMissingColumnErr(insertTry.error)) {
+            delete basePayload.is_test;
+            const retry = await supabase
+              .from("governance_drafts")
+              .insert(basePayload)
+              .select(
+                `
+                  id, entity_id, entity_slug, entity_name, title, record_type, draft_text,
+                  status, created_at, updated_at, finalized_record_id
+                `
+              )
+              .single();
+            if (retry.error) throw retry.error;
+            const created = retry.data as DraftRecord;
+
+            setSelectedId(created.id);
+            setTitle(created.title ?? "");
+            setBody(created.draft_text ?? "");
+            markLoadedSnapshot(created.id, created.title ?? "", created.draft_text ?? "");
+            return created.id;
+          }
+          throw insertTry.error;
+        }
+
+        const created = insertTry.data as DraftRecord;
+        setSelectedId(created.id);
+        setTitle(created.title ?? "");
+        setBody(created.draft_text ?? "");
+        markLoadedSnapshot(created.id, created.title ?? "", created.draft_text ?? "");
+        return created.id;
+      };
+
+      const targetDraftId = await ensureDraftRow();
 
       const hasBody = body.trim().length > 0;
       const instructions = hasBody
@@ -409,6 +483,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         language: "English",
         is_test: isSandbox,
         lane: isSandbox ? "SANDBOX" : "ROT",
+        // ✅ Pass the target draft id so backend can correlate (even if it doesn't write).
+        draft_id: targetDraftId,
       };
 
       const res = await fetch(`${baseUrl}/functions/v1/scribe`, {
@@ -430,39 +506,71 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       const data = await res.json();
       if (!data?.ok) return flashError(`CI-Alchemy failed: ${data?.error || data?.stage || "Unknown error."}`);
 
-      const draftId: string | undefined = data.draft_id;
       const draftText: string = data.draft_text || data.draft || data.content || data.text || "";
       if (!draftText?.trim()) return flashError("CI-Alchemy returned no usable draft body.");
 
       const producedTitle = (data.title || title.trim() || "(untitled)") as string;
 
-      const newDraft: DraftRecord = {
-        id: draftId || crypto.randomUUID(),
-        entity_id: data.entity_id ?? null,
-        entity_slug: data.entity_slug ?? activeEntity,
-        entity_name: data.entity_name ?? activeEntityLabel,
+      // ✅ CRITICAL: Persist Alchemy output into the REAL governance_drafts row
+      // BEFORE we reloadDrafts, so the editor cannot be wiped.
+      const updatePayload: any = {
         title: producedTitle,
-        record_type: data.record_type || "resolution",
         draft_text: draftText,
-        status: (data.draft_status || "draft") as DraftStatus,
-        created_at: data.draft_created_at ?? new Date().toISOString(),
-        updated_at: null,
-        finalized_record_id: data.finalized_record_id ?? null,
-        is_test: typeof data.is_test === "boolean" ? data.is_test : isSandbox,
+        record_type: data.record_type || "resolution",
+        status: "draft" as DraftStatus,
+        updated_at: new Date().toISOString(),
+        is_test: isSandbox,
       };
 
-      setTitle(newDraft.title);
-      setBody(newDraft.draft_text);
-      setSelectedId(newDraft.id);
+      const updateTry = await supabase
+        .from("governance_drafts")
+        .update(updatePayload)
+        .eq("id", targetDraftId)
+        .select(
+          `
+            id, entity_id, entity_slug, entity_name, title, record_type, draft_text,
+            status, created_at, updated_at, finalized_record_id, is_test
+          `
+        )
+        .single();
+
+      if (updateTry.error) {
+        if (isMissingColumnErr(updateTry.error)) {
+          delete updatePayload.is_test;
+          const retry = await supabase
+            .from("governance_drafts")
+            .update(updatePayload)
+            .eq("id", targetDraftId)
+            .select(
+              `
+                id, entity_id, entity_slug, entity_name, title, record_type, draft_text,
+                status, created_at, updated_at, finalized_record_id
+              `
+            )
+            .single();
+          if (retry.error) throw retry.error;
+
+          const updated = retry.data as DraftRecord;
+          setSelectedId(updated.id);
+          setTitle(updated.title ?? "");
+          setBody(updated.draft_text ?? "");
+          setWorkspaceTab("editor");
+          markLoadedSnapshot(updated.id, updated.title ?? "", updated.draft_text ?? "");
+          flashInfo("Alchemy draft applied. Review, edit, then Save/Finalize.");
+          await reloadDrafts(true);
+          return;
+        }
+        throw updateTry.error;
+      }
+
+      const updated = updateTry.data as DraftRecord;
+      setSelectedId(updated.id);
+      setTitle(updated.title ?? "");
+      setBody(updated.draft_text ?? "");
       setWorkspaceTab("editor");
+      markLoadedSnapshot(updated.id, updated.title ?? "", updated.draft_text ?? "");
 
-      setDrafts((prev) => {
-        const without = prev.filter((d) => d.id !== newDraft.id);
-        return [newDraft, ...without];
-      });
-
-      markLoadedSnapshot(newDraft.id, newDraft.title, newDraft.draft_text);
-      flashInfo("Draft created. Review, edit, then Save.");
+      flashInfo("Alchemy draft applied. Review, edit, then Save/Finalize.");
       await reloadDrafts(true);
     } catch (err: any) {
       console.error("scribe invoke exception", err);
@@ -1314,6 +1422,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                     </div>
                   </div>
                 ) : (
+                  /* AXIOM panel unchanged */
                   <div className="h-full w-full rounded-2xl border border-slate-800 bg-slate-950/40 overflow-hidden flex flex-col">
                     <div className="shrink-0 px-5 py-4 border-b border-slate-800">
                       <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
