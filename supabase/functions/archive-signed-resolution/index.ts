@@ -7,7 +7,8 @@ type ReqBody = { envelope_id: string };
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Allow-Headers":
+    "authorization, apikey, content-type, x-client-info",
   "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
@@ -33,29 +34,6 @@ function requireUUID(v: unknown, field: string) {
   return v;
 }
 
-async function ensureInMinuteBookBucket(sourceBucket: string, path: string) {
-  const MINUTE_BOOK_BUCKET = "minute_book";
-  if (sourceBucket === MINUTE_BOOK_BUCKET) return { copied: false, bucket: MINUTE_BOOK_BUCKET, path };
-
-  // Exists?
-  {
-    const { data: already, error: existsErr } = await supabase.storage
-      .from(MINUTE_BOOK_BUCKET)
-      .download(path);
-    if (!existsErr && already) return { copied: false, bucket: MINUTE_BOOK_BUCKET, path };
-  }
-
-  const { data: file, error: dlErr } = await supabase.storage.from(sourceBucket).download(path);
-  if (dlErr || !file) throw new Error(`Could not download from ${sourceBucket}/${path}: ${dlErr?.message ?? "no file"}`);
-
-  const { error: upErr } = await supabase.storage
-    .from(MINUTE_BOOK_BUCKET)
-    .upload(path, file, { upsert: true, contentType: "application/pdf" });
-
-  if (upErr) throw new Error(`Could not upload to minute_book/${path}: ${upErr.message}`);
-  return { copied: true, bucket: MINUTE_BOOK_BUCKET, path };
-}
-
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
@@ -64,7 +42,6 @@ serve(async (req) => {
     const body = (await req.json()) as ReqBody;
     const envelope_id = requireUUID(body.envelope_id, "envelope_id");
 
-    // Validate envelope
     const { data: env, error: envErr } = await supabase
       .from("signature_envelopes")
       .select("id, record_id, status")
@@ -81,7 +58,7 @@ serve(async (req) => {
       );
     }
 
-    // Seal + register with envelope context
+    // ✅ Canonical: call the envelope-aware RPC (it repairs pointers + verified + minute book idempotently)
     const { data, error } = await supabase
       .rpc("seal_governance_record_for_archive_with_envelope", {
         p_ledger_id: env.record_id,
@@ -92,21 +69,10 @@ serve(async (req) => {
     if (error) throw error;
     if (!data) throw new Error("seal_governance_record_for_archive_with_envelope returned no row");
 
-    // Ensure minute_book bucket has the PDF for Reader
-    const ensured = await ensureInMinuteBookBucket(data.storage_bucket, data.storage_path);
-
-    return json({
-      ok: true,
-      envelope_id: env.id,
-      record_id: env.record_id,
-      ...data,
-      reader_bucket: ensured.bucket,
-      reader_path: ensured.path,
-      copied_to_minute_book: ensured.copied,
-    });
+    return json({ ok: true, envelope_id: env.id, record_id: env.record_id, ...data });
   } catch (err: any) {
     return json(
-      { ok: false, error: err?.message ?? "archive-signed-resolution failed", details: String(err) },
+      { ok: false, error: err?.message ?? "archive-signed-resolution failed", details: err },
       500,
     );
   }
