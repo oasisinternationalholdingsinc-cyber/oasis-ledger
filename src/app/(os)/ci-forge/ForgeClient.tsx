@@ -571,7 +571,7 @@ export default function ForgeClient() {
         else supporting_docs = ((sd.data ?? []) as any) ?? [];
       }
 
-      // 3) verified registry (lane is derived via record_id linkage + archive function)
+      // 3) verified registry
       const vd = await supabase
         .from("verified_documents")
         .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
@@ -623,7 +623,12 @@ export default function ForgeClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.ledger_id, isTest]);
 
+  // ✅ Existing behavior (kept)
   const alreadyArchived = !!evidence.minute_book_entry_id || !!evidence.verified_document?.id;
+
+  // ✅ TINY ADJUSTMENT (UI only): treat ledger_status=ARCHIVED as locked too
+  const archiveLocked =
+    (selected?.ledger_status || "").toUpperCase() === "ARCHIVED" || alreadyArchived;
 
   // --------------------------
   // ✅ View Archive PDF (prefers Verified registry; falls back to Minute Book primary)
@@ -651,7 +656,7 @@ export default function ForgeClient() {
         return;
       }
 
-      // 2) Minute Book primary supporting doc (bucket is minute_book; path stored in supporting_documents.file_path)
+      // 2) Minute Book primary supporting doc (bucket is minute_book)
       const primary = evidence.supporting_docs.find((d) => d.doc_type === "primary" && d.file_path);
       if (primary?.file_path) {
         await openStorageObject("minute_book", primary.file_path);
@@ -659,7 +664,7 @@ export default function ForgeClient() {
         return;
       }
 
-      // 3) Minute book entry storage_path (some deployments store the primary path here)
+      // 3) Minute book entry storage_path
       if (evidence.minute_book_storage_path) {
         await openStorageObject("minute_book", evidence.minute_book_storage_path);
         flashInfo("Opened Minute Book render (entry).");
@@ -838,6 +843,12 @@ export default function ForgeClient() {
       return;
     }
 
+    // ✅ TINY ADJUSTMENT: hard-stop to avoid duplicate/unique violations
+    if (archiveLocked) {
+      flashInfo("Record already archived — no action required.");
+      return;
+    }
+
     setIsArchiving(true);
     try {
       const { data, error } = await supabase.functions.invoke("archive-signed-resolution", {
@@ -993,6 +1004,17 @@ export default function ForgeClient() {
       </div>
     </div>
   );
+
+  // ✅ Tiny helper banner (UI only)
+  const archiveBanner = () => {
+    if (!selected) return null;
+    if (!archiveLocked) return null;
+    return (
+      <div className="mt-2 text-[11px] text-amber-200 bg-amber-950/30 border border-amber-700/40 rounded-xl px-3 py-2">
+        Record already archived — no action required.
+      </div>
+    );
+  };
 
   return (
     <div className="flex h-full flex-col px-8 pt-6 pb-6">
@@ -1189,19 +1211,27 @@ export default function ForgeClient() {
                             {isSendingInvite ? "Sending…" : "Send invite"}
                           </button>
 
+                          {/* ✅ TINY ADJUSTMENT: disable Archive Now when archiveLocked */}
                           <button
                             type="button"
                             onClick={onArchiveSigned}
-                            disabled={isArchiving || selected.envelope_status !== "completed"}
+                            disabled={isArchiving || selected.envelope_status !== "completed" || archiveLocked}
                             className={[
                               "w-full rounded-xl px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
-                              isArchiving || selected.envelope_status !== "completed"
+                              isArchiving || selected.envelope_status !== "completed" || archiveLocked
                                 ? "border-slate-800 bg-slate-950/30 text-slate-500 cursor-not-allowed"
                                 : "border-amber-500/60 bg-amber-500/10 text-amber-200 hover:bg-amber-500/15",
                             ].join(" ")}
                           >
-                            {isArchiving ? "Archiving…" : alreadyArchived ? "Archive now (Already archived)" : "Archive now"}
+                            {isArchiving
+                              ? "Archiving…"
+                              : archiveLocked
+                              ? "Archive now (Already archived)"
+                              : "Archive now"}
                           </button>
+
+                          {/* ✅ Banner exactly as discussed */}
+                          {archiveBanner()}
 
                           <button
                             type="button"
