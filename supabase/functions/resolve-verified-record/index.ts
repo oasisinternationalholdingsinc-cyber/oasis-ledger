@@ -13,9 +13,10 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, OPTIONS",
-  "Access-Control-Allow-Headers": "content-type, authorization, apikey, x-client-info",
-  "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
+  "Access-Control-Allow-Methods": "GET,OPTIONS",
+  "Access-Control-Allow-Headers":
+    "authorization,apikey,content-type,x-client-info",
+  "Access-Control-Expose-Headers": "content-type,x-sb-request-id",
 };
 
 function json(body: unknown, status = 200) {
@@ -26,20 +27,32 @@ function json(body: unknown, status = 200) {
 }
 
 serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { status: 200, headers: cors });
-  if (req.method !== "GET") return json({ ok: false, error: "Method not allowed" }, 405);
+  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
 
   try {
     const url = new URL(req.url);
 
-    const envelope_id = url.searchParams.get("envelope_id");
-    const ledger_id = url.searchParams.get("ledger_id");
-    const verified_document_id = url.searchParams.get("verified_document_id");
+    // Canonical params
     const hash = url.searchParams.get("hash");
+    const verified_document_id =
+      url.searchParams.get("verified_document_id") ??
+      url.searchParams.get("p_verified_document_id");
+    const ledger_id =
+      url.searchParams.get("ledger_id") ?? url.searchParams.get("p_ledger_id");
 
-    if (!envelope_id && !ledger_id && !verified_document_id && !hash) {
+    // IMPORTANT: verify.html is sending envelope_id, and sometimes record_id as legacy alias
+    const envelope_id =
+      url.searchParams.get("envelope_id") ??
+      url.searchParams.get("p_envelope_id") ??
+      url.searchParams.get("record_id"); // legacy UI param seen in your DevTools
+
+    if (!hash && !verified_document_id && !ledger_id && !envelope_id) {
       return json(
-        { ok: false, error: "Provide one of: envelope_id, ledger_id, verified_document_id, or hash" },
+        {
+          ok: false,
+          error:
+            "Provide one of: ledger_id, verified_document_id, envelope_id, or hash",
+        },
         400,
       );
     }
@@ -52,9 +65,10 @@ serve(async (req) => {
     });
 
     if (error) return json({ ok: false, error: error.message, details: error }, 500);
-    if (!data) return json({ ok: false, error: "No data returned" }, 404);
+    if (!data) return json({ ok: false, error: "Record not found" }, 404);
 
-    return json(data, 200);
+    // data is already your JSON payload from SQL: {"ok":true,"ledger":...,"verified":...}
+    return json(data, data.ok ? 200 : 404);
   } catch (e) {
     console.error("resolve-verified-record error:", e);
     return json({ ok: false, error: "Unexpected server error" }, 500);
