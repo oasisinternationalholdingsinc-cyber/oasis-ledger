@@ -2,62 +2,11 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { PDFDocument, StandardFonts } from "https://esm.sh/pdf-lib@1.17.1?target=deno";
-
-type ResolveResp = {
-  ok: boolean;
-  error?: string;
-  message?: string;
-
-  ledger_id?: string;
-  verified_document_id?: string;
-  hash?: string;
-
-  entity?: { id?: string; name?: string; slug?: string };
-  ledger?: {
-    id?: string;
-    title?: string;
-    status?: string;
-    is_test?: boolean;
-    created_at?: string;
-  };
-
-  best_pdf?: {
-    kind?: string;
-    storage_bucket?: string;
-    storage_path?: string;
-  };
-
-  verified?: {
-    file_hash?: string;
-    created_at?: string;
-    envelope_id?: string | null;
-    is_archived?: boolean;
-    storage_bucket?: string;
-    storage_path?: string;
-    verification_level?: string;
-  };
-};
-
-type ReqBody = {
-  hash?: string | null;
-  envelope_id?: string | null;
-  ledger_id?: string | null;
-};
-
-const cors = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers":
-    "authorization, apikey, content-type, x-client-info",
-  "Access-Control-Expose-Headers": "content-type, content-disposition, x-sb-request-id",
-};
-
-const json = (x: unknown, status = 200) =>
-  new Response(JSON.stringify(x, null, 2), {
-    status,
-    headers: { ...cors, "Content-Type": "application/json" },
-  });
+import {
+  PDFDocument,
+  StandardFonts,
+  rgb,
+} from "https://esm.sh/pdf-lib@1.17.1?target=deno";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY =
@@ -67,320 +16,275 @@ if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
   throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
 }
 
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-  global: { fetch },
-});
-
-const pad2 = (n: number) => String(n).padStart(2, "0");
-const fmtDateUTC = (iso?: string | null) => {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
-};
-const fmtDateTimeUTC = (iso?: string | null) => {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} ${pad2(
-    d.getUTCHours(),
-  )}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())} UTC`;
+const cors = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+  "Access-Control-Allow-Headers":
+    "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
-const safe = (s?: string | null, fallback = "—") => (s && String(s).trim() ? String(s) : fallback);
+const json = (x: unknown, status = 200) =>
+  new Response(JSON.stringify(x, null, 2), {
+    status,
+    headers: { ...cors, "Content-Type": "application/json" },
+  });
+
+function fmtDate(value: string | null | undefined): string {
+  if (!value) return "N/A";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "N/A";
+  // nice ISO date
+  return d.toISOString().replace("T", " ").replace("Z", " UTC").slice(0, 20);
+}
+
+function safeStr(v: unknown, fallback = "—") {
+  const s = typeof v === "string" ? v.trim() : "";
+  return s ? s : fallback;
+}
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return json({ ok: true });
 
   try {
-    // Accept either:
-    // - GET ?hash=...&envelope_id=...&ledger_id=...
-    // - POST { hash, envelope_id, ledger_id }
-    const u = new URL(req.url);
+    // NOTE: This function is "public callable" (anon) but uses service_role internally.
+    // We do NOT rely on caller JWT.
+    const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+      global: { fetch },
+      auth: { persistSession: false },
+    });
 
-    let hash = u.searchParams.get("hash");
-    let envelope_id = u.searchParams.get("envelope_id");
-    let ledger_id = u.searchParams.get("ledger_id");
+    const url = new URL(req.url);
+
+    // Accept identifiers from query string or JSON body (enterprise-friendly).
+    let hash = url.searchParams.get("hash");
+    let envelope_id = url.searchParams.get("envelope_id");
+    let ledger_id = url.searchParams.get("ledger_id");
 
     if (req.method === "POST") {
-      const body = (await req.json().catch(() => ({}))) as ReqBody;
-      hash = hash ?? (body.hash ?? null);
-      envelope_id = envelope_id ?? (body.envelope_id ?? null);
-      ledger_id = ledger_id ?? (body.ledger_id ?? null);
+      const body = await req.json().catch(() => ({}));
+      hash = hash ?? body.hash ?? null;
+      envelope_id = envelope_id ?? body.envelope_id ?? null;
+      ledger_id = ledger_id ?? body.ledger_id ?? null;
     }
 
-    const h = (hash ?? "").trim().toLowerCase() || null;
-    const e = (envelope_id ?? "").trim() || null;
-    const l = (ledger_id ?? "").trim() || null;
+    hash = typeof hash === "string" ? hash.trim().toLowerCase() : null;
+    envelope_id = typeof envelope_id === "string" ? envelope_id.trim() : null;
+    ledger_id = typeof ledger_id === "string" ? ledger_id.trim() : null;
 
-    if (!h && !e && !l) {
+    if (!hash && !envelope_id && !ledger_id) {
       return json(
         {
           ok: false,
           error: "MISSING_IDENTIFIER",
-          message: "Provide hash OR envelope_id OR ledger_id.",
+          message:
+            "Provide one of: ?ledger_id=<uuid> OR ?envelope_id=<uuid> OR ?hash=<sha256>.",
         },
         400,
       );
     }
 
-    // Canonical resolve (single source of truth)
-    const { data: resolved, error: rErr } = await supabase.rpc("resolve_verified_record", {
-      p_hash: h,
-      p_envelope_id: e,
-      p_ledger_id: l,
-    });
+    // Canonical: resolve via SQL function you already locked in memory.
+    const { data: resolved, error: rErr } = await supabase.rpc(
+      "resolve_verified_record",
+      {
+        p_hash: hash,
+        p_envelope_id: envelope_id,
+        p_ledger_id: ledger_id,
+      },
+    );
 
     if (rErr) {
+      console.error("resolve_verified_record rpc error", rErr);
       return json(
         {
           ok: false,
-          error: "RESOLVE_FAILED",
+          error: "RESOLVER_RPC_FAILED",
           message: rErr.message,
         },
         500,
       );
     }
 
-    const data = resolved as ResolveResp;
-    if (!data || data.ok !== true) {
+    // resolve_verified_record returns jsonb (an object)
+    const payload = resolved as any;
+
+    if (!payload || payload.ok !== true) {
       return json(
         {
           ok: false,
-          error: data?.error ?? "NOT_OK",
-          message: data?.message ?? "Record could not be resolved.",
+          error: payload?.error ?? "NOT_RESOLVED",
+          message:
+            payload?.error === "NOT_REGISTERED"
+              ? "No verified record is registered for this identifier."
+              : "Unable to resolve a certified record.",
+          details: payload ?? null,
         },
-        404,
+        payload?.error === "NOT_REGISTERED" ? 404 : 400,
       );
     }
 
-    // Canonical fields (resolver-driven)
-    const entityName = safe(data.entity?.name);
-    const entitySlug = safe(data.entity?.slug);
-    const ledgerTitle = safe(data.ledger?.title, "Resolution");
-    const ledgerId = safe(data.ledger_id ?? data.ledger?.id);
-    const ledgerStatus = safe(data.ledger?.status);
-    const lane = data.ledger?.is_test ? "SANDBOX" : "RoT";
+    const ent = payload.entity || {};
+    const led = payload.ledger || {};
+    const ver = payload.verified || {};
+    const best = payload.best_pdf || {};
+    const publicPdf = payload.public_pdf || {};
 
-    const issuedAt = fmtDateTimeUTC(new Date().toISOString());
-    const verifiedAt = fmtDateTimeUTC(data.verified?.created_at ?? null);
+    const outLedgerId = safeStr(payload.ledger_id || led.id, "");
+    const outHash = safeStr(payload.hash || ver.file_hash, "");
+    const lane = led.is_test ? "SANDBOX" : "RoT";
+    const level = safeStr(ver.verification_level, "certified").toUpperCase();
 
-    const verificationLevel = safe(data.verified?.verification_level, "certified").toUpperCase();
-    const resolvedHash = safe(data.hash ?? data.verified?.file_hash);
+    const entityName = safeStr(ent.name, "Oasis Entity");
+    const entitySlug = safeStr(ent.slug, "—");
+    const title = safeStr(led.title, "Resolution");
+    const status = safeStr(led.status, "—");
 
-    const verifiedDocumentId = safe(data.verified_document_id);
-    const envelopeId = data.verified?.envelope_id ?? null;
+    const verifiedDocId = safeStr(payload.verified_document_id, "—");
+    const verifiedBucket = safeStr(ver.storage_bucket, "—");
+    const verifiedPath = safeStr(ver.storage_path, "—");
+    const verifiedAt = fmtDate(ver.created_at);
 
-    const preferredKind = safe(data.best_pdf?.kind, "best_pdf");
-    const evidenceLine =
-      preferredKind === "minute_book_signed"
-        ? "Evidence Source: Minute Book (signed) — preferred artifact"
-        : preferredKind === "minute_book"
-          ? "Evidence Source: Minute Book — reader copy"
-          : "Evidence Source: Certified Archive — registry copy";
+    const evidenceKind = safeStr(best.kind, "—");
+    const evidenceBucket = safeStr(publicPdf.storage_bucket || best.storage_bucket, "—");
+    const evidencePath = safeStr(publicPdf.storage_path || best.storage_path, "—");
 
-    // Optional signer lookup (only if envelope present)
-    let signerLine = "—";
-    let signedAtLine = "—";
-    if (envelopeId) {
-      const { data: party, error: pErr } = await supabase
-        .from("signature_parties")
-        .select("display_name, email, signed_at")
-        .eq("envelope_id", envelopeId)
-        .eq("role", "primary_signer")
-        .maybeSingle();
+    const issuedAt = fmtDate(new Date().toISOString());
 
-      if (!pErr && party) {
-        const dn = party.display_name ? String(party.display_name) : "";
-        const em = party.email ? String(party.email) : "";
-        signerLine = dn && em ? `${dn} <${em}>` : dn || em || "—";
-        signedAtLine = fmtDateUTC(party.signed_at ?? null);
-      }
-    }
-
-    // Build PDF (enterprise-clean, minimal, gold frame)
+    // --- Build branded PDF ---
     const pdfDoc = await PDFDocument.create();
-    const page = pdfDoc.addPage([595.28, 841.89]); // A4 portrait
+    const page = pdfDoc.addPage([595.28, 841.89]); // A4
     const width = page.getWidth();
     const height = page.getHeight();
 
-    const fontTitle = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-    const fontBody = await pdfDoc.embedFont(StandardFonts.Helvetica);
-    const fontMono = await pdfDoc.embedFont(StandardFonts.Courier);
+    const titleFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+    const bodyFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const monoFont = await pdfDoc.embedFont(StandardFonts.Courier);
 
-    const gold = [0.85, 0.70, 0.25] as const;
-    const white = [1, 1, 1] as const;
-    const muted = [0.55, 0.55, 0.60] as const;
-    const bg = [0.03, 0.04, 0.07] as const;
+    // Colors (IMPORTANT: rgb(), not arrays)
+    const GOLD = rgb(0.85, 0.70, 0.25);
+    const INK = rgb(0.03, 0.04, 0.07);
+    const WHITE = rgb(1, 1, 1);
+    const GREY = rgb(0.45, 0.47, 0.52);
+    const FAINT = rgb(0.18, 0.20, 0.24);
 
-    // Outer frame
+    // background panel
     page.drawRectangle({
-      x: 42,
-      y: 42,
-      width: width - 84,
-      height: height - 84,
+      x: 36,
+      y: 36,
+      width: width - 72,
+      height: height - 72,
       borderWidth: 2,
-      borderColor: gold,
-      color: bg,
+      borderColor: GOLD,
+      color: INK,
     });
 
-    // Header
-    const top1 = "OASIS DIGITAL PARLIAMENT";
-    const top2 = "CERTIFICATE OF VERIFICATION";
-
-    const top1Size = 12;
-    const top2Size = 18;
-
-    const top1W = fontBody.widthOfTextAtSize(top1, top1Size);
-    const top2W = fontTitle.widthOfTextAtSize(top2, top2Size);
-
-    page.drawText(top1, {
-      x: (width - top1W) / 2,
-      y: height - 92,
-      size: top1Size,
-      font: fontBody,
-      color: muted,
+    // watermark (subtle)
+    page.drawText("OASIS DIGITAL PARLIAMENT", {
+      x: 60,
+      y: 440,
+      size: 42,
+      font: titleFont,
+      color: FAINT,
+      rotate: { type: "degrees", angle: 18 },
+      opacity: 0.12,
     });
 
-    page.drawText(top2, {
-      x: (width - top2W) / 2,
-      y: height - 118,
-      size: top2Size,
-      font: fontTitle,
-      color: gold,
+    // header
+    const headerText = "Oasis Digital Parliament";
+    const headerSize = 18;
+    const headerWidth = titleFont.widthOfTextAtSize(headerText, headerSize);
+    page.drawText(headerText, {
+      x: (width - headerWidth) / 2,
+      y: height - 86,
+      size: headerSize,
+      font: titleFont,
+      color: GOLD,
     });
 
-    // Divider
-    page.drawRectangle({
+    const subText = "Certificate of Verification";
+    const subSize = 13;
+    const subWidth = bodyFont.widthOfTextAtSize(subText, subSize);
+    page.drawText(subText, {
+      x: (width - subWidth) / 2,
+      y: height - 112,
+      size: subSize,
+      font: bodyFont,
+      color: WHITE,
+    });
+
+    // small lane badge
+    const badge = `LANE: ${lane} • LEVEL: ${level}`;
+    page.drawText(badge, {
       x: 70,
-      y: height - 135,
-      width: width - 140,
-      height: 1,
-      color: [1, 1, 1],
-      opacity: 0.10,
+      y: height - 142,
+      size: 10,
+      font: bodyFont,
+      color: GREY,
     });
 
-    let y = height - 168;
+    let cursorY = height - 175;
+    const lineH = 16;
 
-    const labelSize = 9;
-    const valueSize = 11;
-    const rowGap = 16;
-
-    const drawKV = (label: string, value: string, mono = false) => {
-      page.drawText(label, { x: 76, y, size: labelSize, font: fontBody, color: muted });
-      y -= 14;
-      page.drawText(value, {
-        x: 76,
-        y,
-        size: valueSize,
-        font: mono ? fontMono : fontBody,
-        color: white,
-        maxWidth: width - 152,
+    const drawKV = (k: string, v: string, isMono = false) => {
+      page.drawText(k, { x: 70, y: cursorY, size: 9, font: bodyFont, color: GREY });
+      cursorY -= lineH;
+      page.drawText(v, {
+        x: 70,
+        y: cursorY,
+        size: 10,
+        font: isMono ? monoFont : bodyFont,
+        color: WHITE,
+        maxWidth: width - 140,
       });
-      y -= rowGap;
+      cursorY -= lineH * 1.35;
     };
 
-    drawKV("ENTITY", `${entityName} • ${entitySlug}`);
-    drawKV("DOCUMENT", ledgerTitle);
-    drawKV("LEDGER ID", ledgerId, true);
-    drawKV("LANE", lane);
-    drawKV("STATUS", ledgerStatus);
+    drawKV("ENTITY", `${entityName} (${entitySlug})`);
+    drawKV("DOCUMENT TITLE", title);
+    drawKV("LEDGER", `id: ${outLedgerId} • status: ${status}`);
+    drawKV("VERIFIED REGISTRY", `id: ${verifiedDocId} • at: ${verifiedAt}`);
+    drawKV("ARCHIVE POINTER", `${verifiedBucket}:${verifiedPath}`, true);
 
-    // Hash block
-    y -= 4;
-    page.drawText("SHA-256", { x: 76, y, size: labelSize, font: fontBody, color: muted });
-    y -= 16;
+    drawKV("EVIDENCE (best_pdf)", `${evidenceKind}`, false);
+    drawKV("MINUTE BOOK POINTER", `${evidenceBucket}:${evidencePath}`, true);
 
-    const boxX = 72;
-    const boxW = width - 144;
-    const boxH = 64;
+    drawKV("SHA-256", outHash || "—", true);
+    drawKV("ISSUED", issuedAt);
 
-    page.drawRectangle({
-      x: boxX,
-      y: y - boxH + 10,
-      width: boxW,
-      height: boxH,
-      borderWidth: 1,
-      borderColor: [1, 1, 1],
-      opacity: 0.10,
-      color: [0, 0, 0],
-      opacity: 0.18,
-    });
-
-    page.drawText(resolvedHash, {
-      x: boxX + 12,
-      y: y - 16,
-      size: 10,
-      font: fontMono,
-      color: white,
-      maxWidth: boxW - 24,
+    // footer
+    const footer =
+      "This certificate affirms that the referenced record is registered in the Oasis Digital Parliament registry and that the SHA-256 hash matches the canonical stored value at the time of issuance.";
+    page.drawText(footer, {
+      x: 70,
+      y: 92,
+      size: 9,
+      font: bodyFont,
+      color: GREY,
+      maxWidth: width - 140,
       lineHeight: 12,
     });
 
-    y = y - boxH - 8;
-
-    drawKV("VERIFICATION LEVEL", verificationLevel);
-    drawKV("VERIFIED DOCUMENT ID", verifiedDocumentId, true);
-    drawKV("VERIFIED AT", verifiedAt);
-    drawKV("ISSUED AT", issuedAt);
-
-    if (envelopeId) {
-      drawKV("ENVELOPE ID", envelopeId, true);
-      drawKV("PRIMARY SIGNER", signerLine);
-      drawKV("SIGNED AT", signedAtLine);
-    }
-
-    y -= 6;
-    page.drawText(evidenceLine, {
-      x: 76,
-      y,
+    page.drawText("ODP.AI • Certified Verification Receipt", {
+      x: 70,
+      y: 66,
       size: 9,
-      font: fontBody,
-      color: muted,
-      maxWidth: width - 152,
-    });
-
-    // Footer attestation
-    const attn =
-      "This certificate attests that the referenced record is registered in the Oasis Digital Parliament registry and that the SHA-256 hash above matches the canonical stored value at issuance.";
-    page.drawText(attn, {
-      x: 76,
-      y: 90,
-      size: 9,
-      font: fontBody,
-      color: muted,
-      maxWidth: width - 152,
-      lineHeight: 12,
-    });
-
-    // Small seal ring (minimal)
-    page.drawCircle({
-      x: width - 120,
-      y: 110,
-      size: 34,
-      borderWidth: 2,
-      borderColor: gold,
-      color: [0, 0, 0],
-      opacity: 0.0,
-    });
-    page.drawText("ODP.AI", {
-      x: width - 140,
-      y: 104,
-      size: 10,
-      font: fontTitle,
-      color: gold,
+      font: bodyFont,
+      color: GOLD,
     });
 
     const pdfBytes = await pdfDoc.save();
 
-    const fileName = `Oasis-Certificate-${ledgerId}.pdf`;
+    const filename = outLedgerId
+      ? `Oasis-Certificate-${outLedgerId}.pdf`
+      : "Oasis-Certificate.pdf";
 
     return new Response(pdfBytes, {
       status: 200,
       headers: {
         ...cors,
         "Content-Type": "application/pdf",
-        "Content-Disposition": `attachment; filename="${fileName}"`,
+        "Content-Disposition": `attachment; filename="${filename}"`,
       },
     });
   } catch (err) {
