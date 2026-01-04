@@ -13,7 +13,7 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET,OPTIONS",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
   "Access-Control-Allow-Headers":
     "authorization,apikey,content-type,x-client-info",
   "Access-Control-Expose-Headers": "content-type,x-sb-request-id",
@@ -26,25 +26,55 @@ function json(body: unknown, status = 200) {
   });
 }
 
+async function safeJson(req: Request) {
+  try {
+    // only attempt for non-GET
+    if (req.method === "GET") return {};
+    const ct = req.headers.get("content-type") ?? "";
+    if (!ct.includes("application/json")) return {};
+    return await req.json();
+  } catch {
+    return {};
+  }
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
 
   try {
     const url = new URL(req.url);
+    const q = url.searchParams;
 
-    // Canonical params
-    const hash = url.searchParams.get("hash");
+    const body: any = await safeJson(req);
+
+    // Canonical + legacy aliases, query OR body
+    const hash =
+      body.hash ??
+      q.get("hash") ??
+      null;
+
     const verified_document_id =
-      url.searchParams.get("verified_document_id") ??
-      url.searchParams.get("p_verified_document_id");
-    const ledger_id =
-      url.searchParams.get("ledger_id") ?? url.searchParams.get("p_ledger_id");
+      body.verified_document_id ??
+      body.p_verified_document_id ??
+      q.get("verified_document_id") ??
+      q.get("p_verified_document_id") ??
+      null;
 
-    // IMPORTANT: verify.html is sending envelope_id, and sometimes record_id as legacy alias
+    const ledger_id =
+      body.ledger_id ??
+      body.p_ledger_id ??
+      q.get("ledger_id") ??
+      q.get("p_ledger_id") ??
+      null;
+
     const envelope_id =
-      url.searchParams.get("envelope_id") ??
-      url.searchParams.get("p_envelope_id") ??
-      url.searchParams.get("record_id"); // legacy UI param seen in your DevTools
+      body.envelope_id ??
+      body.p_envelope_id ??
+      body.record_id ?? // legacy UI alias
+      q.get("envelope_id") ??
+      q.get("p_envelope_id") ??
+      q.get("record_id") ?? // legacy UI alias
+      null;
 
     if (!hash && !verified_document_id && !ledger_id && !envelope_id) {
       return json(
@@ -52,6 +82,8 @@ serve(async (req) => {
           ok: false,
           error:
             "Provide one of: ledger_id, verified_document_id, envelope_id, or hash",
+          hint:
+            "Send it as query (?envelope_id=...) or JSON body ({ envelope_id: ... }).",
         },
         400,
       );
@@ -67,7 +99,6 @@ serve(async (req) => {
     if (error) return json({ ok: false, error: error.message, details: error }, 500);
     if (!data) return json({ ok: false, error: "Record not found" }, 404);
 
-    // data is already your JSON payload from SQL: {"ok":true,"ledger":...,"verified":...}
     return json(data, data.ok ? 200 : 404);
   } catch (e) {
     console.error("resolve-verified-record error:", e);
