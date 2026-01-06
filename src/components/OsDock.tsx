@@ -1,15 +1,17 @@
 "use client";
 
+import React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import clsx from "clsx";
 import {
-  Orbit,       // Dashboard – Oasis Os Core 
+  Orbit,       // Dashboard – Oasis Os Core
   Edit,        // CI-Alchemy – Scribe / Drafting
   Landmark,    // CI-Parliament – Parliament / Council
   Flame,       // CI-Forge – Execution / Fire
   ShieldAlert, // CI-Sentinel – Guardian / Alerts
   Archive,     // CI-Archive – Vault / Records
+  IdCard,      // CI-Admissions – Intake / Authority Gateway
 } from "lucide-react";
 
 type DockItem = {
@@ -53,6 +55,13 @@ const CORE_ITEMS: DockItem[] = [
 
 const FUTURE_ITEMS: DockItem[] = [
   {
+    href: "/ci-admissions",
+    label: "CI-Admissions",
+    Icon: IdCard,
+    tintClass: "text-amber-200",
+    moduleKey: "admissions",
+  },
+  {
     href: "/ci-sentinel",
     label: "CI-Sentinel",
     Icon: ShieldAlert,
@@ -82,12 +91,7 @@ export function OsDock() {
     const active = isActive(href);
 
     return (
-      <Link
-        key={href}
-        href={href}
-        className="dock-item"
-        data-module={moduleKey}
-      >
+      <Link key={href} href={href} className="dock-item" data-module={moduleKey}>
         <div className={clsx("dock-icon", active && "active")}>
           <Icon className={clsx("w-5 h-5", tintClass)} />
         </div>
