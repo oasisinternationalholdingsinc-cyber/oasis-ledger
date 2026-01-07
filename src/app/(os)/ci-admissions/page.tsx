@@ -155,18 +155,9 @@ function isMissingColumnErr(err: unknown) {
   return msg.includes("does not exist") && msg.includes("column");
 }
 
-async function rpcFirstOk<T = any>(fn: string, shapes: Array<Record<string, any>>): Promise<T> {
-  let lastErr: any = null;
-  for (const params of shapes) {
-    const { data, error } = await supabase.rpc(fn as any, params as any);
-    if (!error) {
-      const ok = (data as any)?.ok;
-      if (ok === false) throw new Error((data as any)?.error ?? "RPC failed.");
-      return data as T;
-    }
-    lastErr = error;
-  }
-  throw lastErr ?? new Error("RPC failed.");
+/** Admissions enums are Postgres enums; safest is normalized lowercase. */
+function enumLower(x: string) {
+  return String(x || "").trim().toLowerCase();
 }
 
 function statusPill(st?: string | null) {
@@ -187,10 +178,6 @@ function safeArray(x: any): string[] {
   return [];
 }
 
-function statusToRpcEnum(next: string) {
-  return String(next || "").trim().toLowerCase();
-}
-
 export default function CIAdmissionsPage() {
   const entityCtx = useEntity() as any;
   useOsEnv(); // kept for OS consistency (even if admissions ignores is_test)
@@ -202,7 +189,7 @@ export default function CIAdmissionsPage() {
 
   // UI state
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<null | "status" | "decision" | "info" | "tasks" | "delete">(null);
+  const [busy, setBusy] = useState<null | "status" | "review" | "decision" | "info" | "tasks" | "delete">(null);
 
   const [drawerOpen, setDrawerOpen] = useState(true);
   const [tab, setTab] = useState<StatusTab>("ALL");
@@ -224,7 +211,7 @@ export default function CIAdmissionsPage() {
   const [riskNotes, setRiskNotes] = useState<string>("");
 
   const [requestInfoMsg, setRequestInfoMsg] = useState<string>("");
-  const [requestInfoFields, setRequestInfoFields] = useState<string>(""); // JSON string
+  const [requestInfoFields, setRequestInfoFields] = useState<string>(""); // optional JSON overrides
 
   const [tasksJson, setTasksJson] = useState<string>(
     JSON.stringify(
@@ -451,28 +438,45 @@ export default function CIAdmissionsPage() {
   }
 
   // ---- RPC actions (NO RAW UPDATES) ----
-  async function setAdmissionsStatus(nextStatus: string) {
+  async function beginReview() {
+    if (!selected?.id) return flashError("Select an application first.");
+    setBusy("review");
+    setError(null);
+    setInfo(null);
+
+    try {
+      const { data, error } = await supabase.rpc("admissions_begin_review", {
+        p_application_id: selected.id,
+      });
+      if (error) throw error;
+      if ((data as any)?.ok === false) throw new Error((data as any)?.error ?? "RPC failed.");
+
+      flashInfo("Admissions: begin review.");
+      await reload(true);
+    } catch (e: any) {
+      flashError(e?.message ?? "Failed to begin review (RPC).");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function setAdmissionsStatus(nextStatus: string, note?: string) {
     if (!selected?.id) return flashError("Select an application first.");
     setBusy("status");
     setError(null);
     setInfo(null);
 
     try {
-      const appId = selected.id;
-      const next = statusToRpcEnum(nextStatus);
+      const next = enumLower(nextStatus);
+      const { data, error } = await supabase.rpc("admissions_set_status", {
+        p_application_id: selected.id,
+        p_next_status: next,
+        p_note: (note ?? "Admissions status update").trim(),
+      });
+      if (error) throw error;
+      if ((data as any)?.ok === false) throw new Error((data as any)?.error ?? "RPC failed.");
 
-      const shapes = [
-        { p_application_id: appId, p_next_status: next },
-        { application_id: appId, next_status: next },
-        { p_application_id: appId, p_status: next },
-        { application_id: appId, status: next },
-        { p_application_id: appId, p_next_status: next, p_note: "Admissions status update" },
-        { application_id: appId, next_status: next, note: "Admissions status update" },
-      ];
-
-      await rpcFirstOk("admissions_set_status", shapes);
-
-      flashInfo(`Admissions: status → ${next.toUpperCase()}.`);
+      flashInfo(`Admissions: status → ${String(nextStatus).toUpperCase()}.`);
       await reload(true);
     } catch (e: any) {
       flashError(e?.message ?? "Failed to set status (RPC).");
@@ -488,42 +492,23 @@ export default function CIAdmissionsPage() {
     setInfo(null);
 
     try {
-      const appId = selected.id;
+      const decision = enumLower(decisionKind.trim() || "approved");
+      const rt = riskTier.trim() ? enumLower(riskTier.trim()) : null;
 
-      const decision = (decisionKind.trim() || "APPROVED").toUpperCase();
-      const summary = decisionSummary.trim();
-      const conditions = decisionConditions.trim();
-      const rt = riskTier.trim() || null;
-      const rn = riskNotes.trim() || null;
+      const { data, error } = await supabase.rpc("admissions_record_decision", {
+        p_application_id: selected.id,
+        p_decision: decision,
+        p_risk_tier: rt,
+        p_summary: decisionSummary.trim(),
+        p_reason: decisionConditions.trim(),
+      });
 
-      const shapes = [
-        {
-          p_application_id: appId,
-          p_decision: decision,
-          p_risk_tier: rt,
-          p_summary: summary,
-          p_reason: conditions,
-        },
-        { application_id: appId, decision, risk_tier: rt, summary, reason: conditions },
+      if (error) throw error;
+      if ((data as any)?.ok === false) throw new Error((data as any)?.error ?? "RPC failed.");
 
-        {
-          p_application_id: appId,
-          p_decision: decision,
-          p_risk_tier: rt,
-          p_summary: summary,
-          p_conditions: conditions,
-        },
-        { application_id: appId, decision, risk_tier: rt, summary, conditions },
-
-        { p_application_id: appId, p_decision: decision, p_risk_tier: rt, p_summary: summary },
-        { application_id: appId, decision, risk_tier: rt, summary },
-      ];
-
-      await rpcFirstOk("admissions_record_decision", shapes);
-
-      flashInfo(`Decision recorded: ${decision}.`);
+      flashInfo(`Decision recorded: ${String(decisionKind).toUpperCase()}.`);
       await reload(true);
-      await loadRelated(appId);
+      await loadRelated(selected.id);
     } catch (e: any) {
       flashError(e?.message ?? "Failed to record decision (RPC).");
     } finally {
@@ -540,30 +525,39 @@ export default function CIAdmissionsPage() {
     setInfo(null);
 
     try {
-      const appId = selected.id;
+      // Defaults (can be overridden via optional JSON box)
+      let channels: string[] = ["email"];
+      let dueAt: string | null = null; // ISO string (timestamptz)
+      let nextStatus = "needs_info";
 
-      let fields: any = null;
       const raw = requestInfoFields.trim();
       if (raw) {
+        let j: any;
         try {
-          fields = JSON.parse(raw);
+          j = JSON.parse(raw);
         } catch {
-          return flashError("Request fields must be valid JSON (or empty).");
+          return flashError("Optional JSON must be valid JSON (or empty).");
         }
+
+        if (Array.isArray(j?.channels)) channels = j.channels.map(String);
+        if (typeof j?.due_at === "string" && j.due_at.trim()) dueAt = j.due_at.trim();
+        if (typeof j?.next_status === "string" && j.next_status.trim()) nextStatus = enumLower(j.next_status.trim());
       }
 
-      const shapes = [
-        { p_application_id: appId, p_message: msg, p_fields: fields },
-        { application_id: appId, message: msg, fields },
-        { p_application_id: appId, p_message: msg },
-        { application_id: appId, message: msg },
-      ];
+      const { data, error } = await supabase.rpc("admissions_request_info", {
+        p_application_id: selected.id,
+        p_message: msg,
+        p_channels: channels,
+        p_due_at: dueAt,
+        p_next_status: nextStatus,
+      });
 
-      await rpcFirstOk("admissions_request_info", shapes);
+      if (error) throw error;
+      if ((data as any)?.ok === false) throw new Error((data as any)?.error ?? "RPC failed.");
 
       flashInfo("Information request recorded.");
       setRequestInfoMsg("");
-      await loadRelated(appId);
+      await loadRelated(selected.id);
       await reload(true);
     } catch (e: any) {
       flashError(e?.message ?? "Failed to request info (RPC).");
@@ -579,27 +573,23 @@ export default function CIAdmissionsPage() {
     setInfo(null);
 
     try {
-      const appId = selected.id;
-
-      let payload: any = null;
+      let payload: any;
       try {
         payload = JSON.parse(tasksJson);
       } catch {
         return flashError("Provisioning payload must be valid JSON.");
       }
 
-      const shapes = [
-        { p_application_id: appId, p_tasks: payload },
-        { application_id: appId, tasks: payload },
-        { p_application_id: appId, p_payload: payload },
-        { application_id: appId, payload },
-        { p_application_id: appId, p_tasks_json: payload },
-      ];
+      const { data, error } = await supabase.rpc("admissions_create_provisioning_tasks", {
+        p_application_id: selected.id,
+        p_tasks: payload,
+      });
 
-      await rpcFirstOk("admissions_create_provisioning_tasks", shapes);
+      if (error) throw error;
+      if ((data as any)?.ok === false) throw new Error((data as any)?.error ?? "RPC failed.");
 
       flashInfo("Provisioning tasks created.");
-      await loadRelated(appId);
+      await loadRelated(selected.id);
       await reload(true);
     } catch (e: any) {
       flashError(e?.message ?? "Failed to create provisioning tasks (RPC).");
@@ -615,14 +605,13 @@ export default function CIAdmissionsPage() {
     setInfo(null);
 
     try {
-      const appId = selected.id;
+      const { data, error } = await supabase.rpc("admissions_delete_application", {
+        p_application_id: selected.id,
+        p_reason: deleteReason.trim() || null,
+      });
 
-      const shapes = [
-        { p_application_id: appId, p_reason: deleteReason.trim() || null },
-        { application_id: appId, reason: deleteReason.trim() || null },
-      ];
-
-      await rpcFirstOk("admissions_delete_application", shapes);
+      if (error) throw error;
+      if ((data as any)?.ok === false) throw new Error((data as any)?.error ?? "RPC failed.");
 
       flashInfo("Application hard-deleted (tombstoned).");
       setDeleteOpen(false);
@@ -747,14 +736,12 @@ export default function CIAdmissionsPage() {
               ))}
             </div>
 
-            <div className="text-[11px] text-slate-500">
-              Queue is entity-scoped. Archive is a tab. Hard delete is guarded.
-            </div>
+            <div className="text-[11px] text-slate-500">Queue is entity-scoped. Archive is a tab. Hard delete is guarded.</div>
           </div>
 
           {/* Workspace */}
           <div className="flex-1 min-h-0 flex gap-4 overflow-hidden">
-            {/* Left queue drawer (Finder-style mailbox: lighter + scannable) */}
+            {/* Left queue drawer */}
             {drawerOpen && (
               <aside className="w-[390px] shrink-0 min-h-0 rounded-2xl border border-slate-800/70 bg-slate-900/18 flex flex-col overflow-hidden">
                 <div className="shrink-0 p-4 border-b border-slate-800/60 bg-white/[0.02]">
@@ -791,8 +778,7 @@ export default function CIAdmissionsPage() {
                     <ul className="py-2">
                       {filtered.map((a) => {
                         const st = (a.status ?? "—").toUpperCase();
-                        const title =
-                          a.organization_legal_name || a.organization_trade_name || a.applicant_name || "(unnamed)";
+                        const title = a.organization_legal_name || a.organization_trade_name || a.applicant_name || "(unnamed)";
                         const sub = a.applicant_email || a.applicant_phone || a.website || "—";
 
                         const selectedRow = a.id === selectedId;
@@ -805,19 +791,12 @@ export default function CIAdmissionsPage() {
                               className={cx(
                                 "w-full text-left rounded-2xl px-4 py-3 transition",
                                 "hover:bg-white/[0.05] focus:outline-none focus:ring-2 focus:ring-emerald-400/30",
-                                selectedRow
-                                  ? "bg-white/[0.07] ring-1 ring-emerald-400/25"
-                                  : "bg-transparent"
+                                selectedRow ? "bg-white/[0.07] ring-1 ring-emerald-400/25" : "bg-transparent"
                               )}
                             >
                               <div className="flex items-start justify-between gap-2">
                                 <div className="min-w-0 flex-1">
-                                  <div
-                                    className={cx(
-                                      "truncate text-[14px] font-semibold",
-                                      selectedRow ? "text-slate-50" : "text-slate-100"
-                                    )}
-                                  >
+                                  <div className={cx("truncate text-[14px] font-semibold", selectedRow ? "text-slate-50" : "text-slate-100")}>
                                     {title}
                                   </div>
                                   <div className="mt-1 text-[12px] text-slate-400 truncate">{sub}</div>
@@ -847,7 +826,7 @@ export default function CIAdmissionsPage() {
               </aside>
             )}
 
-            {/* Center: Document preview (cleaner, less boxed) */}
+            {/* Center */}
             <section className="flex-1 min-w-0 min-h-0 rounded-2xl border border-slate-800/70 bg-slate-950/28 flex flex-col overflow-hidden">
               <div className="shrink-0 px-5 py-4 border-b border-slate-800/60 bg-white/[0.02] flex items-start justify-between gap-4">
                 <div className="min-w-0">
@@ -855,8 +834,7 @@ export default function CIAdmissionsPage() {
                   <div className="mt-1 text-[13px] text-slate-400">
                     Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
                     <span className="mx-2 text-slate-700">•</span>
-                    Status:{" "}
-                    <span className="text-slate-100 font-semibold">{(selected?.status ?? "—").toUpperCase()}</span>
+                    Status: <span className="text-slate-100 font-semibold">{(selected?.status ?? "—").toUpperCase()}</span>
                   </div>
                 </div>
 
@@ -941,10 +919,7 @@ export default function CIAdmissionsPage() {
                           ["Trade Name", selected.organization_trade_name ?? "—"],
                           ["Website", selected.website ?? "—"],
                           ["Incorporation #", selected.incorporation_number ?? "—"],
-                          [
-                            "Jurisdiction",
-                            `${selected.jurisdiction_region ?? "—"} · ${selected.jurisdiction_country ?? "—"}`,
-                          ],
+                          ["Jurisdiction", `${selected.jurisdiction_region ?? "—"} · ${selected.jurisdiction_country ?? "—"}`],
                         ]}
                       />
 
@@ -957,13 +932,7 @@ export default function CIAdmissionsPage() {
                         ]}
                       />
 
-                      <InfoBlock
-                        title="Risk"
-                        rows={[
-                          ["Tier", selected.risk_tier ?? "—"],
-                          ["Notes", selected.risk_notes ?? "—"],
-                        ]}
-                      />
+                      <InfoBlock title="Risk" rows={[["Tier", selected.risk_tier ?? "—"], ["Notes", selected.risk_notes ?? "—"]]} />
 
                       <InfoBlock
                         title="Lifecycle"
@@ -978,9 +947,7 @@ export default function CIAdmissionsPage() {
                       {(error || info) && (
                         <div className="text-[13px]">
                           {error && (
-                            <div className="rounded-2xl border border-red-500/60 bg-red-500/10 px-4 py-3 text-red-200">
-                              {error}
-                            </div>
+                            <div className="rounded-2xl border border-red-500/60 bg-red-500/10 px-4 py-3 text-red-200">{error}</div>
                           )}
                           {info && !error && (
                             <div className="rounded-2xl border border-emerald-500/60 bg-emerald-500/10 px-4 py-3 text-emerald-200">
@@ -1000,38 +967,32 @@ export default function CIAdmissionsPage() {
               </div>
             </section>
 
-            {/* Right: Authority (simpler + clearer contrast, less “code panel”) */}
+            {/* Right */}
             <aside className="w-[440px] shrink-0 min-h-0 rounded-2xl border border-slate-800/70 bg-slate-950/28 flex flex-col overflow-hidden">
               <div className="shrink-0 px-5 py-4 border-b border-slate-800/60 bg-white/[0.02]">
                 <div className="flex items-center justify-between gap-2">
                   <div>
-                    <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-300">
-                      Authority Panel
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-300">Authority Panel</div>
+                    <div className="mt-1 text-[13px] text-slate-400">
+                      Review · Decisions · Requests · Archive · Provisioning
                     </div>
-                    <div className="mt-1 text-[13px] text-slate-400">Review · Decisions · Requests · Archive · Provisioning</div>
                   </div>
 
                   {selected && (
-                    <span
-                      className={cx(
-                        "rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.18em]",
-                        statusPill(selected.status)
-                      )}
-                    >
+                    <span className={cx("rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.18em]", statusPill(selected.status))}>
                       {(selected.status ?? "—").toUpperCase()}
                     </span>
                   )}
                 </div>
 
-                {/* Primary actions (Finder-style: one primary, one secondary, danger separated) */}
                 <div className="mt-4 grid grid-cols-2 gap-2">
                   <button
-                    onClick={() => setAdmissionsStatus("TRIAGE")}
+                    onClick={beginReview}
                     disabled={!selected || busy !== null}
                     className="rounded-2xl border border-emerald-400/45 bg-emerald-500/12 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-100 hover:bg-emerald-500/16 disabled:opacity-50 disabled:cursor-not-allowed"
-                    title="Marks the application in review (RPC)"
+                    title="Begins review (RPC)"
                   >
-                    {busy === "status" ? "…" : "Begin Review"}
+                    {busy === "review" ? "…" : "Begin Review"}
                   </button>
 
                   <button
@@ -1109,7 +1070,7 @@ export default function CIAdmissionsPage() {
                     value={decisionConditions}
                     onChange={(e) => setDecisionConditions(e.target.value)}
                     disabled={!selected || busy !== null}
-                    placeholder="Conditions / notes (optional)"
+                    placeholder="Conditions / reason (optional)"
                     className="mt-2 w-full min-h-[72px] resize-none rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-emerald-400/60 disabled:opacity-50"
                   />
 
@@ -1161,7 +1122,7 @@ export default function CIAdmissionsPage() {
                     value={requestInfoFields}
                     onChange={(e) => setRequestInfoFields(e.target.value)}
                     disabled={!selected || busy !== null}
-                    placeholder='Optional JSON fields (e.g. {"need":["incorporation_number","registry_email"]})'
+                    placeholder='Optional JSON overrides: {"channels":["email"],"due_at":"2026-01-10T17:00:00Z","next_status":"needs_info"}'
                     className="mt-2 w-full min-h-[72px] resize-none rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[12px] text-slate-100 outline-none focus:border-amber-400/60 disabled:opacity-50 font-mono"
                   />
 
@@ -1223,7 +1184,7 @@ export default function CIAdmissionsPage() {
                   </div>
                 </div>
 
-                {/* Audit rails (kept, but rendered as readable cards; result JSON stays, smaller + calmer) */}
+                {/* Audit rails */}
                 <div className="rounded-2xl border border-slate-800/60 bg-black/12 overflow-hidden">
                   <div className="px-4 py-4 border-b border-slate-800/60 bg-white/[0.02]">
                     <div className="text-[11px] uppercase tracking-[0.22em] text-slate-200">Audit Trail</div>
@@ -1241,18 +1202,13 @@ export default function CIAdmissionsPage() {
                             <div key={d.id} className="rounded-2xl border border-slate-800/60 bg-black/10 px-3 py-3">
                               <div className="flex items-start justify-between gap-2">
                                 <div className="min-w-0">
-                                  <div className="text-[13px] font-semibold text-slate-100">
-                                    {(d.decision ?? "—").toUpperCase()}
-                                  </div>
+                                  <div className="text-[13px] font-semibold text-slate-100">{(d.decision ?? "—").toUpperCase()}</div>
                                   <div className="mt-1 text-[11px] text-slate-400">
-                                    {fmtShort(d.decided_at)} <span className="mx-2 text-slate-700">•</span> by{" "}
-                                    {hashShort(d.decided_by)}
+                                    {fmtShort(d.decided_at)} <span className="mx-2 text-slate-700">•</span> by {hashShort(d.decided_by)}
                                   </div>
                                 </div>
                               </div>
-                              {d.summary && (
-                                <div className="mt-2 text-[13px] text-slate-200 whitespace-pre-wrap">{d.summary}</div>
-                              )}
+                              {d.summary && <div className="mt-2 text-[13px] text-slate-200 whitespace-pre-wrap">{d.summary}</div>}
                               {d.conditions && (
                                 <div className="mt-2 text-[12px] text-slate-300 whitespace-pre-wrap">
                                   <span className="text-slate-400">Conditions: </span>
@@ -1271,9 +1227,7 @@ export default function CIAdmissionsPage() {
                         <div className="mt-2 space-y-2">
                           {tasks.slice(0, 8).map((t) => (
                             <div key={t.id} className="rounded-2xl border border-slate-800/60 bg-black/10 px-3 py-3">
-                              <div className="text-[13px] font-semibold text-slate-100 truncate">
-                                {t.task_key ?? "(task)"}
-                              </div>
+                              <div className="text-[13px] font-semibold text-slate-100 truncate">{t.task_key ?? "(task)"}</div>
                               <div className="mt-1 text-[11px] text-slate-400">
                                 {fmtShort(t.created_at)} <span className="mx-2 text-slate-700">•</span> status:{" "}
                                 <span className="text-slate-100 font-semibold">{(t.status ?? "—").toUpperCase()}</span>
@@ -1303,16 +1257,11 @@ export default function CIAdmissionsPage() {
                         <div className="mt-2 space-y-2">
                           {events.slice(0, 10).map((e) => (
                             <div key={e.id} className="rounded-2xl border border-slate-800/60 bg-black/10 px-3 py-3">
-                              <div className="text-[12px] font-semibold text-slate-100">
-                                {(e.event_type ?? "event").toUpperCase()}
-                              </div>
+                              <div className="text-[12px] font-semibold text-slate-100">{(e.event_type ?? "event").toUpperCase()}</div>
                               <div className="mt-1 text-[11px] text-slate-400">
-                                {fmtShort(e.created_at)} <span className="mx-2 text-slate-700">•</span> actor{" "}
-                                {hashShort(e.actor_id)}
+                                {fmtShort(e.created_at)} <span className="mx-2 text-slate-700">•</span> actor {hashShort(e.actor_id)}
                               </div>
-                              {e.message && (
-                                <div className="mt-2 text-[13px] text-slate-200 whitespace-pre-wrap">{e.message}</div>
-                              )}
+                              {e.message && <div className="mt-2 text-[13px] text-slate-200 whitespace-pre-wrap">{e.message}</div>}
                             </div>
                           ))}
                         </div>
@@ -1335,13 +1284,10 @@ export default function CIAdmissionsPage() {
         </div>
       </div>
 
-      {/* Low-presence footer rail (wake near bottom) */}
+      {/* Low-presence footer rail */}
       <div
         className="mt-5 rounded-2xl border border-slate-900/80 bg-black/30 px-5 py-4 text-[11px] text-slate-500 flex items-center justify-between"
-        style={{
-          opacity: 0.38 + wake * 0.62,
-          transform: `translateY(${(1 - wake) * 6}px)`,
-        }}
+        style={{ opacity: 0.38 + wake * 0.62, transform: `translateY(${(1 - wake) * 6}px)` }}
       >
         <span className="tracking-[0.18em] uppercase">Verified Intake · Auditable Decisions · Archive Discipline</span>
         <span className="text-slate-600">© {new Date().getFullYear()} Oasis International Holdings</span>
@@ -1365,10 +1311,7 @@ export default function CIAdmissionsPage() {
               <div className="rounded-2xl border border-slate-800/60 bg-black/12 px-4 py-4">
                 <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Target</div>
                 <div className="mt-2 text-[13px] text-slate-100">
-                  {(selected?.organization_legal_name ||
-                    selected?.organization_trade_name ||
-                    selected?.applicant_email ||
-                    "—") ?? "—"}
+                  {(selected?.organization_legal_name || selected?.organization_trade_name || selected?.applicant_email || "—") ?? "—"}
                 </div>
                 <div className="mt-1 text-[12px] text-slate-400">
                   id: <span className="font-mono">{selected?.id ?? "—"}</span> · status:{" "}
@@ -1393,7 +1336,7 @@ export default function CIAdmissionsPage() {
                 value={deleteConfirmText}
                 onChange={(e) => setDeleteConfirmText(e.target.value)}
                 className="w-full rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-rose-400/60"
-                placeholder='Type DELETE to confirm'
+                placeholder="Type DELETE to confirm"
               />
             </div>
 
@@ -1441,9 +1384,7 @@ function StatusTabButton({
       onClick={onClick}
       className={cx(
         "px-4 py-2 rounded-full text-left transition min-w-[110px]",
-        active
-          ? "bg-emerald-500/14 border border-emerald-400/55 text-slate-50"
-          : "bg-transparent border border-transparent hover:bg-white/[0.05] text-slate-200"
+        active ? "bg-emerald-500/14 border border-emerald-400/55 text-slate-50" : "bg-transparent border border-transparent hover:bg-white/[0.05] text-slate-200"
       )}
       title={String(value)}
     >
