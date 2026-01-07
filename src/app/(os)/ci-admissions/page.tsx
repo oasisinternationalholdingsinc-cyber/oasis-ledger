@@ -171,14 +171,14 @@ async function rpcFirstOk<T = any>(fn: string, shapes: Array<Record<string, any>
 
 function statusPill(st?: string | null) {
   const s = (st ?? "").toUpperCase();
-  if (s.includes("APPROV")) return "bg-emerald-500/15 text-emerald-200 border-emerald-400/40";
-  if (s.includes("DECLIN") || s.includes("REJECT")) return "bg-rose-500/15 text-rose-200 border-rose-400/40";
-  if (s.includes("ARCHIV")) return "bg-slate-700/30 text-slate-200 border-slate-600/40";
-  if (s.includes("NEED") || s.includes("INFO")) return "bg-amber-500/15 text-amber-200 border-amber-400/40";
-  if (s.includes("PROVISION")) return "bg-sky-500/15 text-sky-200 border-sky-400/40";
-  if (s.includes("TRIAG") || s.includes("REVIEW")) return "bg-indigo-500/15 text-indigo-200 border-indigo-400/40";
-  if (s.includes("SUBMIT") || s.includes("DRAFT")) return "bg-slate-700/30 text-slate-200 border-slate-600/40";
-  return "bg-slate-700/25 text-slate-200 border-slate-600/40";
+  if (s.includes("APPROV")) return "bg-emerald-500/18 text-emerald-100 border-emerald-300/45";
+  if (s.includes("DECLIN") || s.includes("REJECT")) return "bg-rose-500/16 text-rose-100 border-rose-300/45";
+  if (s.includes("ARCHIV")) return "bg-slate-700/30 text-slate-100 border-slate-500/45";
+  if (s.includes("NEED") || s.includes("INFO")) return "bg-amber-500/18 text-amber-100 border-amber-300/45";
+  if (s.includes("PROVISION")) return "bg-sky-500/18 text-sky-100 border-sky-300/45";
+  if (s.includes("TRIAG") || s.includes("REVIEW")) return "bg-indigo-500/18 text-indigo-100 border-indigo-300/45";
+  if (s.includes("SUBMIT") || s.includes("DRAFT")) return "bg-slate-700/25 text-slate-100 border-slate-500/40";
+  return "bg-slate-700/20 text-slate-100 border-slate-500/35";
 }
 
 function safeArray(x: any): string[] {
@@ -188,8 +188,6 @@ function safeArray(x: any): string[] {
 }
 
 function statusToRpcEnum(next: string) {
-  // DB enum values are typically lowercase (your onboarding UI uses "submitted" already).
-  // We accept either, but send lowercase to be safe.
   return String(next || "").trim().toLowerCase();
 }
 
@@ -198,10 +196,7 @@ export default function CIAdmissionsPage() {
   useOsEnv(); // kept for OS consistency (even if admissions ignores is_test)
 
   const activeEntitySlug = (entityCtx?.activeEntity as string) || "holdings";
-  const activeEntityLabel = useMemo(
-    () => ENTITY_LABELS[activeEntitySlug] ?? activeEntitySlug,
-    [activeEntitySlug]
-  );
+  const activeEntityLabel = useMemo(() => ENTITY_LABELS[activeEntitySlug] ?? activeEntitySlug, [activeEntitySlug]);
 
   const [entityId, setEntityId] = useState<string | null>((entityCtx?.activeEntityId as string) || null);
 
@@ -336,9 +331,7 @@ export default function CIAdmissionsPage() {
       }
 
       const filteredByTab =
-        tab === "ALL"
-          ? rows
-          : rows.filter((r) => (r.status ?? "").toUpperCase() === String(tab).toUpperCase());
+        tab === "ALL" ? rows : rows.filter((r) => (r.status ?? "").toUpperCase() === String(tab).toUpperCase());
 
       const pick = filteredByTab[0] ?? rows[0] ?? null;
       if (pick) {
@@ -513,7 +506,6 @@ export default function CIAdmissionsPage() {
         },
         { application_id: appId, decision, risk_tier: rt, summary, reason: conditions },
 
-        // fallbacks if your signature uses "conditions"
         {
           p_application_id: appId,
           p_decision: decision,
@@ -523,7 +515,6 @@ export default function CIAdmissionsPage() {
         },
         { application_id: appId, decision, risk_tier: rt, summary, conditions },
 
-        // minimal
         { p_application_id: appId, p_decision: decision, p_risk_tier: rt, p_summary: summary },
         { application_id: appId, decision, risk_tier: rt, summary },
       ];
@@ -692,7 +683,7 @@ export default function CIAdmissionsPage() {
         <div className="mt-1 flex items-center justify-between gap-4">
           <div className="min-w-0">
             <h1 className="text-xl font-semibold text-slate-50">Admissions · Authority Console</h1>
-            <p className="mt-1 text-xs text-slate-400 max-w-3xl">
+            <p className="mt-1 text-[13px] leading-5 text-slate-400 max-w-3xl">
               Institutional intake is non-custodial. This console performs{" "}
               <span className="text-amber-200 font-semibold">review</span>, records{" "}
               <span className="text-emerald-300 font-semibold">decisions</span>, and manages{" "}
@@ -700,7 +691,7 @@ export default function CIAdmissionsPage() {
               <span className="text-slate-200 font-semibold">RPC</span> (no raw updates).
             </p>
 
-            <div className="mt-2 text-xs text-slate-400">
+            <div className="mt-2 text-[13px] text-slate-400">
               Entity: <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
               <span className="mx-2 text-slate-700">•</span>
               Intake is auditable. Archive is reversible (status). Hard delete is explicit.
@@ -710,21 +701,21 @@ export default function CIAdmissionsPage() {
           <div className="shrink-0 flex items-center gap-2">
             <button
               onClick={() => setDrawerOpen((v) => !v)}
-              className="rounded-full border border-slate-800 bg-slate-950/60 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
+              className="rounded-full border border-slate-800 bg-slate-950/40 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/50"
             >
               {drawerOpen ? "Hide Queue" : "Show Queue"}
             </button>
 
             <button
               onClick={() => reload(true)}
-              className="rounded-full border border-slate-800 bg-slate-950/60 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
+              className="rounded-full border border-slate-800 bg-slate-950/40 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/50"
             >
               Refresh
             </button>
 
             <Link
               href="/ci-council"
-              className="rounded-full border border-slate-700 bg-black/40 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
+              className="rounded-full border border-slate-700 bg-black/30 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/50"
               title="Reference: Council authority console"
             >
               Council
@@ -741,10 +732,10 @@ export default function CIAdmissionsPage() {
 
       {/* Main OS window frame */}
       <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
-        <div className="w-full max-w-[1500px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-6 py-5 flex flex-col overflow-hidden">
+        <div className="w-full max-w-[1540px] h-full rounded-3xl border border-slate-900/80 bg-black/45 shadow-[0_0_70px_rgba(15,23,42,0.75)] px-6 py-5 flex flex-col overflow-hidden">
           {/* Top strip */}
           <div className="shrink-0 mb-4 flex items-center justify-between gap-4">
-            <div className="inline-flex rounded-full bg-slate-950/70 border border-slate-800 p-1 overflow-hidden">
+            <div className="inline-flex rounded-full bg-slate-950/45 border border-slate-800/80 p-1 overflow-hidden">
               {statusTabs.map((s) => (
                 <StatusTabButton
                   key={s}
@@ -756,17 +747,19 @@ export default function CIAdmissionsPage() {
               ))}
             </div>
 
-            <div className="text-[10px] text-slate-500">Queue is entity-scoped. Archive is a tab. Hard delete is guarded.</div>
+            <div className="text-[11px] text-slate-500">
+              Queue is entity-scoped. Archive is a tab. Hard delete is guarded.
+            </div>
           </div>
 
           {/* Workspace */}
           <div className="flex-1 min-h-0 flex gap-4 overflow-hidden">
-            {/* Left queue drawer */}
+            {/* Left queue drawer (Finder-style mailbox: lighter + scannable) */}
             {drawerOpen && (
-              <aside className="w-[380px] shrink-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
-                <div className="shrink-0 p-4 border-b border-slate-800">
+              <aside className="w-[390px] shrink-0 min-h-0 rounded-2xl border border-slate-800/70 bg-slate-900/18 flex flex-col overflow-hidden">
+                <div className="shrink-0 p-4 border-b border-slate-800/60 bg-white/[0.02]">
                   <div className="flex items-center justify-between gap-2">
-                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-300">
                       Queue · {filtered.length}/{apps.length}
                     </div>
 
@@ -775,14 +768,14 @@ export default function CIAdmissionsPage() {
                         setTab("ALL");
                         setQuery("");
                       }}
-                      className="rounded-full border border-slate-800 bg-slate-950/60 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
+                      className="rounded-full border border-slate-700/70 bg-slate-950/30 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/45"
                     >
                       Reset
                     </button>
                   </div>
 
                   <input
-                    className="mt-3 w-full rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-emerald-400"
+                    className="mt-3 w-full rounded-2xl border border-slate-700/60 bg-slate-950/25 px-4 py-3 text-[14px] text-slate-100 placeholder:text-slate-500 outline-none focus:border-emerald-400/70"
                     placeholder="Search… applicant / org / email / intent"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
@@ -791,45 +784,60 @@ export default function CIAdmissionsPage() {
 
                 <div className="flex-1 min-h-0 overflow-y-auto">
                   {loading ? (
-                    <div className="p-4 text-[13px] text-slate-400">Loading…</div>
+                    <div className="p-4 text-[14px] text-slate-300">Loading…</div>
                   ) : filtered.length === 0 ? (
-                    <div className="p-4 text-[13px] text-slate-500">No applications for this filter.</div>
+                    <div className="p-4 text-[14px] text-slate-400">No applications for this filter.</div>
                   ) : (
-                    <ul className="divide-y divide-slate-800">
+                    <ul className="py-2">
                       {filtered.map((a) => {
                         const st = (a.status ?? "—").toUpperCase();
-                        const title = a.organization_legal_name || a.organization_trade_name || a.applicant_name || "(unnamed)";
+                        const title =
+                          a.organization_legal_name || a.organization_trade_name || a.applicant_name || "(unnamed)";
                         const sub = a.applicant_email || a.applicant_phone || a.website || "—";
 
+                        const selectedRow = a.id === selectedId;
+
                         return (
-                          <li
-                            key={a.id}
-                            onClick={() => handleSelect(a)}
-                            className={cx(
-                              "cursor-pointer px-4 py-3 transition hover:bg-slate-800/60",
-                              a.id === selectedId && "bg-slate-800/80"
-                            )}
-                          >
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="min-w-0 flex-1">
-                                <div className="truncate text-[13px] font-semibold text-slate-100">{title}</div>
-                                <div className="mt-1 text-[11px] text-slate-500 truncate">{sub}</div>
+                          <li key={a.id} className="px-2">
+                            <button
+                              type="button"
+                              onClick={() => handleSelect(a)}
+                              className={cx(
+                                "w-full text-left rounded-2xl px-4 py-3 transition",
+                                "hover:bg-white/[0.05] focus:outline-none focus:ring-2 focus:ring-emerald-400/30",
+                                selectedRow
+                                  ? "bg-white/[0.07] ring-1 ring-emerald-400/25"
+                                  : "bg-transparent"
+                              )}
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="min-w-0 flex-1">
+                                  <div
+                                    className={cx(
+                                      "truncate text-[14px] font-semibold",
+                                      selectedRow ? "text-slate-50" : "text-slate-100"
+                                    )}
+                                  >
+                                    {title}
+                                  </div>
+                                  <div className="mt-1 text-[12px] text-slate-400 truncate">{sub}</div>
 
-                                <div className="mt-2 text-[11px] text-slate-500">
-                                  {fmtShort(a.created_at)} <span className="mx-2 text-slate-700">•</span>
-                                  {a.applicant_type ?? "—"}
+                                  <div className="mt-2 text-[12px] text-slate-500">
+                                    {fmtShort(a.created_at)} <span className="mx-2 text-slate-700">•</span>
+                                    {a.applicant_type ?? "—"}
+                                  </div>
                                 </div>
-                              </div>
 
-                              <span
-                                className={cx(
-                                  "shrink-0 rounded-full border px-2 py-1 text-[9px] uppercase tracking-[0.18em]",
-                                  statusPill(st)
-                                )}
-                              >
-                                {st}
-                              </span>
-                            </div>
+                                <span
+                                  className={cx(
+                                    "shrink-0 rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.18em]",
+                                    statusPill(st)
+                                  )}
+                                >
+                                  {st}
+                                </span>
+                              </div>
+                            </button>
                           </li>
                         );
                       })}
@@ -839,15 +847,16 @@ export default function CIAdmissionsPage() {
               </aside>
             )}
 
-            {/* Center: Application details */}
-            <section className="flex-1 min-w-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
-              <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
+            {/* Center: Document preview (cleaner, less boxed) */}
+            <section className="flex-1 min-w-0 min-h-0 rounded-2xl border border-slate-800/70 bg-slate-950/28 flex flex-col overflow-hidden">
+              <div className="shrink-0 px-5 py-4 border-b border-slate-800/60 bg-white/[0.02] flex items-start justify-between gap-4">
                 <div className="min-w-0">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Application</div>
-                  <div className="mt-1 text-[12px] text-slate-500">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-300">Application</div>
+                  <div className="mt-1 text-[13px] text-slate-400">
                     Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
                     <span className="mx-2 text-slate-700">•</span>
-                    Status: <span className="text-slate-200 font-semibold">{(selected?.status ?? "—").toUpperCase()}</span>
+                    Status:{" "}
+                    <span className="text-slate-100 font-semibold">{(selected?.status ?? "—").toUpperCase()}</span>
                   </div>
                 </div>
 
@@ -863,14 +872,14 @@ export default function CIAdmissionsPage() {
                       }
                     }}
                     disabled={!selected}
-                    className="rounded-full border border-slate-800 bg-slate-950/60 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="rounded-full border border-slate-700/70 bg-slate-950/25 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/45 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Copy ID
                   </button>
 
                   <Link
                     href="/ci-archive/verified"
-                    className="rounded-full border border-slate-700 bg-black/40 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
+                    className="rounded-full border border-slate-700/70 bg-slate-950/25 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/45"
                     title="Reference registries (separate from admissions)"
                   >
                     Verified Registry
@@ -880,23 +889,23 @@ export default function CIAdmissionsPage() {
 
               <div className="flex-1 min-h-0 overflow-hidden p-5">
                 {!selected ? (
-                  <div className="h-full w-full rounded-2xl border border-slate-800 bg-black/20 flex items-center justify-center text-slate-500">
+                  <div className="h-full w-full rounded-2xl border border-slate-800/60 bg-black/10 flex items-center justify-center text-slate-400">
                     Select an application from the queue.
                   </div>
                 ) : (
-                  <div className="h-full w-full rounded-2xl border border-slate-800 bg-black/30 overflow-hidden flex flex-col">
-                    <div className="shrink-0 px-5 py-4 border-b border-slate-800">
-                      <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Snapshot</div>
+                  <div className="h-full w-full rounded-2xl border border-slate-800/60 bg-black/12 overflow-hidden flex flex-col">
+                    <div className="shrink-0 px-5 py-4 border-b border-slate-800/60 bg-white/[0.02]">
+                      <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Snapshot</div>
 
                       <div className="mt-2 flex items-start justify-between gap-3">
                         <div className="min-w-0">
-                          <div className="text-[15px] font-semibold text-slate-100 truncate">
+                          <div className="text-[16px] font-semibold text-slate-50 truncate">
                             {selected.organization_legal_name ||
                               selected.organization_trade_name ||
                               selected.applicant_name ||
                               "(untitled)"}
                           </div>
-                          <div className="mt-1 text-[11px] text-slate-500">
+                          <div className="mt-1 text-[13px] text-slate-400">
                             Submitted: {fmtShort(selected.submitted_at || selected.created_at)}
                             <span className="mx-2 text-slate-700">•</span>
                             Applicant: {selected.applicant_type ?? "—"}
@@ -905,7 +914,7 @@ export default function CIAdmissionsPage() {
 
                         <span
                           className={cx(
-                            "shrink-0 rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.18em]",
+                            "shrink-0 rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.18em]",
                             statusPill(selected.status)
                           )}
                         >
@@ -932,7 +941,10 @@ export default function CIAdmissionsPage() {
                           ["Trade Name", selected.organization_trade_name ?? "—"],
                           ["Website", selected.website ?? "—"],
                           ["Incorporation #", selected.incorporation_number ?? "—"],
-                          ["Jurisdiction", `${selected.jurisdiction_region ?? "—"} · ${selected.jurisdiction_country ?? "—"}`],
+                          [
+                            "Jurisdiction",
+                            `${selected.jurisdiction_region ?? "—"} · ${selected.jurisdiction_country ?? "—"}`,
+                          ],
                         ]}
                       />
 
@@ -946,7 +958,7 @@ export default function CIAdmissionsPage() {
                       />
 
                       <InfoBlock
-                        title="Risk (Admissions)"
+                        title="Risk"
                         rows={[
                           ["Tier", selected.risk_tier ?? "—"],
                           ["Notes", selected.risk_notes ?? "—"],
@@ -979,7 +991,7 @@ export default function CIAdmissionsPage() {
                       )}
                     </div>
 
-                    <div className="shrink-0 px-5 py-4 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
+                    <div className="shrink-0 px-5 py-4 border-t border-slate-800/60 text-[11px] text-slate-500 flex items-center justify-between bg-white/[0.02]">
                       <span>Read-only surface. Mutations are RPC-only.</span>
                       <span>Oasis OS · Institutional Intake</span>
                     </div>
@@ -988,29 +1000,35 @@ export default function CIAdmissionsPage() {
               </div>
             </section>
 
-            {/* Right: Authority + Audit */}
-            <aside className="w-[430px] shrink-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
-              <div className="shrink-0 px-5 py-4 border-b border-slate-800">
+            {/* Right: Authority (simpler + clearer contrast, less “code panel”) */}
+            <aside className="w-[440px] shrink-0 min-h-0 rounded-2xl border border-slate-800/70 bg-slate-950/28 flex flex-col overflow-hidden">
+              <div className="shrink-0 px-5 py-4 border-b border-slate-800/60 bg-white/[0.02]">
                 <div className="flex items-center justify-between gap-2">
                   <div>
-                    <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Authority Panel</div>
-                    <div className="mt-1 text-[12px] text-slate-500">Review · Decisions · Requests · Archive · Provisioning</div>
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-300">
+                      Authority Panel
+                    </div>
+                    <div className="mt-1 text-[13px] text-slate-400">Review · Decisions · Requests · Archive · Provisioning</div>
                   </div>
 
                   {selected && (
                     <span
-                      className={cx("rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.18em]", statusPill(selected.status))}
+                      className={cx(
+                        "rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.18em]",
+                        statusPill(selected.status)
+                      )}
                     >
                       {(selected.status ?? "—").toUpperCase()}
                     </span>
                   )}
                 </div>
 
+                {/* Primary actions (Finder-style: one primary, one secondary, danger separated) */}
                 <div className="mt-4 grid grid-cols-2 gap-2">
                   <button
                     onClick={() => setAdmissionsStatus("TRIAGE")}
                     disabled={!selected || busy !== null}
-                    className="rounded-2xl border border-indigo-400/50 bg-indigo-500/10 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-indigo-200 hover:bg-indigo-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="rounded-2xl border border-emerald-400/45 bg-emerald-500/12 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-100 hover:bg-emerald-500/16 disabled:opacity-50 disabled:cursor-not-allowed"
                     title="Marks the application in review (RPC)"
                   >
                     {busy === "status" ? "…" : "Begin Review"}
@@ -1019,7 +1037,7 @@ export default function CIAdmissionsPage() {
                   <button
                     onClick={() => setAdmissionsStatus("NEEDS_INFO")}
                     disabled={!selected || busy !== null}
-                    className="rounded-2xl border border-amber-400/50 bg-amber-500/10 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="rounded-2xl border border-amber-400/45 bg-amber-500/12 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-amber-100 hover:bg-amber-500/16 disabled:opacity-50 disabled:cursor-not-allowed"
                     title="Moves to Needs Info (RPC)"
                   >
                     {busy === "status" ? "…" : "Needs Info"}
@@ -1030,7 +1048,7 @@ export default function CIAdmissionsPage() {
                   <button
                     onClick={() => setAdmissionsStatus("ARCHIVED")}
                     disabled={!selected || busy !== null}
-                    className="rounded-2xl border border-slate-600/50 bg-slate-900/30 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/45 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="rounded-2xl border border-slate-600/50 bg-white/[0.03] px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-100 hover:bg-white/[0.05] disabled:opacity-50 disabled:cursor-not-allowed"
                     title="Soft archive: status → archived (RPC)"
                   >
                     {busy === "status" ? "…" : "Archive"}
@@ -1044,7 +1062,7 @@ export default function CIAdmissionsPage() {
                       setDeleteConfirmText("");
                     }}
                     disabled={!selected || busy !== null}
-                    className="rounded-2xl border border-rose-400/40 bg-rose-500/10 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-rose-200 hover:bg-rose-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="rounded-2xl border border-rose-400/35 bg-rose-500/10 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-rose-100 hover:bg-rose-500/14 disabled:opacity-50 disabled:cursor-not-allowed"
                     title="Hard delete (RPC) — terminal statuses only"
                   >
                     Hard Delete
@@ -1054,15 +1072,15 @@ export default function CIAdmissionsPage() {
 
               <div className="flex-1 min-h-0 overflow-y-auto px-5 py-5 space-y-4">
                 {/* Decision */}
-                <div className="rounded-2xl border border-slate-800 bg-black/25 px-4 py-4">
-                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Record Decision (RPC)</div>
+                <div className="rounded-2xl border border-slate-800/60 bg-black/12 px-4 py-4">
+                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-200">Decision (RPC)</div>
 
                   <div className="mt-3 grid grid-cols-2 gap-2">
                     <select
                       value={decisionKind}
                       onChange={(e) => setDecisionKind(e.target.value)}
                       disabled={!selected || busy !== null}
-                      className="w-full rounded-2xl border border-slate-800 bg-slate-950/60 px-3 py-3 text-[12px] text-slate-100 outline-none focus:border-emerald-400 disabled:opacity-50"
+                      className="w-full rounded-2xl border border-slate-700/60 bg-slate-950/20 px-3 py-3 text-[13px] text-slate-100 outline-none focus:border-emerald-400/60 disabled:opacity-50"
                     >
                       <option value="APPROVED">APPROVED</option>
                       <option value="DECLINED">DECLINED</option>
@@ -1075,7 +1093,7 @@ export default function CIAdmissionsPage() {
                       onChange={(e) => setRiskTier(e.target.value)}
                       disabled={!selected || busy !== null}
                       placeholder="risk_tier (optional)"
-                      className="w-full rounded-2xl border border-slate-800 bg-slate-950/60 px-3 py-3 text-[12px] text-slate-100 outline-none focus:border-emerald-400 disabled:opacity-50"
+                      className="w-full rounded-2xl border border-slate-700/60 bg-slate-950/20 px-3 py-3 text-[13px] text-slate-100 outline-none focus:border-emerald-400/60 disabled:opacity-50"
                     />
                   </div>
 
@@ -1084,7 +1102,7 @@ export default function CIAdmissionsPage() {
                     onChange={(e) => setDecisionSummary(e.target.value)}
                     disabled={!selected || busy !== null}
                     placeholder="Decision summary (what / why)"
-                    className="mt-2 w-full min-h-[88px] resize-none rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[12px] text-slate-100 outline-none focus:border-emerald-400 disabled:opacity-50"
+                    className="mt-2 w-full min-h-[92px] resize-none rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-emerald-400/60 disabled:opacity-50"
                   />
 
                   <textarea
@@ -1092,7 +1110,7 @@ export default function CIAdmissionsPage() {
                     onChange={(e) => setDecisionConditions(e.target.value)}
                     disabled={!selected || busy !== null}
                     placeholder="Conditions / notes (optional)"
-                    className="mt-2 w-full min-h-[72px] resize-none rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[12px] text-slate-100 outline-none focus:border-emerald-400 disabled:opacity-50"
+                    className="mt-2 w-full min-h-[72px] resize-none rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-emerald-400/60 disabled:opacity-50"
                   />
 
                   <textarea
@@ -1100,14 +1118,14 @@ export default function CIAdmissionsPage() {
                     onChange={(e) => setRiskNotes(e.target.value)}
                     disabled={!selected || busy !== null}
                     placeholder="risk_notes (optional)"
-                    className="mt-2 w-full min-h-[64px] resize-none rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[12px] text-slate-100 outline-none focus:border-emerald-400 disabled:opacity-50"
+                    className="mt-2 w-full min-h-[64px] resize-none rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-emerald-400/60 disabled:opacity-50"
                   />
 
                   <div className="mt-3 grid grid-cols-2 gap-2">
                     <button
                       onClick={recordDecision}
                       disabled={!selected || busy !== null}
-                      className="rounded-2xl border border-emerald-400/50 bg-emerald-500/10 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="rounded-2xl border border-emerald-400/45 bg-emerald-500/12 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-100 hover:bg-emerald-500/16 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {busy === "decision" ? "Recording…" : "Record"}
                     </button>
@@ -1115,28 +1133,28 @@ export default function CIAdmissionsPage() {
                     <button
                       onClick={() => setAdmissionsStatus(decisionKind)}
                       disabled={!selected || busy !== null}
-                      className="rounded-2xl border border-amber-400/50 bg-amber-500/10 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="rounded-2xl border border-slate-700/60 bg-white/[0.03] px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-100 hover:bg-white/[0.05] disabled:opacity-50 disabled:cursor-not-allowed"
                       title="Convenience: set status to match decision (RPC)"
                     >
                       {busy === "status" ? "…" : "Set Status"}
                     </button>
                   </div>
 
-                  <div className="mt-3 text-[10px] text-slate-600">
-                    Decision is auditable: writes to <span className="font-mono">onboarding_decisions</span>.
+                  <div className="mt-3 text-[11px] text-slate-500">
+                    Writes to <span className="font-mono">onboarding_decisions</span>.
                   </div>
                 </div>
 
                 {/* Request info */}
-                <div className="rounded-2xl border border-slate-800 bg-black/25 px-4 py-4">
-                  <div className="text-[11px] uppercase tracking-[0.22em] text-amber-200">Request Information (RPC)</div>
+                <div className="rounded-2xl border border-slate-800/60 bg-black/12 px-4 py-4">
+                  <div className="text-[11px] uppercase tracking-[0.22em] text-amber-100">Request Info (RPC)</div>
 
                   <textarea
                     value={requestInfoMsg}
                     onChange={(e) => setRequestInfoMsg(e.target.value)}
                     disabled={!selected || busy !== null}
                     placeholder="Message to applicant (what you need / why / deadline)"
-                    className="mt-3 w-full min-h-[92px] resize-none rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[12px] text-slate-100 outline-none focus:border-amber-400 disabled:opacity-50"
+                    className="mt-3 w-full min-h-[96px] resize-none rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-amber-400/60 disabled:opacity-50"
                   />
 
                   <textarea
@@ -1144,14 +1162,14 @@ export default function CIAdmissionsPage() {
                     onChange={(e) => setRequestInfoFields(e.target.value)}
                     disabled={!selected || busy !== null}
                     placeholder='Optional JSON fields (e.g. {"need":["incorporation_number","registry_email"]})'
-                    className="mt-2 w-full min-h-[72px] resize-none rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[12px] text-slate-100 outline-none focus:border-amber-400 disabled:opacity-50 font-mono"
+                    className="mt-2 w-full min-h-[72px] resize-none rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[12px] text-slate-100 outline-none focus:border-amber-400/60 disabled:opacity-50 font-mono"
                   />
 
                   <div className="mt-3 grid grid-cols-2 gap-2">
                     <button
                       onClick={requestInfo}
                       disabled={!selected || busy !== null}
-                      className="rounded-2xl border border-amber-400/50 bg-amber-500/10 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="rounded-2xl border border-amber-400/45 bg-amber-500/12 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-amber-100 hover:bg-amber-500/16 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {busy === "info" ? "Sending…" : "Request Info"}
                     </button>
@@ -1159,33 +1177,33 @@ export default function CIAdmissionsPage() {
                     <button
                       onClick={() => setAdmissionsStatus("NEEDS_INFO")}
                       disabled={!selected || busy !== null}
-                      className="rounded-2xl border border-slate-700 bg-slate-950/40 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="rounded-2xl border border-slate-700/60 bg-white/[0.03] px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-100 hover:bg-white/[0.05] disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {busy === "status" ? "…" : "Mark Needs Info"}
                     </button>
                   </div>
 
-                  <div className="mt-3 text-[10px] text-slate-600">
-                    Request is auditable: writes to <span className="font-mono">onboarding_events</span>.
+                  <div className="mt-3 text-[11px] text-slate-500">
+                    Writes to <span className="font-mono">onboarding_events</span>.
                   </div>
                 </div>
 
                 {/* Provisioning tasks */}
-                <div className="rounded-2xl border border-slate-800 bg-black/25 px-4 py-4">
-                  <div className="text-[11px] uppercase tracking-[0.22em] text-sky-200">Provisioning Tasks (RPC)</div>
+                <div className="rounded-2xl border border-slate-800/60 bg-black/12 px-4 py-4">
+                  <div className="text-[11px] uppercase tracking-[0.22em] text-sky-100">Provisioning (RPC)</div>
 
                   <textarea
                     value={tasksJson}
                     onChange={(e) => setTasksJson(e.target.value)}
                     disabled={!selected || busy !== null}
-                    className="mt-3 w-full min-h-[160px] resize-none rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[12px] text-slate-100 outline-none focus:border-sky-400 disabled:opacity-50 font-mono"
+                    className="mt-3 w-full min-h-[150px] resize-none rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[12px] text-slate-100 outline-none focus:border-sky-400/60 disabled:opacity-50 font-mono"
                   />
 
                   <div className="mt-3 grid grid-cols-2 gap-2">
                     <button
                       onClick={createProvisioningTasks}
                       disabled={!selected || busy !== null}
-                      className="rounded-2xl border border-sky-400/50 bg-sky-500/10 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-sky-200 hover:bg-sky-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="rounded-2xl border border-sky-400/45 bg-sky-500/12 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-sky-100 hover:bg-sky-500/16 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {busy === "tasks" ? "Creating…" : "Create Tasks"}
                     </button>
@@ -1193,49 +1211,51 @@ export default function CIAdmissionsPage() {
                     <button
                       onClick={() => setAdmissionsStatus("PROVISIONING")}
                       disabled={!selected || busy !== null}
-                      className="rounded-2xl border border-slate-700 bg-slate-950/40 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="rounded-2xl border border-slate-700/60 bg-white/[0.03] px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-100 hover:bg-white/[0.05] disabled:opacity-50 disabled:cursor-not-allowed"
                       title="Moves status into provisioning phase (RPC)"
                     >
                       {busy === "status" ? "…" : "Set Provisioning"}
                     </button>
                   </div>
 
-                  <div className="mt-3 text-[10px] text-slate-600">
-                    Tasks live in <span className="font-mono">onboarding_provisioning_tasks</span>.
+                  <div className="mt-3 text-[11px] text-slate-500">
+                    Writes to <span className="font-mono">onboarding_provisioning_tasks</span>.
                   </div>
                 </div>
 
-                {/* Audit rails */}
-                <div className="rounded-2xl border border-slate-800 bg-black/25 overflow-hidden">
-                  <div className="px-4 py-4 border-b border-slate-800">
-                    <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Audit Trail</div>
-                    <div className="mt-1 text-[11px] text-slate-500">
+                {/* Audit rails (kept, but rendered as readable cards; result JSON stays, smaller + calmer) */}
+                <div className="rounded-2xl border border-slate-800/60 bg-black/12 overflow-hidden">
+                  <div className="px-4 py-4 border-b border-slate-800/60 bg-white/[0.02]">
+                    <div className="text-[11px] uppercase tracking-[0.22em] text-slate-200">Audit Trail</div>
+                    <div className="mt-1 text-[12px] text-slate-400">
                       Events: {events.length} · Decisions: {decisions.length} · Tasks: {tasks.length}
                     </div>
                   </div>
 
-                  <div className="max-h-[360px] overflow-y-auto divide-y divide-slate-800">
+                  <div className="max-h-[360px] overflow-y-auto">
                     {decisions.length > 0 && (
                       <div className="p-4">
-                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Decisions</div>
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Decisions</div>
                         <div className="mt-2 space-y-2">
                           {decisions.slice(0, 6).map((d) => (
-                            <div key={d.id} className="rounded-2xl border border-slate-800 bg-black/25 px-3 py-3">
+                            <div key={d.id} className="rounded-2xl border border-slate-800/60 bg-black/10 px-3 py-3">
                               <div className="flex items-start justify-between gap-2">
                                 <div className="min-w-0">
-                                  <div className="text-[12px] font-semibold text-slate-100">
+                                  <div className="text-[13px] font-semibold text-slate-100">
                                     {(d.decision ?? "—").toUpperCase()}
                                   </div>
-                                  <div className="mt-1 text-[10px] text-slate-500">
+                                  <div className="mt-1 text-[11px] text-slate-400">
                                     {fmtShort(d.decided_at)} <span className="mx-2 text-slate-700">•</span> by{" "}
                                     {hashShort(d.decided_by)}
                                   </div>
                                 </div>
                               </div>
-                              {d.summary && <div className="mt-2 text-[12px] text-slate-300 whitespace-pre-wrap">{d.summary}</div>}
+                              {d.summary && (
+                                <div className="mt-2 text-[13px] text-slate-200 whitespace-pre-wrap">{d.summary}</div>
+                              )}
                               {d.conditions && (
-                                <div className="mt-2 text-[11px] text-slate-400 whitespace-pre-wrap">
-                                  <span className="text-slate-500">Conditions: </span>
+                                <div className="mt-2 text-[12px] text-slate-300 whitespace-pre-wrap">
+                                  <span className="text-slate-400">Conditions: </span>
                                   {d.conditions}
                                 </div>
                               )}
@@ -1246,30 +1266,28 @@ export default function CIAdmissionsPage() {
                     )}
 
                     {tasks.length > 0 && (
-                      <div className="p-4">
-                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Provisioning Tasks</div>
+                      <div className="px-4 pb-4">
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Provisioning Tasks</div>
                         <div className="mt-2 space-y-2">
                           {tasks.slice(0, 8).map((t) => (
-                            <div key={t.id} className="rounded-2xl border border-slate-800 bg-black/25 px-3 py-3">
-                              <div className="flex items-start justify-between gap-2">
-                                <div className="min-w-0">
-                                  <div className="text-[12px] font-semibold text-slate-100 truncate">{t.task_key ?? "(task)"}</div>
-                                  <div className="mt-1 text-[10px] text-slate-500">
-                                    {fmtShort(t.created_at)} <span className="mx-2 text-slate-700">•</span> status:{" "}
-                                    <span className="text-slate-200 font-semibold">{(t.status ?? "—").toUpperCase()}</span>
-                                    <span className="mx-2 text-slate-700">•</span> attempts: {t.attempts ?? 0}
-                                  </div>
-                                </div>
+                            <div key={t.id} className="rounded-2xl border border-slate-800/60 bg-black/10 px-3 py-3">
+                              <div className="text-[13px] font-semibold text-slate-100 truncate">
+                                {t.task_key ?? "(task)"}
+                              </div>
+                              <div className="mt-1 text-[11px] text-slate-400">
+                                {fmtShort(t.created_at)} <span className="mx-2 text-slate-700">•</span> status:{" "}
+                                <span className="text-slate-100 font-semibold">{(t.status ?? "—").toUpperCase()}</span>
+                                <span className="mx-2 text-slate-700">•</span> attempts: {t.attempts ?? 0}
                               </div>
 
                               {t.last_error && (
-                                <div className="mt-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200">
+                                <div className="mt-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-[12px] text-rose-100">
                                   {t.last_error}
                                 </div>
                               )}
 
                               {t.result && (
-                                <pre className="mt-2 whitespace-pre-wrap font-mono text-[10px] text-slate-300 rounded-xl border border-slate-800 bg-black/25 px-3 py-2 max-h-[140px] overflow-y-auto">
+                                <pre className="mt-2 whitespace-pre-wrap font-mono text-[10px] text-slate-200 rounded-xl border border-slate-800/60 bg-black/15 px-3 py-2 max-h-[140px] overflow-y-auto">
                                   {JSON.stringify(t.result, null, 2)}
                                 </pre>
                               )}
@@ -1280,23 +1298,21 @@ export default function CIAdmissionsPage() {
                     )}
 
                     {events.length > 0 && (
-                      <div className="p-4">
-                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Events</div>
+                      <div className="px-4 pb-4">
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Events</div>
                         <div className="mt-2 space-y-2">
                           {events.slice(0, 10).map((e) => (
-                            <div key={e.id} className="rounded-2xl border border-slate-800 bg-black/25 px-3 py-3">
-                              <div className="flex items-start justify-between gap-2">
-                                <div className="min-w-0">
-                                  <div className="text-[11px] font-semibold text-slate-200">
-                                    {(e.event_type ?? "event").toUpperCase()}
-                                  </div>
-                                  <div className="mt-1 text-[10px] text-slate-500">
-                                    {fmtShort(e.created_at)} <span className="mx-2 text-slate-700">•</span> actor{" "}
-                                    {hashShort(e.actor_id)}
-                                  </div>
-                                </div>
+                            <div key={e.id} className="rounded-2xl border border-slate-800/60 bg-black/10 px-3 py-3">
+                              <div className="text-[12px] font-semibold text-slate-100">
+                                {(e.event_type ?? "event").toUpperCase()}
                               </div>
-                              {e.message && <div className="mt-2 text-[12px] text-slate-300 whitespace-pre-wrap">{e.message}</div>}
+                              <div className="mt-1 text-[11px] text-slate-400">
+                                {fmtShort(e.created_at)} <span className="mx-2 text-slate-700">•</span> actor{" "}
+                                {hashShort(e.actor_id)}
+                              </div>
+                              {e.message && (
+                                <div className="mt-2 text-[13px] text-slate-200 whitespace-pre-wrap">{e.message}</div>
+                              )}
                             </div>
                           ))}
                         </div>
@@ -1304,13 +1320,13 @@ export default function CIAdmissionsPage() {
                     )}
 
                     {events.length === 0 && decisions.length === 0 && tasks.length === 0 && (
-                      <div className="p-4 text-[12px] text-slate-500">No audit entries yet for this application.</div>
+                      <div className="p-4 text-[13px] text-slate-400">No audit entries yet for this application.</div>
                     )}
                   </div>
                 </div>
               </div>
 
-              <div className="shrink-0 px-5 py-3 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
+              <div className="shrink-0 px-5 py-4 border-t border-slate-800/60 text-[11px] text-slate-500 flex items-center justify-between bg-white/[0.02]">
                 <span>Admissions mutations are RPC-only.</span>
                 <span>Oasis OS · Authority Gateway</span>
               </div>
@@ -1321,9 +1337,9 @@ export default function CIAdmissionsPage() {
 
       {/* Low-presence footer rail (wake near bottom) */}
       <div
-        className="mt-5 rounded-2xl border border-slate-900 bg-black/40 px-5 py-4 text-[11px] text-slate-500 flex items-center justify-between"
+        className="mt-5 rounded-2xl border border-slate-900/80 bg-black/30 px-5 py-4 text-[11px] text-slate-500 flex items-center justify-between"
         style={{
-          opacity: 0.35 + wake * 0.65,
+          opacity: 0.38 + wake * 0.62,
           transform: `translateY(${(1 - wake) * 6}px)`,
         }}
       >
@@ -1334,26 +1350,29 @@ export default function CIAdmissionsPage() {
       {/* Hard Delete Modal */}
       {deleteOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 px-6">
-          <div className="w-full max-w-[640px] rounded-3xl border border-slate-800 bg-slate-950/80 shadow-[0_0_80px_rgba(0,0,0,0.6)] overflow-hidden">
-            <div className="px-6 py-5 border-b border-slate-800">
-              <div className="text-[11px] uppercase tracking-[0.22em] text-rose-200">Hard Delete (Production)</div>
-              <div className="mt-2 text-[13px] text-slate-300">
+          <div className="w-full max-w-[640px] rounded-3xl border border-slate-800/70 bg-slate-950/80 shadow-[0_0_90px_rgba(0,0,0,0.6)] overflow-hidden">
+            <div className="px-6 py-5 border-b border-slate-800/60 bg-white/[0.02]">
+              <div className="text-[11px] uppercase tracking-[0.22em] text-rose-100">Hard Delete (Production)</div>
+              <div className="mt-2 text-[13px] text-slate-200">
                 This permanently removes the application and its related rows. A tombstone snapshot should exist server-side.
               </div>
-              <div className="mt-2 text-[12px] text-slate-500">
-                Allowed only when status is <span className="text-slate-200 font-semibold">DECLINED / WITHDRAWN / ARCHIVED</span>.
+              <div className="mt-2 text-[12px] text-slate-400">
+                Allowed only when status is <span className="text-slate-100 font-semibold">DECLINED / WITHDRAWN / ARCHIVED</span>.
               </div>
             </div>
 
             <div className="px-6 py-5 space-y-3">
-              <div className="rounded-2xl border border-slate-800 bg-black/25 px-4 py-4">
+              <div className="rounded-2xl border border-slate-800/60 bg-black/12 px-4 py-4">
                 <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Target</div>
-                <div className="mt-2 text-[12px] text-slate-200">
-                  {(selected?.organization_legal_name || selected?.organization_trade_name || selected?.applicant_email || "—") ?? "—"}
+                <div className="mt-2 text-[13px] text-slate-100">
+                  {(selected?.organization_legal_name ||
+                    selected?.organization_trade_name ||
+                    selected?.applicant_email ||
+                    "—") ?? "—"}
                 </div>
-                <div className="mt-1 text-[11px] text-slate-500">
+                <div className="mt-1 text-[12px] text-slate-400">
                   id: <span className="font-mono">{selected?.id ?? "—"}</span> · status:{" "}
-                  <span className="text-slate-200 font-semibold">{(selected?.status ?? "—").toUpperCase()}</span>
+                  <span className="text-slate-100 font-semibold">{(selected?.status ?? "—").toUpperCase()}</span>
                 </div>
               </div>
 
@@ -1366,26 +1385,26 @@ export default function CIAdmissionsPage() {
               <textarea
                 value={deleteReason}
                 onChange={(e) => setDeleteReason(e.target.value)}
-                className="w-full min-h-[90px] resize-none rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[12px] text-slate-100 outline-none focus:border-rose-400"
+                className="w-full min-h-[90px] resize-none rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-rose-400/60"
                 placeholder="Reason (recommended)."
               />
 
               <input
                 value={deleteConfirmText}
                 onChange={(e) => setDeleteConfirmText(e.target.value)}
-                className="w-full rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[12px] text-slate-100 outline-none focus:border-rose-400"
+                className="w-full rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-rose-400/60"
                 placeholder='Type DELETE to confirm'
               />
             </div>
 
-            <div className="px-6 py-4 border-t border-slate-800 flex items-center justify-between">
+            <div className="px-6 py-4 border-t border-slate-800/60 flex items-center justify-between bg-white/[0.02]">
               <button
                 onClick={() => {
                   setDeleteOpen(false);
                   setDeleteReason("");
                   setDeleteConfirmText("");
                 }}
-                className="rounded-full border border-slate-800 bg-slate-950/60 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
+                className="rounded-full border border-slate-700/70 bg-slate-950/25 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/45"
               >
                 Cancel
               </button>
@@ -1393,7 +1412,7 @@ export default function CIAdmissionsPage() {
               <button
                 onClick={hardDeleteSelected}
                 disabled={!selected || !canHardDelete || deleteConfirmText.trim().toUpperCase() !== "DELETE" || busy !== null}
-                className="rounded-full border border-rose-400/50 bg-rose-500/10 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-rose-200 hover:bg-rose-500/15 disabled:opacity-40 disabled:cursor-not-allowed"
+                className="rounded-full border border-rose-400/45 bg-rose-500/10 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-rose-100 hover:bg-rose-500/14 disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {busy === "delete" ? "Deleting…" : "Hard Delete"}
               </button>
@@ -1422,7 +1441,9 @@ function StatusTabButton({
       onClick={onClick}
       className={cx(
         "px-4 py-2 rounded-full text-left transition min-w-[110px]",
-        active ? "bg-emerald-500/15 border border-emerald-400/70 text-slate-50" : "bg-transparent border border-transparent hover:bg-slate-900/60 text-slate-300"
+        active
+          ? "bg-emerald-500/14 border border-emerald-400/55 text-slate-50"
+          : "bg-transparent border border-transparent hover:bg-white/[0.05] text-slate-200"
       )}
       title={String(value)}
     >
@@ -1434,13 +1455,13 @@ function StatusTabButton({
 
 function InfoBlock({ title, rows }: { title: string; rows: Array<[string, string]> }) {
   return (
-    <div className="rounded-2xl border border-slate-800 bg-black/35 px-5 py-5">
-      <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">{title}</div>
+    <div className="rounded-2xl border border-slate-800/60 bg-black/10 px-5 py-5">
+      <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">{title}</div>
       <div className="mt-3 space-y-2">
         {rows.map(([k, v]) => (
           <div key={k} className="flex items-start justify-between gap-6">
-            <div className="text-[11px] text-slate-500">{k}</div>
-            <div className="text-[12px] text-slate-100 text-right whitespace-pre-wrap max-w-[70%]">{v || "—"}</div>
+            <div className="text-[12px] text-slate-400">{k}</div>
+            <div className="text-[13px] text-slate-100 text-right whitespace-pre-wrap max-w-[70%]">{v || "—"}</div>
           </div>
         ))}
       </div>
