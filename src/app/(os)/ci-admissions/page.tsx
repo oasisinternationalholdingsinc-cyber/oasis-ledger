@@ -10,11 +10,31 @@ import { useOsEnv } from "@/components/OsEnvContext";
 
 type StatusTab = "ALL" | string;
 
+/**
+ * IMPORTANT: v_onboarding_admissions_inbox columns (confirmed):
+ * id, status, submitted_at, triaged_at, decided_at, provisioned_at, created_at, updated_at,
+ * applicant_type, applicant_name, applicant_email, applicant_phone,
+ * organization_legal_name, organization_trade_name,
+ * website, incorporation_number, jurisdiction_country, jurisdiction_region,
+ * intent, requested_services, expected_start_date,
+ * risk_tier, risk_notes,
+ * created_by, assigned_to, decided_by,
+ * entity_id, entity_slug, metadata
+ */
+
 type ApplicationRow = {
   id: string;
 
-  // core
   status: string | null;
+
+  submitted_at: string | null;
+  triaged_at: string | null;
+  decided_at: string | null;
+  provisioned_at: string | null;
+
+  created_at: string | null;
+  updated_at: string | null;
+
   applicant_type: string | null;
   applicant_name: string | null;
   applicant_email: string | null;
@@ -23,10 +43,10 @@ type ApplicationRow = {
   organization_legal_name: string | null;
   organization_trade_name: string | null;
 
+  website: string | null;
+  incorporation_number: string | null;
   jurisdiction_country: string | null;
   jurisdiction_region: string | null;
-  incorporation_number: string | null;
-  website: string | null;
 
   intent: string | null;
   requested_services: string[] | null;
@@ -35,11 +55,6 @@ type ApplicationRow = {
   risk_tier: string | null;
   risk_notes: string | null;
 
-  submitted_at: string | null;
-  triaged_at: string | null;
-  decided_at: string | null;
-  provisioned_at: string | null;
-
   created_by: string | null;
   assigned_to: string | null;
   decided_by: string | null;
@@ -47,11 +62,7 @@ type ApplicationRow = {
   entity_id: string | null;
   entity_slug: string | null;
 
-  primary_contact_user_id: string | null;
   metadata: any | null;
-
-  created_at: string | null;
-  updated_at: string | null;
 };
 
 type DecisionRow = {
@@ -165,8 +176,8 @@ function statusPill(st?: string | null) {
   if (s.includes("ARCHIV")) return "bg-slate-700/30 text-slate-200 border-slate-600/40";
   if (s.includes("NEED") || s.includes("INFO")) return "bg-amber-500/15 text-amber-200 border-amber-400/40";
   if (s.includes("PROVISION")) return "bg-sky-500/15 text-sky-200 border-sky-400/40";
-  if (s.includes("TRIAG")) return "bg-indigo-500/15 text-indigo-200 border-indigo-400/40";
-  if (s.includes("SUBMIT")) return "bg-slate-700/30 text-slate-200 border-slate-600/40";
+  if (s.includes("TRIAG") || s.includes("REVIEW")) return "bg-indigo-500/15 text-indigo-200 border-indigo-400/40";
+  if (s.includes("SUBMIT") || s.includes("DRAFT")) return "bg-slate-700/30 text-slate-200 border-slate-600/40";
   return "bg-slate-700/25 text-slate-200 border-slate-600/40";
 }
 
@@ -174,6 +185,12 @@ function safeArray(x: any): string[] {
   if (!x) return [];
   if (Array.isArray(x)) return x.map(String);
   return [];
+}
+
+function statusToRpcEnum(next: string) {
+  // DB enum values are typically lowercase (your onboarding UI uses "submitted" already).
+  // We accept either, but send lowercase to be safe.
+  return String(next || "").trim().toLowerCase();
 }
 
 export default function CIAdmissionsPage() {
@@ -273,12 +290,15 @@ export default function CIAdmissionsPage() {
     try {
       const eid = await ensureEntityId(activeEntitySlug);
 
+      // ONLY columns that exist in v_onboarding_admissions_inbox
       const baseSelect =
-        "id,status,applicant_type,applicant_name,applicant_email,applicant_phone,organization_legal_name,organization_trade_name,jurisdiction_country,jurisdiction_region,incorporation_number,website,intent,requested_services,expected_start_date,risk_tier,risk_notes,submitted_at,triaged_at,decided_at,provisioned_at,created_by,assigned_to,decided_by,entity_id,entity_slug,primary_contact_user_id,metadata,created_at,updated_at";
+        "id,status,submitted_at,triaged_at,decided_at,provisioned_at,created_at,updated_at,applicant_type,applicant_name,applicant_email,applicant_phone,organization_legal_name,organization_trade_name,website,incorporation_number,jurisdiction_country,jurisdiction_region,intent,requested_services,expected_start_date,risk_tier,risk_notes,created_by,assigned_to,decided_by,entity_id,entity_slug,metadata";
+
+      const VIEW = "v_onboarding_admissions_inbox";
 
       const tryByEntityId = async () => {
         const { data, error } = await supabase
-          .from("v_onboarding_admissions_inbox")
+          .from(VIEW)
           .select(baseSelect)
           .eq("entity_id", eid)
           .order("created_at", { ascending: false });
@@ -288,7 +308,7 @@ export default function CIAdmissionsPage() {
 
       const tryByEntitySlug = async () => {
         const { data, error } = await supabase
-          .from("onboarding_applications")
+          .from(VIEW)
           .select(baseSelect)
           .eq("entity_slug", activeEntitySlug)
           .order("created_at", { ascending: false });
@@ -386,7 +406,6 @@ export default function CIAdmissionsPage() {
     }
 
     const ordered = STATUS_ORDER.filter((s) => s === "ALL" || present.has(s) || s === "ARCHIVED");
-    // also include any weird/unknown statuses at end (rare)
     const extras = Array.from(present)
       .filter((s) => !STATUS_ORDER.includes(s as any))
       .sort((a, b) => a.localeCompare(b));
@@ -447,19 +466,20 @@ export default function CIAdmissionsPage() {
 
     try {
       const appId = selected.id;
+      const next = statusToRpcEnum(nextStatus);
 
       const shapes = [
-        { p_application_id: appId, p_next_status: nextStatus },
-        { application_id: appId, next_status: nextStatus },
-        { p_application_id: appId, p_status: nextStatus },
-        { application_id: appId, status: nextStatus },
-        { p_application_id: appId, p_next_status: nextStatus, p_note: "Admissions status update" },
-        { application_id: appId, next_status: nextStatus, note: "Admissions status update" },
+        { p_application_id: appId, p_next_status: next },
+        { application_id: appId, next_status: next },
+        { p_application_id: appId, p_status: next },
+        { application_id: appId, status: next },
+        { p_application_id: appId, p_next_status: next, p_note: "Admissions status update" },
+        { application_id: appId, next_status: next, note: "Admissions status update" },
       ];
 
       await rpcFirstOk("admissions_set_status", shapes);
 
-      flashInfo(`Admissions: status → ${nextStatus}.`);
+      flashInfo(`Admissions: status → ${next.toUpperCase()}.`);
       await reload(true);
     } catch (e: any) {
       flashError(e?.message ?? "Failed to set status (RPC).");
@@ -477,17 +497,35 @@ export default function CIAdmissionsPage() {
     try {
       const appId = selected.id;
 
-      const decision = decisionKind.trim() || "APPROVED";
+      const decision = (decisionKind.trim() || "APPROVED").toUpperCase();
       const summary = decisionSummary.trim();
       const conditions = decisionConditions.trim();
       const rt = riskTier.trim() || null;
       const rn = riskNotes.trim() || null;
 
       const shapes = [
-        { p_application_id: appId, p_decision: decision, p_summary: summary, p_conditions: conditions, p_risk_tier: rt, p_risk_notes: rn },
-        { application_id: appId, decision, summary, conditions, risk_tier: rt, risk_notes: rn },
-        { p_application_id: appId, p_decision: decision, p_summary: summary, p_conditions: conditions },
-        { application_id: appId, decision, summary, conditions },
+        {
+          p_application_id: appId,
+          p_decision: decision,
+          p_risk_tier: rt,
+          p_summary: summary,
+          p_reason: conditions,
+        },
+        { application_id: appId, decision, risk_tier: rt, summary, reason: conditions },
+
+        // fallbacks if your signature uses "conditions"
+        {
+          p_application_id: appId,
+          p_decision: decision,
+          p_risk_tier: rt,
+          p_summary: summary,
+          p_conditions: conditions,
+        },
+        { application_id: appId, decision, risk_tier: rt, summary, conditions },
+
+        // minimal
+        { p_application_id: appId, p_decision: decision, p_risk_tier: rt, p_summary: summary },
+        { application_id: appId, decision, risk_tier: rt, summary },
       ];
 
       await rpcFirstOk("admissions_record_decision", shapes);
@@ -656,7 +694,7 @@ export default function CIAdmissionsPage() {
             <h1 className="text-xl font-semibold text-slate-50">Admissions · Authority Console</h1>
             <p className="mt-1 text-xs text-slate-400 max-w-3xl">
               Institutional intake is non-custodial. This console performs{" "}
-              <span className="text-amber-200 font-semibold">triage</span>, records{" "}
+              <span className="text-amber-200 font-semibold">review</span>, records{" "}
               <span className="text-emerald-300 font-semibold">decisions</span>, and manages{" "}
               <span className="text-slate-200 font-semibold">archive</span> + provisioning — strictly via{" "}
               <span className="text-slate-200 font-semibold">RPC</span> (no raw updates).
@@ -718,9 +756,7 @@ export default function CIAdmissionsPage() {
               ))}
             </div>
 
-            <div className="text-[10px] text-slate-500">
-              Queue is entity-scoped. Archive is a tab. Hard delete is guarded.
-            </div>
+            <div className="text-[10px] text-slate-500">Queue is entity-scoped. Archive is a tab. Hard delete is guarded.</div>
           </div>
 
           {/* Workspace */}
@@ -762,8 +798,7 @@ export default function CIAdmissionsPage() {
                     <ul className="divide-y divide-slate-800">
                       {filtered.map((a) => {
                         const st = (a.status ?? "—").toUpperCase();
-                        const title =
-                          a.organization_legal_name || a.organization_trade_name || a.applicant_name || "(unnamed)";
+                        const title = a.organization_legal_name || a.organization_trade_name || a.applicant_name || "(unnamed)";
                         const sub = a.applicant_email || a.applicant_phone || a.website || "—";
 
                         return (
@@ -897,10 +932,7 @@ export default function CIAdmissionsPage() {
                           ["Trade Name", selected.organization_trade_name ?? "—"],
                           ["Website", selected.website ?? "—"],
                           ["Incorporation #", selected.incorporation_number ?? "—"],
-                          [
-                            "Jurisdiction",
-                            `${selected.jurisdiction_region ?? "—"} · ${selected.jurisdiction_country ?? "—"}`,
-                          ],
+                          ["Jurisdiction", `${selected.jurisdiction_region ?? "—"} · ${selected.jurisdiction_country ?? "—"}`],
                         ]}
                       />
 
@@ -925,7 +957,7 @@ export default function CIAdmissionsPage() {
                         title="Lifecycle"
                         rows={[
                           ["Created", fmtShort(selected.created_at)],
-                          ["Triaged", fmtShort(selected.triaged_at)],
+                          ["Reviewed", fmtShort(selected.triaged_at)],
                           ["Decided", fmtShort(selected.decided_at)],
                           ["Provisioned", fmtShort(selected.provisioned_at)],
                         ]}
@@ -961,18 +993,13 @@ export default function CIAdmissionsPage() {
               <div className="shrink-0 px-5 py-4 border-b border-slate-800">
                 <div className="flex items-center justify-between gap-2">
                   <div>
-                    <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
-                      Authority Panel
-                    </div>
-                    <div className="mt-1 text-[12px] text-slate-500">Triage · Decisions · Requests · Archive · Provisioning</div>
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Authority Panel</div>
+                    <div className="mt-1 text-[12px] text-slate-500">Review · Decisions · Requests · Archive · Provisioning</div>
                   </div>
 
                   {selected && (
                     <span
-                      className={cx(
-                        "rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.18em]",
-                        statusPill(selected.status)
-                      )}
+                      className={cx("rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.18em]", statusPill(selected.status))}
                     >
                       {(selected.status ?? "—").toUpperCase()}
                     </span>
@@ -984,9 +1011,9 @@ export default function CIAdmissionsPage() {
                     onClick={() => setAdmissionsStatus("TRIAGE")}
                     disabled={!selected || busy !== null}
                     className="rounded-2xl border border-indigo-400/50 bg-indigo-500/10 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-indigo-200 hover:bg-indigo-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
-                    title="Marks the application triaged (RPC)"
+                    title="Marks the application in review (RPC)"
                   >
-                    {busy === "status" ? "…" : "Triage"}
+                    {busy === "status" ? "…" : "Begin Review"}
                   </button>
 
                   <button
@@ -1004,7 +1031,7 @@ export default function CIAdmissionsPage() {
                     onClick={() => setAdmissionsStatus("ARCHIVED")}
                     disabled={!selected || busy !== null}
                     className="rounded-2xl border border-slate-600/50 bg-slate-900/30 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/45 disabled:opacity-50 disabled:cursor-not-allowed"
-                    title="Soft archive: status → ARCHIVED (RPC)"
+                    title="Soft archive: status → archived (RPC)"
                   >
                     {busy === "status" ? "…" : "Archive"}
                   </button>
@@ -1064,7 +1091,7 @@ export default function CIAdmissionsPage() {
                     value={decisionConditions}
                     onChange={(e) => setDecisionConditions(e.target.value)}
                     disabled={!selected || busy !== null}
-                    placeholder="Conditions (optional)"
+                    placeholder="Conditions / notes (optional)"
                     className="mt-2 w-full min-h-[72px] resize-none rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[12px] text-slate-100 outline-none focus:border-emerald-400 disabled:opacity-50"
                   />
 
@@ -1395,9 +1422,7 @@ function StatusTabButton({
       onClick={onClick}
       className={cx(
         "px-4 py-2 rounded-full text-left transition min-w-[110px]",
-        active
-          ? "bg-emerald-500/15 border border-emerald-400/70 text-slate-50"
-          : "bg-transparent border border-transparent hover:bg-slate-900/60 text-slate-300"
+        active ? "bg-emerald-500/15 border border-emerald-400/70 text-slate-50" : "bg-transparent border border-transparent hover:bg-slate-900/60 text-slate-300"
       )}
       title={String(value)}
     >
