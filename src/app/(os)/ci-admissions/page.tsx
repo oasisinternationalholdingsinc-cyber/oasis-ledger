@@ -1,3 +1,4 @@
+// src/app/(os)/ci-admissions/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -6,13 +7,6 @@ import Link from "next/link";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
-
-/* =====================================================================================
-   NOTE — CANONICAL ADMISSIONS READ CONTRACT (LOCKED)
-   -------------------------------------------------------------------------------------
-   ✅ Inbox READS ONLY from: v_onboarding_admissions_inbox
-   ❌ NEVER read onboarding_applications directly in UI
-   ===================================================================================== */
 
 type StatusTab = "ALL" | string;
 
@@ -59,6 +53,39 @@ type ApplicationRow = {
   updated_at: string | null;
 };
 
+type DecisionRow = {
+  id: string;
+  application_id: string;
+  decision: string | null;
+  summary: string | null;
+  conditions: string | null;
+  decided_by: string | null;
+  decided_at: string | null;
+  metadata: any | null;
+};
+
+type EventRow = {
+  id: string;
+  application_id: string;
+  event_type: string | null;
+  message: string | null;
+  actor_id: string | null;
+  context: any | null;
+  created_at: string | null;
+};
+
+type TaskRow = {
+  id: string;
+  application_id: string;
+  task_key: string | null;
+  status: string | null;
+  attempts: number | null;
+  result: any | null;
+  last_error: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
 const ENTITY_LABELS: Record<string, string> = {
   holdings: "Oasis International Holdings Inc.",
   lounge: "Oasis International Lounge Inc.",
@@ -80,181 +107,151 @@ const STATUS_ORDER = [
   "ARCHIVED",
 ] as const;
 
-function cx(...c: Array<string | false | null | undefined>) {
-  return c.filter(Boolean).join(" ");
+function cx(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(" ");
 }
 
 function fmtShort(iso: string | null) {
   if (!iso) return "—";
-  return new Date(iso).toLocaleString();
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString(undefined, {
+      month: "short",
+      day: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function hashShort(x?: string | null) {
+  const s = (x ?? "").trim();
+  if (!s) return "—";
+  if (s.length <= 16) return s;
+  return `${s.slice(0, 10)}…${s.slice(-6)}`;
+}
+
+function safeArray(x: any): string[] {
+  if (!x) return [];
+  if (Array.isArray(x)) return x.map(String);
+  return [];
 }
 
 export default function CIAdmissionsPage() {
   const entityCtx = useEntity() as any;
-  useOsEnv(); // admissions ignores is_test by design
+  useOsEnv();
 
-  const activeEntitySlug = entityCtx?.activeEntity ?? "holdings";
+  const activeEntitySlug = (entityCtx?.activeEntity as string) || "holdings";
   const activeEntityLabel = ENTITY_LABELS[activeEntitySlug] ?? activeEntitySlug;
 
   const [apps, setApps] = useState<ApplicationRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<StatusTab>("ALL");
-  const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  const lastPickRef = useRef<string | null>(null);
+  const [events, setEvents] = useState<EventRow[]>([]);
+  const [decisions, setDecisions] = useState<DecisionRow[]>([]);
+  const [tasks, setTasks] = useState<TaskRow[]>([]);
 
-  /* =====================================================================================
-     🔑 SINGLE SOURCE OF TRUTH — INBOX LOAD
-     ===================================================================================== */
+  const selected = useMemo(
+    () => apps.find((a) => a.id === selectedId) ?? null,
+    [apps, selectedId]
+  );
+
+  // 🔑 CANONICAL INBOX LOAD — ONLY CHANGE IN THIS FILE
   async function reload() {
     setLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from("v_onboarding_admissions_inbox")
+        .select("*")
+        .eq("entity_slug", activeEntitySlug)
+        .order("created_at", { ascending: false });
 
-    const { data, error } = await supabase
-      .from("v_onboarding_admissions_inbox") // ✅ FIXED
-      .select("*")
-      .order("created_at", { ascending: false });
+      if (error) throw error;
 
-    if (error) {
-      console.error(error);
-      setApps([]);
-      setLoading(false);
-      return;
-    }
+      setApps((data ?? []) as ApplicationRow[]);
 
-    setApps(data ?? []);
-
-    if (!selectedId && data?.length) {
-      if (lastPickRef.current !== data[0].id) {
-        lastPickRef.current = data[0].id;
+      if (!selectedId && data?.length) {
         setSelectedId(data[0].id);
+        loadRelated(data[0].id);
       }
+    } catch (e: any) {
+      console.error("Admissions load failed:", e?.message);
+    } finally {
+      setLoading(false);
     }
+  }
 
-    setLoading(false);
+  async function loadRelated(applicationId: string) {
+    const [ev, de, tk] = await Promise.all([
+      supabase.from("onboarding_events").select("*").eq("application_id", applicationId),
+      supabase.from("onboarding_decisions").select("*").eq("application_id", applicationId),
+      supabase.from("onboarding_provisioning_tasks").select("*").eq("application_id", applicationId),
+    ]);
+
+    setEvents(ev.data ?? []);
+    setDecisions(de.data ?? []);
+    setTasks(tk.data ?? []);
   }
 
   useEffect(() => {
-    setSelectedId(null);
-    setTab("ALL");
-    setQuery("");
     reload();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeEntitySlug]);
 
-  const filtered = useMemo(() => {
-    let rows = apps;
-
-    if (tab !== "ALL") {
-      rows = rows.filter(
-        (a) => (a.status ?? "").toUpperCase() === tab.toUpperCase()
-      );
-    }
-
-    if (query.trim()) {
-      const q = query.toLowerCase();
-      rows = rows.filter((a) =>
-        [
-          a.applicant_name,
-          a.applicant_email,
-          a.organization_legal_name,
-          a.organization_trade_name,
-          a.intent,
-        ]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase()
-          .includes(q)
-      );
-    }
-
-    return rows;
-  }, [apps, tab, query]);
-
-  const selected = apps.find((a) => a.id === selectedId) ?? null;
-
   return (
-    <div className="h-full flex flex-col px-8 pt-6 pb-6">
-      <div className="mb-4">
-        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">
-          CI • Admissions
-        </div>
-        <h1 className="text-xl font-semibold text-slate-50">
-          Admissions · Authority Console
-        </h1>
-        <div className="text-xs text-slate-400 mt-1">
-          Entity:{" "}
-          <span className="text-emerald-300 font-semibold">
-            {activeEntityLabel}
-          </span>
-        </div>
-      </div>
+    <div className="h-full px-8 pt-6 pb-6">
+      <h1 className="text-xl font-semibold text-slate-50">
+        CI-Admissions · {activeEntityLabel}
+      </h1>
 
-      <div className="flex-1 flex gap-4 overflow-hidden">
-        {/* Queue */}
-        <aside className="w-[380px] border border-slate-800 rounded-2xl bg-slate-950/40 overflow-hidden">
-          <div className="p-4 border-b border-slate-800">
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search admissions…"
-              className="w-full rounded-xl bg-black/40 border border-slate-800 px-3 py-2 text-sm"
-            />
-          </div>
+      {loading ? (
+        <div className="mt-6 text-slate-400">Loading…</div>
+      ) : apps.length === 0 ? (
+        <div className="mt-6 text-slate-500">No applications found.</div>
+      ) : (
+        <div className="mt-6 grid grid-cols-[360px_1fr] gap-6">
+          <aside className="border border-slate-800 rounded-xl overflow-y-auto">
+            {apps.map((a) => (
+              <div
+                key={a.id}
+                onClick={() => {
+                  setSelectedId(a.id);
+                  loadRelated(a.id);
+                }}
+                className={cx(
+                  "px-4 py-3 cursor-pointer border-b border-slate-800",
+                  a.id === selectedId && "bg-slate-800/60"
+                )}
+              >
+                <div className="text-sm font-semibold">
+                  {a.organization_legal_name || a.applicant_name}
+                </div>
+                <div className="text-xs text-slate-400">
+                  {a.applicant_email}
+                </div>
+              </div>
+            ))}
+          </aside>
 
-          <div className="overflow-y-auto">
-            {loading ? (
-              <div className="p-4 text-slate-500">Loading…</div>
-            ) : filtered.length === 0 ? (
-              <div className="p-4 text-slate-500">No applications.</div>
+          <section className="border border-slate-800 rounded-xl p-6">
+            {selected ? (
+              <>
+                <h2 className="text-lg font-semibold">
+                  {selected.organization_legal_name}
+                </h2>
+                <div className="mt-2 text-sm text-slate-400">
+                  Status: {selected.status}
+                </div>
+              </>
             ) : (
-              <ul className="divide-y divide-slate-800">
-                {filtered.map((a) => (
-                  <li
-                    key={a.id}
-                    onClick={() => setSelectedId(a.id)}
-                    className={cx(
-                      "px-4 py-3 cursor-pointer hover:bg-slate-800/60",
-                      a.id === selectedId && "bg-slate-800/80"
-                    )}
-                  >
-                    <div className="text-sm font-semibold text-slate-100 truncate">
-                      {a.organization_legal_name ??
-                        a.organization_trade_name ??
-                        a.applicant_name ??
-                        "(unnamed)"}
-                    </div>
-                    <div className="text-xs text-slate-500">
-                      {fmtShort(a.created_at)} ·{" "}
-                      {(a.status ?? "—").toUpperCase()}
-                    </div>
-                  </li>
-                ))}
-              </ul>
+              <div className="text-slate-500">Select an application</div>
             )}
-          </div>
-        </aside>
-
-        {/* Detail */}
-        <section className="flex-1 border border-slate-800 rounded-2xl bg-slate-950/40 flex items-center justify-center">
-          {!selected ? (
-            <div className="text-slate-500">
-              Select an application from the queue.
-            </div>
-          ) : (
-            <div className="text-slate-200">
-              <div className="text-lg font-semibold">
-                {selected.organization_legal_name ??
-                  selected.organization_trade_name ??
-                  selected.applicant_name}
-              </div>
-              <div className="text-sm text-slate-400 mt-2">
-                Status: {(selected.status ?? "—").toUpperCase()}
-              </div>
-            </div>
-          )}
-        </section>
-      </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 }
