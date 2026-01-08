@@ -30,6 +30,13 @@ function isAlreadyExistsError(msg: string) {
   );
 }
 
+/** Append app_id to a base URL (safe if URL already has query params). */
+function withAppId(base: string, appId: string) {
+  const u = new URL(base);
+  u.searchParams.set("app_id", appId);
+  return u.toString();
+}
+
 Deno.serve(async (req) => {
   // CORS preflight
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -47,6 +54,7 @@ Deno.serve(async (req) => {
 
     // Keep auth header pass-through if you want auditing later
     const authHeader = req.headers.get("Authorization") || "";
+    void authHeader;
 
     const payload = await req.json().catch(() => ({}));
     const application_id = payload?.application_id as string | undefined;
@@ -68,14 +76,18 @@ Deno.serve(async (req) => {
     const email = (app.applicant_email || "").trim().toLowerCase();
     if (!email) return json(400, { ok: false, error: "MISSING_APPLICANT_EMAIL" });
 
+    // ✅ IMPORTANT: always carry app_id to portal
+    const inviteRedirect = withAppId(PORTAL_CALLBACK_URL, application_id);
+    const resetRedirect = withAppId(PORTAL_RESET_URL, application_id);
+
     // 2) Always attempt to send an email you can test.
-    //    - If user is new: send invite -> lands on Portal /auth/callback
-    //    - If user exists: send password reset -> lands on Portal /auth/set-password
+    //    - If user is new: send invite -> lands on Portal /auth/callback?app_id=...
+    //    - If user exists: send password reset -> lands on Portal /auth/set-password?app_id=...
     let mode: "INVITE" | "RESET" = "INVITE";
     let invitedUserId: string | null = null;
 
     const { data: inviteRes, error: inviteErr } = await admin.auth.admin.inviteUserByEmail(email, {
-      redirectTo: PORTAL_CALLBACK_URL,
+      redirectTo: inviteRedirect,
     });
 
     if (inviteErr) {
@@ -84,7 +96,7 @@ Deno.serve(async (req) => {
       if (isAlreadyExistsError(msg)) {
         mode = "RESET";
         const { error: resetErr } = await admin.auth.resetPasswordForEmail(email, {
-          redirectTo: PORTAL_RESET_URL,
+          redirectTo: resetRedirect,
         });
 
         if (resetErr) {
@@ -122,7 +134,12 @@ Deno.serve(async (req) => {
           status: "pending", // keep pending while you're testing
           attempts,
           last_attempt_at: now,
-          result: { mode, invited_user_id: invitedUserId, email, redirect: mode === "INVITE" ? PORTAL_CALLBACK_URL : PORTAL_RESET_URL },
+          result: {
+            mode,
+            invited_user_id: invitedUserId,
+            email,
+            redirect: mode === "INVITE" ? inviteRedirect : resetRedirect,
+          },
         },
         { onConflict: "application_id,task_key" }
       );
@@ -135,7 +152,12 @@ Deno.serve(async (req) => {
         mode === "INVITE"
           ? `Invite email sent to ${email}`
           : `Password reset email sent to ${email}`,
-      metadata: { mode, invited_user_id: invitedUserId, attempts, redirect: mode === "INVITE" ? PORTAL_CALLBACK_URL : PORTAL_RESET_URL },
+      metadata: {
+        mode,
+        invited_user_id: invitedUserId,
+        attempts,
+        redirect: mode === "INVITE" ? inviteRedirect : resetRedirect,
+      },
     });
 
     return json(200, {
@@ -145,7 +167,7 @@ Deno.serve(async (req) => {
       mode,
       invited_user_id: invitedUserId,
       attempts,
-      redirect: mode === "INVITE" ? PORTAL_CALLBACK_URL : PORTAL_RESET_URL,
+      redirect: mode === "INVITE" ? inviteRedirect : resetRedirect,
     });
   } catch (e) {
     return json(500, { ok: false, error: "UNHANDLED", details: String((e as any)?.message ?? e) });
