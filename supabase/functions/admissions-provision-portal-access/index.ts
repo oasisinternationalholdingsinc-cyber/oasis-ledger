@@ -1,171 +1,153 @@
-// supabase/functions/admissions-provision-portal-access/index.ts
-import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+/// <reference lib="deno.ns" />
+
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-function corsHeaders(origin: string | null) {
-  // keep permissive for now; you can tighten to your console domain later
-  return {
-    "Access-Control-Allow-Origin": origin ?? "*",
-    "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-  };
+const PORTAL_CALLBACK_URL = "https://portal.oasisintlholdings.com/auth/callback";
+const PORTAL_RESET_URL = "https://portal.oasisintlholdings.com/auth/set-password";
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
+function json(status: number, body: unknown) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+function isAlreadyExistsError(msg: string) {
+  const m = (msg || "").toLowerCase();
+  return (
+    m.includes("already registered") ||
+    m.includes("already exists") ||
+    m.includes("user already exists") ||
+    m.includes("registered") ||
+    m.includes("exists")
+  );
 }
 
 Deno.serve(async (req) => {
-  const origin = req.headers.get("origin");
-  if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: corsHeaders(origin) });
+  // CORS preflight
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
+  if (req.method !== "POST") {
+    return json(405, { ok: false, error: "METHOD_NOT_ALLOWED" });
   }
 
   try {
-    const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-    const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
-
-    // Authenticated caller (operator) token — for audit/event attribution if you want later
-    const authHeader = req.headers.get("Authorization") ?? "";
-
-    const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-      global: { headers: { Authorization: authHeader } },
+    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+    const serviceRole = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const admin = createClient(supabaseUrl, serviceRole, {
+      auth: { persistSession: false },
     });
 
-    const supabaseAuthed = createClient(SUPABASE_URL, ANON_KEY, {
-      global: { headers: { Authorization: authHeader } },
-    });
+    // Keep auth header pass-through if you want auditing later
+    const authHeader = req.headers.get("Authorization") || "";
 
-    const body = await req.json().catch(() => ({}));
-    const application_id = body?.application_id as string | undefined;
-    const task_key = (body?.task_key as string | undefined) ?? "provision_portal_access";
+    const payload = await req.json().catch(() => ({}));
+    const application_id = payload?.application_id as string | undefined;
 
     if (!application_id) {
-      return new Response(JSON.stringify({ ok: false, error: "Missing application_id" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
-      });
+      return json(400, { ok: false, error: "MISSING_APPLICATION_ID" });
     }
 
-    // Who is calling (must be logged in)
-    const { data: me, error: meErr } = await supabaseAuthed.auth.getUser();
-    if (meErr || !me?.user?.id) {
-      return new Response(JSON.stringify({ ok: false, error: "Not authenticated" }), {
-        status: 401,
-        headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
-      });
-    }
-
-    // Load application
-    const { data: app, error: appErr } = await supabaseAdmin
+    // 1) Load application
+    const { data: app, error: appErr } = await admin
       .from("onboarding_applications")
       .select("id, applicant_email, organization_legal_name, status")
       .eq("id", application_id)
       .maybeSingle();
 
-    if (appErr || !app) {
-      return new Response(JSON.stringify({ ok: false, error: "Application not found" }), {
-        status: 404,
-        headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
-      });
+    if (appErr) return json(500, { ok: false, error: "APP_LOAD_FAILED", details: appErr.message });
+    if (!app) return json(404, { ok: false, error: "APP_NOT_FOUND" });
+
+    const email = (app.applicant_email || "").trim().toLowerCase();
+    if (!email) return json(400, { ok: false, error: "MISSING_APPLICANT_EMAIL" });
+
+    // 2) Always attempt to send an email you can test.
+    //    - If user is new: send invite -> lands on Portal /auth/callback
+    //    - If user exists: send password reset -> lands on Portal /auth/set-password
+    let mode: "INVITE" | "RESET" = "INVITE";
+    let invitedUserId: string | null = null;
+
+    const { data: inviteRes, error: inviteErr } = await admin.auth.admin.inviteUserByEmail(email, {
+      redirectTo: PORTAL_CALLBACK_URL,
+    });
+
+    if (inviteErr) {
+      const msg = String(inviteErr.message || inviteErr);
+
+      if (isAlreadyExistsError(msg)) {
+        mode = "RESET";
+        const { error: resetErr } = await admin.auth.resetPasswordForEmail(email, {
+          redirectTo: PORTAL_RESET_URL,
+        });
+
+        if (resetErr) {
+          return json(500, { ok: false, error: "RESET_FAILED", details: resetErr.message });
+        }
+      } else {
+        return json(500, { ok: false, error: "INVITE_FAILED", details: msg });
+      }
+    } else {
+      invitedUserId = inviteRes?.user?.id || null;
     }
 
-    if (!app.applicant_email) {
-      return new Response(JSON.stringify({ ok: false, error: "Application missing applicant_email" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
-      });
-    }
+    // 3) Update provisioning task (ALLOW RE-RUNS: never gate on current status)
+    //    - increments attempts every time
+    //    - keeps status PENDING so you can keep hitting "RUN INVITE"
+    //    - records last result
+    const now = new Date().toISOString();
 
-    // Find the task row (latest for that app + task_key)
-    const { data: taskRow, error: taskErr } = await supabaseAdmin
+    // Read existing attempts (safe even if row doesn't exist)
+    const { data: taskRow } = await admin
       .from("onboarding_provisioning_tasks")
-      .select("id, status, attempts")
+      .select("id, attempts")
       .eq("application_id", application_id)
-      .eq("task_key", task_key)
-      .order("created_at", { ascending: false })
-      .limit(1)
+      .eq("task_key", "portal_access")
       .maybeSingle();
 
-    if (taskErr || !taskRow?.id) {
-      return new Response(JSON.stringify({ ok: false, error: `Task not found: ${task_key}` }), {
-        status: 404,
-        headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
-      });
-    }
+    const attempts = (taskRow?.attempts ?? 0) + 1;
 
-    // Attempt counter
-    const nextAttempts = (taskRow.attempts ?? 0) + 1;
-
-    // Send invite
-    const inviteRes = await supabaseAdmin.auth.admin.inviteUserByEmail(app.applicant_email, {
-      data: {
-        onboarding_application_id: application_id,
-        organization_legal_name: app.organization_legal_name ?? null,
-      },
-      // IMPORTANT: set this to your portal URL route that handles invite acceptance
-      // e.g. https://portal.oasisintlholdings.com/auth/callback
-      redirectTo: "https://portal.oasisintlholdings.com/auth/callback",
-    });
-
-    if (inviteRes.error) {
-      await supabaseAdmin
-        .from("onboarding_provisioning_tasks")
-        .update({
-          status: "FAILED",
-          attempts: nextAttempts,
-          last_error: inviteRes.error.message,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", taskRow.id);
-
-      return new Response(JSON.stringify({ ok: false, error: inviteRes.error.message }), {
-        status: 500,
-        headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
-      });
-    }
-
-    // Mark task SENT and record result payload (audit)
-    await supabaseAdmin
+    await admin
       .from("onboarding_provisioning_tasks")
-      .update({
-        status: "SENT",
-        attempts: nextAttempts,
-        last_error: null,
-        result: {
-          kind: "auth_invite_sent",
-          email: app.applicant_email,
-          invited_user_id: inviteRes.data?.user?.id ?? null,
-          sent_at: new Date().toISOString(),
+      .upsert(
+        {
+          application_id,
+          task_key: "portal_access",
+          status: "pending", // keep pending while you're testing
+          attempts,
+          last_attempt_at: now,
+          result: { mode, invited_user_id: invitedUserId, email, redirect: mode === "INVITE" ? PORTAL_CALLBACK_URL : PORTAL_RESET_URL },
         },
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", taskRow.id);
+        { onConflict: "application_id,task_key" }
+      );
 
-    // Log event (uses your existing RPC)
-    await supabaseAdmin.rpc("admissions_log_event", {
-      p_application_id: application_id,
-      p_type: "PORTAL_INVITE_SENT",
-      p_message: `Auth invite sent to ${app.applicant_email}`,
-      p_metadata: {
-        task_key,
-        email: app.applicant_email,
-        invited_user_id: inviteRes.data?.user?.id ?? null,
-        operator_id: me.user.id,
-      },
+    // 4) Add an onboarding event (every run)
+    await admin.from("onboarding_events").insert({
+      application_id,
+      event_type: "PROVISION_PORTAL_ACCESS",
+      message:
+        mode === "INVITE"
+          ? `Invite email sent to ${email}`
+          : `Password reset email sent to ${email}`,
+      metadata: { mode, invited_user_id: invitedUserId, attempts, redirect: mode === "INVITE" ? PORTAL_CALLBACK_URL : PORTAL_RESET_URL },
     });
 
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        application_id,
-        task_key,
-        email: app.applicant_email,
-        invited_user_id: inviteRes.data?.user?.id ?? null,
-      }),
-      { headers: { "Content-Type": "application/json", ...corsHeaders(origin) } },
-    );
+    return json(200, {
+      ok: true,
+      application_id,
+      email,
+      mode,
+      invited_user_id: invitedUserId,
+      attempts,
+      redirect: mode === "INVITE" ? PORTAL_CALLBACK_URL : PORTAL_RESET_URL,
+    });
   } catch (e) {
-    return new Response(JSON.stringify({ ok: false, error: String(e?.message ?? e) }), {
-      status: 500,
-      headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
-    });
+    return json(500, { ok: false, error: "UNHANDLED", details: String((e as any)?.message ?? e) });
   }
 });
