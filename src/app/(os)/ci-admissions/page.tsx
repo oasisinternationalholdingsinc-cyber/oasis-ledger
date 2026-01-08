@@ -252,26 +252,6 @@ function normalizeTaskKey(x: string) {
     .replace(/^_+|_+$/g, "");
 }
 
-function isInviteSentStatus(st?: string | null) {
-  const s = String(st ?? "").trim().toUpperCase();
-  return ["SENT", "COMPLETED", "DONE", "SUCCESS", "OK"].includes(s);
-}
-
-function taskStatusPill(st?: string | null) {
-  const s = String(st ?? "").trim().toUpperCase();
-  if (s.includes("COMPLET") || s === "DONE" || s === "SUCCESS") return "bg-emerald-500/14 text-emerald-100 border-emerald-400/35";
-  if (s.includes("SENT")) return "bg-amber-500/12 text-amber-100 border-amber-400/35";
-  if (s.includes("RUN") || s.includes("PROCESS")) return "bg-sky-500/12 text-sky-100 border-sky-400/35";
-  if (s.includes("FAIL") || s.includes("ERR")) return "bg-rose-500/12 text-rose-100 border-rose-400/35";
-  return "bg-slate-700/20 text-slate-100 border-slate-500/35";
-}
-
-function eventTypeLabel(x?: string | null) {
-  const s = String(x ?? "").trim();
-  if (!s) return "EVENT";
-  return s.replace(/_/g, " ").toUpperCase();
-}
-
 export default function CIAdmissionsPage() {
   const entityCtx = useEntity() as any;
   useOsEnv(); // kept for OS consistency (even if admissions ignores is_test)
@@ -299,6 +279,7 @@ export default function CIAdmissionsPage() {
   const [tasks, setTasks] = useState<TaskRow[]>([]);
 
   // action drafts
+  // NOTE: keep decision enum values strict (avoid invalid enum payloads)
   const [decisionKind, setDecisionKind] = useState<string>("APPROVED");
   const [decisionSummary, setDecisionSummary] = useState<string>("");
   const [decisionConditions, setDecisionConditions] = useState<string>("");
@@ -310,6 +291,7 @@ export default function CIAdmissionsPage() {
 
   // ---- Task builder UI state (replaces JSON textarea) ----
   const [taskDrafts, setTaskDrafts] = useState<UiProvisionTask[]>(() => {
+    // Start with a sane default set (enabled)
     const defaults = [TASK_TEMPLATES[0], TASK_TEMPLATES[1], TASK_TEMPLATES[2], TASK_TEMPLATES[4]].filter(Boolean) as Array<
       Omit<UiProvisionTask, "enabled">
     >;
@@ -368,27 +350,20 @@ export default function CIAdmissionsPage() {
     try {
       const eid = await ensureEntityId(activeEntitySlug);
 
+      // ONLY columns that exist in v_onboarding_admissions_inbox
       const baseSelect =
         "id,status,submitted_at,triaged_at,decided_at,provisioned_at,created_at,updated_at,applicant_type,applicant_name,applicant_email,applicant_phone,organization_legal_name,organization_trade_name,website,incorporation_number,jurisdiction_country,jurisdiction_region,intent,requested_services,expected_start_date,risk_tier,risk_notes,created_by,assigned_to,decided_by,entity_id,entity_slug,metadata";
 
       const VIEW = "v_onboarding_admissions_inbox";
 
       const tryByEntityId = async () => {
-        const { data, error } = await supabase
-          .from(VIEW)
-          .select(baseSelect)
-          .eq("entity_id", eid)
-          .order("created_at", { ascending: false });
+        const { data, error } = await supabase.from(VIEW).select(baseSelect).eq("entity_id", eid).order("created_at", { ascending: false });
         if (error) throw error;
         return (data ?? []) as ApplicationRow[];
       };
 
       const tryByEntitySlug = async () => {
-        const { data, error } = await supabase
-          .from(VIEW)
-          .select(baseSelect)
-          .eq("entity_slug", activeEntitySlug)
-          .order("created_at", { ascending: false });
+        const { data, error } = await supabase.from(VIEW).select(baseSelect).eq("entity_slug", activeEntitySlug).order("created_at", { ascending: false });
         if (error) throw error;
         return (data ?? []) as ApplicationRow[];
       };
@@ -528,6 +503,7 @@ export default function CIAdmissionsPage() {
     setRequestInfoMsg("");
     setRequestInfoFields("");
 
+    // Keep task drafts stable (no regression); do not auto-reset on selection.
     void loadRelated(a.id);
   }
 
@@ -619,8 +595,9 @@ export default function CIAdmissionsPage() {
     setInfo(null);
 
     try {
+      // Defaults (can be overridden via optional JSON box)
       let channels: string[] = ["email"];
-      let dueAt: string | null = null;
+      let dueAt: string | null = null; // ISO string (timestamptz)
       let nextStatus = "needs_info";
 
       const raw = requestInfoFields.trim();
@@ -670,6 +647,7 @@ export default function CIAdmissionsPage() {
       const enabled = taskDrafts.filter((t) => t.enabled);
       if (enabled.length === 0) return flashError("Select at least one task.");
 
+      // RPC expects JSONB array (not an object wrapper).
       const payload = enabled.map((t) => ({
         task_key: normalizeTaskKey(t.task_key || t.title || "task"),
         title: (t.title || "").trim() || undefined,
@@ -697,7 +675,7 @@ export default function CIAdmissionsPage() {
     }
   }
 
-  // ---- Task execution (Edge Function) ----
+  // ---- NEW: Run button for task execution (Edge Function) ----
   async function runProvisioningTask(t: TaskRow) {
     if (!selected?.id) return flashError("Select an application first.");
     if (!t?.id) return flashError("Task id missing.");
@@ -723,6 +701,8 @@ export default function CIAdmissionsPage() {
         throw new Error("No invite email found (metadata.organization_email or applicant_email).");
       }
 
+      // Edge Function slug (deploy this exact name):
+      // admissions-provision-portal-access
       const { data, error } = await supabase.functions.invoke("admissions-provision-portal-access", {
         body: {
           application_id: selected.id,
@@ -744,74 +724,13 @@ export default function CIAdmissionsPage() {
       await reload(true);
     } catch (e: any) {
       flashError(e?.message ?? "Failed to run provisioning task.");
+      // Refresh rails anyway (so last_error/result updates show if server wrote them)
       if (selected?.id) {
         await loadRelated(selected.id);
       }
     } finally {
       setBusy(null);
       setRunningTaskId(null);
-    }
-  }
-
-  // ✅ ALWAYS-VISIBLE authoritative invite runner
-  const portalTask = useMemo(() => {
-    return tasks.find((t) => normalizeTaskKey(t.task_key ?? "") === "provision_portal_access") ?? null;
-  }, [tasks]);
-
-  async function runInviteAuthoritative() {
-    if (!selected?.id) return flashError("Select an application first.");
-
-    if (portalTask?.id) {
-      return runProvisioningTask(portalTask);
-    }
-
-    setBusy("tasks");
-    setError(null);
-    setInfo(null);
-
-    try {
-      const payload = [
-        {
-          task_key: "provision_portal_access",
-          title: "Provision portal access",
-          notes: "Create portal routing / invite (delivery layer later).",
-          required: true,
-          channels: ["email"],
-          due_at: null,
-        },
-      ];
-
-      const { data, error } = await supabase.rpc("admissions_create_provisioning_tasks", {
-        p_application_id: selected.id,
-        p_tasks: payload,
-      });
-
-      if (error) throw error;
-      if ((data as any)?.ok === false) throw new Error((data as any)?.error ?? "RPC failed.");
-
-      const { data: tk, error: tkErr } = await supabase
-        .from("onboarding_provisioning_tasks")
-        .select("id,application_id,task_key,status,attempts,result,last_error,created_at,updated_at")
-        .eq("application_id", selected.id)
-        .order("created_at", { ascending: false })
-        .limit(50);
-
-      if (tkErr) throw tkErr;
-
-      const newestPortal = (tk ?? []).find((t) => normalizeTaskKey((t as any).task_key ?? "") === "provision_portal_access") as TaskRow | undefined;
-
-      await loadRelated(selected.id);
-
-      if (!newestPortal?.id) {
-        throw new Error("Portal invite task could not be created/found.");
-      }
-
-      setBusy(null);
-      return runProvisioningTask(newestPortal);
-    } catch (e: any) {
-      flashError(e?.message ?? "Failed to create/run invite task.");
-    } finally {
-      setBusy((b) => (b === "tasks" ? null : b));
     }
   }
 
@@ -959,24 +878,6 @@ export default function CIAdmissionsPage() {
       })
     );
   }
-
-  // Invite button label/status (authoritative)
-  const portalTaskStatus = String(portalTask?.status ?? "").trim().toUpperCase();
-  const portalAlreadySent = isInviteSentStatus(portalTaskStatus);
-
-  // A tiny enhancement: show the *invite target* we will use (pure UI, no wiring)
-  const computedOrgEmail =
-    (selected?.metadata?.organization_email as string) ||
-    (selected?.metadata?.org_email as string) ||
-    (selected?.metadata?.contact_email as string) ||
-    null;
-
-  const computedInviteEmail =
-    (computedOrgEmail && String(computedOrgEmail).trim()) ||
-    (selected?.applicant_email && String(selected?.applicant_email).trim()) ||
-    null;
-
-  const showInviteTarget = !!selected;
 
   return (
     <div className="h-full flex flex-col px-8 pt-6 pb-6">
@@ -1343,54 +1244,6 @@ export default function CIAdmissionsPage() {
                     Hard Delete
                   </button>
                 </div>
-
-                {/* ✅ AUTHORITATIVE INVITE — ALWAYS VISIBLE */}
-                <div className="mt-3 rounded-2xl border border-slate-800/60 bg-black/12 px-4 py-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="text-[11px] uppercase tracking-[0.22em] text-amber-100">Portal Invite</div>
-                    <span
-                      className={cx(
-                        "rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.18em]",
-                        portalAlreadySent ? "border-emerald-400/35 bg-emerald-500/10 text-emerald-100" : "border-slate-700/60 bg-white/[0.03] text-slate-200"
-                      )}
-                    >
-                      {portalTask ? `status: ${portalTaskStatus || "—"}` : "status: —"}
-                    </span>
-                  </div>
-
-                  {showInviteTarget && (
-                    <div className="mt-2 text-[11px] text-slate-500">
-                      Target:{" "}
-                      <span className="text-slate-200 font-mono">{computedInviteEmail ? computedInviteEmail : "—"}</span>
-                      <span className="mx-2 text-slate-700">•</span>
-                      Task: <span className="font-mono">provision_portal_access</span>
-                    </div>
-                  )}
-
-                  <button
-                    onClick={runInviteAuthoritative}
-                    disabled={!selected || busy !== null}
-                    className={cx(
-                      "mt-3 w-full rounded-2xl border px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase transition",
-                      "disabled:opacity-50 disabled:cursor-not-allowed",
-                      "border-amber-400/45 bg-amber-500/10 text-amber-100 hover:bg-amber-500/14"
-                    )}
-                    title={
-                      !selected
-                        ? "Select an application first."
-                        : portalTask
-                        ? `Runs provisioning task: provision_portal_access (status: ${portalTaskStatus || "—"})`
-                        : "Creates the portal invite task (RPC) then runs it (Edge Function)."
-                    }
-                  >
-                    {busy === "run_task" || busy === "tasks" ? "Sending…" : portalAlreadySent ? "Re-send Invite" : "Run Invite"}
-                  </button>
-
-                  <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
-                    <span>attempts: {portalTask?.attempts ?? 0}</span>
-                    <span className="text-slate-400">{portalTask?.updated_at ? `updated: ${fmtShort(portalTask.updated_at)}` : ""}</span>
-                  </div>
-                </div>
               </div>
 
               <div className="flex-1 min-h-0 overflow-y-auto px-5 py-5 space-y-4">
@@ -1511,117 +1364,182 @@ export default function CIAdmissionsPage() {
 
                 {/* Provisioning tasks (NEW UI) */}
                 <div className="rounded-2xl border border-slate-800/60 bg-black/12 px-4 py-4">
-                  <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-start justify-between gap-3">
                     <div>
-                      <div className="text-[11px] uppercase tracking-[0.22em] text-sky-100">Provisioning Tasks (RPC)</div>
-                      <div className="mt-1 text-[12px] text-slate-500">Select tasks, edit details, then create (server stores tasks).</div>
+                      <div className="text-[11px] uppercase tracking-[0.22em] text-sky-100">Provisioning (RPC)</div>
+                      <div className="mt-1 text-[12px] text-slate-400">Build tasks with checkboxes — UI generates the JSON array for the RPC.</div>
                     </div>
-                    <span className="rounded-full border border-slate-700/60 bg-white/[0.03] px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-200">
-                      selected: {selectedTaskCount}
-                    </span>
+
+                    <div className="shrink-0 text-right">
+                      <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Selected</div>
+                      <div className="mt-1 text-[12px] font-semibold text-slate-100">{selectedTaskCount}</div>
+                    </div>
                   </div>
 
-                  {/* Template quick-add */}
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {TASK_TEMPLATES.map((tpl) => (
+                  {/* Templates */}
+                  <div className="mt-3">
+                    <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Templates</div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {TASK_TEMPLATES.map((t) => (
+                        <button
+                          key={t.task_key}
+                          type="button"
+                          onClick={() => addTemplate(t)}
+                          disabled={!selected || busy !== null}
+                          className="rounded-full border border-slate-700/70 bg-slate-950/20 px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase text-slate-200 hover:bg-white/[0.05] disabled:opacity-50"
+                          title={t.notes}
+                        >
+                          {t.title}
+                        </button>
+                      ))}
+
                       <button
-                        key={tpl.task_key}
                         type="button"
-                        onClick={() => addTemplate(tpl)}
-                        className="rounded-full border border-slate-700/60 bg-slate-950/15 px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase text-slate-200 hover:bg-white/[0.05]"
-                        title={tpl.notes}
+                        onClick={openNewTaskModal}
+                        disabled={!selected || busy !== null}
+                        className="rounded-full border border-sky-400/45 bg-sky-500/10 px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase text-sky-100 hover:bg-sky-500/14 disabled:opacity-50"
                       >
-                        + {tpl.title}
+                        + Add Task
                       </button>
-                    ))}
-                  </div>
 
-                  <div className="mt-3 grid grid-cols-3 gap-2">
-                    <button
-                      type="button"
-                      onClick={openNewTaskModal}
-                      disabled={busy !== null}
-                      className="rounded-2xl border border-sky-400/35 bg-sky-500/10 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-sky-100 hover:bg-sky-500/14 disabled:opacity-50"
-                    >
-                      Add Custom
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={resetDraftsToDefault}
-                      disabled={busy !== null}
-                      className="rounded-2xl border border-slate-700/60 bg-white/[0.03] px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-100 hover:bg-white/[0.05] disabled:opacity-50"
-                    >
-                      Reset Defaults
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={createProvisioningTasks}
-                      disabled={!selected || busy !== null}
-                      className="rounded-2xl border border-emerald-400/35 bg-emerald-500/10 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-100 hover:bg-emerald-500/14 disabled:opacity-50 disabled:cursor-not-allowed"
-                      title="Creates tasks via admissions_create_provisioning_tasks (RPC)"
-                    >
-                      {busy === "tasks" ? "Creating…" : "Create Tasks"}
-                    </button>
+                      <button
+                        type="button"
+                        onClick={resetDraftsToDefault}
+                        disabled={!selected || busy !== null}
+                        className="rounded-full border border-slate-700/70 bg-slate-950/20 px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase text-slate-200 hover:bg-white/[0.05] disabled:opacity-50"
+                        title="Reset to default task set"
+                      >
+                        Reset
+                      </button>
+                    </div>
                   </div>
 
                   {/* Draft list */}
                   <div className="mt-4 space-y-2">
                     {taskDrafts.length === 0 ? (
-                      <div className="text-[12px] text-slate-400">No task drafts.</div>
+                      <div className="rounded-2xl border border-slate-800/60 bg-black/10 px-4 py-4 text-[13px] text-slate-400">
+                        No tasks yet. Add templates or create a custom task.
+                      </div>
                     ) : (
                       taskDrafts.map((t, ix) => (
-                        <div key={`${t.task_key}-${ix}`} className="rounded-2xl border border-slate-800/60 bg-black/10 px-4 py-4">
+                        <div key={`${t.task_key}-${ix}`} className="rounded-2xl border border-slate-800/60 bg-black/10 px-3 py-3">
                           <div className="flex items-start justify-between gap-3">
-                            <label className="flex items-start gap-3 min-w-0">
+                            <label className="flex items-start gap-3 min-w-0 flex-1 cursor-pointer">
                               <input
                                 type="checkbox"
                                 checked={t.enabled}
                                 onChange={() => toggleTaskEnabled(ix)}
-                                className="mt-1 h-4 w-4 accent-amber-300"
+                                disabled={!selected || busy !== null}
+                                className="mt-1 h-4 w-4 accent-sky-300"
                               />
+
                               <div className="min-w-0">
-                                <div className="text-[13px] font-semibold text-slate-100 truncate">{t.title || "(untitled task)"}</div>
-                                <div className="mt-1 text-[11px] text-slate-500 font-mono truncate">{normalizeTaskKey(t.task_key || t.title)}</div>
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <div className="text-[13px] font-semibold text-slate-100 truncate">{t.title}</div>
+
+                                  {t.required ? (
+                                    <span className="rounded-full border border-amber-300/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold tracking-[0.14em] uppercase text-amber-100">
+                                      Required
+                                    </span>
+                                  ) : (
+                                    <span className="rounded-full border border-slate-600/50 bg-white/[0.03] px-2 py-0.5 text-[10px] font-semibold tracking-[0.14em] uppercase text-slate-200">
+                                      Optional
+                                    </span>
+                                  )}
+
+                                  {t.channels.length > 0 && (
+                                    <span className="rounded-full border border-slate-700/70 bg-slate-950/20 px-2 py-0.5 text-[10px] text-slate-200">
+                                      {t.channels.join(" · ").toUpperCase()}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div className="mt-1 text-[11px] text-slate-400 truncate">{t.task_key}</div>
+
+                                {t.notes ? (
+                                  <div className="mt-2 text-[12px] text-slate-200 whitespace-pre-wrap">{t.notes}</div>
+                                ) : (
+                                  <div className="mt-2 text-[12px] text-slate-500">—</div>
+                                )}
+
+                                {t.due_at && (
+                                  <div className="mt-2 text-[11px] text-slate-400">
+                                    Due: <span className="text-slate-100 font-semibold">{fmtShort(t.due_at)}</span>
+                                  </div>
+                                )}
+
+                                {/* Controls */}
+                                <div className="mt-3 grid grid-cols-2 gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => setTaskField(ix, { required: !t.required })}
+                                    disabled={!selected || busy !== null}
+                                    className="rounded-xl border border-slate-700/60 bg-slate-950/15 px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase text-slate-200 hover:bg-white/[0.05] disabled:opacity-50"
+                                  >
+                                    {t.required ? "Mark Optional" : "Mark Required"}
+                                  </button>
+
+                                  <div className="flex items-center justify-end gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleChannel(ix, "email")}
+                                      disabled={!selected || busy !== null}
+                                      className={cx(
+                                        "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase disabled:opacity-50",
+                                        t.channels.includes("email")
+                                          ? "border-emerald-400/45 bg-emerald-500/10 text-emerald-100"
+                                          : "border-slate-700/60 bg-slate-950/15 text-slate-200 hover:bg-white/[0.05]"
+                                      )}
+                                      title="Channel: Email (delivery later)"
+                                    >
+                                      Email
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleChannel(ix, "sms")}
+                                      disabled={!selected || busy !== null}
+                                      className={cx(
+                                        "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase disabled:opacity-50",
+                                        t.channels.includes("sms")
+                                          ? "border-sky-400/45 bg-sky-500/10 text-sky-100"
+                                          : "border-slate-700/60 bg-slate-950/15 text-slate-200 hover:bg-white/[0.05]"
+                                      )}
+                                      title="Channel: SMS (delivery later)"
+                                    >
+                                      SMS
+                                    </button>
+                                  </div>
+                                </div>
                               </div>
                             </label>
 
-                            <div className="shrink-0 flex items-center gap-2">
-                              <span
-                                className={cx(
-                                  "rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.18em]",
-                                  t.required ? "border-amber-400/35 bg-amber-500/10 text-amber-100" : "border-slate-700/60 bg-white/[0.03] text-slate-200"
-                                )}
-                              >
-                                {t.required ? "Required" : "Optional"}
-                              </span>
-
-                              <button
-                                type="button"
-                                onClick={() => removeDraft(ix)}
-                                disabled={busy !== null}
-                                className="rounded-full border border-slate-700/60 bg-slate-950/15 px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase text-slate-200 hover:bg-white/[0.05] disabled:opacity-50"
-                              >
-                                Remove
-                              </button>
-                            </div>
+                            <button
+                              type="button"
+                              onClick={() => removeDraft(ix)}
+                              disabled={!selected || busy !== null}
+                              className="shrink-0 rounded-full border border-slate-700/60 bg-slate-950/15 px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase text-slate-200 hover:bg-rose-500/10 hover:border-rose-400/35 hover:text-rose-100 disabled:opacity-50"
+                              title="Remove from draft list"
+                            >
+                              Remove
+                            </button>
                           </div>
 
+                          {/* Editable fields */}
                           <div className="mt-3 grid grid-cols-2 gap-2">
                             <input
                               value={t.title}
                               onChange={(e) => setTaskField(ix, { title: e.target.value })}
-                              disabled={busy !== null}
-                              className="w-full rounded-2xl border border-slate-700/60 bg-slate-950/20 px-3 py-3 text-[13px] text-slate-100 outline-none focus:border-sky-400/60 disabled:opacity-50"
+                              disabled={!selected || busy !== null}
+                              className="w-full rounded-xl border border-slate-700/60 bg-slate-950/20 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-sky-400/60 disabled:opacity-50"
                               placeholder="Title"
                             />
 
                             <input
                               value={t.task_key}
                               onChange={(e) => setTaskField(ix, { task_key: e.target.value })}
-                              disabled={busy !== null}
-                              className="w-full rounded-2xl border border-slate-700/60 bg-slate-950/20 px-3 py-3 text-[12px] text-slate-100 outline-none focus:border-sky-400/60 disabled:opacity-50 font-mono"
+                              disabled={!selected || busy !== null}
+                              className="w-full rounded-xl border border-slate-700/60 bg-slate-950/20 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-sky-400/60 disabled:opacity-50 font-mono"
                               placeholder="task_key"
                             />
                           </div>
@@ -1629,198 +1547,167 @@ export default function CIAdmissionsPage() {
                           <textarea
                             value={t.notes}
                             onChange={(e) => setTaskField(ix, { notes: e.target.value })}
-                            disabled={busy !== null}
-                            className="mt-2 w-full min-h-[72px] resize-none rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-sky-400/60 disabled:opacity-50"
+                            disabled={!selected || busy !== null}
+                            className="mt-2 w-full min-h-[64px] resize-none rounded-xl border border-slate-700/60 bg-slate-950/20 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-sky-400/60 disabled:opacity-50"
                             placeholder="Notes (what the applicant must provide)"
                           />
 
-                          <div className="mt-2 grid grid-cols-2 gap-2">
-                            <label className="flex items-center gap-3 rounded-2xl border border-slate-800/60 bg-black/10 px-4 py-3">
-                              <input
-                                type="checkbox"
-                                checked={t.required}
-                                onChange={(e) => setTaskField(ix, { required: e.target.checked })}
-                                className="h-4 w-4 accent-amber-300"
-                              />
-                              <span className="text-[12px] text-slate-200">
-                                Required <span className="text-slate-500">(unchecked = optional)</span>
-                              </span>
-                            </label>
-
-                            <div className="rounded-2xl border border-slate-800/60 bg-black/10 px-4 py-3">
-                              <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Channels</div>
-                              <div className="mt-2 flex gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleChannel(ix, "email")}
-                                  className={cx(
-                                    "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase",
-                                    t.channels.includes("email")
-                                      ? "border-emerald-400/45 bg-emerald-500/10 text-emerald-100"
-                                      : "border-slate-700/60 bg-slate-950/15 text-slate-200 hover:bg-white/[0.05]"
-                                  )}
-                                >
-                                  Email
-                                </button>
-
-                                <button
-                                  type="button"
-                                  onClick={() => toggleChannel(ix, "sms")}
-                                  className={cx(
-                                    "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase",
-                                    t.channels.includes("sms")
-                                      ? "border-sky-400/45 bg-sky-500/10 text-sky-100"
-                                      : "border-slate-700/60 bg-slate-950/15 text-slate-200 hover:bg-white/[0.05]"
-                                  )}
-                                >
-                                  SMS
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="mt-2 rounded-2xl border border-slate-800/60 bg-black/10 px-4 py-3">
-                            <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Due (optional)</div>
+                          <div className="mt-2">
+                            <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Due (optional)</div>
                             <input
                               type="datetime-local"
                               value={t.due_at ? new Date(t.due_at).toISOString().slice(0, 16) : ""}
                               onChange={(e) => {
-                                const raw = e.target.value.trim();
-                                const iso = raw ? new Date(raw).toISOString() : null;
-                                setTaskField(ix, { due_at: iso });
+                                const v = e.target.value;
+                                setTaskField(ix, { due_at: v ? new Date(v).toISOString() : null });
                               }}
-                              disabled={busy !== null}
-                              className="mt-2 w-full rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-sky-400/60 disabled:opacity-50"
+                              disabled={!selected || busy !== null}
+                              className="mt-1 w-full rounded-xl border border-slate-700/60 bg-slate-950/20 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-sky-400/60 disabled:opacity-50"
                             />
-                            <div className="mt-2 text-[11px] text-slate-500">Sent to RPC as ISO timestamptz; server decides enforcement.</div>
                           </div>
                         </div>
                       ))
                     )}
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <button
+                      onClick={createProvisioningTasks}
+                      disabled={!selected || busy !== null}
+                      className="rounded-2xl border border-sky-400/45 bg-sky-500/12 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-sky-100 hover:bg-sky-500/16 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {busy === "tasks" ? "Creating…" : "Create Tasks"}
+                    </button>
+
+                    <button
+                      onClick={() => setAdmissionsStatus("PROVISIONING")}
+                      disabled={!selected || busy !== null}
+                      className="rounded-2xl border border-slate-700/60 bg-white/[0.03] px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-100 hover:bg-white/[0.05] disabled:opacity-50 disabled:cursor-not-allowed"
+                      title="Moves status into provisioning phase (RPC)"
+                    >
+                      {busy === "status" ? "…" : "Set Provisioning"}
+                    </button>
                   </div>
 
                   <div className="mt-3 text-[11px] text-slate-500">
-                    Creates rows in <span className="font-mono">onboarding_provisioning_tasks</span>. Run actions below use the existing Edge Function runner.
+                    Writes to <span className="font-mono">onboarding_provisioning_tasks</span>.
                   </div>
                 </div>
 
-                {/* Activity rails */}
-                <div className="rounded-2xl border border-slate-800/60 bg-black/12 px-4 py-4">
-                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-200">Recent Tasks (DB)</div>
-                  <div className="mt-3 space-y-2">
-                    {!selected ? (
-                      <div className="text-[12px] text-slate-400">Select an application.</div>
-                    ) : tasks.length === 0 ? (
-                      <div className="text-[12px] text-slate-400">No tasks yet.</div>
-                    ) : (
-                      tasks.slice(0, 12).map((t) => {
-                        const st = String(t.status ?? "").toUpperCase();
-                        const isRunning = busy === "run_task" && runningTaskId === t.id;
-                        const key = normalizeTaskKey(t.task_key ?? "");
-                        return (
-                          <div key={t.id} className="rounded-2xl border border-slate-800/60 bg-black/10 px-4 py-3">
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="min-w-0">
-                                <div className="text-[12px] text-slate-100 font-semibold truncate">{key || "(task)"}</div>
-                                <div className="mt-1 text-[11px] text-slate-500">
-                                  created: {fmtShort(t.created_at)} <span className="mx-2 text-slate-700">•</span> attempts: {t.attempts ?? 0}
+                {/* Audit rails */}
+                <div className="rounded-2xl border border-slate-800/60 bg-black/12 overflow-hidden">
+                  <div className="px-4 py-4 border-b border-slate-800/60 bg-white/[0.02]">
+                    <div className="text-[11px] uppercase tracking-[0.22em] text-slate-200">Audit Trail</div>
+                    <div className="mt-1 text-[12px] text-slate-400">
+                      Events: {events.length} · Decisions: {decisions.length} · Tasks: {tasks.length}
+                    </div>
+                  </div>
+
+                  <div className="max-h-[360px] overflow-y-auto">
+                    {decisions.length > 0 && (
+                      <div className="p-4">
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Decisions</div>
+                        <div className="mt-2 space-y-2">
+                          {decisions.slice(0, 6).map((d) => (
+                            <div key={d.id} className="rounded-2xl border border-slate-800/60 bg-black/10 px-3 py-3">
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="min-w-0">
+                                  <div className="text-[13px] font-semibold text-slate-100">{(d.decision ?? "—").toUpperCase()}</div>
+                                  <div className="mt-1 text-[11px] text-slate-400">
+                                    {fmtShort(d.decided_at)} <span className="mx-2 text-slate-700">•</span> by {hashShort(d.decided_by)}
+                                  </div>
                                 </div>
                               </div>
-
-                              <span className={cx("shrink-0 rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.18em]", taskStatusPill(st))}>
-                                {st || "—"}
-                              </span>
+                              {d.summary && <div className="mt-2 text-[13px] text-slate-200 whitespace-pre-wrap">{d.summary}</div>}
+                              {d.conditions && (
+                                <div className="mt-2 text-[12px] text-slate-300 whitespace-pre-wrap">
+                                  <span className="text-slate-400">Conditions: </span>
+                                  {d.conditions}
+                                </div>
+                              )}
                             </div>
-
-                            {t.last_error ? (
-                              <div className="mt-2 text-[11px] text-rose-200/90 whitespace-pre-wrap">{t.last_error}</div>
-                            ) : null}
-
-                            <div className="mt-2 flex items-center justify-between gap-2">
-                              <button
-                                type="button"
-                                onClick={() => runProvisioningTask(t)}
-                                disabled={!selected || busy !== null}
-                                className="rounded-full border border-amber-400/35 bg-amber-500/10 px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase text-amber-100 hover:bg-amber-500/14 disabled:opacity-50"
-                                title="Runs task via Edge Function (no DB updates here)"
-                              >
-                                {isRunning ? "Running…" : "Run"}
-                              </button>
-
-                              <button
-                                type="button"
-                                onClick={async () => {
-                                  try {
-                                    await navigator.clipboard.writeText(t.id);
-                                    flashInfo("Copied task id.");
-                                  } catch {
-                                    flashError("Copy failed.");
-                                  }
-                                }}
-                                disabled={!selected}
-                                className="rounded-full border border-slate-700/60 bg-slate-950/15 px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase text-slate-200 hover:bg-white/[0.05] disabled:opacity-50"
-                              >
-                                Copy Task ID
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })
-                    )}
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-slate-800/60 bg-black/12 px-4 py-4">
-                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-200">Recent Decisions</div>
-                  <div className="mt-3 space-y-2">
-                    {!selected ? (
-                      <div className="text-[12px] text-slate-400">Select an application.</div>
-                    ) : decisions.length === 0 ? (
-                      <div className="text-[12px] text-slate-400">No decisions recorded.</div>
-                    ) : (
-                      decisions.slice(0, 6).map((d) => (
-                        <div key={d.id} className="rounded-2xl border border-slate-800/60 bg-black/10 px-4 py-3">
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <div className="text-[12px] font-semibold text-slate-100 truncate">{String(d.decision ?? "—").toUpperCase()}</div>
-                              <div className="mt-1 text-[11px] text-slate-500">decided: {fmtShort(d.decided_at)}</div>
-                            </div>
-                            <span className={cx("shrink-0 rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.18em]", statusPill(d.decision))}>
-                              {String(d.decision ?? "—").toUpperCase()}
-                            </span>
-                          </div>
-                          {d.summary ? <div className="mt-2 text-[12px] text-slate-300 whitespace-pre-wrap">{d.summary}</div> : null}
-                          {d.conditions ? <div className="mt-2 text-[11px] text-slate-500 whitespace-pre-wrap">{d.conditions}</div> : null}
+                          ))}
                         </div>
-                      ))
+                      </div>
                     )}
-                  </div>
-                </div>
 
-                <div className="rounded-2xl border border-slate-800/60 bg-black/12 px-4 py-4">
-                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-200">Recent Events</div>
-                  <div className="mt-3 space-y-2">
-                    {!selected ? (
-                      <div className="text-[12px] text-slate-400">Select an application.</div>
-                    ) : events.length === 0 ? (
-                      <div className="text-[12px] text-slate-400">No events recorded.</div>
-                    ) : (
-                      events.slice(0, 10).map((e) => (
-                        <div key={e.id} className="rounded-2xl border border-slate-800/60 bg-black/10 px-4 py-3">
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <div className="text-[11px] font-semibold text-slate-100 uppercase tracking-[0.18em] truncate">
-                                {eventTypeLabel(e.event_type)}
+                    {tasks.length > 0 && (
+                      <div className="px-4 pb-4">
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Provisioning Tasks</div>
+                        <div className="mt-2 space-y-2">
+                          {tasks.slice(0, 8).map((t) => {
+                            const k = normalizeTaskKey(t.task_key ?? "");
+                            const st = (t.status ?? "").toUpperCase();
+                            const canRun = ["PENDING", "FAILED", "ERROR"].includes(st) || !st;
+                            const isPortalInvite = k === "provision_portal_access";
+                            const isRunningThis = busy === "run_task" && runningTaskId === t.id;
+
+                            return (
+                              <div key={t.id} className="rounded-2xl border border-slate-800/60 bg-black/10 px-3 py-3">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <div className="text-[13px] font-semibold text-slate-100 truncate">{t.task_key ?? "(task)"}</div>
+                                    <div className="mt-1 text-[11px] text-slate-400">
+                                      {fmtShort(t.created_at)} <span className="mx-2 text-slate-700">•</span> status:{" "}
+                                      <span className="text-slate-100 font-semibold">{(t.status ?? "—").toUpperCase()}</span>
+                                      <span className="mx-2 text-slate-700">•</span> attempts: {t.attempts ?? 0}
+                                    </div>
+                                  </div>
+
+                                  {/* Run button (Edge) for provision_portal_access */}
+                                  {isPortalInvite && (
+                                    <button
+                                      type="button"
+                                      onClick={() => runProvisioningTask(t)}
+                                      disabled={!selected || busy !== null || !canRun}
+                                      className={cx(
+                                        "shrink-0 rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase disabled:opacity-50",
+                                        "border-sky-400/45 bg-sky-500/10 text-sky-100 hover:bg-sky-500/14"
+                                      )}
+                                      title="Runs the provisioning task via Edge Function (sends invite email)"
+                                    >
+                                      {isRunningThis ? "Running…" : "Run Invite"}
+                                    </button>
+                                  )}
+                                </div>
+
+                                {t.last_error && (
+                                  <div className="mt-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-[12px] text-rose-100">
+                                    {t.last_error}
+                                  </div>
+                                )}
+
+                                {t.result && (
+                                  <pre className="mt-2 whitespace-pre-wrap font-mono text-[10px] text-slate-200 rounded-xl border border-slate-800/60 bg-black/15 px-3 py-2 max-h-[140px] overflow-y-auto">
+                                    {JSON.stringify(t.result, null, 2)}
+                                  </pre>
+                                )}
                               </div>
-                              <div className="mt-1 text-[11px] text-slate-500">{fmtShort(e.created_at)}</div>
-                            </div>
-                            <span className="rounded-full border border-slate-700/60 bg-white/[0.03] px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-200">
-                              {hashShort(e.actor_id)}
-                            </span>
-                          </div>
-                          {e.message ? <div className="mt-2 text-[12px] text-slate-300 whitespace-pre-wrap">{e.message}</div> : null}
+                            );
+                          })}
                         </div>
-                      ))
+                      </div>
+                    )}
+
+                    {events.length > 0 && (
+                      <div className="px-4 pb-4">
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Events</div>
+                        <div className="mt-2 space-y-2">
+                          {events.slice(0, 10).map((e) => (
+                            <div key={e.id} className="rounded-2xl border border-slate-800/60 bg-black/10 px-3 py-3">
+                              <div className="text-[12px] font-semibold text-slate-100">{(e.event_type ?? "event").toUpperCase()}</div>
+                              <div className="mt-1 text-[11px] text-slate-400">
+                                {fmtShort(e.created_at)} <span className="mx-2 text-slate-700">•</span> actor {hashShort(e.actor_id)}
+                              </div>
+                              {e.message && <div className="mt-2 text-[13px] text-slate-200 whitespace-pre-wrap">{e.message}</div>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {events.length === 0 && decisions.length === 0 && tasks.length === 0 && (
+                      <div className="p-4 text-[13px] text-slate-400">No audit entries yet for this application.</div>
                     )}
                   </div>
                 </div>
