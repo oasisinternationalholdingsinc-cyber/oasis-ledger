@@ -1246,9 +1246,6 @@ export default function CIAdmissionsPage() {
                 </div>
               </div>
 
-              {/* --- rest of your file unchanged below --- */}
-              {/* NOTE: kept identical to your paste; no wiring changes. */}
-
               <div className="flex-1 min-h-0 overflow-y-auto px-5 py-5 space-y-4">
                 {/* Decision */}
                 <div className="rounded-2xl border border-slate-800/60 bg-black/12 px-4 py-4">
@@ -1366,8 +1363,354 @@ export default function CIAdmissionsPage() {
                 </div>
 
                 {/* Provisioning tasks (NEW UI) */}
-                {/* (unchanged, as in your paste) */}
-                {/* ... keep the remainder identical ... */}
+                <div className="rounded-2xl border border-slate-800/60 bg-black/12 px-4 py-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-[11px] uppercase tracking-[0.22em] text-sky-100">Provisioning (RPC)</div>
+                      <div className="mt-1 text-[12px] text-slate-400">Build tasks with checkboxes — UI generates the JSON array for the RPC.</div>
+                    </div>
+
+                    <div className="shrink-0 text-right">
+                      <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Selected</div>
+                      <div className="mt-1 text-[12px] font-semibold text-slate-100">{selectedTaskCount}</div>
+                    </div>
+                  </div>
+
+                  {/* Templates */}
+                  <div className="mt-3">
+                    <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Templates</div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {TASK_TEMPLATES.map((t) => (
+                        <button
+                          key={t.task_key}
+                          type="button"
+                          onClick={() => addTemplate(t)}
+                          disabled={!selected || busy !== null}
+                          className="rounded-full border border-slate-700/70 bg-slate-950/20 px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase text-slate-200 hover:bg-white/[0.05] disabled:opacity-50"
+                          title={t.notes}
+                        >
+                          {t.title}
+                        </button>
+                      ))}
+
+                      <button
+                        type="button"
+                        onClick={openNewTaskModal}
+                        disabled={!selected || busy !== null}
+                        className="rounded-full border border-sky-400/45 bg-sky-500/10 px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase text-sky-100 hover:bg-sky-500/14 disabled:opacity-50"
+                      >
+                        + Add Task
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={resetDraftsToDefault}
+                        disabled={!selected || busy !== null}
+                        className="rounded-full border border-slate-700/70 bg-slate-950/20 px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase text-slate-200 hover:bg-white/[0.05] disabled:opacity-50"
+                        title="Reset to default task set"
+                      >
+                        Reset
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Draft list */}
+                  <div className="mt-4 space-y-2">
+                    {taskDrafts.length === 0 ? (
+                      <div className="rounded-2xl border border-slate-800/60 bg-black/10 px-4 py-4 text-[13px] text-slate-400">
+                        No tasks yet. Add templates or create a custom task.
+                      </div>
+                    ) : (
+                      taskDrafts.map((t, ix) => (
+                        <div key={`${t.task_key}-${ix}`} className="rounded-2xl border border-slate-800/60 bg-black/10 px-3 py-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <label className="flex items-start gap-3 min-w-0 flex-1 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={t.enabled}
+                                onChange={() => toggleTaskEnabled(ix)}
+                                disabled={!selected || busy !== null}
+                                className="mt-1 h-4 w-4 accent-sky-300"
+                              />
+
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <div className="text-[13px] font-semibold text-slate-100 truncate">{t.title}</div>
+
+                                  {t.required ? (
+                                    <span className="rounded-full border border-amber-300/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold tracking-[0.14em] uppercase text-amber-100">
+                                      Required
+                                    </span>
+                                  ) : (
+                                    <span className="rounded-full border border-slate-600/50 bg-white/[0.03] px-2 py-0.5 text-[10px] font-semibold tracking-[0.14em] uppercase text-slate-200">
+                                      Optional
+                                    </span>
+                                  )}
+
+                                  {t.channels.length > 0 && (
+                                    <span className="rounded-full border border-slate-700/70 bg-slate-950/20 px-2 py-0.5 text-[10px] text-slate-200">
+                                      {t.channels.join(" · ").toUpperCase()}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div className="mt-1 text-[11px] text-slate-400 truncate">{t.task_key}</div>
+
+                                {t.notes ? (
+                                  <div className="mt-2 text-[12px] text-slate-200 whitespace-pre-wrap">{t.notes}</div>
+                                ) : (
+                                  <div className="mt-2 text-[12px] text-slate-500">—</div>
+                                )}
+
+                                {t.due_at && (
+                                  <div className="mt-2 text-[11px] text-slate-400">
+                                    Due: <span className="text-slate-100 font-semibold">{fmtShort(t.due_at)}</span>
+                                  </div>
+                                )}
+
+                                {/* Controls */}
+                                <div className="mt-3 grid grid-cols-2 gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => setTaskField(ix, { required: !t.required })}
+                                    disabled={!selected || busy !== null}
+                                    className="rounded-xl border border-slate-700/60 bg-slate-950/15 px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase text-slate-200 hover:bg-white/[0.05] disabled:opacity-50"
+                                  >
+                                    {t.required ? "Mark Optional" : "Mark Required"}
+                                  </button>
+
+                                  <div className="flex items-center justify-end gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleChannel(ix, "email")}
+                                      disabled={!selected || busy !== null}
+                                      className={cx(
+                                        "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase disabled:opacity-50",
+                                        t.channels.includes("email")
+                                          ? "border-emerald-400/45 bg-emerald-500/10 text-emerald-100"
+                                          : "border-slate-700/60 bg-slate-950/15 text-slate-200 hover:bg-white/[0.05]"
+                                      )}
+                                      title="Channel: Email (delivery later)"
+                                    >
+                                      Email
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleChannel(ix, "sms")}
+                                      disabled={!selected || busy !== null}
+                                      className={cx(
+                                        "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase disabled:opacity-50",
+                                        t.channels.includes("sms")
+                                          ? "border-sky-400/45 bg-sky-500/10 text-sky-100"
+                                          : "border-slate-700/60 bg-slate-950/15 text-slate-200 hover:bg-white/[0.05]"
+                                      )}
+                                      title="Channel: SMS (delivery later)"
+                                    >
+                                      SMS
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            </label>
+
+                            <button
+                              type="button"
+                              onClick={() => removeDraft(ix)}
+                              disabled={!selected || busy !== null}
+                              className="shrink-0 rounded-full border border-slate-700/60 bg-slate-950/15 px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase text-slate-200 hover:bg-rose-500/10 hover:border-rose-400/35 hover:text-rose-100 disabled:opacity-50"
+                              title="Remove from draft list"
+                            >
+                              Remove
+                            </button>
+                          </div>
+
+                          {/* Editable fields */}
+                          <div className="mt-3 grid grid-cols-2 gap-2">
+                            <input
+                              value={t.title}
+                              onChange={(e) => setTaskField(ix, { title: e.target.value })}
+                              disabled={!selected || busy !== null}
+                              className="w-full rounded-xl border border-slate-700/60 bg-slate-950/20 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-sky-400/60 disabled:opacity-50"
+                              placeholder="Title"
+                            />
+
+                            <input
+                              value={t.task_key}
+                              onChange={(e) => setTaskField(ix, { task_key: e.target.value })}
+                              disabled={!selected || busy !== null}
+                              className="w-full rounded-xl border border-slate-700/60 bg-slate-950/20 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-sky-400/60 disabled:opacity-50 font-mono"
+                              placeholder="task_key"
+                            />
+                          </div>
+
+                          <textarea
+                            value={t.notes}
+                            onChange={(e) => setTaskField(ix, { notes: e.target.value })}
+                            disabled={!selected || busy !== null}
+                            className="mt-2 w-full min-h-[64px] resize-none rounded-xl border border-slate-700/60 bg-slate-950/20 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-sky-400/60 disabled:opacity-50"
+                            placeholder="Notes (what the applicant must provide)"
+                          />
+
+                          <div className="mt-2">
+                            <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Due (optional)</div>
+                            <input
+                              type="datetime-local"
+                              value={t.due_at ? new Date(t.due_at).toISOString().slice(0, 16) : ""}
+                              onChange={(e) => {
+                                const v = e.target.value;
+                                setTaskField(ix, { due_at: v ? new Date(v).toISOString() : null });
+                              }}
+                              disabled={!selected || busy !== null}
+                              className="mt-1 w-full rounded-xl border border-slate-700/60 bg-slate-950/20 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-sky-400/60 disabled:opacity-50"
+                            />
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <button
+                      onClick={createProvisioningTasks}
+                      disabled={!selected || busy !== null}
+                      className="rounded-2xl border border-sky-400/45 bg-sky-500/12 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-sky-100 hover:bg-sky-500/16 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {busy === "tasks" ? "Creating…" : "Create Tasks"}
+                    </button>
+
+                    <button
+                      onClick={() => setAdmissionsStatus("PROVISIONING")}
+                      disabled={!selected || busy !== null}
+                      className="rounded-2xl border border-slate-700/60 bg-white/[0.03] px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-100 hover:bg-white/[0.05] disabled:opacity-50 disabled:cursor-not-allowed"
+                      title="Moves status into provisioning phase (RPC)"
+                    >
+                      {busy === "status" ? "…" : "Set Provisioning"}
+                    </button>
+                  </div>
+
+                  <div className="mt-3 text-[11px] text-slate-500">
+                    Writes to <span className="font-mono">onboarding_provisioning_tasks</span>.
+                  </div>
+                </div>
+
+                {/* Audit rails */}
+                <div className="rounded-2xl border border-slate-800/60 bg-black/12 overflow-hidden">
+                  <div className="px-4 py-4 border-b border-slate-800/60 bg-white/[0.02]">
+                    <div className="text-[11px] uppercase tracking-[0.22em] text-slate-200">Audit Trail</div>
+                    <div className="mt-1 text-[12px] text-slate-400">
+                      Events: {events.length} · Decisions: {decisions.length} · Tasks: {tasks.length}
+                    </div>
+                  </div>
+
+                  <div className="max-h-[360px] overflow-y-auto">
+                    {decisions.length > 0 && (
+                      <div className="p-4">
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Decisions</div>
+                        <div className="mt-2 space-y-2">
+                          {decisions.slice(0, 6).map((d) => (
+                            <div key={d.id} className="rounded-2xl border border-slate-800/60 bg-black/10 px-3 py-3">
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="min-w-0">
+                                  <div className="text-[13px] font-semibold text-slate-100">{(d.decision ?? "—").toUpperCase()}</div>
+                                  <div className="mt-1 text-[11px] text-slate-400">
+                                    {fmtShort(d.decided_at)} <span className="mx-2 text-slate-700">•</span> by {hashShort(d.decided_by)}
+                                  </div>
+                                </div>
+                              </div>
+                              {d.summary && <div className="mt-2 text-[13px] text-slate-200 whitespace-pre-wrap">{d.summary}</div>}
+                              {d.conditions && (
+                                <div className="mt-2 text-[12px] text-slate-300 whitespace-pre-wrap">
+                                  <span className="text-slate-400">Conditions: </span>
+                                  {d.conditions}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {tasks.length > 0 && (
+                      <div className="px-4 pb-4">
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Provisioning Tasks</div>
+                        <div className="mt-2 space-y-2">
+                          {tasks.slice(0, 8).map((t) => {
+                            const k = normalizeTaskKey(t.task_key ?? "");
+                            const st = (t.status ?? "").toUpperCase();
+                            const canRun = ["PENDING", "FAILED", "ERROR"].includes(st) || !st;
+                            const isPortalInvite = k === "provision_portal_access";
+                            const isRunningThis = busy === "run_task" && runningTaskId === t.id;
+
+                            return (
+                              <div key={t.id} className="rounded-2xl border border-slate-800/60 bg-black/10 px-3 py-3">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <div className="text-[13px] font-semibold text-slate-100 truncate">{t.task_key ?? "(task)"}</div>
+                                    <div className="mt-1 text-[11px] text-slate-400">
+                                      {fmtShort(t.created_at)} <span className="mx-2 text-slate-700">•</span> status:{" "}
+                                      <span className="text-slate-100 font-semibold">{(t.status ?? "—").toUpperCase()}</span>
+                                      <span className="mx-2 text-slate-700">•</span> attempts: {t.attempts ?? 0}
+                                    </div>
+                                  </div>
+
+                                  {/* Run button (Edge) for provision_portal_access */}
+                                  {isPortalInvite && (
+                                    <button
+                                      type="button"
+                                      onClick={() => runProvisioningTask(t)}
+                                      disabled={!selected || busy !== null || !canRun}
+                                      className={cx(
+                                        "shrink-0 rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase disabled:opacity-50",
+                                        "border-sky-400/45 bg-sky-500/10 text-sky-100 hover:bg-sky-500/14"
+                                      )}
+                                      title="Runs the provisioning task via Edge Function (sends invite email)"
+                                    >
+                                      {isRunningThis ? "Running…" : "Run Invite"}
+                                    </button>
+                                  )}
+                                </div>
+
+                                {t.last_error && (
+                                  <div className="mt-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-[12px] text-rose-100">
+                                    {t.last_error}
+                                  </div>
+                                )}
+
+                                {t.result && (
+                                  <pre className="mt-2 whitespace-pre-wrap font-mono text-[10px] text-slate-200 rounded-xl border border-slate-800/60 bg-black/15 px-3 py-2 max-h-[140px] overflow-y-auto">
+                                    {JSON.stringify(t.result, null, 2)}
+                                  </pre>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {events.length > 0 && (
+                      <div className="px-4 pb-4">
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Events</div>
+                        <div className="mt-2 space-y-2">
+                          {events.slice(0, 10).map((e) => (
+                            <div key={e.id} className="rounded-2xl border border-slate-800/60 bg-black/10 px-3 py-3">
+                              <div className="text-[12px] font-semibold text-slate-100">{(e.event_type ?? "event").toUpperCase()}</div>
+                              <div className="mt-1 text-[11px] text-slate-400">
+                                {fmtShort(e.created_at)} <span className="mx-2 text-slate-700">•</span> actor {hashShort(e.actor_id)}
+                              </div>
+                              {e.message && <div className="mt-2 text-[13px] text-slate-200 whitespace-pre-wrap">{e.message}</div>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {events.length === 0 && decisions.length === 0 && tasks.length === 0 && (
+                      <div className="p-4 text-[13px] text-slate-400">No audit entries yet for this application.</div>
+                    )}
+                  </div>
+                </div>
               </div>
 
               <div className="shrink-0 px-5 py-4 border-t border-slate-800/60 text-[11px] text-slate-500 flex items-center justify-between bg-white/[0.02]">
@@ -1588,7 +1931,9 @@ function StatusTabButton({
       onClick={onClick}
       className={cx(
         "px-4 py-2 rounded-full text-left transition min-w-[110px]",
-        active ? "bg-emerald-500/14 border border-emerald-400/55 text-slate-50" : "bg-transparent border border-transparent hover:bg-white/[0.05] text-slate-200"
+        active
+          ? "bg-emerald-500/14 border border-emerald-400/55 text-slate-50"
+          : "bg-transparent border border-transparent hover:bg-white/[0.05] text-slate-200"
       )}
       title={String(value)}
     >
