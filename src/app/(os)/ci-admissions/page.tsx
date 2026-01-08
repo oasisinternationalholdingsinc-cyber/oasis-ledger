@@ -263,7 +263,8 @@ export default function CIAdmissionsPage() {
 
   // UI state
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<null | "status" | "review" | "decision" | "info" | "tasks" | "delete">(null);
+  const [busy, setBusy] = useState<null | "status" | "review" | "decision" | "info" | "tasks" | "run_task" | "delete">(null);
+  const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
 
   const [drawerOpen, setDrawerOpen] = useState(true);
   const [tab, setTab] = useState<StatusTab>("ALL");
@@ -288,15 +289,12 @@ export default function CIAdmissionsPage() {
   const [requestInfoMsg, setRequestInfoMsg] = useState<string>("");
   const [requestInfoFields, setRequestInfoFields] = useState<string>(""); // optional JSON overrides
 
-  // ---- NEW: task builder UI state (replaces JSON textarea) ----
+  // ---- Task builder UI state (replaces JSON textarea) ----
   const [taskDrafts, setTaskDrafts] = useState<UiProvisionTask[]>(() => {
     // Start with a sane default set (enabled)
-    const defaults = [
-      TASK_TEMPLATES[0],
-      TASK_TEMPLATES[1],
-      TASK_TEMPLATES[2],
-      TASK_TEMPLATES[4],
-    ].filter(Boolean) as Array<Omit<UiProvisionTask, "enabled">>;
+    const defaults = [TASK_TEMPLATES[0], TASK_TEMPLATES[1], TASK_TEMPLATES[2], TASK_TEMPLATES[4]].filter(Boolean) as Array<
+      Omit<UiProvisionTask, "enabled">
+    >;
     return defaults.map(mkTask);
   });
 
@@ -359,21 +357,13 @@ export default function CIAdmissionsPage() {
       const VIEW = "v_onboarding_admissions_inbox";
 
       const tryByEntityId = async () => {
-        const { data, error } = await supabase
-          .from(VIEW)
-          .select(baseSelect)
-          .eq("entity_id", eid)
-          .order("created_at", { ascending: false });
+        const { data, error } = await supabase.from(VIEW).select(baseSelect).eq("entity_id", eid).order("created_at", { ascending: false });
         if (error) throw error;
         return (data ?? []) as ApplicationRow[];
       };
 
       const tryByEntitySlug = async () => {
-        const { data, error } = await supabase
-          .from(VIEW)
-          .select(baseSelect)
-          .eq("entity_slug", activeEntitySlug)
-          .order("created_at", { ascending: false });
+        const { data, error } = await supabase.from(VIEW).select(baseSelect).eq("entity_slug", activeEntitySlug).order("created_at", { ascending: false });
         if (error) throw error;
         return (data ?? []) as ApplicationRow[];
       };
@@ -397,8 +387,7 @@ export default function CIAdmissionsPage() {
         }
       }
 
-      const filteredByTab =
-        tab === "ALL" ? rows : rows.filter((r) => (r.status ?? "").toUpperCase() === String(tab).toUpperCase());
+      const filteredByTab = tab === "ALL" ? rows : rows.filter((r) => (r.status ?? "").toUpperCase() === String(tab).toUpperCase());
 
       const pick = filteredByTab[0] ?? rows[0] ?? null;
       if (pick) {
@@ -515,7 +504,6 @@ export default function CIAdmissionsPage() {
     setRequestInfoFields("");
 
     // Keep task drafts stable (no regression); do not auto-reset on selection.
-
     void loadRelated(a.id);
   }
 
@@ -648,7 +636,7 @@ export default function CIAdmissionsPage() {
     }
   }
 
-  // ---- NEW: createProvisioningTasks now uses UI task builder (still RPC-only) ----
+  // ---- Provisioning tasks (RPC-only) ----
   async function createProvisioningTasks() {
     if (!selected?.id) return flashError("Select an application first.");
     setBusy("tasks");
@@ -659,7 +647,7 @@ export default function CIAdmissionsPage() {
       const enabled = taskDrafts.filter((t) => t.enabled);
       if (enabled.length === 0) return flashError("Select at least one task.");
 
-      // RPC expects JSONB; based on your earlier error, it expects a JSON array (not an object wrapper).
+      // RPC expects JSONB array (not an object wrapper).
       const payload = enabled.map((t) => ({
         task_key: normalizeTaskKey(t.task_key || t.title || "task"),
         title: (t.title || "").trim() || undefined,
@@ -684,6 +672,65 @@ export default function CIAdmissionsPage() {
       flashError(e?.message ?? "Failed to create provisioning tasks (RPC).");
     } finally {
       setBusy(null);
+    }
+  }
+
+  // ---- NEW: Run button for task execution (Edge Function) ----
+  async function runProvisioningTask(t: TaskRow) {
+    if (!selected?.id) return flashError("Select an application first.");
+    if (!t?.id) return flashError("Task id missing.");
+
+    setBusy("run_task");
+    setRunningTaskId(t.id);
+    setError(null);
+    setInfo(null);
+
+    try {
+      const orgEmail =
+        (selected.metadata?.organization_email as string) ||
+        (selected.metadata?.org_email as string) ||
+        (selected.metadata?.contact_email as string) ||
+        null;
+
+      const inviteEmail =
+        (orgEmail && String(orgEmail).trim()) ||
+        (selected.applicant_email && String(selected.applicant_email).trim()) ||
+        null;
+
+      if (!inviteEmail) {
+        throw new Error("No invite email found (metadata.organization_email or applicant_email).");
+      }
+
+      // Edge Function slug (deploy this exact name):
+      // admissions-provision-portal-access
+      const { data, error } = await supabase.functions.invoke("admissions-provision-portal-access", {
+        body: {
+          application_id: selected.id,
+          task_id: t.id,
+          task_key: t.task_key,
+          entity_slug: activeEntitySlug,
+          invite_email: inviteEmail,
+          applicant_name: selected.applicant_name,
+          organization_legal_name: selected.organization_legal_name,
+          organization_trade_name: selected.organization_trade_name,
+        },
+      });
+
+      if (error) throw error;
+      if ((data as any)?.ok === false) throw new Error((data as any)?.error ?? "Task runner failed.");
+
+      flashInfo("Task executed (invite sent).");
+      await loadRelated(selected.id);
+      await reload(true);
+    } catch (e: any) {
+      flashError(e?.message ?? "Failed to run provisioning task.");
+      // Refresh rails anyway (so last_error/result updates show if server wrote them)
+      if (selected?.id) {
+        await loadRelated(selected.id);
+      }
+    } finally {
+      setBusy(null);
+      setRunningTaskId(null);
     }
   }
 
@@ -778,12 +825,9 @@ export default function CIAdmissionsPage() {
   }
 
   function resetDraftsToDefault() {
-    const defaults = [
-      TASK_TEMPLATES[0],
-      TASK_TEMPLATES[1],
-      TASK_TEMPLATES[2],
-      TASK_TEMPLATES[4],
-    ].filter(Boolean) as Array<Omit<UiProvisionTask, "enabled">>;
+    const defaults = [TASK_TEMPLATES[0], TASK_TEMPLATES[1], TASK_TEMPLATES[2], TASK_TEMPLATES[4]].filter(Boolean) as Array<
+      Omit<UiProvisionTask, "enabled">
+    >;
     setTaskDrafts(defaults.map(mkTask));
   }
 
@@ -892,19 +936,11 @@ export default function CIAdmissionsPage() {
           <div className="shrink-0 mb-4 flex items-center justify-between gap-4">
             <div className="inline-flex rounded-full bg-slate-950/45 border border-slate-800/80 p-1 overflow-hidden">
               {statusTabs.map((s) => (
-                <StatusTabButton
-                  key={s}
-                  label={s === "ALL" ? "All" : s}
-                  value={s}
-                  active={String(tab) === String(s)}
-                  onClick={() => setTab(s)}
-                />
+                <StatusTabButton key={s} label={s === "ALL" ? "All" : s} value={s} active={String(tab) === String(s)} onClick={() => setTab(s)} />
               ))}
             </div>
 
-            <div className="text-[11px] text-slate-500">
-              Queue is entity-scoped. Archive is a tab. Hard delete is guarded.
-            </div>
+            <div className="text-[11px] text-slate-500">Queue is entity-scoped. Archive is a tab. Hard delete is guarded.</div>
           </div>
 
           {/* Workspace */}
@@ -946,8 +982,7 @@ export default function CIAdmissionsPage() {
                     <ul className="py-2">
                       {filtered.map((a) => {
                         const st = (a.status ?? "—").toUpperCase();
-                        const title =
-                          a.organization_legal_name || a.organization_trade_name || a.applicant_name || "(unnamed)";
+                        const title = a.organization_legal_name || a.organization_trade_name || a.applicant_name || "(unnamed)";
                         const sub = a.applicant_email || a.applicant_phone || a.website || "—";
 
                         const selectedRow = a.id === selectedId;
@@ -965,12 +1000,7 @@ export default function CIAdmissionsPage() {
                             >
                               <div className="flex items-start justify-between gap-2">
                                 <div className="min-w-0 flex-1">
-                                  <div
-                                    className={cx(
-                                      "truncate text-[14px] font-semibold",
-                                      selectedRow ? "text-slate-50" : "text-slate-100"
-                                    )}
-                                  >
+                                  <div className={cx("truncate text-[14px] font-semibold", selectedRow ? "text-slate-50" : "text-slate-100")}>
                                     {title}
                                   </div>
                                   <div className="mt-1 text-[12px] text-slate-400 truncate">{sub}</div>
@@ -1008,8 +1038,7 @@ export default function CIAdmissionsPage() {
                   <div className="mt-1 text-[13px] text-slate-400">
                     Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
                     <span className="mx-2 text-slate-700">•</span>
-                    Status:{" "}
-                    <span className="text-slate-100 font-semibold">{(selected?.status ?? "—").toUpperCase()}</span>
+                    Status: <span className="text-slate-100 font-semibold">{(selected?.status ?? "—").toUpperCase()}</span>
                   </div>
                 </div>
 
@@ -1053,10 +1082,7 @@ export default function CIAdmissionsPage() {
                       <div className="mt-2 flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="text-[16px] font-semibold text-slate-50 truncate">
-                            {selected.organization_legal_name ||
-                              selected.organization_trade_name ||
-                              selected.applicant_name ||
-                              "(untitled)"}
+                            {selected.organization_legal_name || selected.organization_trade_name || selected.applicant_name || "(untitled)"}
                           </div>
                           <div className="mt-1 text-[13px] text-slate-400">
                             Submitted: {fmtShort(selected.submitted_at || selected.created_at)}
@@ -1152,12 +1178,7 @@ export default function CIAdmissionsPage() {
                   </div>
 
                   {selected && (
-                    <span
-                      className={cx(
-                        "rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.18em]",
-                        statusPill(selected.status)
-                      )}
-                    >
+                    <span className={cx("rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.18em]", statusPill(selected.status))}>
                       {(selected.status ?? "—").toUpperCase()}
                     </span>
                   )}
@@ -1330,9 +1351,7 @@ export default function CIAdmissionsPage() {
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-[11px] uppercase tracking-[0.22em] text-sky-100">Provisioning (RPC)</div>
-                      <div className="mt-1 text-[12px] text-slate-400">
-                        Build tasks with checkboxes — UI generates the JSON array for the RPC.
-                      </div>
+                      <div className="mt-1 text-[12px] text-slate-400">Build tasks with checkboxes — UI generates the JSON array for the RPC.</div>
                     </div>
 
                     <div className="shrink-0 text-right">
@@ -1600,28 +1619,56 @@ export default function CIAdmissionsPage() {
                       <div className="px-4 pb-4">
                         <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Provisioning Tasks</div>
                         <div className="mt-2 space-y-2">
-                          {tasks.slice(0, 8).map((t) => (
-                            <div key={t.id} className="rounded-2xl border border-slate-800/60 bg-black/10 px-3 py-3">
-                              <div className="text-[13px] font-semibold text-slate-100 truncate">{t.task_key ?? "(task)"}</div>
-                              <div className="mt-1 text-[11px] text-slate-400">
-                                {fmtShort(t.created_at)} <span className="mx-2 text-slate-700">•</span> status:{" "}
-                                <span className="text-slate-100 font-semibold">{(t.status ?? "—").toUpperCase()}</span>
-                                <span className="mx-2 text-slate-700">•</span> attempts: {t.attempts ?? 0}
-                              </div>
+                          {tasks.slice(0, 8).map((t) => {
+                            const k = normalizeTaskKey(t.task_key ?? "");
+                            const st = (t.status ?? "").toUpperCase();
+                            const canRun = ["PENDING", "FAILED", "ERROR"].includes(st) || !st;
+                            const isPortalInvite = k === "provision_portal_access";
+                            const isRunningThis = busy === "run_task" && runningTaskId === t.id;
 
-                              {t.last_error && (
-                                <div className="mt-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-[12px] text-rose-100">
-                                  {t.last_error}
+                            return (
+                              <div key={t.id} className="rounded-2xl border border-slate-800/60 bg-black/10 px-3 py-3">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <div className="text-[13px] font-semibold text-slate-100 truncate">{t.task_key ?? "(task)"}</div>
+                                    <div className="mt-1 text-[11px] text-slate-400">
+                                      {fmtShort(t.created_at)} <span className="mx-2 text-slate-700">•</span> status:{" "}
+                                      <span className="text-slate-100 font-semibold">{(t.status ?? "—").toUpperCase()}</span>
+                                      <span className="mx-2 text-slate-700">•</span> attempts: {t.attempts ?? 0}
+                                    </div>
+                                  </div>
+
+                                  {/* NEW: Run button (Edge) for provision_portal_access */}
+                                  {isPortalInvite && (
+                                    <button
+                                      type="button"
+                                      onClick={() => runProvisioningTask(t)}
+                                      disabled={!selected || busy !== null || !canRun}
+                                      className={cx(
+                                        "shrink-0 rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase disabled:opacity-50",
+                                        "border-sky-400/45 bg-sky-500/10 text-sky-100 hover:bg-sky-500/14"
+                                      )}
+                                      title="Runs the provisioning task via Edge Function (sends invite email)"
+                                    >
+                                      {isRunningThis ? "Running…" : "Run Invite"}
+                                    </button>
+                                  )}
                                 </div>
-                              )}
 
-                              {t.result && (
-                                <pre className="mt-2 whitespace-pre-wrap font-mono text-[10px] text-slate-200 rounded-xl border border-slate-800/60 bg-black/15 px-3 py-2 max-h-[140px] overflow-y-auto">
-                                  {JSON.stringify(t.result, null, 2)}
-                                </pre>
-                              )}
-                            </div>
-                          ))}
+                                {t.last_error && (
+                                  <div className="mt-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-[12px] text-rose-100">
+                                    {t.last_error}
+                                  </div>
+                                )}
+
+                                {t.result && (
+                                  <pre className="mt-2 whitespace-pre-wrap font-mono text-[10px] text-slate-200 rounded-xl border border-slate-800/60 bg-black/15 px-3 py-2 max-h-[140px] overflow-y-auto">
+                                    {JSON.stringify(t.result, null, 2)}
+                                  </pre>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
                     )}
@@ -1790,11 +1837,7 @@ export default function CIAdmissionsPage() {
                   <div className="mt-2 flex gap-2">
                     <button
                       type="button"
-                      onClick={() =>
-                        setNewTaskChannels((prev) =>
-                          prev.includes("email") ? prev.filter((x) => x !== "email") : [...prev, "email"]
-                        )
-                      }
+                      onClick={() => setNewTaskChannels((prev) => (prev.includes("email") ? prev.filter((x) => x !== "email") : [...prev, "email"]))}
                       className={cx(
                         "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase",
                         newTaskChannels.includes("email")
@@ -1807,11 +1850,7 @@ export default function CIAdmissionsPage() {
 
                     <button
                       type="button"
-                      onClick={() =>
-                        setNewTaskChannels((prev) =>
-                          prev.includes("sms") ? prev.filter((x) => x !== "sms") : [...prev, "sms"]
-                        )
-                      }
+                      onClick={() => setNewTaskChannels((prev) => (prev.includes("sms") ? prev.filter((x) => x !== "sms") : [...prev, "sms"]))}
                       className={cx(
                         "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase",
                         newTaskChannels.includes("sms")
@@ -1833,9 +1872,7 @@ export default function CIAdmissionsPage() {
                   onChange={(e) => setNewTaskDueAt(e.target.value)}
                   className="mt-2 w-full rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-sky-400/60"
                 />
-                <div className="mt-2 text-[11px] text-slate-500">
-                  Stored as ISO timestamptz in payload (server decides enforcement).
-                </div>
+                <div className="mt-2 text-[11px] text-slate-500">Stored as ISO timestamptz in payload (server decides enforcement).</div>
               </div>
             </div>
 
@@ -1878,7 +1915,9 @@ function StatusTabButton({
       onClick={onClick}
       className={cx(
         "px-4 py-2 rounded-full text-left transition min-w-[110px]",
-        active ? "bg-emerald-500/14 border border-emerald-400/55 text-slate-50" : "bg-transparent border border-transparent hover:bg-white/[0.05] text-slate-200"
+        active
+          ? "bg-emerald-500/14 border border-emerald-400/55 text-slate-50"
+          : "bg-transparent border border-transparent hover:bg-white/[0.05] text-slate-200"
       )}
       title={String(value)}
     >
