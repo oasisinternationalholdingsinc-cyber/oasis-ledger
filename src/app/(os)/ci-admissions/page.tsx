@@ -178,6 +178,80 @@ function safeArray(x: any): string[] {
   return [];
 }
 
+type UiProvisionTask = {
+  enabled: boolean; // checkbox == include this task in payload
+  task_key: string;
+  title: string;
+  notes: string;
+  required: boolean;
+  channels: Array<"email" | "sms">;
+  due_at: string | null; // ISO string
+};
+
+const TASK_TEMPLATES: Array<Omit<UiProvisionTask, "enabled">> = [
+  {
+    task_key: "collect_incorporation_documents",
+    title: "Provide incorporation documents",
+    notes: "Upload Articles of Incorporation + any incorporation proof.",
+    required: true,
+    channels: ["email"],
+    due_at: null,
+  },
+  {
+    task_key: "collect_registry_proof",
+    title: "Provide registry proof",
+    notes: "Provide corporate registry extract / proof of status.",
+    required: true,
+    channels: ["email"],
+    due_at: null,
+  },
+  {
+    task_key: "collect_authority_to_act",
+    title: "Provide authority to act",
+    notes: "Provide director/officer authorization to submit and sign.",
+    required: true,
+    channels: ["email"],
+    due_at: null,
+  },
+  {
+    task_key: "collect_beneficial_owners",
+    title: "Provide beneficial owners",
+    notes: "List beneficial owners and control persons (if applicable).",
+    required: false,
+    channels: ["email"],
+    due_at: null,
+  },
+  {
+    task_key: "provision_portal_access",
+    title: "Provision portal access",
+    notes: "Create portal routing / invite (delivery layer later).",
+    required: true,
+    channels: ["email"],
+    due_at: null,
+  },
+  {
+    task_key: "assign_operator",
+    title: "Assign admissions operator",
+    notes: "Assign internal owner + reviewer.",
+    required: true,
+    channels: [],
+    due_at: null,
+  },
+];
+
+function mkTask(t: Omit<UiProvisionTask, "enabled">): UiProvisionTask {
+  return { enabled: true, ...t };
+}
+
+function normalizeTaskKey(x: string) {
+  return String(x || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
 export default function CIAdmissionsPage() {
   const entityCtx = useEntity() as any;
   useOsEnv(); // kept for OS consistency (even if admissions ignores is_test)
@@ -214,20 +288,25 @@ export default function CIAdmissionsPage() {
   const [requestInfoMsg, setRequestInfoMsg] = useState<string>("");
   const [requestInfoFields, setRequestInfoFields] = useState<string>(""); // optional JSON overrides
 
-  const [tasksJson, setTasksJson] = useState<string>(
-    JSON.stringify(
-      {
-        tasks: [
-          { task_key: "create_entity_profile", notes: "Create internal entity profile + scoping." },
-          { task_key: "assign_operator", notes: "Assign admissions owner + reviewer." },
-          { task_key: "provision_portal_access", notes: "Provision portal routing / invite." },
-          { task_key: "collect_evidence", notes: "Request incorporation proof + registry contact." },
-        ],
-      },
-      null,
-      2
-    )
-  );
+  // ---- NEW: task builder UI state (replaces JSON textarea) ----
+  const [taskDrafts, setTaskDrafts] = useState<UiProvisionTask[]>(() => {
+    // Start with a sane default set (enabled)
+    const defaults = [
+      TASK_TEMPLATES[0],
+      TASK_TEMPLATES[1],
+      TASK_TEMPLATES[2],
+      TASK_TEMPLATES[4],
+    ].filter(Boolean) as Array<Omit<UiProvisionTask, "enabled">>;
+    return defaults.map(mkTask);
+  });
+
+  const [taskModalOpen, setTaskModalOpen] = useState(false);
+  const [newTaskKey, setNewTaskKey] = useState("");
+  const [newTaskTitle, setNewTaskTitle] = useState("");
+  const [newTaskNotes, setNewTaskNotes] = useState("");
+  const [newTaskRequired, setNewTaskRequired] = useState(true);
+  const [newTaskChannels, setNewTaskChannels] = useState<Array<"email" | "sms">>(["email"]);
+  const [newTaskDueAt, setNewTaskDueAt] = useState<string>(""); // datetime-local string
 
   // Delete modal
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -435,6 +514,8 @@ export default function CIAdmissionsPage() {
     setRequestInfoMsg("");
     setRequestInfoFields("");
 
+    // Keep task drafts stable (no regression); do not auto-reset on selection.
+
     void loadRelated(a.id);
   }
 
@@ -567,6 +648,7 @@ export default function CIAdmissionsPage() {
     }
   }
 
+  // ---- NEW: createProvisioningTasks now uses UI task builder (still RPC-only) ----
   async function createProvisioningTasks() {
     if (!selected?.id) return flashError("Select an application first.");
     setBusy("tasks");
@@ -574,16 +656,22 @@ export default function CIAdmissionsPage() {
     setInfo(null);
 
     try {
-      let payload: any;
-      try {
-        payload = JSON.parse(tasksJson);
-      } catch {
-        return flashError("Provisioning payload must be valid JSON.");
-      }
+      const enabled = taskDrafts.filter((t) => t.enabled);
+      if (enabled.length === 0) return flashError("Select at least one task.");
+
+      // RPC expects JSONB; based on your earlier error, it expects a JSON array (not an object wrapper).
+      const payload = enabled.map((t) => ({
+        task_key: normalizeTaskKey(t.task_key || t.title || "task"),
+        title: (t.title || "").trim() || undefined,
+        notes: (t.notes || "").trim() || undefined,
+        required: !!t.required,
+        channels: (t.channels ?? []).map(String),
+        due_at: t.due_at ? String(t.due_at) : null,
+      }));
 
       const { data, error } = await supabase.rpc("admissions_create_provisioning_tasks", {
         p_application_id: selected.id,
-        p_tasks: payload,
+        p_tasks: payload, // ✅ JSON array
       });
 
       if (error) throw error;
@@ -664,6 +752,83 @@ export default function CIAdmissionsPage() {
   const statusUpper = (selected?.status ?? "").toUpperCase();
   const canHardDelete = ["DECLINED", "WITHDRAWN", "ARCHIVED"].includes(statusUpper);
 
+  const selectedTaskCount = useMemo(() => taskDrafts.filter((t) => t.enabled).length, [taskDrafts]);
+
+  function toggleTaskEnabled(ix: number) {
+    setTaskDrafts((prev) => prev.map((t, i) => (i === ix ? { ...t, enabled: !t.enabled } : t)));
+  }
+
+  function setTaskField(ix: number, patch: Partial<UiProvisionTask>) {
+    setTaskDrafts((prev) => prev.map((t, i) => (i === ix ? { ...t, ...patch } : t)));
+  }
+
+  function addTemplate(tpl: Omit<UiProvisionTask, "enabled">) {
+    setTaskDrafts((prev) => {
+      const key = normalizeTaskKey(tpl.task_key);
+      const exists = prev.some((x) => normalizeTaskKey(x.task_key) === key);
+      if (exists) {
+        return prev.map((x) => (normalizeTaskKey(x.task_key) === key ? { ...x, enabled: true } : x));
+      }
+      return [mkTask(tpl), ...prev];
+    });
+  }
+
+  function removeDraft(ix: number) {
+    setTaskDrafts((prev) => prev.filter((_, i) => i !== ix));
+  }
+
+  function resetDraftsToDefault() {
+    const defaults = [
+      TASK_TEMPLATES[0],
+      TASK_TEMPLATES[1],
+      TASK_TEMPLATES[2],
+      TASK_TEMPLATES[4],
+    ].filter(Boolean) as Array<Omit<UiProvisionTask, "enabled">>;
+    setTaskDrafts(defaults.map(mkTask));
+  }
+
+  function openNewTaskModal() {
+    setTaskModalOpen(true);
+    setNewTaskKey("");
+    setNewTaskTitle("");
+    setNewTaskNotes("");
+    setNewTaskRequired(true);
+    setNewTaskChannels(["email"]);
+    setNewTaskDueAt("");
+  }
+
+  function addCustomTask() {
+    const title = newTaskTitle.trim();
+    if (!title) return flashError("Task title is required.");
+
+    const key = normalizeTaskKey(newTaskKey.trim() || title);
+    const dueIso = newTaskDueAt.trim() ? new Date(newTaskDueAt).toISOString() : null;
+
+    const t: UiProvisionTask = {
+      enabled: true,
+      task_key: key,
+      title,
+      notes: newTaskNotes.trim(),
+      required: !!newTaskRequired,
+      channels: newTaskChannels,
+      due_at: dueIso,
+    };
+
+    setTaskDrafts((prev) => [t, ...prev]);
+    setTaskModalOpen(false);
+  }
+
+  function toggleChannel(ix: number, ch: "email" | "sms") {
+    setTaskDrafts((prev) =>
+      prev.map((t, i) => {
+        if (i !== ix) return t;
+        const has = t.channels.includes(ch);
+        const next = has ? t.channels.filter((x) => x !== ch) : [...t.channels, ch];
+        return { ...t, channels: next };
+      })
+    );
+  }
+
   return (
     <div className="h-full flex flex-col px-8 pt-6 pb-6">
       {/* Header under OS bar */}
@@ -737,7 +902,9 @@ export default function CIAdmissionsPage() {
               ))}
             </div>
 
-            <div className="text-[11px] text-slate-500">Queue is entity-scoped. Archive is a tab. Hard delete is guarded.</div>
+            <div className="text-[11px] text-slate-500">
+              Queue is entity-scoped. Archive is a tab. Hard delete is guarded.
+            </div>
           </div>
 
           {/* Workspace */}
@@ -779,7 +946,8 @@ export default function CIAdmissionsPage() {
                     <ul className="py-2">
                       {filtered.map((a) => {
                         const st = (a.status ?? "—").toUpperCase();
-                        const title = a.organization_legal_name || a.organization_trade_name || a.applicant_name || "(unnamed)";
+                        const title =
+                          a.organization_legal_name || a.organization_trade_name || a.applicant_name || "(unnamed)";
                         const sub = a.applicant_email || a.applicant_phone || a.website || "—";
 
                         const selectedRow = a.id === selectedId;
@@ -797,7 +965,12 @@ export default function CIAdmissionsPage() {
                             >
                               <div className="flex items-start justify-between gap-2">
                                 <div className="min-w-0 flex-1">
-                                  <div className={cx("truncate text-[14px] font-semibold", selectedRow ? "text-slate-50" : "text-slate-100")}>
+                                  <div
+                                    className={cx(
+                                      "truncate text-[14px] font-semibold",
+                                      selectedRow ? "text-slate-50" : "text-slate-100"
+                                    )}
+                                  >
                                     {title}
                                   </div>
                                   <div className="mt-1 text-[12px] text-slate-400 truncate">{sub}</div>
@@ -835,7 +1008,8 @@ export default function CIAdmissionsPage() {
                   <div className="mt-1 text-[13px] text-slate-400">
                     Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
                     <span className="mx-2 text-slate-700">•</span>
-                    Status: <span className="text-slate-100 font-semibold">{(selected?.status ?? "—").toUpperCase()}</span>
+                    Status:{" "}
+                    <span className="text-slate-100 font-semibold">{(selected?.status ?? "—").toUpperCase()}</span>
                   </div>
                 </div>
 
@@ -978,7 +1152,12 @@ export default function CIAdmissionsPage() {
                   </div>
 
                   {selected && (
-                    <span className={cx("rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.18em]", statusPill(selected.status))}>
+                    <span
+                      className={cx(
+                        "rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.18em]",
+                        statusPill(selected.status)
+                      )}
+                    >
                       {(selected.status ?? "—").toUpperCase()}
                     </span>
                   )}
@@ -1146,16 +1325,215 @@ export default function CIAdmissionsPage() {
                   </div>
                 </div>
 
-                {/* Provisioning tasks */}
+                {/* Provisioning tasks (NEW UI) */}
                 <div className="rounded-2xl border border-slate-800/60 bg-black/12 px-4 py-4">
-                  <div className="text-[11px] uppercase tracking-[0.22em] text-sky-100">Provisioning (RPC)</div>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-[11px] uppercase tracking-[0.22em] text-sky-100">Provisioning (RPC)</div>
+                      <div className="mt-1 text-[12px] text-slate-400">
+                        Build tasks with checkboxes — UI generates the JSON array for the RPC.
+                      </div>
+                    </div>
 
-                  <textarea
-                    value={tasksJson}
-                    onChange={(e) => setTasksJson(e.target.value)}
-                    disabled={!selected || busy !== null}
-                    className="mt-3 w-full min-h-[150px] resize-none rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[12px] text-slate-100 outline-none focus:border-sky-400/60 disabled:opacity-50 font-mono"
-                  />
+                    <div className="shrink-0 text-right">
+                      <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Selected</div>
+                      <div className="mt-1 text-[12px] font-semibold text-slate-100">{selectedTaskCount}</div>
+                    </div>
+                  </div>
+
+                  {/* Templates */}
+                  <div className="mt-3">
+                    <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Templates</div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {TASK_TEMPLATES.map((t) => (
+                        <button
+                          key={t.task_key}
+                          type="button"
+                          onClick={() => addTemplate(t)}
+                          disabled={!selected || busy !== null}
+                          className="rounded-full border border-slate-700/70 bg-slate-950/20 px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase text-slate-200 hover:bg-white/[0.05] disabled:opacity-50"
+                          title={t.notes}
+                        >
+                          {t.title}
+                        </button>
+                      ))}
+
+                      <button
+                        type="button"
+                        onClick={openNewTaskModal}
+                        disabled={!selected || busy !== null}
+                        className="rounded-full border border-sky-400/45 bg-sky-500/10 px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase text-sky-100 hover:bg-sky-500/14 disabled:opacity-50"
+                      >
+                        + Add Task
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={resetDraftsToDefault}
+                        disabled={!selected || busy !== null}
+                        className="rounded-full border border-slate-700/70 bg-slate-950/20 px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase text-slate-200 hover:bg-white/[0.05] disabled:opacity-50"
+                        title="Reset to default task set"
+                      >
+                        Reset
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Draft list */}
+                  <div className="mt-4 space-y-2">
+                    {taskDrafts.length === 0 ? (
+                      <div className="rounded-2xl border border-slate-800/60 bg-black/10 px-4 py-4 text-[13px] text-slate-400">
+                        No tasks yet. Add templates or create a custom task.
+                      </div>
+                    ) : (
+                      taskDrafts.map((t, ix) => (
+                        <div key={`${t.task_key}-${ix}`} className="rounded-2xl border border-slate-800/60 bg-black/10 px-3 py-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <label className="flex items-start gap-3 min-w-0 flex-1 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={t.enabled}
+                                onChange={() => toggleTaskEnabled(ix)}
+                                disabled={!selected || busy !== null}
+                                className="mt-1 h-4 w-4 accent-sky-300"
+                              />
+
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <div className="text-[13px] font-semibold text-slate-100 truncate">{t.title}</div>
+
+                                  {t.required ? (
+                                    <span className="rounded-full border border-amber-300/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold tracking-[0.14em] uppercase text-amber-100">
+                                      Required
+                                    </span>
+                                  ) : (
+                                    <span className="rounded-full border border-slate-600/50 bg-white/[0.03] px-2 py-0.5 text-[10px] font-semibold tracking-[0.14em] uppercase text-slate-200">
+                                      Optional
+                                    </span>
+                                  )}
+
+                                  {t.channels.length > 0 && (
+                                    <span className="rounded-full border border-slate-700/70 bg-slate-950/20 px-2 py-0.5 text-[10px] text-slate-200">
+                                      {t.channels.join(" · ").toUpperCase()}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div className="mt-1 text-[11px] text-slate-400 truncate">{t.task_key}</div>
+
+                                {t.notes ? (
+                                  <div className="mt-2 text-[12px] text-slate-200 whitespace-pre-wrap">{t.notes}</div>
+                                ) : (
+                                  <div className="mt-2 text-[12px] text-slate-500">—</div>
+                                )}
+
+                                {t.due_at && (
+                                  <div className="mt-2 text-[11px] text-slate-400">
+                                    Due: <span className="text-slate-100 font-semibold">{fmtShort(t.due_at)}</span>
+                                  </div>
+                                )}
+
+                                {/* Controls */}
+                                <div className="mt-3 grid grid-cols-2 gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => setTaskField(ix, { required: !t.required })}
+                                    disabled={!selected || busy !== null}
+                                    className="rounded-xl border border-slate-700/60 bg-slate-950/15 px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase text-slate-200 hover:bg-white/[0.05] disabled:opacity-50"
+                                  >
+                                    {t.required ? "Mark Optional" : "Mark Required"}
+                                  </button>
+
+                                  <div className="flex items-center justify-end gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleChannel(ix, "email")}
+                                      disabled={!selected || busy !== null}
+                                      className={cx(
+                                        "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase disabled:opacity-50",
+                                        t.channels.includes("email")
+                                          ? "border-emerald-400/45 bg-emerald-500/10 text-emerald-100"
+                                          : "border-slate-700/60 bg-slate-950/15 text-slate-200 hover:bg-white/[0.05]"
+                                      )}
+                                      title="Channel: Email (delivery later)"
+                                    >
+                                      Email
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleChannel(ix, "sms")}
+                                      disabled={!selected || busy !== null}
+                                      className={cx(
+                                        "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase disabled:opacity-50",
+                                        t.channels.includes("sms")
+                                          ? "border-sky-400/45 bg-sky-500/10 text-sky-100"
+                                          : "border-slate-700/60 bg-slate-950/15 text-slate-200 hover:bg-white/[0.05]"
+                                      )}
+                                      title="Channel: SMS (delivery later)"
+                                    >
+                                      SMS
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            </label>
+
+                            <button
+                              type="button"
+                              onClick={() => removeDraft(ix)}
+                              disabled={!selected || busy !== null}
+                              className="shrink-0 rounded-full border border-slate-700/60 bg-slate-950/15 px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase text-slate-200 hover:bg-rose-500/10 hover:border-rose-400/35 hover:text-rose-100 disabled:opacity-50"
+                              title="Remove from draft list"
+                            >
+                              Remove
+                            </button>
+                          </div>
+
+                          {/* Editable fields */}
+                          <div className="mt-3 grid grid-cols-2 gap-2">
+                            <input
+                              value={t.title}
+                              onChange={(e) => setTaskField(ix, { title: e.target.value })}
+                              disabled={!selected || busy !== null}
+                              className="w-full rounded-xl border border-slate-700/60 bg-slate-950/20 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-sky-400/60 disabled:opacity-50"
+                              placeholder="Title"
+                            />
+
+                            <input
+                              value={t.task_key}
+                              onChange={(e) => setTaskField(ix, { task_key: e.target.value })}
+                              disabled={!selected || busy !== null}
+                              className="w-full rounded-xl border border-slate-700/60 bg-slate-950/20 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-sky-400/60 disabled:opacity-50 font-mono"
+                              placeholder="task_key"
+                            />
+                          </div>
+
+                          <textarea
+                            value={t.notes}
+                            onChange={(e) => setTaskField(ix, { notes: e.target.value })}
+                            disabled={!selected || busy !== null}
+                            className="mt-2 w-full min-h-[64px] resize-none rounded-xl border border-slate-700/60 bg-slate-950/20 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-sky-400/60 disabled:opacity-50"
+                            placeholder="Notes (what the applicant must provide)"
+                          />
+
+                          <div className="mt-2">
+                            <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Due (optional)</div>
+                            <input
+                              type="datetime-local"
+                              value={t.due_at ? new Date(t.due_at).toISOString().slice(0, 16) : ""}
+                              onChange={(e) => {
+                                const v = e.target.value;
+                                setTaskField(ix, { due_at: v ? new Date(v).toISOString() : null });
+                              }}
+                              disabled={!selected || busy !== null}
+                              className="mt-1 w-full rounded-xl border border-slate-700/60 bg-slate-950/20 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-sky-400/60 disabled:opacity-50"
+                            />
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
 
                   <div className="mt-3 grid grid-cols-2 gap-2">
                     <button
@@ -1360,6 +1738,125 @@ export default function CIAdmissionsPage() {
           </div>
         </div>
       )}
+
+      {/* Add Task Modal (NEW) */}
+      {taskModalOpen && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 px-6">
+          <div className="w-full max-w-[720px] rounded-3xl border border-slate-800/70 bg-slate-950/80 shadow-[0_0_90px_rgba(0,0,0,0.6)] overflow-hidden">
+            <div className="px-6 py-5 border-b border-slate-800/60 bg-white/[0.02]">
+              <div className="text-[11px] uppercase tracking-[0.22em] text-sky-100">Add Provisioning Task</div>
+              <div className="mt-2 text-[13px] text-slate-200">Create a task without typing JSON. The UI will generate the RPC payload.</div>
+            </div>
+
+            <div className="px-6 py-5 space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <input
+                  value={newTaskTitle}
+                  onChange={(e) => setNewTaskTitle(e.target.value)}
+                  className="w-full rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-sky-400/60"
+                  placeholder="Title (required)"
+                />
+
+                <input
+                  value={newTaskKey}
+                  onChange={(e) => setNewTaskKey(e.target.value)}
+                  className="w-full rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-sky-400/60 font-mono"
+                  placeholder="task_key (optional; auto-derived)"
+                />
+              </div>
+
+              <textarea
+                value={newTaskNotes}
+                onChange={(e) => setNewTaskNotes(e.target.value)}
+                className="w-full min-h-[110px] resize-none rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-sky-400/60"
+                placeholder="Notes (what the applicant must provide)"
+              />
+
+              <div className="grid grid-cols-2 gap-3">
+                <label className="flex items-center gap-3 rounded-2xl border border-slate-800/60 bg-black/10 px-4 py-3">
+                  <input
+                    type="checkbox"
+                    checked={newTaskRequired}
+                    onChange={(e) => setNewTaskRequired(e.target.checked)}
+                    className="h-4 w-4 accent-amber-300"
+                  />
+                  <span className="text-[12px] text-slate-200">
+                    Required <span className="text-slate-500">(unchecked = optional)</span>
+                  </span>
+                </label>
+
+                <div className="rounded-2xl border border-slate-800/60 bg-black/10 px-4 py-3">
+                  <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Channels (delivery later)</div>
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setNewTaskChannels((prev) =>
+                          prev.includes("email") ? prev.filter((x) => x !== "email") : [...prev, "email"]
+                        )
+                      }
+                      className={cx(
+                        "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase",
+                        newTaskChannels.includes("email")
+                          ? "border-emerald-400/45 bg-emerald-500/10 text-emerald-100"
+                          : "border-slate-700/60 bg-slate-950/15 text-slate-200 hover:bg-white/[0.05]"
+                      )}
+                    >
+                      Email
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setNewTaskChannels((prev) =>
+                          prev.includes("sms") ? prev.filter((x) => x !== "sms") : [...prev, "sms"]
+                        )
+                      }
+                      className={cx(
+                        "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase",
+                        newTaskChannels.includes("sms")
+                          ? "border-sky-400/45 bg-sky-500/10 text-sky-100"
+                          : "border-slate-700/60 bg-slate-950/15 text-slate-200 hover:bg-white/[0.05]"
+                      )}
+                    >
+                      SMS
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-slate-800/60 bg-black/10 px-4 py-3">
+                <div className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Due (optional)</div>
+                <input
+                  type="datetime-local"
+                  value={newTaskDueAt}
+                  onChange={(e) => setNewTaskDueAt(e.target.value)}
+                  className="mt-2 w-full rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-sky-400/60"
+                />
+                <div className="mt-2 text-[11px] text-slate-500">
+                  Stored as ISO timestamptz in payload (server decides enforcement).
+                </div>
+              </div>
+            </div>
+
+            <div className="px-6 py-4 border-t border-slate-800/60 flex items-center justify-between bg-white/[0.02]">
+              <button
+                onClick={() => setTaskModalOpen(false)}
+                className="rounded-full border border-slate-700/70 bg-slate-950/25 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/45"
+              >
+                Cancel
+              </button>
+
+              <button
+                onClick={addCustomTask}
+                className="rounded-full border border-sky-400/45 bg-sky-500/12 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-sky-100 hover:bg-sky-500/16"
+              >
+                Add Task
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1381,9 +1878,7 @@ function StatusTabButton({
       onClick={onClick}
       className={cx(
         "px-4 py-2 rounded-full text-left transition min-w-[110px]",
-        active
-          ? "bg-emerald-500/14 border border-emerald-400/55 text-slate-50"
-          : "bg-transparent border border-transparent hover:bg-white/[0.05] text-slate-200"
+        active ? "bg-emerald-500/14 border border-emerald-400/55 text-slate-50" : "bg-transparent border border-transparent hover:bg-white/[0.05] text-slate-200"
       )}
       title={String(value)}
     >
