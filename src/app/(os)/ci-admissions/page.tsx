@@ -155,7 +155,7 @@ function isMissingColumnErr(err: unknown) {
   return msg.includes("does not exist") && msg.includes("column");
 }
 
-/** Admissions enums are Postgres enums; safest is normalized lowercase. */
+/** Admissions enums are Postgres enums in this project; normalize to lowercase for RPC payloads. */
 function enumLower(x: string) {
   return String(x || "").trim().toLowerCase();
 }
@@ -204,6 +204,7 @@ export default function CIAdmissionsPage() {
   const [tasks, setTasks] = useState<TaskRow[]>([]);
 
   // action drafts
+  // NOTE: keep decision enum values strict (avoid invalid enum payloads)
   const [decisionKind, setDecisionKind] = useState<string>("APPROVED");
   const [decisionSummary, setDecisionSummary] = useState<string>("");
   const [decisionConditions, setDecisionConditions] = useState<string>("");
@@ -470,7 +471,7 @@ export default function CIAdmissionsPage() {
       const next = enumLower(nextStatus);
       const { data, error } = await supabase.rpc("admissions_set_status", {
         p_application_id: selected.id,
-        p_next_status: next,
+        p_next_status: next, // ✅ lowercase enum payload
         p_note: (note ?? "Admissions status update").trim(),
       });
       if (error) throw error;
@@ -497,7 +498,7 @@ export default function CIAdmissionsPage() {
 
       const { data, error } = await supabase.rpc("admissions_record_decision", {
         p_application_id: selected.id,
-        p_decision: decision,
+        p_decision: decision, // ✅ lowercase enum payload
         p_risk_tier: rt,
         p_summary: decisionSummary.trim(),
         p_reason: decisionConditions.trim(),
@@ -549,7 +550,7 @@ export default function CIAdmissionsPage() {
         p_message: msg,
         p_channels: channels,
         p_due_at: dueAt,
-        p_next_status: nextStatus,
+        p_next_status: nextStatus, // ✅ lowercase enum payload
       });
 
       if (error) throw error;
@@ -973,9 +974,7 @@ export default function CIAdmissionsPage() {
                 <div className="flex items-center justify-between gap-2">
                   <div>
                     <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-300">Authority Panel</div>
-                    <div className="mt-1 text-[13px] text-slate-400">
-                      Review · Decisions · Requests · Archive · Provisioning
-                    </div>
+                    <div className="mt-1 text-[13px] text-slate-400">Review · Decisions · Requests · Archive · Provisioning</div>
                   </div>
 
                   {selected && (
@@ -1045,8 +1044,6 @@ export default function CIAdmissionsPage() {
                     >
                       <option value="APPROVED">APPROVED</option>
                       <option value="DECLINED">DECLINED</option>
-                      <option value="CONDITIONAL">CONDITIONAL</option>
-                      <option value="DEFERRED">DEFERRED</option>
                     </select>
 
                     <input
@@ -1336,7 +1333,7 @@ export default function CIAdmissionsPage() {
                 value={deleteConfirmText}
                 onChange={(e) => setDeleteConfirmText(e.target.value)}
                 className="w-full rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-rose-400/60"
-                placeholder="Type DELETE to confirm"
+                placeholder='Type "DELETE" to confirm'
               />
             </div>
 
@@ -1384,7 +1381,9 @@ function StatusTabButton({
       onClick={onClick}
       className={cx(
         "px-4 py-2 rounded-full text-left transition min-w-[110px]",
-        active ? "bg-emerald-500/14 border border-emerald-400/55 text-slate-50" : "bg-transparent border border-transparent hover:bg-white/[0.05] text-slate-200"
+        active
+          ? "bg-emerald-500/14 border border-emerald-400/55 text-slate-50"
+          : "bg-transparent border border-transparent hover:bg-white/[0.05] text-slate-200"
       )}
       title={String(value)}
     >
