@@ -13,6 +13,11 @@ export const dynamic = "force-dynamic";
  * ✅ Metadata Zone preserved (Storage / Hash / Audit)
  * ✅ Delete UX (right panel): calls public.delete_minute_book_entry_and_files(p_entry_id, p_reason)
  * ❌ NO wiring changes beyond calling the existing delete function
+ *
+ * FIX (surgical, read-only):
+ * - Storage paths are case-sensitive and some objects are hash-suffixed.
+ * - If createSignedUrl fails with "Object not found", we auto-resolve the real object by listing the directory.
+ * - No schema changes. No new tables. No contract drift.
  */
 
 import Link from "next/link";
@@ -53,6 +58,7 @@ type SupportingDoc = {
   mime_type: string | null;
   version?: number | null;
   uploaded_at?: string | null;
+  registry_visible?: boolean | null;
 };
 
 type EntryWithDoc = MinuteBookEntry & {
@@ -109,6 +115,31 @@ function getCreatedAtMs(iso?: string | null) {
   if (!iso) return 0;
   const t = Date.parse(iso);
   return Number.isFinite(t) ? t : 0;
+}
+
+function dirOf(path: string) {
+  const i = path.lastIndexOf("/");
+  return i >= 0 ? path.slice(0, i) : "";
+}
+
+function baseOf(path: string) {
+  const i = path.lastIndexOf("/");
+  return i >= 0 ? path.slice(i + 1) : path;
+}
+
+function normalizeSlashes(s: string) {
+  return s.replace(/\\/g, "/").replace(/\/+/g, "/");
+}
+
+function extractUuidPrefix(filename: string): string | null {
+  // captures leading uuid in "<uuid>.pdf" or "<uuid>-<hash>.pdf" or "<uuid>-signed.pdf"
+  const m = filename.match(/^([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/i);
+  return m?.[1] ?? null;
+}
+
+function looksLikeNotFound(err: unknown) {
+  const msg = (err as any)?.message ? String((err as any).message) : "";
+  return /not\s*found/i.test(msg) || /object/i.test(msg) && /not\s*found/i.test(msg);
 }
 
 /** Optional UI-only icon map (does not affect wiring) */
@@ -177,10 +208,12 @@ async function loadSupportingDocs(entryIds: string[]): Promise<SupportingDoc[]> 
   if (!entryIds.length) return [];
   const sb = supabaseBrowser;
 
+  // NOTE: we only need primary doc; but we keep the same read contract
   const { data, error } = await sb
     .from("supporting_documents")
-    .select("id,entry_id,file_path,file_name,file_hash,file_size,mime_type,version,uploaded_at")
+    .select("id,entry_id,file_path,file_name,file_hash,file_size,mime_type,version,uploaded_at,registry_visible")
     .in("entry_id", entryIds)
+    .order("registry_visible", { ascending: false })
     .order("version", { ascending: false })
     .order("uploaded_at", { ascending: false });
 
@@ -189,6 +222,7 @@ async function loadSupportingDocs(entryIds: string[]): Promise<SupportingDoc[]> 
 }
 
 function pickPrimaryDocByEntry(docs: SupportingDoc[]): Map<string, SupportingDoc> {
+  // primary rule: first row per entry after ordering (registry_visible desc, version desc, uploaded_at desc)
   const m = new Map<string, SupportingDoc>();
   for (const d of docs) {
     if (!d.entry_id) continue;
@@ -208,11 +242,12 @@ async function resolveOfficialArtifact(entityKey: string, entry: EntryWithDoc): 
     const hash = entry.file_hash || null;
     const path = entry.storage_path || null;
 
+    // IMPORTANT: Verified schema has varied historical columns. Keep OR flexible.
     const orParts = [
       hash ? `file_hash.eq.${hash}` : "",
       path ? `source_storage_path.eq.${path}` : "",
-      `source_entry_id.eq.${entry.id}`,
       `minute_book_entry_id.eq.${entry.id}`,
+      `source_entry_id.eq.${entry.id}`,
     ].filter(Boolean);
 
     if (!orParts.length) return null;
@@ -244,84 +279,97 @@ async function resolveOfficialArtifact(entityKey: string, entry: EntryWithDoc): 
   }
 }
 
-/* ---------------- storage url helpers (SURGICAL FIX) ---------------- */
-
 /**
- * Canonicalize storage paths:
- * - remove leading slashes
- * - collapse accidental double slashes
+ * Create signed URL with auto-repair:
+ * - If the exact path fails (Object not found), list directory and pick the real object.
+ * - Handles:
+ *   - Case differences (resolutions vs Resolutions)
+ *   - Hash-suffixed filenames (<uuid>-<hash>.pdf)
+ *   - Signed variants (<uuid>-signed.pdf)
  */
-function cleanStoragePath(p: string) {
-  const x = p.trim().replace(/^\/+/, "");
-  return x.replace(/\/{2,}/g, "/");
-}
-
-/**
- * Build a small set of safe fallbacks for known case-variance issues (seen in storage.objects):
- * - holdings/resolutions/...  <-> holdings/Resolutions/...
- *
- * This does NOT change wiring; it only retries reads if the exact key was stored with different casing.
- */
-function buildMinuteBookPathFallbacks(p: string): string[] {
-  const base = cleanStoragePath(p);
-
-  // Only a few deterministic fallbacks — keep it surgical.
-  const flips: Array<[string, string]> = [
-    ["/resolutions/", "/Resolutions/"],
-    ["/Resolutions/", "/resolutions/"],
-    ["/bylaws/", "/Bylaws/"],
-    ["/Bylaws/", "/bylaws/"],
-    ["/registers/", "/Registers/"],
-    ["/Registers/", "/registers/"],
-    ["/share_certificates/", "/Share_Certificates/"],
-    ["/Share_Certificates/", "/share_certificates/"],
-  ];
-
-  const out: string[] = [base];
-
-  for (const [a, b] of flips) {
-    if (base.includes(a)) out.push(base.replace(a, b));
-  }
-
-  // Also try a lowercased variant ONLY if it doesn't explode path semantics
-  // (this is rare but cheap and controlled).
-  if (base !== base.toLowerCase()) out.push(base.toLowerCase());
-
-  // Deduplicate
-  return Array.from(new Set(out));
-}
-
 async function signedUrlFor(bucketId: string, storagePath: string, downloadName?: string | null) {
   const sb = supabaseBrowser;
-  const key = cleanStoragePath(storagePath);
+
+  const wantPath = normalizeSlashes(storagePath);
   const opts: { download?: string } | undefined = downloadName ? { download: downloadName } : undefined;
 
-  const { data, error } = await sb.storage.from(bucketId).createSignedUrl(key, 60 * 10, opts);
-  if (error) throw error;
-  return data.signedUrl;
-}
+  // 1) try exact path first
+  {
+    const { data, error } = await sb.storage.from(bucketId).createSignedUrl(wantPath, 60 * 10, opts);
+    if (!error && data?.signedUrl) return data.signedUrl;
 
-/**
- * Minute Book evidence signer with controlled fallbacks for casing variance.
- * If the first key fails with "Object not found", we retry a few safe variants.
- */
-async function signedUrlForMinuteBookEvidence(storagePath: string, downloadName?: string | null) {
-  const tries = buildMinuteBookPathFallbacks(storagePath);
-  let lastErr: unknown = null;
-
-  for (const key of tries) {
-    try {
-      return await signedUrlFor("minute_book", key, downloadName);
-    } catch (e: unknown) {
-      lastErr = e;
-      const msg = e instanceof Error ? e.message : String(e);
-      // Only retry on "Object not found" / 404-ish errors
-      if (!/not found|404/i.test(msg)) throw e;
+    // only attempt repair on "not found"-type issues
+    if (!looksLikeNotFound(error)) {
+      if (error) throw error;
     }
   }
 
-  // If we exhausted fallbacks, throw the last error (preserves current UX)
-  throw lastErr instanceof Error ? lastErr : new Error("Object not found");
+  // 2) attempt directory repair
+  const dir = dirOf(wantPath);
+  const base = baseOf(wantPath);
+  const uuidPrefix = extractUuidPrefix(base);
+
+  // Candidate directories for case mismatches (only for obvious folders)
+  const dirLower = dir.toLowerCase();
+  const candidateDirs = new Set<string>([dir]);
+
+  // If path contains "/resolutions/" or "/Resolutions/" allow swapping case of that segment
+  if (dirLower.includes("/resolutions")) {
+    candidateDirs.add(dir.replace(/\/resolutions\b/i, "/resolutions"));
+    candidateDirs.add(dir.replace(/\/resolutions\b/i, "/Resolutions"));
+  }
+
+  // 3) list and resolve
+  const candidates: { name: string; updated_at?: string }[] = [];
+
+  for (const d of Array.from(candidateDirs)) {
+    const prefix = d;
+    const { data: list, error: listErr } = await sb.storage.from(bucketId).list(prefix, {
+      limit: 200,
+      sortBy: { column: "updated_at", order: "desc" },
+    });
+
+    if (listErr || !list) continue;
+
+    for (const it of list) {
+      if (!it?.name) continue;
+      const full = prefix ? `${prefix}/${it.name}` : it.name;
+      candidates.push({ name: full, updated_at: (it as any)?.updated_at });
+    }
+  }
+
+  // filter: must be .pdf and ideally match the uuid prefix (if we have one)
+  let filtered = candidates.filter((c) => c.name.toLowerCase().endsWith(".pdf"));
+
+  if (uuidPrefix) {
+    const up = uuidPrefix.toLowerCase();
+    filtered = filtered.filter((c) => baseOf(c.name).toLowerCase().startsWith(up));
+  } else {
+    // fallback: try base-name includes
+    const b = base.toLowerCase();
+    filtered = filtered.filter((c) => baseOf(c.name).toLowerCase().includes(b.replace(/\.pdf$/i, "")));
+  }
+
+  // prefer signed
+  const signed = filtered.find((c) => baseOf(c.name).toLowerCase().includes("-signed"));
+  const best =
+    signed ||
+    filtered.sort((a, b) => {
+      const ta = a.updated_at ? Date.parse(a.updated_at) : 0;
+      const tb = b.updated_at ? Date.parse(b.updated_at) : 0;
+      return tb - ta;
+    })[0];
+
+  if (!best?.name) {
+    // last resort: throw a clean error
+    throw new Error(`Object not found. No matching PDF in bucket "${bucketId}" for path "${wantPath}".`);
+  }
+
+  // 4) sign the resolved object
+  const { data: data2, error: err2 } = await sb.storage.from(bucketId).createSignedUrl(best.name, 60 * 10, opts);
+  if (err2) throw err2;
+  if (!data2?.signedUrl) throw new Error("Signed URL generation failed.");
+  return data2.signedUrl;
 }
 
 /* ---------------- UI ---------------- */
@@ -533,11 +581,12 @@ export default function MinuteBookClient() {
         return;
       }
 
-      // fallback: minute_book evidence (with casing fallbacks)
+      // fallback: minute_book evidence
       if (!selected.storage_path) throw new Error("No storage_path on the primary document.");
-      const url = await signedUrlForMinuteBookEvidence(selected.storage_path, null);
+      const url = await signedUrlFor("minute_book", selected.storage_path, null);
       setPreviewUrl(url);
       if (openReader) setReaderOpen(true);
+      return;
     } catch (e: unknown) {
       setPdfErr(e instanceof Error ? e.message : "Failed to generate PDF preview.");
     } finally {
@@ -560,7 +609,7 @@ export default function MinuteBookClient() {
       }
 
       if (!selected.storage_path) throw new Error("No storage_path on the primary document.");
-      const url = await signedUrlForMinuteBookEvidence(selected.storage_path, name);
+      const url = await signedUrlFor("minute_book", selected.storage_path, name);
       window.open(url, "_blank", "noopener,noreferrer");
     } catch (e: unknown) {
       setPdfErr(e instanceof Error ? e.message : "Failed to generate download URL.");
@@ -575,7 +624,6 @@ export default function MinuteBookClient() {
     setPdfBusy(true);
 
     try {
-      // prefer existing preview
       if (previewUrl) {
         window.open(previewUrl, "_blank", "noopener,noreferrer");
         return;
@@ -588,7 +636,7 @@ export default function MinuteBookClient() {
       }
 
       if (!selected.storage_path) throw new Error("No storage_path on the primary document.");
-      const url = await signedUrlForMinuteBookEvidence(selected.storage_path, null);
+      const url = await signedUrlFor("minute_book", selected.storage_path, null);
       window.open(url, "_blank", "noopener,noreferrer");
     } catch (e: unknown) {
       setPdfErr(e instanceof Error ? e.message : "Failed to open PDF.");
@@ -606,7 +654,6 @@ export default function MinuteBookClient() {
     try {
       const sb = supabaseBrowser;
 
-      // SECURITY DEFINER function (already implemented in DB)
       const { data, error } = await sb.rpc("delete_minute_book_entry_and_files", {
         p_entry_id: selected.id,
         p_reason: deleteReason?.trim() || null,
@@ -617,7 +664,6 @@ export default function MinuteBookClient() {
       const res = (data ?? {}) as DeleteResult;
       if (!res.ok) throw new Error("Delete failed (no ok=true returned).");
 
-      // close modal + refresh list (same wiring, just re-fetch)
       setDeleteOpen(false);
       setDeleteReason("");
       setReaderOpen(false);
@@ -677,10 +723,9 @@ export default function MinuteBookClient() {
         </p>
       </div>
 
-      {/* Main Window – council-framed */}
+      {/* Main Window */}
       <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
         <div className="w-full max-w-[1600px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-6 py-5 flex flex-col overflow-hidden">
-          {/* Window Title */}
           <div className="flex items-start justify-between mb-4 shrink-0">
             <div className="min-w-0">
               <h1 className="text-lg font-semibold text-slate-50 truncate">Minute Book Registry</h1>
@@ -709,7 +754,7 @@ export default function MinuteBookClient() {
             </div>
           ) : (
             <div className="grid grid-cols-12 gap-6 flex-1 min-h-0">
-              {/* LEFT: Domains (tab-style, hover glow) */}
+              {/* LEFT: Domains */}
               <section className="col-span-12 lg:col-span-3 min-h-0 flex flex-col">
                 <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex flex-col min-h-0">
                   <div className="flex items-center justify-between mb-3 shrink-0">
@@ -721,7 +766,6 @@ export default function MinuteBookClient() {
                   </div>
 
                   <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-slate-800/80 bg-slate-950/60 p-2">
-                    {/* All */}
                     <button
                       type="button"
                       onClick={() => setActiveDomainKey("all")}
@@ -857,7 +901,7 @@ export default function MinuteBookClient() {
                 </div>
               </section>
 
-              {/* RIGHT: Evidence (Actions + Reader + Metadata Zone) */}
+              {/* RIGHT: Evidence */}
               <section className="col-span-12 lg:col-span-4 min-h-0 flex flex-col">
                 <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex flex-col min-h-0">
                   <div className="flex items-start justify-between mb-3 shrink-0">
@@ -886,7 +930,6 @@ export default function MinuteBookClient() {
                     </div>
                   ) : (
                     <>
-                      {/* Actions */}
                       <div className="rounded-xl border border-slate-800/80 bg-slate-950/60 p-3 shrink-0">
                         <div className="text-sm font-semibold text-slate-100">
                           {selected.title || selected.file_name || "Untitled filing"}
@@ -897,7 +940,8 @@ export default function MinuteBookClient() {
                             {selected.entry_type || "document"}
                           </span>
                           <span className="px-2 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200">
-                            {domains.find((d: GovernanceDomain) => d.key === selected.domain_key)?.label || norm(selected.domain_key, "—")}
+                            {domains.find((d: GovernanceDomain) => d.key === selected.domain_key)?.label ||
+                              norm(selected.domain_key, "—")}
                           </span>
                         </div>
 
@@ -908,14 +952,15 @@ export default function MinuteBookClient() {
                         ) : null}
 
                         <div className="mt-3 flex flex-wrap items-center gap-2">
-                          {/* Primary action: Reader */}
                           <button
                             type="button"
                             onClick={() => ensurePreviewUrl(true)}
                             disabled={pdfBusy}
                             className={[
                               "rounded-full px-4 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
-                              pdfBusy ? "bg-amber-500/20 text-amber-200/60 cursor-not-allowed" : "bg-amber-500 text-black hover:bg-amber-400",
+                              pdfBusy
+                                ? "bg-amber-500/20 text-amber-200/60 cursor-not-allowed"
+                                : "bg-amber-500 text-black hover:bg-amber-400",
                             ].join(" ")}
                             title="Open PDF in Reader Mode (full overlay)"
                           >
@@ -950,7 +995,6 @@ export default function MinuteBookClient() {
                             Open
                           </button>
 
-                          {/* Delete */}
                           <button
                             type="button"
                             onClick={() => {
@@ -978,7 +1022,6 @@ export default function MinuteBookClient() {
                         </div>
                       </div>
 
-                      {/* Docked preview (secondary) */}
                       <div className="mt-3 flex-1 min-h-0 rounded-xl border border-slate-800/80 bg-slate-950/60 overflow-hidden">
                         {previewUrl ? (
                           <iframe title="PDF Preview" src={previewUrl} className="h-full w-full" />
@@ -989,7 +1032,6 @@ export default function MinuteBookClient() {
                         )}
                       </div>
 
-                      {/* Metadata Zone (secondary) */}
                       <div className="mt-3 rounded-xl border border-slate-800/80 bg-slate-950/60 p-3 shrink-0">
                         <div className="flex items-center justify-between mb-2">
                           <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Metadata Zone</div>
@@ -1074,7 +1116,7 @@ export default function MinuteBookClient() {
         </div>
       </div>
 
-      {/* ---------------- Reader Overlay (Council-style) ---------------- */}
+      {/* ---------------- Reader Overlay ---------------- */}
       {readerOpen ? (
         <div
           className={[
@@ -1159,7 +1201,7 @@ export default function MinuteBookClient() {
         </div>
       ) : null}
 
-      {/* ---------------- Delete Confirm Modal (Right-panel authority) ---------------- */}
+      {/* ---------------- Delete Confirm Modal ---------------- */}
       {deleteOpen && selected ? (
         <div className="fixed inset-0 z-[90] bg-black/70 backdrop-blur-xl flex items-center justify-center p-4">
           <div className="w-full max-w-[720px] rounded-3xl border border-red-500/30 bg-slate-950/80 shadow-[0_0_70px_rgba(0,0,0,0.55)] overflow-hidden">
