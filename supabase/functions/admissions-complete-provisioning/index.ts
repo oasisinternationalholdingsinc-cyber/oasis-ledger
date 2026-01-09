@@ -16,6 +16,11 @@ function json(status: number, body: unknown) {
   });
 }
 
+function isUuidLike(x: string) {
+  const s = (x || "").trim();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
   if (req.method !== "POST") return json(405, { ok: false, error: "METHOD_NOT_ALLOWED" });
@@ -25,17 +30,13 @@ Deno.serve(async (req) => {
     const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
 
-    if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
-      return json(500, { ok: false, error: "MISSING_ENV" });
-    }
+    if (!SUPABASE_URL || !SERVICE_ROLE_KEY) return json(500, { ok: false, error: "MISSING_ENV" });
+    if (!ANON_KEY) return json(500, { ok: false, error: "MISSING_ANON_KEY" });
 
-    // Require an authenticated caller (the invited user, after accepting invite / reset).
-    const authHeader = req.headers.get("authorization") || "";
+    // Require an authenticated caller (invite/reset establishes a session)
+    const authHeader = req.headers.get("authorization") || req.headers.get("Authorization") || "";
     if (!authHeader.toLowerCase().startsWith("bearer ")) {
       return json(401, { ok: false, error: "MISSING_AUTH" });
-    }
-    if (!ANON_KEY) {
-      return json(500, { ok: false, error: "MISSING_ANON_KEY" });
     }
 
     // Validate caller session (this user becomes p_user_id)
@@ -45,19 +46,43 @@ Deno.serve(async (req) => {
     });
 
     const { data: callerRes, error: callerErr } = await caller.auth.getUser();
-    if (callerErr || !callerRes?.user?.id) {
-      return json(401, { ok: false, error: "INVALID_SESSION" });
-    }
+    if (callerErr || !callerRes?.user?.id) return json(401, { ok: false, error: "INVALID_SESSION" });
+
     const user_id = callerRes.user.id;
+    const caller_email = (callerRes.user.email || "").trim().toLowerCase();
 
     const body = await req.json().catch(() => ({}));
-    const app_id = String(body?.app_id || body?.application_id || "").trim();
-    if (!app_id) return json(400, { ok: false, error: "MISSING_APP_ID" });
 
-    // Service role client for DB operations
-    const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-      auth: { persistSession: false },
-    });
+    // Accept: app_id / application_id / p_application_id (defensive)
+    let app_id = String(body?.app_id || body?.application_id || body?.p_application_id || "").trim();
+
+    // ✅ If missing app_id, resolve by caller email (this fixes the “missing app_id” hop)
+    const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { auth: { persistSession: false } });
+
+    if (!app_id) {
+      if (!caller_email) {
+        return json(400, { ok: false, error: "MISSING_APP_ID" });
+      }
+
+      const { data: resolved, error: resErr } = await admin
+        .from("onboarding_applications")
+        .select("id")
+        .eq("applicant_email", caller_email)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (resErr) {
+        return json(500, { ok: false, error: "APP_RESOLVE_FAILED", details: resErr.message });
+      }
+      if (!resolved?.id) {
+        return json(404, { ok: false, error: "APP_NOT_FOUND_FOR_EMAIL", applicant_email: caller_email });
+      }
+
+      app_id = resolved.id as string;
+    }
+
+    if (!isUuidLike(app_id)) return json(400, { ok: false, error: "BAD_APP_ID_FORMAT", app_id });
 
     // Load application (idempotency + state gate)
     const { data: app, error: appErr } = await admin
@@ -67,7 +92,7 @@ Deno.serve(async (req) => {
       .maybeSingle();
 
     if (appErr) return json(500, { ok: false, error: "APP_LOOKUP_FAILED", details: appErr.message });
-    if (!app) return json(404, { ok: false, error: "APP_NOT_FOUND" });
+    if (!app) return json(404, { ok: false, error: "APP_NOT_FOUND", app_id });
 
     // Idempotency guard: already provisioned
     if (app.provisioned_at) {
@@ -85,7 +110,7 @@ Deno.serve(async (req) => {
 
     // Gate: must be approved/provisioning (match your workflow)
     const st = String(app.status || "").toLowerCase();
-    if (st !== "provisioning" && st !== "approved" && st !== "provisioned") {
+    if (st !== "provisioning" && st !== "approved") {
       return json(409, { ok: false, error: "BAD_STATE", status: app.status });
     }
 
