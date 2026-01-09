@@ -244,12 +244,84 @@ async function resolveOfficialArtifact(entityKey: string, entry: EntryWithDoc): 
   }
 }
 
+/* ---------------- storage url helpers (SURGICAL FIX) ---------------- */
+
+/**
+ * Canonicalize storage paths:
+ * - remove leading slashes
+ * - collapse accidental double slashes
+ */
+function cleanStoragePath(p: string) {
+  const x = p.trim().replace(/^\/+/, "");
+  return x.replace(/\/{2,}/g, "/");
+}
+
+/**
+ * Build a small set of safe fallbacks for known case-variance issues (seen in storage.objects):
+ * - holdings/resolutions/...  <-> holdings/Resolutions/...
+ *
+ * This does NOT change wiring; it only retries reads if the exact key was stored with different casing.
+ */
+function buildMinuteBookPathFallbacks(p: string): string[] {
+  const base = cleanStoragePath(p);
+
+  // Only a few deterministic fallbacks — keep it surgical.
+  const flips: Array<[string, string]> = [
+    ["/resolutions/", "/Resolutions/"],
+    ["/Resolutions/", "/resolutions/"],
+    ["/bylaws/", "/Bylaws/"],
+    ["/Bylaws/", "/bylaws/"],
+    ["/registers/", "/Registers/"],
+    ["/Registers/", "/registers/"],
+    ["/share_certificates/", "/Share_Certificates/"],
+    ["/Share_Certificates/", "/share_certificates/"],
+  ];
+
+  const out: string[] = [base];
+
+  for (const [a, b] of flips) {
+    if (base.includes(a)) out.push(base.replace(a, b));
+  }
+
+  // Also try a lowercased variant ONLY if it doesn't explode path semantics
+  // (this is rare but cheap and controlled).
+  if (base !== base.toLowerCase()) out.push(base.toLowerCase());
+
+  // Deduplicate
+  return Array.from(new Set(out));
+}
+
 async function signedUrlFor(bucketId: string, storagePath: string, downloadName?: string | null) {
   const sb = supabaseBrowser;
+  const key = cleanStoragePath(storagePath);
   const opts: { download?: string } | undefined = downloadName ? { download: downloadName } : undefined;
-  const { data, error } = await sb.storage.from(bucketId).createSignedUrl(storagePath, 60 * 10, opts);
+
+  const { data, error } = await sb.storage.from(bucketId).createSignedUrl(key, 60 * 10, opts);
   if (error) throw error;
   return data.signedUrl;
+}
+
+/**
+ * Minute Book evidence signer with controlled fallbacks for casing variance.
+ * If the first key fails with "Object not found", we retry a few safe variants.
+ */
+async function signedUrlForMinuteBookEvidence(storagePath: string, downloadName?: string | null) {
+  const tries = buildMinuteBookPathFallbacks(storagePath);
+  let lastErr: unknown = null;
+
+  for (const key of tries) {
+    try {
+      return await signedUrlFor("minute_book", key, downloadName);
+    } catch (e: unknown) {
+      lastErr = e;
+      const msg = e instanceof Error ? e.message : String(e);
+      // Only retry on "Object not found" / 404-ish errors
+      if (!/not found|404/i.test(msg)) throw e;
+    }
+  }
+
+  // If we exhausted fallbacks, throw the last error (preserves current UX)
+  throw lastErr instanceof Error ? lastErr : new Error("Object not found");
 }
 
 /* ---------------- UI ---------------- */
@@ -461,9 +533,9 @@ export default function MinuteBookClient() {
         return;
       }
 
-      // fallback: minute_book evidence
+      // fallback: minute_book evidence (with casing fallbacks)
       if (!selected.storage_path) throw new Error("No storage_path on the primary document.");
-      const url = await signedUrlFor("minute_book", selected.storage_path, null);
+      const url = await signedUrlForMinuteBookEvidence(selected.storage_path, null);
       setPreviewUrl(url);
       if (openReader) setReaderOpen(true);
     } catch (e: unknown) {
@@ -488,7 +560,7 @@ export default function MinuteBookClient() {
       }
 
       if (!selected.storage_path) throw new Error("No storage_path on the primary document.");
-      const url = await signedUrlFor("minute_book", selected.storage_path, name);
+      const url = await signedUrlForMinuteBookEvidence(selected.storage_path, name);
       window.open(url, "_blank", "noopener,noreferrer");
     } catch (e: unknown) {
       setPdfErr(e instanceof Error ? e.message : "Failed to generate download URL.");
@@ -516,7 +588,7 @@ export default function MinuteBookClient() {
       }
 
       if (!selected.storage_path) throw new Error("No storage_path on the primary document.");
-      const url = await signedUrlFor("minute_book", selected.storage_path, null);
+      const url = await signedUrlForMinuteBookEvidence(selected.storage_path, null);
       window.open(url, "_blank", "noopener,noreferrer");
     } catch (e: unknown) {
       setPdfErr(e instanceof Error ? e.message : "Failed to open PDF.");
@@ -843,9 +915,7 @@ export default function MinuteBookClient() {
                             disabled={pdfBusy}
                             className={[
                               "rounded-full px-4 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
-                              pdfBusy
-                                ? "bg-amber-500/20 text-amber-200/60 cursor-not-allowed"
-                                : "bg-amber-500 text-black hover:bg-amber-400",
+                              pdfBusy ? "bg-amber-500/20 text-amber-200/60 cursor-not-allowed" : "bg-amber-500 text-black hover:bg-amber-400",
                             ].join(" ")}
                             title="Open PDF in Reader Mode (full overlay)"
                           >
@@ -1065,7 +1135,9 @@ export default function MinuteBookClient() {
             </div>
 
             <div className="px-5 py-3 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-500">
-              <span>Record ID: <span className="font-mono text-slate-300">{selected?.id || "—"}</span></span>
+              <span>
+                Record ID: <span className="font-mono text-slate-300">{selected?.id || "—"}</span>
+              </span>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
