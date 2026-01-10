@@ -20,6 +20,8 @@ export const dynamic = "force-dynamic";
  * - Official-first when available; otherwise try smart bucket candidates based on path.
  * - Storage paths are case-sensitive and some objects are hash-suffixed.
  * - If createSignedUrl fails with "Object not found", we auto-resolve by listing the directory.
+ * - EXTRA hardening: if the directory itself is wrong (pointer lag), we also try a tiny set of common
+ *   entity-based folders (e.g., holdings/Resolutions) — still read-only, no schema drift.
  * - No schema changes. No new tables. No contract drift.
  */
 
@@ -364,7 +366,12 @@ async function resolveOfficialArtifact(entityKey: string, entry: EntryWithDoc): 
  *   - Hash-suffixed filenames (<uuid>-<hash>.pdf)
  *   - Signed variants (<uuid>-signed.pdf)
  */
-async function signedUrlFor(bucketId: string, storagePath: string, downloadName?: string | null) {
+async function signedUrlFor(
+  bucketId: string,
+  storagePath: string,
+  downloadName?: string | null,
+  extraDirs?: string[]
+) {
   const sb = supabaseBrowser;
 
   const wantPath = normalizeSlashes(storagePath);
@@ -388,6 +395,14 @@ async function signedUrlFor(bucketId: string, storagePath: string, downloadName?
 
   const dirLower = dir.toLowerCase();
   const candidateDirs = new Set<string>([dir]);
+
+  // If caller provided extra search directories (UI-only, read-only repair), include them.
+  if (extraDirs?.length) {
+    for (const x of extraDirs) {
+      const nx = normalizeSlashes(String(x || "")).replace(/^\/+/, "").replace(/\/+$/, "");
+      if (nx) candidateDirs.add(nx);
+    }
+  }
 
   if (dirLower.includes("/resolutions")) {
     candidateDirs.add(dir.replace(/\/resolutions\b/i, "/resolutions"));
@@ -443,12 +458,41 @@ async function signedUrlFor(bucketId: string, storagePath: string, downloadName?
   return { signedUrl: data2.signedUrl, resolvedBucket: bucketId, resolvedPath: best.name };
 }
 
+function titleCaseSegment(s: string) {
+  if (!s) return s;
+  const cleaned = s.replace(/[_-]+/g, " ").trim();
+  if (!cleaned) return s;
+  return cleaned
+    .split(" ")
+    .map((p) => (p ? p[0].toUpperCase() + p.slice(1) : p))
+    .join("");
+}
+
+/**
+ * Extra directory candidates (UI-only, read-only repair):
+ * Sometimes DB pointers lag behind where the physical PDF ends up (e.g., archive writes later normalize into
+ * minute_book/<entityKey>/Resolutions/<id>-signed.pdf). If the exact dir cannot be found, we try a small
+ * set of common folders based on entity + domain.
+ */
+function extraDirsForEntry(entityKey: string, e: EntryWithDoc) {
+  const ek = (entityKey || "").trim();
+  if (!ek) return [];
+  const dk = (e.domain_key || "").trim();
+  const dkTitle = dk ? titleCaseSegment(dk) : "";
+  const dirs = [`${ek}/Resolutions`, `${ek}/resolutions`];
+  if (dk) dirs.push(`${ek}/${dk}`);
+  if (dkTitle) dirs.push(`${ek}/${dkTitle}`);
+  // keep minimal + safe (no broad scans)
+  return uniq(dirs.map((d) => normalizeSlashes(d).replace(/^\/+/, "").replace(/\/+$/, ""))).filter(Boolean);
+}
+
 /**
  * Official-first, lane-safe URL resolver:
  * - If official artifact exists: sign it from its bucket.
  * - Else: sign the primary doc path by trying bucket candidates (NO ASSUMPTIONS).
  */
 async function bestSignedUrlForEntry(
+  entityKey: string,
   selected: EntryWithDoc,
   official: OfficialArtifact | null,
   downloadName?: string | null
@@ -470,7 +514,7 @@ async function bestSignedUrlForEntry(
 
   for (const bucket of candidates) {
     try {
-      return await signedUrlFor(bucket, path, downloadName);
+      return await signedUrlFor(bucket, path, downloadName, extraDirsForEntry(entityKey, selected));
     } catch (e) {
       lastErr = e;
       // try next bucket
@@ -690,7 +734,7 @@ export default function MinuteBookClient() {
     setPdfBusy(true);
 
     try {
-      const { signedUrl, resolvedBucket: b, resolvedPath: p } = await bestSignedUrlForEntry(selected, official, null);
+      const { signedUrl, resolvedBucket: b, resolvedPath: p } = await bestSignedUrlForEntry(entityKey, selected, official, null);
 
       setPreviewUrl(signedUrl);
       setResolvedBucket(b);
@@ -712,7 +756,7 @@ export default function MinuteBookClient() {
 
     try {
       const name = selected.file_name || `${norm(selected.title, "document")}.pdf`;
-      const { signedUrl, resolvedBucket: b, resolvedPath: p } = await bestSignedUrlForEntry(selected, official, name);
+      const { signedUrl, resolvedBucket: b, resolvedPath: p } = await bestSignedUrlForEntry(entityKey, selected, official, name);
 
       setResolvedBucket(b);
       setResolvedPath(p);
@@ -736,7 +780,7 @@ export default function MinuteBookClient() {
         return;
       }
 
-      const { signedUrl, resolvedBucket: b, resolvedPath: p } = await bestSignedUrlForEntry(selected, official, null);
+      const { signedUrl, resolvedBucket: b, resolvedPath: p } = await bestSignedUrlForEntry(entityKey, selected, official, null);
 
       setResolvedBucket(b);
       setResolvedPath(p);
@@ -1341,7 +1385,8 @@ export default function MinuteBookClient() {
                 This permanently removes the entry and all related files. Owner/Admin only.
               </p>
               <div className="mt-2 text-[11px] text-slate-500">
-                Record: <span className="text-slate-200 font-semibold">{selected.title || selected.file_name || "Untitled filing"}</span>{" "}
+                Record:{" "}
+                <span className="text-slate-200 font-semibold">{selected.title || selected.file_name || "Untitled filing"}</span>{" "}
                 • <span className="font-mono">{shortHash(selected.file_hash || null)}</span>
               </div>
             </div>
