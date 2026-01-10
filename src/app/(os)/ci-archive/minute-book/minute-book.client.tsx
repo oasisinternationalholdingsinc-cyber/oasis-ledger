@@ -14,9 +14,12 @@ export const dynamic = "force-dynamic";
  * ✅ Delete UX (right panel): calls public.delete_minute_book_entry_and_files(p_entry_id, p_reason)
  * ❌ NO wiring changes beyond calling the existing delete function
  *
- * FIX (surgical, read-only):
+ * FIX (lane-safe, read-only):
+ * - Some records are archived into lane buckets (e.g., governance_sandbox) while uploads live in minute_book.
+ * - We MUST NOT assume bucket = "minute_book".
+ * - Official-first when available; otherwise try smart bucket candidates based on path.
  * - Storage paths are case-sensitive and some objects are hash-suffixed.
- * - If createSignedUrl fails with "Object not found", we auto-resolve the real object by listing the directory.
+ * - If createSignedUrl fails with "Object not found", we auto-resolve by listing the directory.
  * - No schema changes. No new tables. No contract drift.
  */
 
@@ -133,13 +136,43 @@ function normalizeSlashes(s: string) {
 
 function extractUuidPrefix(filename: string): string | null {
   // captures leading uuid in "<uuid>.pdf" or "<uuid>-<hash>.pdf" or "<uuid>-signed.pdf"
-  const m = filename.match(/^([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/i);
+  const m = filename.match(
+    /^([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/i
+  );
   return m?.[1] ?? null;
 }
 
 function looksLikeNotFound(err: unknown) {
   const msg = (err as any)?.message ? String((err as any).message) : "";
-  return /not\s*found/i.test(msg) || /object/i.test(msg) && /not\s*found/i.test(msg);
+  return /not\s*found/i.test(msg) || (/object/i.test(msg) && /not\s*found/i.test(msg));
+}
+
+function uniq<T>(arr: T[]) {
+  return Array.from(new Set(arr));
+}
+
+/**
+ * Lane bucket heuristic (read-only, UI-only):
+ * - Archive PDFs live in lane buckets (e.g., governance_sandbox) and often have paths like "sandbox/archive/<id>.pdf".
+ * - Uploaded minute book evidence typically uses "minute_book" with paths like "<entity_key>/<domain>/...".
+ * We still attempt multiple buckets safely (no writes).
+ */
+function bucketCandidatesForPath(path: string) {
+  const p = normalizeSlashes(path).toLowerCase();
+  const candidates: string[] = [];
+
+  // strongest signals first
+  if (p.startsWith("sandbox/")) candidates.push("governance_sandbox");
+  if (p.startsWith("truth/")) candidates.push("governance_truth"); // optional future lane (harmless if bucket missing)
+  if (p.includes("/archive/")) candidates.push("governance_sandbox");
+
+  // evidence bucket
+  candidates.push("minute_book");
+
+  // try common lane bucket last (won't harm; if bucket doesn't exist, Supabase returns error and we continue)
+  candidates.push("governance_sandbox");
+
+  return uniq(candidates);
 }
 
 /** Optional UI-only icon map (does not affect wiring) */
@@ -234,6 +267,7 @@ function pickPrimaryDocByEntry(docs: SupportingDoc[]): Map<string, SupportingDoc
 /**
  * OFFICIAL-first resolver (read-only)
  * If Verified Registry has a record tied by hash/path/entry_id, prefer that.
+ * NOTE: This function is defensive because verified_documents schema has evolved.
  */
 async function resolveOfficialArtifact(entityKey: string, entry: EntryWithDoc): Promise<OfficialArtifact | null> {
   const sb = supabaseBrowser;
@@ -242,29 +276,72 @@ async function resolveOfficialArtifact(entityKey: string, entry: EntryWithDoc): 
     const hash = entry.file_hash || null;
     const path = entry.storage_path || null;
 
-    // IMPORTANT: Verified schema has varied historical columns. Keep OR flexible.
     const orParts = [
       hash ? `file_hash.eq.${hash}` : "",
       path ? `source_storage_path.eq.${path}` : "",
       `minute_book_entry_id.eq.${entry.id}`,
       `source_entry_id.eq.${entry.id}`,
+      `source_record_id.eq.${entry.id}`,
     ].filter(Boolean);
 
     if (!orParts.length) return null;
 
+    // We intentionally avoid hard-failing if entity_key column doesn't exist
+    // by wrapping the entire resolver in try/catch.
     const { data, error } = await sb
       .from("verified_documents")
       .select("*")
-      .eq("entity_key", entityKey)
+      .eq("entity_key", entityKey as any)
       .or(orParts.join(","))
       .order("created_at", { ascending: false })
       .limit(1);
 
-    if (error || !data?.length) return null;
+    if (error || !data?.length) {
+      // try again WITHOUT entity_key filter (schema may not have it)
+      const { data: data2, error: error2 } = await sb
+        .from("verified_documents")
+        .select("*")
+        .or(orParts.join(","))
+        .order("created_at", { ascending: false })
+        .limit(1);
+
+      if (error2 || !data2?.length) return null;
+      const v2 = data2[0] as Record<string, unknown>;
+
+      const bucket2 =
+        (v2.storage_bucket as string) ||
+        (v2.bucket_id as string) ||
+        (v2.bucket as string) ||
+        "";
+
+      const vpath2 =
+        (v2.storage_path as string) ||
+        (v2.file_path as string) ||
+        (v2.path as string) ||
+        "";
+
+      if (!bucket2 || !vpath2) return null;
+
+      return {
+        bucket_id: bucket2,
+        storage_path: vpath2,
+        file_name: (v2.file_name as string) || entry.file_name || null,
+        kind: ((v2.kind as string) as any) || "verified",
+      };
+    }
 
     const v = data[0] as Record<string, unknown>;
-    const bucket = (v.bucket_id as string) || (v.storage_bucket as string) || "verified_documents";
-    const vpath = (v.storage_path as string) || (v.file_path as string) || (v.path as string);
+    const bucket =
+      (v.storage_bucket as string) ||
+      (v.bucket_id as string) ||
+      (v.bucket as string) ||
+      "";
+
+    const vpath =
+      (v.storage_path as string) ||
+      (v.file_path as string) ||
+      (v.path as string) ||
+      "";
 
     if (!bucket || !vpath) return null;
 
@@ -272,7 +349,7 @@ async function resolveOfficialArtifact(entityKey: string, entry: EntryWithDoc): 
       bucket_id: bucket,
       storage_path: vpath,
       file_name: (v.file_name as string) || entry.file_name || null,
-      kind: ((v.kind as string) as "official" | "certified" | "verified") || "verified",
+      kind: ((v.kind as string) as any) || "verified",
     };
   } catch {
     return null;
@@ -296,7 +373,7 @@ async function signedUrlFor(bucketId: string, storagePath: string, downloadName?
   // 1) try exact path first
   {
     const { data, error } = await sb.storage.from(bucketId).createSignedUrl(wantPath, 60 * 10, opts);
-    if (!error && data?.signedUrl) return data.signedUrl;
+    if (!error && data?.signedUrl) return { signedUrl: data.signedUrl, resolvedBucket: bucketId, resolvedPath: wantPath };
 
     // only attempt repair on "not found"-type issues
     if (!looksLikeNotFound(error)) {
@@ -309,11 +386,9 @@ async function signedUrlFor(bucketId: string, storagePath: string, downloadName?
   const base = baseOf(wantPath);
   const uuidPrefix = extractUuidPrefix(base);
 
-  // Candidate directories for case mismatches (only for obvious folders)
   const dirLower = dir.toLowerCase();
   const candidateDirs = new Set<string>([dir]);
 
-  // If path contains "/resolutions/" or "/Resolutions/" allow swapping case of that segment
   if (dirLower.includes("/resolutions")) {
     candidateDirs.add(dir.replace(/\/resolutions\b/i, "/resolutions"));
     candidateDirs.add(dir.replace(/\/resolutions\b/i, "/Resolutions"));
@@ -338,19 +413,16 @@ async function signedUrlFor(bucketId: string, storagePath: string, downloadName?
     }
   }
 
-  // filter: must be .pdf and ideally match the uuid prefix (if we have one)
   let filtered = candidates.filter((c) => c.name.toLowerCase().endsWith(".pdf"));
 
   if (uuidPrefix) {
     const up = uuidPrefix.toLowerCase();
     filtered = filtered.filter((c) => baseOf(c.name).toLowerCase().startsWith(up));
   } else {
-    // fallback: try base-name includes
     const b = base.toLowerCase();
     filtered = filtered.filter((c) => baseOf(c.name).toLowerCase().includes(b.replace(/\.pdf$/i, "")));
   }
 
-  // prefer signed
   const signed = filtered.find((c) => baseOf(c.name).toLowerCase().includes("-signed"));
   const best =
     signed ||
@@ -361,7 +433,6 @@ async function signedUrlFor(bucketId: string, storagePath: string, downloadName?
     })[0];
 
   if (!best?.name) {
-    // last resort: throw a clean error
     throw new Error(`Object not found. No matching PDF in bucket "${bucketId}" for path "${wantPath}".`);
   }
 
@@ -369,7 +440,46 @@ async function signedUrlFor(bucketId: string, storagePath: string, downloadName?
   const { data: data2, error: err2 } = await sb.storage.from(bucketId).createSignedUrl(best.name, 60 * 10, opts);
   if (err2) throw err2;
   if (!data2?.signedUrl) throw new Error("Signed URL generation failed.");
-  return data2.signedUrl;
+  return { signedUrl: data2.signedUrl, resolvedBucket: bucketId, resolvedPath: best.name };
+}
+
+/**
+ * Official-first, lane-safe URL resolver:
+ * - If official artifact exists: sign it from its bucket.
+ * - Else: sign the primary doc path by trying bucket candidates (NO ASSUMPTIONS).
+ */
+async function bestSignedUrlForEntry(
+  selected: EntryWithDoc,
+  official: OfficialArtifact | null,
+  downloadName?: string | null
+) {
+  // 1) official-first
+  if (official?.bucket_id && official?.storage_path) {
+    return signedUrlFor(official.bucket_id, official.storage_path, downloadName);
+  }
+
+  // 2) fallback: primary doc path
+  if (!selected.storage_path) {
+    throw new Error("No storage_path on the primary document.");
+  }
+
+  const path = normalizeSlashes(selected.storage_path);
+  const candidates = bucketCandidatesForPath(path);
+
+  let lastErr: unknown = null;
+
+  for (const bucket of candidates) {
+    try {
+      return await signedUrlFor(bucket, path, downloadName);
+    } catch (e) {
+      lastErr = e;
+      // try next bucket
+    }
+  }
+
+  // If all fail, raise a clean error
+  const msg = lastErr instanceof Error ? lastErr.message : "Object not found in candidate buckets.";
+  throw new Error(msg);
 }
 
 /* ---------------- UI ---------------- */
@@ -395,6 +505,10 @@ export default function MinuteBookClient() {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [pdfBusy, setPdfBusy] = useState<boolean>(false);
   const [pdfErr, setPdfErr] = useState<string | null>(null);
+
+  // NEW: show what actually got signed (bucket/path) so we can prove alignment
+  const [resolvedBucket, setResolvedBucket] = useState<string | null>(null);
+  const [resolvedPath, setResolvedPath] = useState<string | null>(null);
 
   // reader overlay
   const [readerOpen, setReaderOpen] = useState<boolean>(false);
@@ -441,6 +555,8 @@ export default function MinuteBookClient() {
       setOfficial(null);
       setPreviewUrl(null);
       setPdfErr(null);
+      setResolvedBucket(null);
+      setResolvedPath(null);
 
       if (!entityKey) {
         setLoading(false);
@@ -475,7 +591,6 @@ export default function MinuteBookClient() {
         setEntries(merged);
         setSelectedId(merged[0]?.id ?? null);
 
-        // if selected domain no longer exists, reset to all
         if (activeDomainKey !== "all") {
           const exists = domains.some((d: GovernanceDomain) => d.key === activeDomainKey);
           if (!exists) setActiveDomainKey("all");
@@ -547,6 +662,8 @@ export default function MinuteBookClient() {
       setOfficial(null);
       setPdfErr(null);
       setPreviewUrl(null);
+      setResolvedBucket(null);
+      setResolvedPath(null);
       setReaderOpen(false);
 
       if (!entityKey || !selected) return;
@@ -573,18 +690,12 @@ export default function MinuteBookClient() {
     setPdfBusy(true);
 
     try {
-      // official-first
-      if (official?.bucket_id && official?.storage_path) {
-        const url = await signedUrlFor(official.bucket_id, official.storage_path, null);
-        setPreviewUrl(url);
-        if (openReader) setReaderOpen(true);
-        return;
-      }
+      const { signedUrl, resolvedBucket: b, resolvedPath: p } = await bestSignedUrlForEntry(selected, official, null);
 
-      // fallback: minute_book evidence
-      if (!selected.storage_path) throw new Error("No storage_path on the primary document.");
-      const url = await signedUrlFor("minute_book", selected.storage_path, null);
-      setPreviewUrl(url);
+      setPreviewUrl(signedUrl);
+      setResolvedBucket(b);
+      setResolvedPath(p);
+
       if (openReader) setReaderOpen(true);
       return;
     } catch (e: unknown) {
@@ -601,16 +712,12 @@ export default function MinuteBookClient() {
 
     try {
       const name = selected.file_name || `${norm(selected.title, "document")}.pdf`;
+      const { signedUrl, resolvedBucket: b, resolvedPath: p } = await bestSignedUrlForEntry(selected, official, name);
 
-      if (official?.bucket_id && official?.storage_path) {
-        const url = await signedUrlFor(official.bucket_id, official.storage_path, name);
-        window.open(url, "_blank", "noopener,noreferrer");
-        return;
-      }
+      setResolvedBucket(b);
+      setResolvedPath(p);
 
-      if (!selected.storage_path) throw new Error("No storage_path on the primary document.");
-      const url = await signedUrlFor("minute_book", selected.storage_path, name);
-      window.open(url, "_blank", "noopener,noreferrer");
+      window.open(signedUrl, "_blank", "noopener,noreferrer");
     } catch (e: unknown) {
       setPdfErr(e instanceof Error ? e.message : "Failed to generate download URL.");
     } finally {
@@ -629,15 +736,12 @@ export default function MinuteBookClient() {
         return;
       }
 
-      if (official?.bucket_id && official?.storage_path) {
-        const url = await signedUrlFor(official.bucket_id, official.storage_path, null);
-        window.open(url, "_blank", "noopener,noreferrer");
-        return;
-      }
+      const { signedUrl, resolvedBucket: b, resolvedPath: p } = await bestSignedUrlForEntry(selected, official, null);
 
-      if (!selected.storage_path) throw new Error("No storage_path on the primary document.");
-      const url = await signedUrlFor("minute_book", selected.storage_path, null);
-      window.open(url, "_blank", "noopener,noreferrer");
+      setResolvedBucket(b);
+      setResolvedPath(p);
+
+      window.open(signedUrl, "_blank", "noopener,noreferrer");
     } catch (e: unknown) {
       setPdfErr(e instanceof Error ? e.message : "Failed to open PDF.");
     } finally {
@@ -668,8 +772,9 @@ export default function MinuteBookClient() {
       setDeleteReason("");
       setReaderOpen(false);
       setPreviewUrl(null);
+      setResolvedBucket(null);
+      setResolvedPath(null);
 
-      // re-load entries for this entity
       if (entityKey) {
         const base = await loadEntries(entityKey);
         const ids = base.map((e: MinuteBookEntry) => e.id);
@@ -973,7 +1078,9 @@ export default function MinuteBookClient() {
                             disabled={pdfBusy}
                             className={[
                               "rounded-full px-4 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
-                              pdfBusy ? "bg-slate-800/40 text-slate-300/60 cursor-not-allowed" : "bg-slate-200 text-black hover:bg-white",
+                              pdfBusy
+                                ? "bg-slate-800/40 text-slate-300/60 cursor-not-allowed"
+                                : "bg-slate-200 text-black hover:bg-white",
                             ].join(" ")}
                             title="Download PDF"
                           >
@@ -1045,9 +1152,20 @@ export default function MinuteBookClient() {
                             <summary className="cursor-pointer text-[11px] text-slate-200">Storage</summary>
                             <div className="mt-2 space-y-1 text-[11px] text-slate-300">
                               <div className="flex items-start justify-between gap-3">
-                                <span className="text-slate-500">Path</span>
+                                <span className="text-slate-500">Primary Path</span>
                                 <span className="text-right font-mono break-all">{norm(selected.storage_path, "—")}</span>
                               </div>
+
+                              {/* NEW: show what we actually signed (proves bucket alignment) */}
+                              <div className="flex items-start justify-between gap-3">
+                                <span className="text-slate-500">Resolved Bucket</span>
+                                <span className="text-right font-mono break-all">{norm(resolvedBucket, "—")}</span>
+                              </div>
+                              <div className="flex items-start justify-between gap-3">
+                                <span className="text-slate-500">Resolved Path</span>
+                                <span className="text-right font-mono break-all">{norm(resolvedPath, "—")}</span>
+                              </div>
+
                               <div className="flex items-start justify-between gap-3">
                                 <span className="text-slate-500">File</span>
                                 <span className="text-right break-all">{norm(selected.file_name, "—")}</span>
@@ -1081,7 +1199,9 @@ export default function MinuteBookClient() {
                             <div className="mt-2 space-y-1 text-[11px] text-slate-300">
                               <div className="flex items-start justify-between gap-3">
                                 <span className="text-slate-500">Created</span>
-                                <span className="text-right">{selected.created_at ? new Date(selected.created_at).toLocaleString() : "—"}</span>
+                                <span className="text-right">
+                                  {selected.created_at ? new Date(selected.created_at).toLocaleString() : "—"}
+                                </span>
                               </div>
                               <div className="flex items-start justify-between gap-3">
                                 <span className="text-slate-500">Created By</span>
@@ -1134,6 +1254,15 @@ export default function MinuteBookClient() {
                 <div className="mt-1 text-[11px] text-slate-500">
                   {official ? "Official artifact preferred • " : "Uploaded evidence • "}
                   {showHashInReader ? <span className="font-mono">{shortHash(selected?.file_hash || null)}</span> : null}
+                </div>
+                <div className="mt-1 text-[10px] text-slate-600">
+                  {resolvedBucket ? (
+                    <>
+                      Resolved: <span className="font-mono text-slate-300">{resolvedBucket}</span>{" "}
+                      <span className="text-slate-700">•</span>{" "}
+                      <span className="font-mono text-slate-400">{shortHash(resolvedPath || null)}</span>
+                    </>
+                  ) : null}
                 </div>
               </div>
 
@@ -1209,8 +1338,7 @@ export default function MinuteBookClient() {
               <div className="text-xs tracking-[0.3em] uppercase text-red-300">HARD DELETE</div>
               <div className="mt-2 text-lg font-semibold text-slate-100">Delete Minute Book entry?</div>
               <p className="mt-2 text-sm text-slate-300">
-                This permanently removes the entry and all related files in the <span className="font-mono">minute_book</span> bucket
-                (including thumbnails). Owner/Admin only.
+                This permanently removes the entry and all related files. Owner/Admin only.
               </p>
               <div className="mt-2 text-[11px] text-slate-500">
                 Record: <span className="text-slate-200 font-semibold">{selected.title || selected.file_name || "Untitled filing"}</span>{" "}
