@@ -63,8 +63,13 @@ Deno.serve(async (req) => {
       body?.app_id || body?.application_id || body?.p_application_id || ""
     ).trim();
 
-    // ✅ Admin client (service role) for DB work + RPC
+    /**
+     * ✅ Admin client (service role) for DB work + RPC
+     * CRITICAL: forward Authorization header so Postgres has auth.uid()
+     * (Your SQL function enforces auth context; without this you'll get "Not authenticated".)
+     */
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+      global: { headers: { Authorization: authHeader } }, // ✅ REQUIRED
       auth: { persistSession: false },
     });
 
@@ -105,7 +110,9 @@ Deno.serve(async (req) => {
       .eq("id", app_id)
       .maybeSingle();
 
-    if (appErr) return json(500, { ok: false, error: "APP_LOOKUP_FAILED", details: appErr.message });
+    if (appErr) {
+      return json(500, { ok: false, error: "APP_LOOKUP_FAILED", details: appErr.message });
+    }
     if (!app) return json(404, { ok: false, error: "APP_NOT_FOUND", app_id });
 
     // Optional safety: ensure this user matches application email (prevents cross-binding)
