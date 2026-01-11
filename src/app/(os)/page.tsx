@@ -90,8 +90,8 @@ export default function DashboardPlaceholder() {
   /**
    * ✅ ENV FIX (the bug you described):
    * If your toggle/label was effectively reversed, the safest approach is:
-   * - Treat env === "SANDBOX" as is_test=true
-   * - Treat env === "ROT" as is_test=false
+   * - Treat env === "SANDBOX" as is_test=false
+   * - Treat env === "ROT" as is_test=true
    *
    * If your UI previously behaved opposite, it means the old code likely did env !== "SANDBOX"
    * or some inversion. This file keeps it canonical.
