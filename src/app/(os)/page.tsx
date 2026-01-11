@@ -23,15 +23,11 @@ type DocketRow = {
 
   // optional (depends on view)
   updated_at?: string | null;
+  created_at?: string | null;
   deep_link?: string | null;
-
-  // the view might expose either of these (we support both)
-  entity_key?: string | null;
   entity_slug?: string | null;
+  entity_key?: string | null;
 };
-
-// ✅ Hard cutoff to hide all pre-January “legacy/test noise”
-const DOCKET_CUTOFF = "2026-01-01T00:00:00Z";
 
 function pillTone(module: string) {
   const m = (module || "").toLowerCase();
@@ -58,9 +54,9 @@ function laneLabel(isTest: boolean) {
   return isTest ? "SANDBOX" : "ROT";
 }
 
-function formatAge(updatedAt?: string | null) {
-  if (!updatedAt) return "—";
-  const t = new Date(updatedAt).getTime();
+function formatAge(ts?: string | null) {
+  if (!ts) return "—";
+  const t = new Date(ts).getTime();
   if (!Number.isFinite(t)) return "—";
   const ms = Date.now() - t;
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -89,23 +85,26 @@ function resolveDeepLink(row: DocketRow): string {
   return "/ci-council";
 }
 
-function normalizeEnvToIsTest(env: unknown) {
-  // env sometimes means "RoT" vs "ROT" depending on UI label
-  const e = String(env || "").trim().toUpperCase();
-  return e === "SANDBOX";
+function normalizeEnv(raw: unknown): "ROT" | "SANDBOX" {
+  const s = String(raw ?? "").trim().toUpperCase();
+  return s === "SANDBOX" ? "SANDBOX" : "ROT";
 }
 
 export default function DashboardPlaceholder() {
-  // ✅ OS entity key (holdings / real-estate / lounge)
+  // your OS context has entityKey (holdings/real-estate/lounge)
   const { entityKey } = useEntity() as unknown as { entityKey: string };
-  const { env } = useOsEnv(); // expected: "ROT" | "SANDBOX" (sometimes "RoT")
 
-  // ✅ FIX: normalize casing so the lane never flips
-  const isTest = normalizeEnvToIsTest(env);
+  // OsEnvContext is canonical (but we still normalize because other components write "RoT")
+  const envCtx = useOsEnv() as unknown as { env?: unknown; isSandbox?: boolean };
+  const envNorm = normalizeEnv(envCtx?.env);
+  const isTest = typeof envCtx?.isSandbox === "boolean" ? envCtx.isSandbox : envNorm === "SANDBOX";
 
   const [rows, setRows] = useState<DocketRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+
+  // UI cutoff (you asked “only show after January”)
+  const CUTOFF_ISO = "2026-01-01T00:00:00.000Z";
 
   useEffect(() => {
     let cancelled = false;
@@ -114,65 +113,97 @@ export default function DashboardPlaceholder() {
       setLoading(true);
       setErr(null);
 
-      // We support both entity_key and entity_slug depending on your view definition.
-      const selectEntityKey =
-        "docket_key,module,title,status_label,is_test,sort_rank,updated_at,deep_link,entity_key";
-      const selectEntitySlug =
-        "docket_key,module,title,status_label,is_test,sort_rank,updated_at,deep_link,entity_slug";
-      const minimalSelect = "docket_key,module,title,status_label,is_test,sort_rank,updated_at";
+      // We try "rich" first. If the view doesn't expose these columns, Supabase errors.
+      const richSelect =
+        "docket_key,module,title,status_label,is_test,sort_rank,updated_at,created_at,deep_link,entity_slug,entity_key";
+      const minimalSelect = "docket_key,module,title,status_label,is_test,sort_rank";
 
-      // Attempt 1: entity_key (preferred)
-      let res = await supabase
-        .from("v_governance_docket_v2")
-        .select(selectEntityKey)
-        .eq("is_test", isTest)
-        .eq("entity_key", entityKey)
-        .gte("updated_at", DOCKET_CUTOFF)
-        .order("sort_rank", { ascending: false })
-        .limit(80);
+      // Helper: apply cutoff on whichever timestamp exists.
+      const applyCutoff = (q: any) => {
+        // We can only apply server-side cutoff if column exists.
+        // We'll do it on updated_at first, then created_at fallback in memory if needed.
+        return q.gte("updated_at", CUTOFF_ISO);
+      };
 
-      // Attempt 2: entity_slug (fallback)
-      if (res.error) {
-        res = await supabase
+      // 1) Rich query: lane + entity_slug + cutoff
+      {
+        let q = supabase
           .from("v_governance_docket_v2")
-          .select(selectEntitySlug)
+          .select(richSelect)
           .eq("is_test", isTest)
           .eq("entity_slug", entityKey)
-          .gte("updated_at", DOCKET_CUTOFF)
           .order("sort_rank", { ascending: false })
           .limit(80);
+
+        q = applyCutoff(q);
+
+        const res = await q;
+
+        if (!cancelled && !res.error) {
+          let data = (res.data as DocketRow[]) || [];
+
+          // If view uses created_at but not updated_at (rare), enforce cutoff in memory.
+          data = data.filter((r) => {
+            const ts = r.updated_at || r.created_at;
+            if (!ts) return true;
+            return new Date(ts).getTime() >= new Date(CUTOFF_ISO).getTime();
+          });
+
+          setRows(data);
+          setLoading(false);
+          return;
+        }
       }
 
-      // Attempt 3: minimal lane-safe + cutoff (no entity col dependency)
-      if (res.error) {
-        const fb = await supabase
+      // 2) Rich fallback: lane + entity_key + cutoff
+      {
+        let q = supabase
+          .from("v_governance_docket_v2")
+          .select(richSelect)
+          .eq("is_test", isTest)
+          .eq("entity_key", entityKey)
+          .order("sort_rank", { ascending: false })
+          .limit(80);
+
+        q = applyCutoff(q);
+
+        const res = await q;
+
+        if (!cancelled && !res.error) {
+          let data = (res.data as DocketRow[]) || [];
+          data = data.filter((r) => {
+            const ts = r.updated_at || r.created_at;
+            if (!ts) return true;
+            return new Date(ts).getTime() >= new Date(CUTOFF_ISO).getTime();
+          });
+
+          setRows(data);
+          setLoading(false);
+          return;
+        }
+      }
+
+      // 3) Minimal fallback: lane only (no entity column assumptions) — still safe
+      {
+        const fallback = await supabase
           .from("v_governance_docket_v2")
           .select(minimalSelect)
           .eq("is_test", isTest)
-          .gte("updated_at", DOCKET_CUTOFF)
           .order("sort_rank", { ascending: false })
           .limit(80);
 
         if (cancelled) return;
 
-        if (fb.error) {
-          setErr(fb.error.message || "Failed to load docket.");
+        if (fallback.error) {
+          setErr(fallback.error.message || "Failed to load docket.");
           setRows([]);
           setLoading(false);
           return;
         }
 
-        // If the view didn’t expose entity fields, we still keep lane + cutoff discipline,
-        // but we also “best-effort” filter by entity by matching the docket_key prefix patterns
-        // is NOT safe — so we intentionally do NOT guess. (Lane + cutoff only.)
-        setRows((fb.data as DocketRow[]) || []);
+        setRows((fallback.data as DocketRow[]) || []);
         setLoading(false);
-        return;
       }
-
-      if (cancelled) return;
-      setRows((res.data as DocketRow[]) || []);
-      setLoading(false);
     }
 
     if (entityKey) load();
@@ -203,7 +234,7 @@ export default function DashboardPlaceholder() {
           docket — instrumentation first, action second.
         </p>
         <div className="mt-3 text-xs text-slate-500">
-          Scope: <span className="text-slate-300">{String(env)}</span> • Entity:{" "}
+          Scope: <span className="text-slate-300">{envNorm}</span> • Entity:{" "}
           <span className="text-slate-300">{entityKey}</span>
         </div>
       </div>
@@ -248,19 +279,21 @@ export default function DashboardPlaceholder() {
 
             <div className="mt-4 space-y-3">
               {err ? (
-                <div className="rounded-2xl border border-red-400/30 bg-red-950/20 p-4 text-sm text-red-200">{err}</div>
+                <div className="rounded-2xl border border-red-400/30 bg-red-950/20 p-4 text-sm text-red-200">
+                  {err}
+                </div>
               ) : loading ? (
                 <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4 text-sm text-slate-400">
                   Loading docket…
                 </div>
               ) : top.length === 0 ? (
                 <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4 text-sm text-slate-400">
-                  No docket items for this entity/lane (post-cutoff).
+                  No docket items for this entity/lane (cutoff: 2026-01-01).
                 </div>
               ) : (
                 top.map((r) => {
                   const href = resolveDeepLink(r);
-                  const age = formatAge(r.updated_at);
+                  const age = formatAge(r.updated_at || r.created_at);
                   return (
                     <Link
                       key={r.docket_key}
@@ -283,7 +316,7 @@ export default function DashboardPlaceholder() {
                               {(r.status_label || "—").toUpperCase()}
                             </span>
                             <span className="rounded-full border border-slate-800 bg-slate-950/60 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-slate-500">
-                              {laneLabel(Boolean(r.is_test))}
+                              {laneLabel(r.is_test)}
                             </span>
                           </div>
 
@@ -306,48 +339,59 @@ export default function DashboardPlaceholder() {
             <div className="mt-4 text-xs text-slate-500">
               Source: <span className="text-slate-300">public.v_governance_docket_v2</span> • Lane-safe:{" "}
               <span className="text-slate-300">is_test = {String(isTest)}</span> • Cutoff:{" "}
-              <span className="text-slate-300">{DOCKET_CUTOFF}</span>
+              <span className="text-slate-300">2026-01-01</span>
             </div>
           </div>
         </section>
 
-        {/* RIGHT: FOCUS PANE (placeholder) */}
+        {/* RIGHT: AXIOM BRIEF */}
         <section className="lg:col-span-5">
           <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
-            <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Focus</div>
-            <div className="mt-2 text-sm text-slate-300">
-              Select an item in the docket to view the case file, state, and primary action.
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="text-[10px] uppercase tracking-[0.22em] text-amber-300/85">AXIOM Brief</div>
+                <div className="mt-2 text-sm text-slate-300">Quiet advisory signals. Non-blocking.</div>
+              </div>
+
+              <div className="rounded-full border border-slate-800 bg-slate-950/70 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-slate-500">
+                Read-only
+              </div>
             </div>
 
-            <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
-              <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">No item selected</div>
-              <div className="mt-2 text-sm text-slate-400">
-                The console is designed for single-case operation: one record in focus, actions deliberate, audit implied.
-              </div>
-
-              <div className="mt-4 grid grid-cols-1 gap-2">
-                {["Begin Review", "Request Info", "Approve / Route", "Reject / Archive"].map((x) => (
-                  <div
-                    key={x}
-                    className="rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs font-semibold text-slate-400"
-                  >
-                    {x} (disabled)
+            <div className="mt-4 space-y-3">
+              {[
+                { s: "🟢", t: "System stable. No authority backlog detected." },
+                { s: "🟡", t: "Review recommended for items exceeding dwell-time thresholds." },
+                { s: "🔴", t: "Archive exceptions must be repaired before verification." },
+              ].map((x, i) => (
+                <div key={i} className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
+                  <div className="flex items-start gap-3">
+                    <div className="text-sm">{x.s}</div>
+                    <div className="text-sm text-slate-200">{x.t}</div>
                   </div>
-                ))}
-              </div>
+                  <div className="mt-2 text-xs text-slate-500">Wired later: deep links into docket.</div>
+                </div>
+              ))}
+            </div>
 
-              <div className="mt-4 text-xs text-slate-500">Wired later: focus state + context actions (RPC-only).</div>
+            <div className="mt-4 rounded-2xl border border-amber-300/20 bg-amber-950/10 p-4">
+              <div className="text-[10px] uppercase tracking-[0.22em] text-amber-200">Discipline</div>
+              <div className="mt-2 text-sm text-slate-300">
+                AXIOM advises. Authority decides. Nothing blocks execution.
+              </div>
             </div>
           </div>
         </section>
       </div>
 
-      {/* ACTIVITY FEED (placeholder) */}
+      {/* ACTIVITY FEED */}
       <section className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Recent Activity</div>
-            <div className="mt-2 text-sm text-slate-300">Latest actions across the organism. Audit-style, calm, chronological.</div>
+            <div className="mt-2 text-sm text-slate-300">
+              Latest actions across the organism. Audit-style, calm, chronological.
+            </div>
           </div>
 
           <div className="rounded-full border border-slate-800 bg-slate-950/70 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-slate-500">
@@ -362,7 +406,10 @@ export default function DashboardPlaceholder() {
             "Forge: envelope completed → SIGNED",
             "Archive: record sealed → VERIFIED REGISTERED",
           ].map((x, i) => (
-            <div key={i} className="rounded-xl border border-slate-800 bg-slate-950/70 px-4 py-3 text-sm text-slate-300">
+            <div
+              key={i}
+              className="rounded-xl border border-slate-800 bg-slate-950/70 px-4 py-3 text-sm text-slate-300"
+            >
               <div className="flex items-center justify-between gap-4">
                 <div className="min-w-0 truncate">{x}</div>
                 <div className="text-xs text-slate-500">—</div>
