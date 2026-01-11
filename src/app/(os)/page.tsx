@@ -7,7 +7,11 @@ import { useEffect, useMemo, useState } from "react";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
-import { cx } from "@/lib/utils";
+
+// Local cx helper (avoids '@/lib/utils' import mismatch)
+function cx(...parts: Array<string | false | null | undefined>) {
+  return parts.filter(Boolean).join(" ");
+}
 
 type DocketRow = {
   docket_key: string;
@@ -63,10 +67,8 @@ function formatAge(updatedAt?: string | null) {
 }
 
 function resolveDeepLink(row: DocketRow): string {
-  // If the view provides a deep_link, trust it.
   if (row.deep_link && row.deep_link.startsWith("/")) return row.deep_link;
 
-  // Otherwise fallback based on module + key prefix
   const key = row.docket_key || "";
   const prefix = key.split(":")[0];
 
@@ -82,7 +84,7 @@ function resolveDeepLink(row: DocketRow): string {
 
 export default function DashboardPlaceholder() {
   const { entityId } = useEntity();
-  const { env } = useOsEnv(); // expects "ROT" | "SANDBOX"
+  const { env } = useOsEnv(); // "ROT" | "SANDBOX"
   const isTest = env === "SANDBOX";
 
   const [rows, setRows] = useState<DocketRow[]>([]);
@@ -96,7 +98,7 @@ export default function DashboardPlaceholder() {
       setLoading(true);
       setErr(null);
 
-      const q = supabase
+      const { data, error } = await supabase
         .from("v_governance_docket_v2")
         .select("docket_key,module,title,status_label,is_test,sort_rank,updated_at,deep_link,entity_id,entity_slug")
         .eq("entity_id", entityId)
@@ -105,7 +107,6 @@ export default function DashboardPlaceholder() {
         .order("updated_at", { ascending: false })
         .limit(50);
 
-      const { data, error } = await q;
       if (cancelled) return;
 
       if (error) {
@@ -125,15 +126,7 @@ export default function DashboardPlaceholder() {
   }, [entityId, isTest]);
 
   const counts = useMemo(() => {
-    const base = {
-      admissions: 0,
-      drafts: 0,
-      council: 0,
-      forge: 0,
-      archive: 0,
-      verified: 0,
-    };
-
+    const base = { admissions: 0, drafts: 0, council: 0, forge: 0, archive: 0, verified: 0 };
     for (const r of rows) {
       const m = (r.module || "").toLowerCase();
       if (m in base) (base as any)[m] += 1;
@@ -199,7 +192,7 @@ export default function DashboardPlaceholder() {
                 <div className="rounded-2xl border border-red-400/30 bg-red-950/20 p-4 text-sm text-red-200">
                   {err}
                   <div className="mt-2 text-xs text-red-200/70">
-                    Confirm the view exists and includes columns: docket_key,module,title,status_label,is_test,sort_rank,updated_at,entity_id.
+                    Confirm view columns: docket_key,module,title,status_label,is_test,sort_rank,updated_at,entity_id.
                   </div>
                 </div>
               ) : loading ? (
@@ -236,7 +229,9 @@ export default function DashboardPlaceholder() {
                           </div>
 
                           <div className="mt-2 text-sm font-semibold text-slate-100">{r.title}</div>
-                          <div className="mt-1 text-xs text-slate-500">Age: {age} • {r.docket_key}</div>
+                          <div className="mt-1 text-xs text-slate-500">
+                            Age: {age} • {r.docket_key}
+                          </div>
                         </div>
 
                         <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-1.5 text-xs font-semibold text-slate-200 opacity-80 transition group-hover:border-amber-300/25 group-hover:opacity-100">
@@ -255,7 +250,7 @@ export default function DashboardPlaceholder() {
           </div>
         </section>
 
-        {/* CENTER: FOCUS PANE (still placeholder, no regressions) */}
+        {/* CENTER: FOCUS PANE */}
         <section className="lg:col-span-4">
           <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
             <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Focus</div>
@@ -287,7 +282,7 @@ export default function DashboardPlaceholder() {
           </div>
         </section>
 
-        {/* RIGHT: AXIOM BRIEF (placeholder, read-only) */}
+        {/* RIGHT: AXIOM BRIEF */}
         <section className="lg:col-span-3">
           <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
             <div className="flex items-start justify-between gap-4">
@@ -327,12 +322,14 @@ export default function DashboardPlaceholder() {
         </section>
       </div>
 
-      {/* ACTIVITY FEED (placeholder) */}
+      {/* ACTIVITY FEED */}
       <section className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Recent Activity</div>
-            <div className="mt-2 text-sm text-slate-300">Latest actions across the organism. Audit-style, calm, chronological.</div>
+            <div className="mt-2 text-sm text-slate-300">
+              Latest actions across the organism. Audit-style, calm, chronological.
+            </div>
           </div>
 
           <div className="rounded-full border border-slate-800 bg-slate-950/70 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-slate-500">
@@ -356,7 +353,9 @@ export default function DashboardPlaceholder() {
           ))}
         </div>
 
-        <div className="mt-4 text-xs text-slate-500">Wired later: single activity feed (last 20) with lane + entity + deep links.</div>
+        <div className="mt-4 text-xs text-slate-500">
+          Wired later: single activity feed (last 20) with lane + entity + deep links.
+        </div>
       </section>
     </div>
   );
