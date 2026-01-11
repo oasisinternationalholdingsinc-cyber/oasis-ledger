@@ -24,8 +24,14 @@ type DocketRow = {
   // optional (depends on view)
   updated_at?: string | null;
   deep_link?: string | null;
+
+  // the view might expose either of these (we support both)
+  entity_key?: string | null;
   entity_slug?: string | null;
 };
+
+// ✅ Hard cutoff to hide all pre-January “legacy/test noise”
+const DOCKET_CUTOFF = "2026-01-01T00:00:00Z";
 
 function pillTone(module: string) {
   const m = (module || "").toLowerCase();
@@ -83,24 +89,19 @@ function resolveDeepLink(row: DocketRow): string {
   return "/ci-council";
 }
 
+function normalizeEnvToIsTest(env: unknown) {
+  // env sometimes means "RoT" vs "ROT" depending on UI label
+  const e = String(env || "").trim().toUpperCase();
+  return e === "SANDBOX";
+}
+
 export default function DashboardPlaceholder() {
-  // ✅ OS context exposes entityKey (holdings/real-estate/lounge)
+  // ✅ OS entity key (holdings / real-estate / lounge)
   const { entityKey } = useEntity() as unknown as { entityKey: string };
+  const { env } = useOsEnv(); // expected: "ROT" | "SANDBOX" (sometimes "RoT")
 
-  /**
-   * ✅ ENV FIX (the bug you described):
-   * If your toggle/label was effectively reversed, the safest approach is:
-   * - Treat env === "SANDBOX" as is_test=false
-   * - Treat env === "ROT" as is_test=true
-   *
-   * If your UI previously behaved opposite, it means the old code likely did env !== "SANDBOX"
-   * or some inversion. This file keeps it canonical.
-   */
-  const { env } = useOsEnv(); // "ROT" | "SANDBOX"
-  const isTest = env === "SANDBOX";
-
-  // ✅ January cutoff (dashboard calm)
-  const JAN_CUTOFF = "2026-01-01T00:00:00Z";
+  // ✅ FIX: normalize casing so the lane never flips
+  const isTest = normalizeEnvToIsTest(env);
 
   const [rows, setRows] = useState<DocketRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -113,43 +114,58 @@ export default function DashboardPlaceholder() {
       setLoading(true);
       setErr(null);
 
-      // Select a superset (safe only if the view actually has these columns)
-      // If it errors, we retry a minimal select.
-      const richSelect =
+      // We support both entity_key and entity_slug depending on your view definition.
+      const selectEntityKey =
+        "docket_key,module,title,status_label,is_test,sort_rank,updated_at,deep_link,entity_key";
+      const selectEntitySlug =
         "docket_key,module,title,status_label,is_test,sort_rank,updated_at,deep_link,entity_slug";
       const minimalSelect = "docket_key,module,title,status_label,is_test,sort_rank,updated_at";
 
-      // 1) Try rich query (entity_slug + deep_link) + lane safety + January cutoff.
+      // Attempt 1: entity_key (preferred)
       let res = await supabase
         .from("v_governance_docket_v2")
-        .select(richSelect)
+        .select(selectEntityKey)
         .eq("is_test", isTest)
-        .eq("entity_slug", entityKey)
-        .gte("created_at", JAN_CUTOFF)
+        .eq("entity_key", entityKey)
+        .gte("updated_at", DOCKET_CUTOFF)
         .order("sort_rank", { ascending: false })
-        .limit(50);
+        .limit(80);
 
-      // 2) If view lacks any of the rich columns, retry minimal (still lane-safe + cutoff).
+      // Attempt 2: entity_slug (fallback)
       if (res.error) {
-        const fallback = await supabase
+        res = await supabase
+          .from("v_governance_docket_v2")
+          .select(selectEntitySlug)
+          .eq("is_test", isTest)
+          .eq("entity_slug", entityKey)
+          .gte("updated_at", DOCKET_CUTOFF)
+          .order("sort_rank", { ascending: false })
+          .limit(80);
+      }
+
+      // Attempt 3: minimal lane-safe + cutoff (no entity col dependency)
+      if (res.error) {
+        const fb = await supabase
           .from("v_governance_docket_v2")
           .select(minimalSelect)
           .eq("is_test", isTest)
-          .gte("created_at", JAN_CUTOFF)
-          // if entity_slug doesn't exist, we can't filter by it; keep lane-safe only
+          .gte("updated_at", DOCKET_CUTOFF)
           .order("sort_rank", { ascending: false })
-          .limit(50);
+          .limit(80);
 
         if (cancelled) return;
 
-        if (fallback.error) {
-          setErr(fallback.error.message || "Failed to load docket.");
+        if (fb.error) {
+          setErr(fb.error.message || "Failed to load docket.");
           setRows([]);
           setLoading(false);
           return;
         }
 
-        setRows((fallback.data as DocketRow[]) || []);
+        // If the view didn’t expose entity fields, we still keep lane + cutoff discipline,
+        // but we also “best-effort” filter by entity by matching the docket_key prefix patterns
+        // is NOT safe — so we intentionally do NOT guess. (Lane + cutoff only.)
+        setRows((fb.data as DocketRow[]) || []);
         setLoading(false);
         return;
       }
@@ -174,7 +190,7 @@ export default function DashboardPlaceholder() {
     return base;
   }, [rows]);
 
-  const top = useMemo(() => rows.slice(0, 8), [rows]);
+  const top = useMemo(() => rows.slice(0, 10), [rows]);
 
   return (
     <div className="w-full h-full flex flex-col gap-6">
@@ -187,7 +203,7 @@ export default function DashboardPlaceholder() {
           docket — instrumentation first, action second.
         </p>
         <div className="mt-3 text-xs text-slate-500">
-          Scope: <span className="text-slate-300">{env}</span> • Entity:{" "}
+          Scope: <span className="text-slate-300">{String(env)}</span> • Entity:{" "}
           <span className="text-slate-300">{entityKey}</span>
         </div>
       </div>
@@ -215,7 +231,7 @@ export default function DashboardPlaceholder() {
       {/* MAIN DOCKET SURFACE */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* LEFT: PRIORITY QUEUE */}
-        <section className="lg:col-span-5">
+        <section className="lg:col-span-7">
           <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
             <div className="flex items-start justify-between gap-4">
               <div>
@@ -232,16 +248,14 @@ export default function DashboardPlaceholder() {
 
             <div className="mt-4 space-y-3">
               {err ? (
-                <div className="rounded-2xl border border-red-400/30 bg-red-950/20 p-4 text-sm text-red-200">
-                  {err}
-                </div>
+                <div className="rounded-2xl border border-red-400/30 bg-red-950/20 p-4 text-sm text-red-200">{err}</div>
               ) : loading ? (
                 <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4 text-sm text-slate-400">
                   Loading docket…
                 </div>
               ) : top.length === 0 ? (
                 <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4 text-sm text-slate-400">
-                  No docket items for this entity/lane (post-Jan 1).
+                  No docket items for this entity/lane (post-cutoff).
                 </div>
               ) : (
                 top.map((r) => {
@@ -269,7 +283,7 @@ export default function DashboardPlaceholder() {
                               {(r.status_label || "—").toUpperCase()}
                             </span>
                             <span className="rounded-full border border-slate-800 bg-slate-950/60 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-slate-500">
-                              {laneLabel(r.is_test)}
+                              {laneLabel(Boolean(r.is_test))}
                             </span>
                           </div>
 
@@ -292,13 +306,13 @@ export default function DashboardPlaceholder() {
             <div className="mt-4 text-xs text-slate-500">
               Source: <span className="text-slate-300">public.v_governance_docket_v2</span> • Lane-safe:{" "}
               <span className="text-slate-300">is_test = {String(isTest)}</span> • Cutoff:{" "}
-              <span className="text-slate-300">≥ 2026-01-01</span>
+              <span className="text-slate-300">{DOCKET_CUTOFF}</span>
             </div>
           </div>
         </section>
 
-        {/* CENTER: FOCUS PANE */}
-        <section className="lg:col-span-4">
+        {/* RIGHT: FOCUS PANE (placeholder) */}
+        <section className="lg:col-span-5">
           <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
             <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Focus</div>
             <div className="mt-2 text-sm text-slate-300">
@@ -326,53 +340,14 @@ export default function DashboardPlaceholder() {
             </div>
           </div>
         </section>
-
-        {/* RIGHT: AXIOM BRIEF */}
-        <section className="lg:col-span-3">
-          <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <div className="text-[10px] uppercase tracking-[0.22em] text-amber-300/85">AXIOM Brief</div>
-                <div className="mt-2 text-sm text-slate-300">Quiet advisory signals. Non-blocking.</div>
-              </div>
-
-              <div className="rounded-full border border-slate-800 bg-slate-950/70 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-slate-500">
-                Read-only
-              </div>
-            </div>
-
-            <div className="mt-4 space-y-3">
-              {[
-                { s: "🟢", t: "System stable. No authority backlog detected." },
-                { s: "🟡", t: "Review recommended for items exceeding dwell-time thresholds." },
-                { s: "🔴", t: "Archive exceptions must be repaired before verification." },
-              ].map((x, i) => (
-                <div key={i} className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
-                  <div className="flex items-start gap-3">
-                    <div className="text-sm">{x.s}</div>
-                    <div className="text-sm text-slate-200">{x.t}</div>
-                  </div>
-                  <div className="mt-2 text-xs text-slate-500">Wired later: deep links into docket.</div>
-                </div>
-              ))}
-            </div>
-
-            <div className="mt-4 rounded-2xl border border-amber-300/20 bg-amber-950/10 p-4">
-              <div className="text-[10px] uppercase tracking-[0.22em] text-amber-200">Discipline</div>
-              <div className="mt-2 text-sm text-slate-300">AXIOM advises. Authority decides. Nothing blocks execution.</div>
-            </div>
-          </div>
-        </section>
       </div>
 
-      {/* ACTIVITY FEED */}
+      {/* ACTIVITY FEED (placeholder) */}
       <section className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Recent Activity</div>
-            <div className="mt-2 text-sm text-slate-300">
-              Latest actions across the organism. Audit-style, calm, chronological.
-            </div>
+            <div className="mt-2 text-sm text-slate-300">Latest actions across the organism. Audit-style, calm, chronological.</div>
           </div>
 
           <div className="rounded-full border border-slate-800 bg-slate-950/70 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-slate-500">
@@ -387,10 +362,7 @@ export default function DashboardPlaceholder() {
             "Forge: envelope completed → SIGNED",
             "Archive: record sealed → VERIFIED REGISTERED",
           ].map((x, i) => (
-            <div
-              key={i}
-              className="rounded-xl border border-slate-800 bg-slate-950/70 px-4 py-3 text-sm text-slate-300"
-            >
+            <div key={i} className="rounded-xl border border-slate-800 bg-slate-950/70 px-4 py-3 text-sm text-slate-300">
               <div className="flex items-center justify-between gap-4">
                 <div className="min-w-0 truncate">{x}</div>
                 <div className="text-xs text-slate-500">—</div>
@@ -399,9 +371,7 @@ export default function DashboardPlaceholder() {
           ))}
         </div>
 
-        <div className="mt-4 text-xs text-slate-500">
-          Wired later: a single activity feed with lane + entity + deep links.
-        </div>
+        <div className="mt-4 text-xs text-slate-500">Wired later: a single activity feed with lane + entity + deep links.</div>
       </section>
     </div>
   );
