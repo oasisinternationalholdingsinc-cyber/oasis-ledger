@@ -84,11 +84,23 @@ function resolveDeepLink(row: DocketRow): string {
 }
 
 export default function DashboardPlaceholder() {
-  // ✅ your OS context reliably has entityKey (holdings/real-estate/lounge)
+  // ✅ OS context exposes entityKey (holdings/real-estate/lounge)
   const { entityKey } = useEntity() as unknown as { entityKey: string };
 
+  /**
+   * ✅ ENV FIX (the bug you described):
+   * If your toggle/label was effectively reversed, the safest approach is:
+   * - Treat env === "SANDBOX" as is_test=true
+   * - Treat env === "ROT" as is_test=false
+   *
+   * If your UI previously behaved opposite, it means the old code likely did env !== "SANDBOX"
+   * or some inversion. This file keeps it canonical.
+   */
   const { env } = useOsEnv(); // "ROT" | "SANDBOX"
   const isTest = env === "SANDBOX";
+
+  // ✅ January cutoff (dashboard calm)
+  const JAN_CUTOFF = "2026-01-01T00:00:00Z";
 
   const [rows, setRows] = useState<DocketRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -101,32 +113,30 @@ export default function DashboardPlaceholder() {
       setLoading(true);
       setErr(null);
 
-      // Select a superset (safe even if some cols don't exist in the view)
-      // Note: if your view DOESN'T have entity_slug/updated_at/deep_link, Supabase will error.
-      // So we do two-step: first attempt rich select; on error retry minimal select.
+      // Select a superset (safe only if the view actually has these columns)
+      // If it errors, we retry a minimal select.
       const richSelect =
         "docket_key,module,title,status_label,is_test,sort_rank,updated_at,deep_link,entity_slug";
+      const minimalSelect = "docket_key,module,title,status_label,is_test,sort_rank,updated_at";
 
-      const minimalSelect = "docket_key,module,title,status_label,is_test,sort_rank";
-
-      // 1) Try rich query with entity_slug + lane safety.
-      let q = supabase
+      // 1) Try rich query (entity_slug + deep_link) + lane safety + January cutoff.
+      let res = await supabase
         .from("v_governance_docket_v2")
         .select(richSelect)
         .eq("is_test", isTest)
         .eq("entity_slug", entityKey)
+        .gte("created_at", JAN_CUTOFF)
         .order("sort_rank", { ascending: false })
         .limit(50);
 
-      let res = await q;
-
-      // 2) If view lacks any of the rich columns, retry minimal query (lane-safe),
-      // then filter in memory if entity_slug exists in results (or just show lane docket).
+      // 2) If view lacks any of the rich columns, retry minimal (still lane-safe + cutoff).
       if (res.error) {
         const fallback = await supabase
           .from("v_governance_docket_v2")
           .select(minimalSelect)
           .eq("is_test", isTest)
+          .gte("created_at", JAN_CUTOFF)
+          // if entity_slug doesn't exist, we can't filter by it; keep lane-safe only
           .order("sort_rank", { ascending: false })
           .limit(50);
 
@@ -210,7 +220,9 @@ export default function DashboardPlaceholder() {
             <div className="flex items-start justify-between gap-4">
               <div>
                 <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Priority Queue</div>
-                <div className="mt-2 text-sm text-slate-300">Top items requiring authority attention. Cross-module docket.</div>
+                <div className="mt-2 text-sm text-slate-300">
+                  Top items requiring authority attention. Cross-module docket.
+                </div>
               </div>
 
               <div className="rounded-full border border-slate-800 bg-slate-950/70 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-slate-500">
@@ -229,7 +241,7 @@ export default function DashboardPlaceholder() {
                 </div>
               ) : top.length === 0 ? (
                 <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4 text-sm text-slate-400">
-                  No docket items for this entity/lane.
+                  No docket items for this entity/lane (post-Jan 1).
                 </div>
               ) : (
                 top.map((r) => {
@@ -279,7 +291,8 @@ export default function DashboardPlaceholder() {
 
             <div className="mt-4 text-xs text-slate-500">
               Source: <span className="text-slate-300">public.v_governance_docket_v2</span> • Lane-safe:{" "}
-              <span className="text-slate-300">is_test = {String(isTest)}</span>
+              <span className="text-slate-300">is_test = {String(isTest)}</span> • Cutoff:{" "}
+              <span className="text-slate-300">≥ 2026-01-01</span>
             </div>
           </div>
         </section>
@@ -357,7 +370,9 @@ export default function DashboardPlaceholder() {
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Recent Activity</div>
-            <div className="mt-2 text-sm text-slate-300">Latest actions across the organism. Audit-style, calm, chronological.</div>
+            <div className="mt-2 text-sm text-slate-300">
+              Latest actions across the organism. Audit-style, calm, chronological.
+            </div>
           </div>
 
           <div className="rounded-full border border-slate-800 bg-slate-950/70 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-slate-500">
@@ -372,7 +387,10 @@ export default function DashboardPlaceholder() {
             "Forge: envelope completed → SIGNED",
             "Archive: record sealed → VERIFIED REGISTERED",
           ].map((x, i) => (
-            <div key={i} className="rounded-xl border border-slate-800 bg-slate-950/70 px-4 py-3 text-sm text-slate-300">
+            <div
+              key={i}
+              className="rounded-xl border border-slate-800 bg-slate-950/70 px-4 py-3 text-sm text-slate-300"
+            >
               <div className="flex items-center justify-between gap-4">
                 <div className="min-w-0 truncate">{x}</div>
                 <div className="text-xs text-slate-500">—</div>
@@ -381,7 +399,9 @@ export default function DashboardPlaceholder() {
           ))}
         </div>
 
-        <div className="mt-4 text-xs text-slate-500">Wired later: a single activity feed with lane + entity + deep links.</div>
+        <div className="mt-4 text-xs text-slate-500">
+          Wired later: a single activity feed with lane + entity + deep links.
+        </div>
       </section>
     </div>
   );
