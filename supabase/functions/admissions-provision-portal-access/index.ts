@@ -37,6 +37,30 @@ function withAppId(base: string, appId: string) {
   return u.toString();
 }
 
+/**
+ * Fallback: generate a tokenized Supabase action_link (INVITE/RECOVERY).
+ * This does NOT replace your existing email send; it gives you a guaranteed working link
+ * in the function response + task metadata in case templates/clients strip params.
+ */
+async function tryGenerateActionLink(args: {
+  admin: ReturnType<typeof createClient>;
+  type: "invite" | "recovery";
+  email: string;
+  redirectTo: string;
+}): Promise<string | null> {
+  try {
+    const { data, error } = await args.admin.auth.admin.generateLink({
+      type: args.type,
+      email: args.email,
+      options: { redirectTo: args.redirectTo },
+    });
+    if (error) return null;
+    return (data as any)?.properties?.action_link ?? null;
+  } catch {
+    return null;
+  }
+}
+
 Deno.serve(async (req) => {
   // CORS preflight
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -102,6 +126,9 @@ Deno.serve(async (req) => {
     let mode: "INVITE" | "RESET" = "INVITE";
     let invitedUserId: string | null = null;
 
+    // Fallback link (tokenized) in case email templates/clients strip auth params
+    let action_link: string | null = null;
+
     const { data: inviteRes, error: inviteErr } = await admin.auth.admin.inviteUserByEmail(email, {
       redirectTo: inviteRedirect,
     });
@@ -118,11 +145,27 @@ Deno.serve(async (req) => {
         if (resetErr) {
           return json(500, { ok: false, error: "RESET_FAILED", details: resetErr.message });
         }
+
+        // Tokenized fallback link for recovery
+        action_link = await tryGenerateActionLink({
+          admin,
+          type: "recovery",
+          email,
+          redirectTo: resetRedirect,
+        });
       } else {
         return json(500, { ok: false, error: "INVITE_FAILED", details: msg });
       }
     } else {
       invitedUserId = inviteRes?.user?.id || null;
+
+      // Tokenized fallback link for invite
+      action_link = await tryGenerateActionLink({
+        admin,
+        type: "invite",
+        email,
+        redirectTo: inviteRedirect,
+      });
     }
 
     // 3) Update provisioning task (ALLOW RE-RUNS)
@@ -152,6 +195,8 @@ Deno.serve(async (req) => {
             invited_user_id: invitedUserId,
             email,
             redirect: mode === "INVITE" ? inviteRedirect : resetRedirect,
+            // ✅ fallback tokenized link (if present)
+            action_link,
           },
         },
         { onConflict: "application_id,task_key" },
@@ -170,6 +215,7 @@ Deno.serve(async (req) => {
         invited_user_id: invitedUserId,
         attempts,
         redirect: mode === "INVITE" ? inviteRedirect : resetRedirect,
+        action_link,
       },
     });
 
@@ -181,6 +227,8 @@ Deno.serve(async (req) => {
       invited_user_id: invitedUserId,
       attempts,
       redirect: mode === "INVITE" ? inviteRedirect : resetRedirect,
+      // ✅ if your email client/template strips params, use this link directly
+      action_link,
     });
   } catch (e) {
     return json(500, {
