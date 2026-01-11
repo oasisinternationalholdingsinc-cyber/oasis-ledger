@@ -38,43 +38,42 @@ function withAppId(base: string, appId: string) {
 }
 
 /**
- * Fallback: generate a tokenized Supabase action_link (INVITE/RECOVERY).
- * This does NOT replace your existing email send; it gives you a guaranteed working link
- * in the function response + task metadata in case templates/clients strip params.
+ * Generate a tokenized Supabase action_link (INVITE / RECOVERY).
+ * This is the "guaranteed working link" fallback you can copy/use immediately.
+ * It still expires like all OTP links, but it's always fresh per run.
  */
-async function tryGenerateActionLink(args: {
+async function generateActionLink(args: {
   admin: ReturnType<typeof createClient>;
   type: "invite" | "recovery";
   email: string;
   redirectTo: string;
-}): Promise<string | null> {
+}): Promise<{ action_link: string | null; error?: string }> {
   try {
     const { data, error } = await args.admin.auth.admin.generateLink({
       type: args.type,
       email: args.email,
       options: { redirectTo: args.redirectTo },
     });
-    if (error) return null;
-    return (data as any)?.properties?.action_link ?? null;
-  } catch {
-    return null;
+
+    if (error) return { action_link: null, error: error.message };
+
+    // Supabase returns "properties.action_link"
+    const action_link = (data as any)?.properties?.action_link ?? null;
+    return { action_link };
+  } catch (e) {
+    return { action_link: null, error: String((e as any)?.message ?? e) };
   }
 }
 
 Deno.serve(async (req) => {
   // CORS preflight
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
-
-  if (req.method !== "POST") {
-    return json(405, { ok: false, error: "METHOD_NOT_ALLOWED" });
-  }
+  if (req.method !== "POST") return json(405, { ok: false, error: "METHOD_NOT_ALLOWED" });
 
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const serviceRole = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    if (!supabaseUrl || !serviceRole) {
-      return json(500, { ok: false, error: "MISSING_ENV" });
-    }
+    if (!supabaseUrl || !serviceRole) return json(500, { ok: false, error: "MISSING_ENV" });
 
     const admin = createClient(supabaseUrl, serviceRole, {
       auth: { persistSession: false },
@@ -86,7 +85,7 @@ Deno.serve(async (req) => {
       return json(401, { ok: false, error: "MISSING_AUTH" });
     }
 
-    // (Optional) validate session (keeps it operator-only even though we write via service role)
+    // Validate session (keeps it operator-only even though we write via service role)
     const anonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
     if (anonKey) {
       const operatorClient = createClient(supabaseUrl, anonKey, {
@@ -101,9 +100,7 @@ Deno.serve(async (req) => {
 
     const payload = await req.json().catch(() => ({}));
     const application_id = String(payload?.application_id || payload?.app_id || "").trim();
-    if (!application_id) {
-      return json(400, { ok: false, error: "MISSING_APPLICATION_ID" });
-    }
+    if (!application_id) return json(400, { ok: false, error: "MISSING_APPLICATION_ID" });
 
     // 1) Load application
     const { data: app, error: appErr } = await admin
@@ -118,16 +115,19 @@ Deno.serve(async (req) => {
     const email = String(app.applicant_email || "").trim().toLowerCase();
     if (!email) return json(400, { ok: false, error: "MISSING_APPLICANT_EMAIL" });
 
-    // ✅ IMPORTANT: always carry app_id to portal
+    // ✅ Always carry app_id to portal
     const inviteRedirect = withAppId(PORTAL_CALLBACK_URL, application_id);
     const resetRedirect = withAppId(PORTAL_RESET_URL, application_id);
 
-    // 2) Send invite; if user exists, send reset
+    // 2) Invite or reset
     let mode: "INVITE" | "RESET" = "INVITE";
     let invitedUserId: string | null = null;
 
-    // Fallback link (tokenized) in case email templates/clients strip auth params
+    // Always produce a fresh tokenized fallback link on each run.
+    // We will set it to the correct mode below.
     let action_link: string | null = null;
+    let action_link_type: "invite" | "recovery" | null = null;
+    let action_link_error: string | null = null;
 
     const { data: inviteRes, error: inviteErr } = await admin.auth.admin.inviteUserByEmail(email, {
       redirectTo: inviteRedirect,
@@ -138,38 +138,43 @@ Deno.serve(async (req) => {
 
       if (isAlreadyExistsError(msg)) {
         mode = "RESET";
+
         const { error: resetErr } = await admin.auth.resetPasswordForEmail(email, {
           redirectTo: resetRedirect,
         });
-
         if (resetErr) {
           return json(500, { ok: false, error: "RESET_FAILED", details: resetErr.message });
         }
 
-        // Tokenized fallback link for recovery
-        action_link = await tryGenerateActionLink({
+        // Fresh recovery action link (best fallback)
+        const link = await generateActionLink({
           admin,
           type: "recovery",
           email,
           redirectTo: resetRedirect,
         });
+        action_link = link.action_link;
+        action_link_type = "recovery";
+        action_link_error = link.error ?? null;
       } else {
         return json(500, { ok: false, error: "INVITE_FAILED", details: msg });
       }
     } else {
       invitedUserId = inviteRes?.user?.id || null;
 
-      // Tokenized fallback link for invite
-      action_link = await tryGenerateActionLink({
+      // Fresh invite action link (best fallback)
+      const link = await generateActionLink({
         admin,
         type: "invite",
         email,
         redirectTo: inviteRedirect,
       });
+      action_link = link.action_link;
+      action_link_type = "invite";
+      action_link_error = link.error ?? null;
     }
 
     // 3) Update provisioning task (ALLOW RE-RUNS)
-    // Align task_key to your UI: "provision_portal_access"
     const now = new Date().toISOString();
 
     const { data: taskRow } = await admin
@@ -181,28 +186,29 @@ Deno.serve(async (req) => {
 
     const attempts = (taskRow?.attempts ?? 0) + 1;
 
-    await admin
-      .from("onboarding_provisioning_tasks")
-      .upsert(
-        {
-          application_id,
-          task_key: "provision_portal_access",
-          status: "pending", // keep pending while you test "RUN INVITE"
-          attempts,
-          last_attempt_at: now,
-          result: {
-            mode,
-            invited_user_id: invitedUserId,
-            email,
-            redirect: mode === "INVITE" ? inviteRedirect : resetRedirect,
-            // ✅ fallback tokenized link (if present)
-            action_link,
-          },
-        },
-        { onConflict: "application_id,task_key" },
-      );
+    await admin.from("onboarding_provisioning_tasks").upsert(
+      {
+        application_id,
+        task_key: "provision_portal_access",
+        status: "pending", // keep pending while testing
+        attempts,
+        last_attempt_at: now,
+        result: {
+          mode,
+          invited_user_id: invitedUserId,
+          email,
+          redirect: mode === "INVITE" ? inviteRedirect : resetRedirect,
 
-    // 4) Add an onboarding event (every run)
+          // ✅ Guaranteed-fresh fallback (copy/paste safe, includes token/code)
+          action_link,
+          action_link_type,
+          action_link_error,
+        },
+      },
+      { onConflict: "application_id,task_key" },
+    );
+
+    // 4) Add event (every run)
     await admin.from("onboarding_events").insert({
       application_id,
       event_type: "PROVISION_PORTAL_ACCESS",
@@ -216,6 +222,8 @@ Deno.serve(async (req) => {
         attempts,
         redirect: mode === "INVITE" ? inviteRedirect : resetRedirect,
         action_link,
+        action_link_type,
+        action_link_error,
       },
     });
 
@@ -227,8 +235,11 @@ Deno.serve(async (req) => {
       invited_user_id: invitedUserId,
       attempts,
       redirect: mode === "INVITE" ? inviteRedirect : resetRedirect,
-      // ✅ if your email client/template strips params, use this link directly
+
+      // ✅ Use this if the inbox link is expired/stripped
       action_link,
+      action_link_type,
+      action_link_error,
     });
   } catch (e) {
     return json(500, {
