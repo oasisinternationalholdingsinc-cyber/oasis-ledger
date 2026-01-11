@@ -8,7 +8,7 @@ import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
 
-// Local cx helper (avoids '@/lib/utils' import mismatch)
+// Local cx helper (avoid utils import mismatch)
 function cx(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(" ");
 }
@@ -20,10 +20,11 @@ type DocketRow = {
   status_label: string | null;
   is_test: boolean;
   sort_rank: number | null;
+
+  // optional (depends on view)
   updated_at?: string | null;
-  entity_id?: string | null;
-  entity_slug?: string | null;
   deep_link?: string | null;
+  entity_slug?: string | null;
 };
 
 function pillTone(module: string) {
@@ -83,7 +84,9 @@ function resolveDeepLink(row: DocketRow): string {
 }
 
 export default function DashboardPlaceholder() {
-  const { entityId } = useEntity();
+  // ✅ your OS context reliably has entityKey (holdings/real-estate/lounge)
+  const { entityKey } = useEntity() as unknown as { entityKey: string };
+
   const { env } = useOsEnv(); // "ROT" | "SANDBOX"
   const isTest = env === "SANDBOX";
 
@@ -98,32 +101,59 @@ export default function DashboardPlaceholder() {
       setLoading(true);
       setErr(null);
 
-      const { data, error } = await supabase
+      // Select a superset (safe even if some cols don't exist in the view)
+      // Note: if your view DOESN'T have entity_slug/updated_at/deep_link, Supabase will error.
+      // So we do two-step: first attempt rich select; on error retry minimal select.
+      const richSelect =
+        "docket_key,module,title,status_label,is_test,sort_rank,updated_at,deep_link,entity_slug";
+
+      const minimalSelect = "docket_key,module,title,status_label,is_test,sort_rank";
+
+      // 1) Try rich query with entity_slug + lane safety.
+      let q = supabase
         .from("v_governance_docket_v2")
-        .select("docket_key,module,title,status_label,is_test,sort_rank,updated_at,deep_link,entity_id,entity_slug")
-        .eq("entity_id", entityId)
+        .select(richSelect)
         .eq("is_test", isTest)
+        .eq("entity_slug", entityKey)
         .order("sort_rank", { ascending: false })
-        .order("updated_at", { ascending: false })
         .limit(50);
 
-      if (cancelled) return;
+      let res = await q;
 
-      if (error) {
-        setErr(error.message || "Failed to load docket.");
-        setRows([]);
-      } else {
-        setRows((data as DocketRow[]) || []);
+      // 2) If view lacks any of the rich columns, retry minimal query (lane-safe),
+      // then filter in memory if entity_slug exists in results (or just show lane docket).
+      if (res.error) {
+        const fallback = await supabase
+          .from("v_governance_docket_v2")
+          .select(minimalSelect)
+          .eq("is_test", isTest)
+          .order("sort_rank", { ascending: false })
+          .limit(50);
+
+        if (cancelled) return;
+
+        if (fallback.error) {
+          setErr(fallback.error.message || "Failed to load docket.");
+          setRows([]);
+          setLoading(false);
+          return;
+        }
+
+        setRows((fallback.data as DocketRow[]) || []);
+        setLoading(false);
+        return;
       }
 
+      if (cancelled) return;
+      setRows((res.data as DocketRow[]) || []);
       setLoading(false);
     }
 
-    if (entityId) load();
+    if (entityKey) load();
     return () => {
       cancelled = true;
     };
-  }, [entityId, isTest]);
+  }, [entityKey, isTest]);
 
   const counts = useMemo(() => {
     const base = { admissions: 0, drafts: 0, council: 0, forge: 0, archive: 0, verified: 0 };
@@ -147,7 +177,8 @@ export default function DashboardPlaceholder() {
           docket — instrumentation first, action second.
         </p>
         <div className="mt-3 text-xs text-slate-500">
-          Scope: <span className="text-slate-300">{env}</span> • Entity: <span className="text-slate-300">{entityId}</span>
+          Scope: <span className="text-slate-300">{env}</span> • Entity:{" "}
+          <span className="text-slate-300">{entityKey}</span>
         </div>
       </div>
 
@@ -191,9 +222,6 @@ export default function DashboardPlaceholder() {
               {err ? (
                 <div className="rounded-2xl border border-red-400/30 bg-red-950/20 p-4 text-sm text-red-200">
                   {err}
-                  <div className="mt-2 text-xs text-red-200/70">
-                    Confirm view columns: docket_key,module,title,status_label,is_test,sort_rank,updated_at,entity_id.
-                  </div>
                 </div>
               ) : loading ? (
                 <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4 text-sm text-slate-400">
@@ -220,7 +248,12 @@ export default function DashboardPlaceholder() {
                             <span className="text-[10px] uppercase tracking-[0.22em] text-slate-500">
                               {(r.module || "unknown").toUpperCase()}
                             </span>
-                            <span className={cx("rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-[0.18em]", pillTone(r.module))}>
+                            <span
+                              className={cx(
+                                "rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-[0.18em]",
+                                pillTone(r.module)
+                              )}
+                            >
                               {(r.status_label || "—").toUpperCase()}
                             </span>
                             <span className="rounded-full border border-slate-800 bg-slate-950/60 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-slate-500">
@@ -245,7 +278,8 @@ export default function DashboardPlaceholder() {
             </div>
 
             <div className="mt-4 text-xs text-slate-500">
-              Source: <span className="text-slate-300">public.v_governance_docket_v2</span> (entity_id + is_test scoped).
+              Source: <span className="text-slate-300">public.v_governance_docket_v2</span> • Lane-safe:{" "}
+              <span className="text-slate-300">is_test = {String(isTest)}</span>
             </div>
           </div>
         </section>
@@ -275,9 +309,7 @@ export default function DashboardPlaceholder() {
                 ))}
               </div>
 
-              <div className="mt-4 text-xs text-slate-500">
-                Wired later: focus state + context actions (RPC-only) per module.
-              </div>
+              <div className="mt-4 text-xs text-slate-500">Wired later: focus state + context actions (RPC-only).</div>
             </div>
           </div>
         </section>
@@ -288,9 +320,7 @@ export default function DashboardPlaceholder() {
             <div className="flex items-start justify-between gap-4">
               <div>
                 <div className="text-[10px] uppercase tracking-[0.22em] text-amber-300/85">AXIOM Brief</div>
-                <div className="mt-2 text-sm text-slate-300">
-                  Quiet advisory signals. Non-blocking. Links to docket items once wired.
-                </div>
+                <div className="mt-2 text-sm text-slate-300">Quiet advisory signals. Non-blocking.</div>
               </div>
 
               <div className="rounded-full border border-slate-800 bg-slate-950/70 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-slate-500">
@@ -309,7 +339,7 @@ export default function DashboardPlaceholder() {
                     <div className="text-sm">{x.s}</div>
                     <div className="text-sm text-slate-200">{x.t}</div>
                   </div>
-                  <div className="mt-2 text-xs text-slate-500">Wired later: each signal links into the docket.</div>
+                  <div className="mt-2 text-xs text-slate-500">Wired later: deep links into docket.</div>
                 </div>
               ))}
             </div>
@@ -327,9 +357,7 @@ export default function DashboardPlaceholder() {
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Recent Activity</div>
-            <div className="mt-2 text-sm text-slate-300">
-              Latest actions across the organism. Audit-style, calm, chronological.
-            </div>
+            <div className="mt-2 text-sm text-slate-300">Latest actions across the organism. Audit-style, calm, chronological.</div>
           </div>
 
           <div className="rounded-full border border-slate-800 bg-slate-950/70 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-slate-500">
@@ -353,9 +381,7 @@ export default function DashboardPlaceholder() {
           ))}
         </div>
 
-        <div className="mt-4 text-xs text-slate-500">
-          Wired later: single activity feed (last 20) with lane + entity + deep links.
-        </div>
+        <div className="mt-4 text-xs text-slate-500">Wired later: a single activity feed with lane + entity + deep links.</div>
       </section>
     </div>
   );
