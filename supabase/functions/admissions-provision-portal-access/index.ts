@@ -33,9 +33,6 @@ async function resolveUserIdByEmail(
   email: string
 ): Promise<string | null> {
   const target = email.toLowerCase();
-
-  // listUsers is paginated; we scan a few pages safely (enterprise but simple).
-  // If you ever have huge user counts, we can tighten this later.
   let page = 1;
   const perPage = 200;
 
@@ -47,7 +44,7 @@ async function resolveUserIdByEmail(
     const hit = users.find((u) => (u.email ?? "").toLowerCase() === target);
     if (hit?.id) return hit.id;
 
-    if (users.length < perPage) break; // no more pages
+    if (users.length < perPage) break;
     page += 1;
   }
 
@@ -55,12 +52,15 @@ async function resolveUserIdByEmail(
 }
 
 /**
- * Admissions → Provision Portal Access (Invite)
- * - Accepts flexible payload keys (no regressions)
- * - If applicant_email missing, resolves from onboarding_applications by application_id
- * - Idempotent: "already registered" treated as OK
- * - ✅ Enterprise: ALWAYS completes provisioning (membership + linkage) via admissions_complete_provisioning
- * - Redirect target: portal set-password with app_id
+ * Admissions → Provision Portal Access (Invite / Recovery)
+ *
+ * ✅ GUARANTEE: every click issues a FRESH link/token and sends it.
+ * ✅ If user doesn't exist -> invite
+ * ✅ If user exists -> recovery (fresh token)
+ * ✅ Returns action_link for operator "Copy link" fallback.
+ *
+ * 🔒 IMPORTANT: DOES NOT call admissions_complete_provisioning.
+ * Provisioning completion belongs to Set-Password flow (session-bound).
  */
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
@@ -78,7 +78,6 @@ Deno.serve(async (req) => {
 
     const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
 
-    // ✅ Accept many possible shapes (UI / RPC / client variations)
     const applicationId =
       pickString(body.application_id) ??
       pickString(body.app_id) ??
@@ -103,11 +102,12 @@ Deno.serve(async (req) => {
       });
     }
 
-    // ✅ If email not provided, resolve from onboarding_applications
+    // Resolve email from application row if missing
+    let applicationStatus: string | null = null;
     if (!applicantEmail) {
       const { data, error } = await supabase
         .from("onboarding_applications")
-        .select("applicant_email")
+        .select("applicant_email,status")
         .eq("id", applicationId)
         .maybeSingle();
 
@@ -121,6 +121,7 @@ Deno.serve(async (req) => {
       }
 
       applicantEmail = pickString(data?.applicant_email ?? null);
+      applicationStatus = pickString(data?.status ?? null);
 
       if (!applicantEmail) {
         return json(400, {
@@ -130,117 +131,90 @@ Deno.serve(async (req) => {
           application_id: applicationId,
         });
       }
+    } else {
+      // still try to fetch status (nice-to-have)
+      const { data } = await supabase
+        .from("onboarding_applications")
+        .select("status")
+        .eq("id", applicationId)
+        .maybeSingle();
+      applicationStatus = pickString(data?.status ?? null);
     }
 
     const email = applicantEmail.toLowerCase();
     const redirectTo = `${PORTAL_SET_PASSWORD_URL}?app_id=${encodeURIComponent(applicationId)}`;
 
-    // 1) Invite (or detect already-registered)
-    const { data: inviteData, error: inviteErr } = await supabase.auth.admin.inviteUserByEmail(email, {
-      redirectTo,
-    });
+    // Detect whether user already exists
+    const existingUserId = await resolveUserIdByEmail(supabase, email);
 
-    // 2) Determine user_id reliably
-    let userId: string | null = inviteData?.user?.id ?? null;
+    if (!existingUserId) {
+      // 1) INVITE (fresh token) + action link fallback
+      const { data: linkData, error: linkErr } = await supabase.auth.admin.generateLink({
+        type: "invite",
+        email,
+        options: { redirectTo },
+      });
+      if (linkErr) throw linkErr;
 
-    if (inviteErr) {
-      const msg = inviteErr.message || "INVITE_FAILED";
-      const lower = msg.toLowerCase();
-
-      // ✅ Idempotency: treat "already registered" as success…
-      // ✅ …BUT enterprise requires we still complete provisioning.
-      if (lower.includes("already registered") || lower.includes("already exists")) {
-        userId = await resolveUserIdByEmail(supabase, email);
-        if (!userId) {
-          return json(500, {
-            ok: false,
-            error: "USER_RESOLUTION_FAILED",
-            detail: "User exists but could not be resolved by email.",
-            application_id: applicationId,
-            applicant_email: email,
-          });
-        }
-
-        const { data: rpcData, error: rpcErr } = await supabase.rpc("admissions_complete_provisioning", {
-          p_application_id: applicationId,
-          p_user_id: userId,
-        });
-
-        if (rpcErr) {
-          return json(500, {
-            ok: false,
-            error: "COMPLETE_PROVISIONING_FAILED",
-            detail: rpcErr.message,
-            application_id: applicationId,
-            applicant_email: email,
-            user_id: userId,
-          });
-        }
-
-        return json(200, {
-          ok: true,
-          invited: false,
-          already_registered: true,
-          provisioned: true,
-          mode: "existing_user",
+      const { data: inviteData, error: inviteErr } = await supabase.auth.admin.inviteUserByEmail(email, {
+        redirectTo,
+      });
+      if (inviteErr) {
+        return json(400, {
+          ok: false,
+          error: "INVITE_FAILED",
+          detail: inviteErr.message,
           application_id: applicationId,
           applicant_email: email,
-          redirectTo,
-          user_id: userId,
-          result: rpcData ?? null,
         });
       }
 
+      return json(200, {
+        ok: true,
+        mode: "invite",
+        invited: true,
+        email_sent: true,
+        application_id: applicationId,
+        application_status: applicationStatus,
+        applicant_email: email,
+        user_id: inviteData?.user?.id ?? null,
+        redirectTo,
+        action_link: linkData?.properties?.action_link ?? null,
+      });
+    }
+
+    // 2) USER EXISTS → send RECOVERY (fresh token) + action link fallback
+    const { data: linkData, error: linkErr } = await supabase.auth.admin.generateLink({
+      type: "recovery",
+      email,
+      options: { redirectTo },
+    });
+    if (linkErr) throw linkErr;
+
+    const { error: resetErr } = await supabase.auth.admin.resetPasswordForEmail(email, { redirectTo });
+    if (resetErr) {
       return json(400, {
         ok: false,
-        error: "INVITE_FAILED",
-        detail: msg,
+        error: "RECOVERY_SEND_FAILED",
+        detail: resetErr.message,
         application_id: applicationId,
         applicant_email: email,
-      });
-    }
-
-    // If invite succeeded but user_id missing (rare), resolve it.
-    if (!userId) {
-      userId = await resolveUserIdByEmail(supabase, email);
-    }
-    if (!userId) {
-      return json(500, {
-        ok: false,
-        error: "USER_RESOLUTION_FAILED",
-        detail: "Invite succeeded but user_id could not be resolved.",
-        application_id: applicationId,
-        applicant_email: email,
-      });
-    }
-
-    // 3) Always complete provisioning (creates membership + bindings idempotently)
-    const { data: rpcData, error: rpcErr } = await supabase.rpc("admissions_complete_provisioning", {
-      p_application_id: applicationId,
-      p_user_id: userId,
-    });
-
-    if (rpcErr) {
-      return json(500, {
-        ok: false,
-        error: "COMPLETE_PROVISIONING_FAILED",
-        detail: rpcErr.message,
-        application_id: applicationId,
-        applicant_email: email,
-        user_id: userId,
+        user_id: existingUserId,
       });
     }
 
     return json(200, {
       ok: true,
-      invited: true,
-      provisioned: true,
-      mode: "invited_user",
+      mode: "recovery",
+      already_registered: true,
+      invited: false,
+      email_sent: true,
       application_id: applicationId,
+      application_status: applicationStatus,
       applicant_email: email,
+      user_id: existingUserId,
       redirectTo,
-      user_id: userId,
-      result: rpcData ?? null,
+      action_link: linkData?.properties?.action_link ?? null,
     });
   } catch (e) {
     return json(500, {
