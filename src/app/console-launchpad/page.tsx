@@ -32,23 +32,31 @@ type Tile = {
   href: string;
   badge?: string;
   cta: string;
-  external?: boolean;
   disabled?: boolean;
+  external?: boolean;
 };
 
 function TileCard(t: Tile) {
-  const content = (
-    <div
-      className={cx(
-        "group relative overflow-hidden rounded-3xl border border-white/10 bg-black/25 p-7",
-        "shadow-[0_28px_120px_rgba(0,0,0,0.55)] backdrop-blur-xl transition",
-        t.disabled
-          ? "opacity-55 cursor-not-allowed"
-          : "hover:border-amber-300/25 hover:bg-black/30 hover:shadow-[0_0_0_1px_rgba(250,204,21,0.12),0_34px_140px_rgba(0,0,0,0.70)]"
-      )}
-    >
+  const disabled = Boolean(t.disabled);
+
+  const base =
+    "group relative overflow-hidden rounded-3xl border border-white/10 bg-black/25 p-7 " +
+    "shadow-[0_28px_120px_rgba(0,0,0,0.55)] backdrop-blur-xl transition";
+
+  const hover =
+    "hover:border-amber-300/25 hover:bg-black/30 " +
+    "hover:shadow-[0_0_0_1px_rgba(250,204,21,0.12),0_34px_140px_rgba(0,0,0,0.70)] " +
+    "hover:-translate-y-[1px]";
+
+  const disabledFx =
+    "opacity-55 cursor-not-allowed hover:translate-y-0 hover:shadow-[0_28px_120px_rgba(0,0,0,0.55)]";
+
+  const Inner = (
+    <>
       <div className="flex items-start justify-between gap-3">
-        <div className="text-[10px] uppercase tracking-[0.28em] text-slate-500">{t.eyebrow}</div>
+        <div className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
+          {t.eyebrow}
+        </div>
         {t.badge ? (
           <div className="rounded-full border border-amber-300/20 bg-amber-950/10 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-amber-200">
             {t.badge}
@@ -57,12 +65,16 @@ function TileCard(t: Tile) {
       </div>
 
       <div className="mt-3 text-xl font-semibold text-slate-100">{t.title}</div>
-      <div className="mt-2 text-sm leading-relaxed text-slate-400">{t.description}</div>
+      <div className="mt-2 text-sm leading-relaxed text-slate-400">
+        {t.description}
+      </div>
 
       <div
         className={cx(
-          "mt-6 inline-flex items-center gap-2 rounded-full border border-amber-300/25 bg-amber-950/10 px-4 py-2 text-xs font-semibold text-amber-200 transition",
-          !t.disabled && "group-hover:bg-amber-950/15"
+          "mt-6 inline-flex items-center gap-2 rounded-full border px-4 py-2 text-xs font-semibold transition",
+          disabled
+            ? "border-white/10 bg-black/20 text-slate-400"
+            : "border-amber-300/25 bg-amber-950/10 text-amber-200 group-hover:bg-amber-950/15"
         )}
       >
         {t.cta}
@@ -72,22 +84,40 @@ function TileCard(t: Tile) {
       {/* subtle radial */}
       <div className="pointer-events-none absolute -right-24 -top-24 h-64 w-64 rounded-full bg-amber-400/5 blur-3xl" />
       <div className="pointer-events-none absolute -left-28 -bottom-28 h-64 w-64 rounded-full bg-sky-400/4 blur-3xl" />
-    </div>
+
+      {/* interactive sheen */}
+      <div className="pointer-events-none absolute inset-0 opacity-0 transition group-hover:opacity-100">
+        <div className="absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-amber-300/25 to-transparent" />
+        <div className="absolute -top-24 left-1/2 h-48 w-96 -translate-x-1/2 rounded-full bg-white/5 blur-3xl" />
+      </div>
+    </>
   );
 
-  if (t.disabled) return <div aria-disabled="true">{content}</div>;
+  if (disabled) {
+    return (
+      <div className={cx(base, disabledFx)}>
+        {Inner}
+        <div className="pointer-events-none absolute inset-0 bg-black/10" />
+      </div>
+    );
+  }
 
   if (t.external) {
     return (
-      <a href={t.href} target="_blank" rel="noreferrer" className="block">
-        {content}
+      <a
+        href={t.href}
+        target="_blank"
+        rel="noreferrer"
+        className={cx(base, hover)}
+      >
+        {Inner}
       </a>
     );
   }
 
   return (
-    <Link href={t.href} className="block">
-      {content}
+    <Link href={t.href} className={cx(base, hover)}>
+      {Inner}
     </Link>
   );
 }
@@ -142,18 +172,14 @@ export default function ConsoleLaunchpadPage() {
     return `${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
   }, [now]);
 
-  // ✅ FINAL TILE MAP (no 404s)
-  // - Enter Ledger -> /console (your operator home inside this same repo)
-  // - Client Console -> external (ledger.oasis... project)
-  // - Operations -> disabled for now
-  // - Holdings -> external
-  // - Real Estate -> external
+  // ✅ Your new tile plan (no CI shortcuts here)
   const tiles: Tile[] = useMemo(
     () => [
       {
         eyebrow: "Operator Console",
         title: "Enter Ledger",
-        description: "Operator home. From here the OS Dock governs all CI modules (Council, Forge, Archive, etc.).",
+        description: "Operator home. From there the OS Dock governs all CI modules (Council, Forge, Archive, etc.).",
+        // IMPORTANT: this should be the INTERNAL operator home route
         href: "/console",
         badge: "SOURCE OF TRUTH",
         cta: "Enter",
@@ -186,9 +212,9 @@ export default function ConsoleLaunchpadPage() {
         external: true,
       },
       {
-        eyebrow: "Real Estate",
+        eyebrow: "Market Surface",
         title: "Real Estate",
-        description: "Oasis International Real Estate.",
+        description: "Client-facing listings and leasing surface.",
         href: "https://oasisintlrealestate.com",
         badge: "PUBLIC",
         cta: "Open",
@@ -207,48 +233,63 @@ export default function ConsoleLaunchpadPage() {
   }
 
   return (
-    <div className="min-h-[calc(100vh-1px)] w-full">
-      <div className="mx-auto w-full max-w-6xl px-6 pb-16 pt-8">
-        {/* Stocky glass header */}
-        <div className="relative overflow-hidden rounded-[28px] border border-white/10 bg-black/25 shadow-[0_30px_140px_rgba(0,0,0,0.65)] backdrop-blur-xl">
-          <div className="flex flex-col gap-4 px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
-            {/* Left */}
-            <div className="min-w-0">
-              <div className="text-[11px] uppercase tracking-[0.28em] text-amber-300">OASIS OS</div>
-              <div className="mt-1 text-xs text-slate-400">Operator Console • Launchpad</div>
-            </div>
+    // ✅ SCROLL FIX: use min-h-screen (not locked height) and allow natural document scroll
+    <div className="min-h-screen w-full bg-black">
+      {/* ambient background */}
+      <div className="pointer-events-none fixed inset-0">
+        <div className="absolute -left-48 -top-56 h-[520px] w-[520px] rounded-full bg-amber-400/6 blur-3xl" />
+        <div className="absolute -right-56 -top-72 h-[560px] w-[560px] rounded-full bg-sky-400/5 blur-3xl" />
+        <div className="absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/10 to-transparent" />
+      </div>
 
-            {/* Center clock */}
-            <div className="flex items-center justify-start sm:justify-center">
-              <div className="rounded-full border border-white/10 bg-black/35 px-4 py-2">
-                <div className="text-[10px] uppercase tracking-[0.28em] text-slate-500">System Time</div>
-                <div className="mt-1 text-sm font-semibold tracking-[0.22em] text-slate-100">{systemTime}</div>
-              </div>
-            </div>
-
-            {/* Right session */}
-            <div className="flex items-center justify-between gap-3 sm:justify-end">
+      <div className="relative mx-auto w-full max-w-6xl px-6 pb-16 pt-6">
+        {/* ✅ STICKY + INTERACTIVE HEADER */}
+        <div className="sticky top-4 z-50">
+          <div
+            className={cx(
+              "relative overflow-hidden rounded-[28px] border border-white/10 bg-black/25 shadow-[0_30px_140px_rgba(0,0,0,0.65)] backdrop-blur-xl transition",
+              "hover:border-amber-300/20 hover:bg-black/30 hover:shadow-[0_0_0_1px_rgba(250,204,21,0.10),0_34px_160px_rgba(0,0,0,0.72)]"
+            )}
+          >
+            <div className="flex flex-col gap-4 px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
+              {/* Left */}
               <div className="min-w-0">
-                <div className="text-[10px] uppercase tracking-[0.28em] text-slate-500">Session</div>
-                <div className="mt-1 truncate text-sm text-slate-200">{email || "—"}</div>
+                <div className="text-[11px] uppercase tracking-[0.28em] text-amber-300">OASIS OS</div>
+                <div className="mt-1 text-xs text-slate-400">Operator Console • Launchpad</div>
               </div>
 
-              <button
-                onClick={signOut}
-                className={cx(
-                  "shrink-0 rounded-full border border-white/10 bg-black/35 px-4 py-2 text-xs font-semibold text-slate-200 transition",
-                  "hover:border-amber-300/25 hover:bg-black/45"
-                )}
-              >
-                Sign out
-              </button>
-            </div>
-          </div>
+              {/* Center clock */}
+              <div className="flex items-center justify-start sm:justify-center">
+                <div className="rounded-full border border-white/10 bg-black/35 px-4 py-2 transition hover:border-amber-300/20 hover:bg-black/45">
+                  <div className="text-[10px] uppercase tracking-[0.28em] text-slate-500">System Time</div>
+                  <div className="mt-1 text-sm font-semibold tracking-[0.22em] text-slate-100">{systemTime}</div>
+                </div>
+              </div>
 
-          {/* subtle top glow */}
-          <div className="pointer-events-none absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-amber-300/20 to-transparent" />
-          <div className="pointer-events-none absolute -left-32 -top-40 h-96 w-96 rounded-full bg-amber-400/6 blur-3xl" />
-          <div className="pointer-events-none absolute -right-40 -top-56 h-[420px] w-[420px] rounded-full bg-sky-400/5 blur-3xl" />
+              {/* Right session */}
+              <div className="flex items-center justify-between gap-3 sm:justify-end">
+                <div className="min-w-0">
+                  <div className="text-[10px] uppercase tracking-[0.28em] text-slate-500">Session</div>
+                  <div className="mt-1 truncate text-sm text-slate-200">{email || "—"}</div>
+                </div>
+
+                <button
+                  onClick={signOut}
+                  className={cx(
+                    "shrink-0 rounded-full border border-white/10 bg-black/35 px-4 py-2 text-xs font-semibold text-slate-200 transition",
+                    "hover:border-amber-300/25 hover:bg-black/45 hover:-translate-y-[1px]"
+                  )}
+                >
+                  Sign out
+                </button>
+              </div>
+            </div>
+
+            {/* subtle top glow */}
+            <div className="pointer-events-none absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-amber-300/20 to-transparent" />
+            <div className="pointer-events-none absolute -left-32 -top-40 h-96 w-96 rounded-full bg-amber-400/6 blur-3xl" />
+            <div className="pointer-events-none absolute -right-40 -top-56 h-[420px] w-[420px] rounded-full bg-sky-400/5 blur-3xl" />
+          </div>
         </div>
 
         {/* Hero */}
@@ -256,8 +297,8 @@ export default function ConsoleLaunchpadPage() {
           <div className="text-[11px] uppercase tracking-[0.28em] text-slate-500">Private Authority Surface</div>
           <h1 className="mt-3 text-3xl font-semibold text-slate-100">Deliberate access to institutional systems.</h1>
           <p className="mt-4 text-sm leading-relaxed text-slate-400">
-            This console is an entrance — not a workspace. It routes to sovereign chambers. Gold indicates verified state
-            and authority actions — never decoration.
+            This console is an entrance — not a workspace. It routes to sovereign chambers.
+            Gold indicates verified state and authority actions — never decoration.
           </p>
         </div>
 
