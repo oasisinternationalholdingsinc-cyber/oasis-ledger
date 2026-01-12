@@ -1,18 +1,41 @@
-// middleware.ts
-import { NextResponse, type NextRequest } from "next/server";
+import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
 
-export function middleware(request: NextRequest) {
-  const path = request.nextUrl.pathname;
+function hasAuthCookie(req: NextRequest) {
+  const names = [
+    "sb-access-token",
+    "sb-refresh-token",
+    "sb:token",
+    "supabase-auth-token",
+    // Keep this commented unless you KNOW you have it:
+    // "sb-mumalwdczrmxvbenqmgh-auth-token",
+  ];
 
-  // 🔓 allow everything except protected APIs
-  if (!path.startsWith("/api/secure")) {
-    return NextResponse.next();
-  }
-
-  // 🔒 API auth handled inside route handlers (Supabase server client)
-  return NextResponse.next();
+  return names.some((n) => Boolean(req.cookies.get(n)?.value));
 }
 
+export function middleware(req: NextRequest) {
+  const { pathname } = req.nextUrl;
+
+  // ✅ ONLY root is the enterprise "entrance router"
+  if (pathname !== "/") return NextResponse.next();
+
+  // ✅ Authenticated → console launchpad
+  if (hasAuthCookie(req)) {
+    const url = req.nextUrl.clone();
+    url.pathname = "/console";
+    url.search = "";
+    return NextResponse.redirect(url);
+  }
+
+  // ✅ Not authenticated → login (next=/console)
+  const url = req.nextUrl.clone();
+  url.pathname = "/login";
+  url.search = `?next=${encodeURIComponent("/console")}`;
+  return NextResponse.redirect(url);
+}
+
+// ✅ Match ONLY "/" to avoid touching (os), console, login, api, etc.
 export const config = {
-  matcher: ["/api/secure/:path*"],
+  matcher: ["/"],
 };
