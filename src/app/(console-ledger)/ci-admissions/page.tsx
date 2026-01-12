@@ -19,7 +19,8 @@ type StatusTab = "ALL" | string;
  * intent, requested_services, expected_start_date,
  * risk_tier, risk_notes,
  * created_by, assigned_to, decided_by,
- * entity_id, entity_slug, metadata
+ * entity_id, entity_slug, metadata,
+ * ✅ intake_entity_id (new)
  */
 
 type ApplicationRow = {
@@ -61,6 +62,9 @@ type ApplicationRow = {
 
   entity_id: string | null;
   entity_slug: string | null;
+
+  // ✅ NEW (intake scoping)
+  intake_entity_id: string | null;
 
   metadata: any | null;
 };
@@ -279,7 +283,6 @@ export default function CIAdmissionsPage() {
   const [tasks, setTasks] = useState<TaskRow[]>([]);
 
   // action drafts
-  // NOTE: keep decision enum values strict (avoid invalid enum payloads)
   const [decisionKind, setDecisionKind] = useState<string>("APPROVED");
   const [decisionSummary, setDecisionSummary] = useState<string>("");
   const [decisionConditions, setDecisionConditions] = useState<string>("");
@@ -291,7 +294,6 @@ export default function CIAdmissionsPage() {
 
   // ---- Task builder UI state (replaces JSON textarea) ----
   const [taskDrafts, setTaskDrafts] = useState<UiProvisionTask[]>(() => {
-    // Start with a sane default set (enabled)
     const defaults = [TASK_TEMPLATES[0], TASK_TEMPLATES[1], TASK_TEMPLATES[2], TASK_TEMPLATES[4]].filter(Boolean) as Array<
       Omit<UiProvisionTask, "enabled">
     >;
@@ -351,17 +353,30 @@ export default function CIAdmissionsPage() {
       const eid = await ensureEntityId(activeEntitySlug);
 
       // ONLY columns that exist in v_onboarding_admissions_inbox
+      // ✅ ADJUSTMENT: include intake_entity_id (new)
       const baseSelect =
-        "id,status,submitted_at,triaged_at,decided_at,provisioned_at,created_at,updated_at,applicant_type,applicant_name,applicant_email,applicant_phone,organization_legal_name,organization_trade_name,website,incorporation_number,jurisdiction_country,jurisdiction_region,intent,requested_services,expected_start_date,risk_tier,risk_notes,created_by,assigned_to,decided_by,entity_id,entity_slug,metadata";
+        "id,status,submitted_at,triaged_at,decided_at,provisioned_at,created_at,updated_at,applicant_type,applicant_name,applicant_email,applicant_phone,organization_legal_name,organization_trade_name,website,incorporation_number,jurisdiction_country,jurisdiction_region,intent,requested_services,expected_start_date,risk_tier,risk_notes,created_by,assigned_to,decided_by,entity_id,entity_slug,intake_entity_id,metadata";
 
       const VIEW = "v_onboarding_admissions_inbox";
 
-      const tryByEntityId = async () => {
-        const { data, error } = await supabase.from(VIEW).select(baseSelect).eq("entity_id", eid).order("created_at", { ascending: false });
+      /**
+       * ✅ ADJUSTMENT (NO wiring regression):
+       * Admissions visibility must be scoped by intake_entity_id (always set),
+       * while still including provisioned rows that already have entity_id.
+       * So we filter by:
+       *   intake_entity_id = eid  OR  entity_id = eid
+       */
+      const tryByIntakeOrEntityId = async () => {
+        const { data, error } = await supabase
+          .from(VIEW)
+          .select(baseSelect)
+          .or(`intake_entity_id.eq.${eid},entity_id.eq.${eid}`)
+          .order("created_at", { ascending: false });
         if (error) throw error;
         return (data ?? []) as ApplicationRow[];
       };
 
+      // Fallback if RLS/view lacks some fields in older envs
       const tryByEntitySlug = async () => {
         const { data, error } = await supabase.from(VIEW).select(baseSelect).eq("entity_slug", activeEntitySlug).order("created_at", { ascending: false });
         if (error) throw error;
@@ -370,7 +385,7 @@ export default function CIAdmissionsPage() {
 
       let rows: ApplicationRow[] = [];
       try {
-        rows = await tryByEntityId();
+        rows = await tryByIntakeOrEntityId();
         if (rows.length === 0) rows = await tryByEntitySlug();
       } catch (e: any) {
         if (isMissingColumnErr(e)) rows = await tryByEntitySlug();
@@ -503,7 +518,6 @@ export default function CIAdmissionsPage() {
     setRequestInfoMsg("");
     setRequestInfoFields("");
 
-    // Keep task drafts stable (no regression); do not auto-reset on selection.
     void loadRelated(a.id);
   }
 
@@ -595,9 +609,8 @@ export default function CIAdmissionsPage() {
     setInfo(null);
 
     try {
-      // Defaults (can be overridden via optional JSON box)
       let channels: string[] = ["email"];
-      let dueAt: string | null = null; // ISO string (timestamptz)
+      let dueAt: string | null = null;
       let nextStatus = "needs_info";
 
       const raw = requestInfoFields.trim();
@@ -647,7 +660,6 @@ export default function CIAdmissionsPage() {
       const enabled = taskDrafts.filter((t) => t.enabled);
       if (enabled.length === 0) return flashError("Select at least one task.");
 
-      // RPC expects JSONB array (not an object wrapper).
       const payload = enabled.map((t) => ({
         task_key: normalizeTaskKey(t.task_key || t.title || "task"),
         title: (t.title || "").trim() || undefined,
@@ -675,7 +687,7 @@ export default function CIAdmissionsPage() {
     }
   }
 
-  // ---- NEW: Run button for task execution (Edge Function) ----
+  // ---- Run button for task execution (Edge Function) ----
   async function runProvisioningTask(t: TaskRow) {
     if (!selected?.id) return flashError("Select an application first.");
     if (!t?.id) return flashError("Task id missing.");
@@ -701,8 +713,6 @@ export default function CIAdmissionsPage() {
         throw new Error("No invite email found (metadata.organization_email or applicant_email).");
       }
 
-      // Edge Function slug (deploy this exact name):
-      // admissions-provision-portal-access
       const { data, error } = await supabase.functions.invoke("admissions-provision-portal-access", {
         body: {
           application_id: selected.id,
@@ -724,7 +734,6 @@ export default function CIAdmissionsPage() {
       await reload(true);
     } catch (e: any) {
       flashError(e?.message ?? "Failed to run provisioning task.");
-      // Refresh rails anyway (so last_error/result updates show if server wrote them)
       if (selected?.id) {
         await loadRelated(selected.id);
       }
@@ -952,7 +961,7 @@ export default function CIAdmissionsPage() {
               ))}
             </div>
 
-            <div className="text-[11px] text-slate-500">Queue is entity-scoped. Archive is a tab. Hard delete is guarded.</div>
+            <div className="text-[11px] text-slate-500">Queue is entity-scoped (intake). Archive is a tab. Hard delete is guarded.</div>
           </div>
 
           {/* Workspace */}
@@ -1654,7 +1663,6 @@ export default function CIAdmissionsPage() {
                                     </div>
                                   </div>
 
-                                  {/* Run button (Edge) for provision_portal_access */}
                                   {isPortalInvite && (
                                     <button
                                       type="button"
