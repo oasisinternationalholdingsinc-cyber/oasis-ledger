@@ -1,10 +1,10 @@
 "use client";
 
 // src/app/console-launchpad/page.tsx
-// ✅ ENTERPRISE OS LAUNCHPAD — SCROLL FIXED, MORE INTERACTIVE, NO WIRING CHANGES
-// - Fixes "can't scroll" by making the CONTENT the scroll container (not the body)
-// - Keeps your routes/links stable (edit only the HREF constants if yours differ)
-// - Enhances hover/glow + tactile tiles without changing any data wiring
+// ✅ FINAL ENTERPRISE POLISH — ROYAL NAVY OASIS FIELD + GLASS HEADER + SCROLL FIX
+// ✅ NO WIRING CHANGES (same HREF constants, same structure)
+// ✅ Fixes “too dark” by restoring deep royal-navy base + softer vignette
+// ✅ Keeps top bar pinned + true glass (blue-tinted) for Oasis vibe
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
@@ -42,7 +42,6 @@ const HREFS = {
   enterLedger: "/console",
   clientConsole: "https://ledger.oasisintlholdings.com",
   holdingsPublic: "https://oasisintlholdings.com",
-  // optional placeholders (keep if you already have these routes)
   operations: "/console/operations",
 };
 
@@ -58,7 +57,13 @@ function TopBar() {
 
   return (
     <div className="relative z-20 mx-auto w-full max-w-6xl px-6 pt-8">
-      <div className="rounded-[28px] border border-white/10 bg-black/30 backdrop-blur-xl shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
+      <div
+        className={cx(
+          "rounded-[28px] border border-white/10",
+          "bg-[#070f24]/35 backdrop-blur-xl",
+          "shadow-[0_30px_140px_rgba(0,0,0,0.55),0_0_0_1px_rgba(99,102,241,0.06)]"
+        )}
+      >
         <div className="grid grid-cols-12 items-center gap-4 px-6 py-5">
           <div className="col-span-12 md:col-span-4">
             <div className="text-[11px] tracking-[0.38em] text-amber-200/80">
@@ -70,7 +75,13 @@ function TopBar() {
           </div>
 
           <div className="col-span-12 md:col-span-4 flex justify-center">
-            <div className="rounded-full border border-white/10 bg-black/25 px-5 py-3 backdrop-blur-md shadow-[0_16px_80px_rgba(0,0,0,0.45)]">
+            <div
+              className={cx(
+                "rounded-full border border-white/10",
+                "bg-black/10 px-5 py-3 backdrop-blur-md",
+                "shadow-[0_16px_80px_rgba(0,0,0,0.45),0_0_0_1px_rgba(250,204,21,0.05)]"
+              )}
+            >
               <div className="text-[10px] tracking-[0.35em] text-white/45 text-center">
                 SYSTEM TIME
               </div>
@@ -85,17 +96,20 @@ function TopBar() {
               <div className="text-[10px] tracking-[0.35em] text-white/45">
                 SESSION
               </div>
-              {/* keep this static to avoid wiring changes */}
+              {/* keep static to avoid wiring changes */}
               <div className="mt-1 text-sm text-white/85">abbas1167@hotmail.com</div>
             </div>
 
-            {/* keep your existing signout wiring; if you already have a component, swap this back */}
+            {/* Keep your real signout wiring if you have it elsewhere */}
             <button
               type="button"
-              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-white/85 transition hover:border-amber-300/25 hover:bg-white/7 hover:shadow-[0_0_0_1px_rgba(250,204,21,0.10)]"
+              className={cx(
+                "rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-white/85",
+                "transition hover:border-amber-300/25 hover:bg-white/7",
+                "hover:shadow-[0_0_0_1px_rgba(250,204,21,0.10)]"
+              )}
               onClick={() => {
-                // no wiring changes: if you have a real signout handler elsewhere, keep it there.
-                // this is just a safe placeholder that won't break builds.
+                // safe placeholder; swap back to your real signout handler if needed
                 window.location.href = "/login";
               }}
             >
@@ -117,26 +131,23 @@ function TileCard(t: Tile) {
   return (
     <div
       className={cx(
-        "group relative overflow-hidden rounded-3xl border border-white/10 bg-black/20 p-7",
-        "shadow-[0_26px_120px_rgba(0,0,0,0.55)] backdrop-blur-xl",
+        "group relative overflow-hidden rounded-3xl border border-white/10 p-7",
+        "bg-[#070f24]/22 backdrop-blur-xl",
+        "shadow-[0_26px_120px_rgba(0,0,0,0.55)]",
         "transition duration-300",
         !t.disabled &&
-          "hover:border-amber-300/25 hover:bg-black/28 hover:shadow-[0_0_0_1px_rgba(250,204,21,0.10),0_34px_150px_rgba(0,0,0,0.72)]",
+          "hover:border-amber-300/25 hover:bg-[#070f24]/28 hover:shadow-[0_0_0_1px_rgba(250,204,21,0.10),0_34px_150px_rgba(0,0,0,0.72)]",
         !t.disabled && "hover:-translate-y-[1px]",
         t.disabled && "opacity-55"
       )}
     >
-      {/* Glow */}
+      {/* Oasis glow */}
       <div className="pointer-events-none absolute inset-0 opacity-0 transition duration-300 group-hover:opacity-100">
-        <div className="absolute -inset-24 bg-[radial-gradient(circle_at_30%_20%,rgba(250,204,21,0.12),transparent_55%),radial-gradient(circle_at_70%_30%,rgba(255,255,255,0.06),transparent_50%)]" />
+        <div className="absolute -inset-24 bg-[radial-gradient(circle_at_28%_18%,rgba(99,102,241,0.18),transparent_56%),radial-gradient(circle_at_74%_26%,rgba(56,189,248,0.14),transparent_55%),radial-gradient(circle_at_30%_20%,rgba(250,204,21,0.10),transparent_58%)]" />
       </div>
 
       <div className="relative z-10 flex items-start justify-between gap-3">
-        <div>
-          <div className="text-[11px] tracking-[0.35em] text-white/45">
-            {t.eyebrow}
-          </div>
-        </div>
+        <div className="text-[11px] tracking-[0.35em] text-white/45">{t.eyebrow}</div>
 
         {t.badge ? (
           <div className="rounded-full border border-amber-200/20 bg-amber-200/5 px-3 py-1 text-[10px] tracking-[0.25em] text-amber-200/80">
@@ -171,17 +182,15 @@ function TileCard(t: Tile) {
         </div>
       </div>
 
-      {/* subtle bottom rail */}
       <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent" />
     </div>
   );
 }
 
 function CalendarPanel() {
-  // minimal static calendar grid to match your screenshot, no external deps
   const now = new Date();
   const year = now.getFullYear();
-  const month = now.getMonth(); // 0-index
+  const month = now.getMonth();
 
   const monthLabel = useMemo(() => {
     return new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" }).format(
@@ -195,11 +204,8 @@ function CalendarPanel() {
     const last = new Date(year, month + 1, 0).getDate();
 
     const cells: Array<{ day: number; muted: boolean }> = [];
-    // leading blanks
     for (let i = 0; i < startDow; i++) cells.push({ day: 0, muted: true });
-    // month days
     for (let d = 1; d <= last; d++) cells.push({ day: d, muted: false });
-    // trailing to complete rows
     while (cells.length % 7 !== 0) cells.push({ day: 0, muted: true });
     return cells;
   }, [year, month]);
@@ -207,7 +213,7 @@ function CalendarPanel() {
   const today = now.getDate();
 
   return (
-    <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-black/20 p-7 backdrop-blur-xl shadow-[0_26px_120px_rgba(0,0,0,0.55)]">
+    <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-[#070f24]/22 p-7 backdrop-blur-xl shadow-[0_26px_120px_rgba(0,0,0,0.55)]">
       <div className="flex items-center justify-between">
         <div>
           <div className="text-[11px] tracking-[0.35em] text-amber-200/80">CALENDAR</div>
@@ -229,6 +235,7 @@ function CalendarPanel() {
             disabled
           >
             →
+
           </button>
         </div>
       </div>
@@ -236,7 +243,8 @@ function CalendarPanel() {
       <div className="mt-6 flex items-center justify-between">
         <div className="text-base font-semibold text-white/90">{monthLabel}</div>
         <div className="text-xs tracking-[0.20em] text-white/35">
-          {year}-{pad2(month + 1)}-01 — {year}-{pad2(month + 1)}-{pad2(days.filter((d) => !d.muted).length)}
+          {year}-{pad2(month + 1)}-01 — {year}-{pad2(month + 1)}-
+          {pad2(days.filter((d) => !d.muted).length)}
         </div>
       </div>
 
@@ -312,17 +320,13 @@ export default function ConsoleLaunchpadPage() {
   ];
 
   return (
-    // ✅ SCROLL FIX:
-    // Make the *page* a fixed-height viewport container, and make MAIN the scroll container.
-    // This bypasses any global body/html overflow locks without touching wiring or global CSS.
-    <div className="relative h-[100svh] w-full overflow-hidden bg-black">
-      {/* background (fixed) */}
+    <div className="relative h-[100svh] w-full overflow-hidden bg-[#040816]">
+      {/* Royal Navy Oasis Field */}
       <div className="pointer-events-none absolute inset-0">
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_18%_12%,rgba(250,204,21,0.10),transparent_42%),radial-gradient(circle_at_78%_18%,rgba(56,189,248,0.10),transparent_46%),radial-gradient(circle_at_42%_90%,rgba(255,255,255,0.06),transparent_55%)]" />
-        <div className="absolute inset-0 bg-gradient-to-b from-black via-black/96 to-black" />
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_22%_14%,rgba(56,189,248,0.16),transparent_48%),radial-gradient(circle_at_78%_22%,rgba(99,102,241,0.14),transparent_52%),radial-gradient(circle_at_46%_92%,rgba(255,255,255,0.06),transparent_58%),radial-gradient(circle_at_18%_12%,rgba(250,204,21,0.10),transparent_44%)]" />
+        <div className="absolute inset-0 bg-gradient-to-b from-[#040816]/35 via-[#040816]/70 to-[#02040c]" />
       </div>
 
-      {/* Top bar (fixed, non-scrolling) */}
       <TopBar />
 
       {/* ✅ MAIN is the scroll region */}
@@ -353,8 +357,7 @@ export default function ConsoleLaunchpadPage() {
             </div>
           </div>
 
-          {/* footer rail */}
-          <div className="mt-12 rounded-3xl border border-white/10 bg-black/20 p-6 text-sm text-white/55 backdrop-blur-xl">
+          <div className="mt-12 rounded-3xl border border-white/10 bg-[#070f24]/18 p-6 text-sm text-white/55 backdrop-blur-xl">
             <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
               <div className="text-[11px] tracking-[0.35em] text-white/35">
                 OASIS COMMAND CONSOLE
