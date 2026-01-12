@@ -32,16 +32,19 @@ type Tile = {
   href: string;
   badge?: string;
   cta: string;
+  external?: boolean;
+  disabled?: boolean;
 };
 
 function TileCard(t: Tile) {
-  return (
-    <Link
-      href={t.href}
+  const content = (
+    <div
       className={cx(
         "group relative overflow-hidden rounded-3xl border border-white/10 bg-black/25 p-7",
         "shadow-[0_28px_120px_rgba(0,0,0,0.55)] backdrop-blur-xl transition",
-        "hover:border-amber-300/25 hover:bg-black/30 hover:shadow-[0_0_0_1px_rgba(250,204,21,0.12),0_34px_140px_rgba(0,0,0,0.70)]"
+        t.disabled
+          ? "opacity-55 cursor-not-allowed"
+          : "hover:border-amber-300/25 hover:bg-black/30 hover:shadow-[0_0_0_1px_rgba(250,204,21,0.12),0_34px_140px_rgba(0,0,0,0.70)]"
       )}
     >
       <div className="flex items-start justify-between gap-3">
@@ -56,7 +59,12 @@ function TileCard(t: Tile) {
       <div className="mt-3 text-xl font-semibold text-slate-100">{t.title}</div>
       <div className="mt-2 text-sm leading-relaxed text-slate-400">{t.description}</div>
 
-      <div className="mt-6 inline-flex items-center gap-2 rounded-full border border-amber-300/25 bg-amber-950/10 px-4 py-2 text-xs font-semibold text-amber-200 transition group-hover:bg-amber-950/15">
+      <div
+        className={cx(
+          "mt-6 inline-flex items-center gap-2 rounded-full border border-amber-300/25 bg-amber-950/10 px-4 py-2 text-xs font-semibold text-amber-200 transition",
+          !t.disabled && "group-hover:bg-amber-950/15"
+        )}
+      >
         {t.cta}
         <span className="opacity-80">→</span>
       </div>
@@ -64,6 +72,22 @@ function TileCard(t: Tile) {
       {/* subtle radial */}
       <div className="pointer-events-none absolute -right-24 -top-24 h-64 w-64 rounded-full bg-amber-400/5 blur-3xl" />
       <div className="pointer-events-none absolute -left-28 -bottom-28 h-64 w-64 rounded-full bg-sky-400/4 blur-3xl" />
+    </div>
+  );
+
+  if (t.disabled) return <div aria-disabled="true">{content}</div>;
+
+  if (t.external) {
+    return (
+      <a href={t.href} target="_blank" rel="noreferrer" className="block">
+        {content}
+      </a>
+    );
+  }
+
+  return (
+    <Link href={t.href} className="block">
+      {content}
     </Link>
   );
 }
@@ -118,41 +142,57 @@ export default function ConsoleLaunchpadPage() {
     return `${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
   }, [now]);
 
+  // ✅ FINAL TILE MAP (no 404s)
+  // - Enter Ledger -> /console (your operator home inside this same repo)
+  // - Client Console -> external (ledger.oasis... project)
+  // - Operations -> disabled for now
+  // - Holdings -> external
+  // - Real Estate -> external
   const tiles: Tile[] = useMemo(
     () => [
       {
-        eyebrow: "Institutional Record",
-        title: "Digital Parliament Ledger",
-        description:
-          "Canonical system of record for governance, resolutions, compliance, signatures, and archive discipline.",
-        // ✅ Ledger lives under console-ledger now
-        href: "/console-ledger",
+        eyebrow: "Operator Console",
+        title: "Enter Ledger",
+        description: "Operator home. From here the OS Dock governs all CI modules (Council, Forge, Archive, etc.).",
+        href: "/console",
         badge: "SOURCE OF TRUTH",
-        cta: "Enter Ledger",
+        cta: "Enter",
       },
       {
-        eyebrow: "Admission Authority",
-        title: "CI-Admissions",
-        description: "Review intake, request evidence, record decisions, and provision entities under mandate.",
-        href: "/console-ledger/ci-admissions",
-        badge: "QUEUE",
-        cta: "Open Admissions",
+        eyebrow: "Client Surface",
+        title: "Client Console",
+        description: "Client-facing execution console (separate deployment).",
+        href: "https://ledger.oasisintlholdings.com",
+        badge: "CLIENT",
+        cta: "Open",
+        external: true,
       },
       {
-        eyebrow: "Execution Chamber",
-        title: "CI-Forge",
-        description: "Signature-required execution only. Envelopes, signing ceremonies, and controlled sealing.",
-        href: "/console-ledger/ci-forge",
-        badge: "SIGNATURE",
-        cta: "Open Forge",
+        eyebrow: "Future Workstream",
+        title: "Operations",
+        description: "Reserved. Internal operations module (disabled until defined).",
+        href: "#",
+        badge: "SOON",
+        cta: "Disabled",
+        disabled: true,
       },
       {
-        eyebrow: "Registry of Record",
-        title: "CI-Archive",
-        description: "Minute Book registry, verified documents, and immutable archive surfaces. Repair-safe.",
-        href: "/console-ledger/ci-archive/minute-book",
-        badge: "SEALED",
-        cta: "Access Archive",
+        eyebrow: "Institutional Face",
+        title: "Holdings",
+        description: "Suit-and-tie public authority surface.",
+        href: "https://oasisintlholdings.com",
+        badge: "PUBLIC",
+        cta: "Open",
+        external: true,
+      },
+      {
+        eyebrow: "Real Estate",
+        title: "Real Estate",
+        description: "Oasis International Real Estate.",
+        href: "https://oasisintlrealestate.com",
+        badge: "PUBLIC",
+        cta: "Open",
+        external: true,
       },
     ],
     []
