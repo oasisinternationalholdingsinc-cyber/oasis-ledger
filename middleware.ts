@@ -20,22 +20,22 @@ export function middleware(req: NextRequest) {
   // ✅ ONLY root is the enterprise "entrance router"
   if (pathname !== "/") return NextResponse.next();
 
-  // ✅ Authenticated → console launchpad
+  // ✅ Authenticated → console launchpad (operator entrance)
   if (hasAuthCookie(req)) {
     const url = req.nextUrl.clone();
-    url.pathname = "/console";
+    url.pathname = "/console-launchpad";
     url.search = "";
     return NextResponse.redirect(url);
   }
 
-  // ✅ Not authenticated → login (next=/console)
+  // ✅ Not authenticated → login (next=/console-launchpad)
   const url = req.nextUrl.clone();
   url.pathname = "/login";
-  url.search = `?next=${encodeURIComponent("/console")}`;
+  url.search = `?next=${encodeURIComponent("/console-launchpad")}`;
   return NextResponse.redirect(url);
 }
 
-// ✅ Match ONLY "/" to avoid touching (os), console, login, api, etc.
+// ✅ Match ONLY "/" to avoid touching ledger/os routes, login, api, etc.
 export const config = {
   matcher: ["/"],
 };
