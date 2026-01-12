@@ -68,7 +68,7 @@ function TileCard(t: Tile) {
   );
 }
 
-export default function ConsolePage() {
+export default function ConsoleLaunchpadPage() {
   const router = useRouter();
   const pathname = usePathname();
   const now = useSystemClock();
@@ -76,9 +76,15 @@ export default function ConsolePage() {
   const [booting, setBooting] = useState(true);
   const [email, setEmail] = useState<string>("");
 
-  // ✅ Authenticated entrance (console only). DOES NOT TOUCH (os).
+  // ✅ Authenticated entrance (LAUNCHPAD only). Does NOT touch Ledger internals.
   useEffect(() => {
     let alive = true;
+
+    const bounceToLogin = (p?: string | null) => {
+      const raw = p && p.startsWith("/") && !p.startsWith("//") ? p : "/console-launchpad";
+      const next = encodeURIComponent(raw);
+      router.replace(`/login?next=${next}`);
+    };
 
     (async () => {
       const {
@@ -88,8 +94,7 @@ export default function ConsolePage() {
       if (!alive) return;
 
       if (!session) {
-        const next = encodeURIComponent(pathname || "/console");
-        router.replace(`/login?next=${next}`);
+        bounceToLogin(pathname || "/console-launchpad");
         return;
       }
 
@@ -97,13 +102,9 @@ export default function ConsolePage() {
       setBooting(false);
     })();
 
-    // ✅ FIX: typed params (no implicit any)
     const { data: sub } = supabase.auth.onAuthStateChange(
       (_event: AuthChangeEvent, session: Session | null) => {
-        if (!session) {
-          const next = encodeURIComponent(pathname || "/console");
-          router.replace(`/login?next=${next}`);
-        }
+        if (!session) bounceToLogin(pathname || "/console-launchpad");
       }
     );
 
@@ -124,7 +125,8 @@ export default function ConsolePage() {
         title: "Digital Parliament Ledger",
         description:
           "Canonical system of record for governance, resolutions, compliance, signatures, and archive discipline.",
-        href: "/ci-council",
+        // ✅ Ledger lives under console-ledger now
+        href: "/console-ledger",
         badge: "SOURCE OF TRUTH",
         cta: "Enter Ledger",
       },
@@ -132,7 +134,7 @@ export default function ConsolePage() {
         eyebrow: "Admission Authority",
         title: "CI-Admissions",
         description: "Review intake, request evidence, record decisions, and provision entities under mandate.",
-        href: "/ci-admissions",
+        href: "/console-ledger/ci-admissions",
         badge: "QUEUE",
         cta: "Open Admissions",
       },
@@ -140,7 +142,7 @@ export default function ConsolePage() {
         eyebrow: "Execution Chamber",
         title: "CI-Forge",
         description: "Signature-required execution only. Envelopes, signing ceremonies, and controlled sealing.",
-        href: "/ci-forge",
+        href: "/console-ledger/ci-forge",
         badge: "SIGNATURE",
         cta: "Open Forge",
       },
@@ -148,7 +150,7 @@ export default function ConsolePage() {
         eyebrow: "Registry of Record",
         title: "CI-Archive",
         description: "Minute Book registry, verified documents, and immutable archive surfaces. Repair-safe.",
-        href: "/ci-archive/minute-book",
+        href: "/console-ledger/ci-archive/minute-book",
         badge: "SEALED",
         cta: "Access Archive",
       },
@@ -160,7 +162,7 @@ export default function ConsolePage() {
     try {
       await supabase.auth.signOut();
     } finally {
-      window.location.href = "/login?next=%2Fconsole";
+      window.location.href = "/login?next=%2Fconsole-launchpad";
     }
   }
 
@@ -173,7 +175,7 @@ export default function ConsolePage() {
             {/* Left */}
             <div className="min-w-0">
               <div className="text-[11px] uppercase tracking-[0.28em] text-amber-300">OASIS OS</div>
-              <div className="mt-1 text-xs text-slate-400">Operator Console • Authority Entrance</div>
+              <div className="mt-1 text-xs text-slate-400">Operator Console • Launchpad</div>
             </div>
 
             {/* Center clock */}

@@ -12,6 +12,13 @@ export default function OsAuthGate({ children }: { children: React.ReactNode }) 
   useEffect(() => {
     let alive = true;
 
+    const bounceToLogin = (p?: string | null) => {
+      // ✅ Enterprise default entry: Launchpad (not a CI module route)
+      const raw = (p && p.startsWith("/") ? p : "/console-launchpad") || "/console-launchpad";
+      const next = encodeURIComponent(raw);
+      router.replace(`/login?next=${next}`);
+    };
+
     (async () => {
       const {
         data: { session },
@@ -19,18 +26,12 @@ export default function OsAuthGate({ children }: { children: React.ReactNode }) 
 
       if (!alive) return;
 
-      if (!session) {
-        const next = encodeURIComponent(pathname || "/ci-council");
-        router.replace(`/login?next=${next}`);
-      }
+      if (!session) bounceToLogin(pathname);
     })();
 
     const { data: sub } = supabase.auth.onAuthStateChange(
       (_event: AuthChangeEvent, session: Session | null) => {
-        if (!session) {
-          const next = encodeURIComponent(pathname || "/ci-council");
-          router.replace(`/login?next=${next}`);
-        }
+        if (!session) bounceToLogin(pathname);
       }
     );
 

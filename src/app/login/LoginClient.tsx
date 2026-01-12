@@ -1,14 +1,28 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
+
+function isSafeNext(raw: string | null) {
+  if (!raw) return false;
+  const s = raw.trim();
+  // must be an internal path (no protocol, no //)
+  if (!s.startsWith("/")) return false;
+  if (s.startsWith("//")) return false;
+  return true;
+}
 
 export default function LoginClient() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  const nextPath = searchParams.get("next") || "/ci-council";
+  // ✅ Enterprise default entry: Console Launchpad
+  // (Public portal stays unauthenticated; operators authenticate to enter console.)
+  const nextPath = useMemo(() => {
+    const raw = searchParams.get("next");
+    return isSafeNext(raw) ? raw!.trim() : "/console-launchpad";
+  }, [searchParams]);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -26,10 +40,14 @@ export default function LoginClient() {
   }, []);
 
   const handleLogin = async () => {
-    if (!email || !password) return;
+    if (!email || !password || loading) return;
+
     setLoading(true);
 
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { error } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password,
+    });
 
     setLoading(false);
 
@@ -38,7 +56,7 @@ export default function LoginClient() {
       return;
     }
 
-    // go where middleware asked us to go
+    // ✅ go where the gate asked us to go (or default to Launchpad)
     router.replace(nextPath);
   };
 
@@ -59,7 +77,9 @@ export default function LoginClient() {
           Oasis Digital Parliament
         </div>
 
-        <h1 className="text-xl font-semibold text-slate-100 mb-1">Oasis OS Login</h1>
+        <h1 className="text-xl font-semibold text-slate-100 mb-1">
+          Operator Authentication
+        </h1>
 
         <p className="text-xs text-slate-400 mb-6">
           Secure access to the Oasis Digital Governance Operating System
@@ -76,6 +96,7 @@ export default function LoginClient() {
               placeholder="you@organization.com"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              autoComplete="email"
             />
           </div>
 
@@ -89,9 +110,13 @@ export default function LoginClient() {
               placeholder="••••••••"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              autoComplete="current-password"
             />
             <div className="text-right mt-1">
-              <a href="/forgot-password" className="text-[11px] text-slate-500 hover:text-slate-300 transition">
+              <a
+                href="/forgot-password"
+                className="text-[11px] text-slate-500 hover:text-slate-300 transition"
+              >
                 Forgot password?
               </a>
             </div>
@@ -108,7 +133,8 @@ export default function LoginClient() {
         </div>
 
         <div className="mt-6 pt-4 border-t border-slate-800 text-[11px] text-slate-500 text-center">
-          Oasis OS is restricted to authorized operators. If you require access, contact your Oasis administrator.
+          Oasis OS is restricted to authorized operators. If you require access,
+          contact your Oasis administrator.
         </div>
       </div>
     </main>
