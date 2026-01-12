@@ -27,11 +27,39 @@ function pickString(v: unknown): string | null {
   return s.length ? s : null;
 }
 
+/** Resolve an existing Auth user id by email (service role). */
+async function resolveUserIdByEmail(
+  supabase: ReturnType<typeof createClient>,
+  email: string
+): Promise<string | null> {
+  const target = email.toLowerCase();
+
+  // listUsers is paginated; we scan a few pages safely (enterprise but simple).
+  // If you ever have huge user counts, we can tighten this later.
+  let page = 1;
+  const perPage = 200;
+
+  for (let i = 0; i < 10; i++) {
+    const { data, error } = await supabase.auth.admin.listUsers({ page, perPage });
+    if (error) throw error;
+
+    const users = data?.users ?? [];
+    const hit = users.find((u) => (u.email ?? "").toLowerCase() === target);
+    if (hit?.id) return hit.id;
+
+    if (users.length < perPage) break; // no more pages
+    page += 1;
+  }
+
+  return null;
+}
+
 /**
  * Admissions → Provision Portal Access (Invite)
  * - Accepts flexible payload keys (no regressions)
  * - If applicant_email missing, resolves from onboarding_applications by application_id
- * - Idempotent: "already registered" treated as OK (no hard failure)
+ * - Idempotent: "already registered" treated as OK
+ * - ✅ Enterprise: ALWAYS completes provisioning (membership + linkage) via admissions_complete_provisioning
  * - Redirect target: portal set-password with app_id
  */
 Deno.serve(async (req) => {
@@ -104,26 +132,62 @@ Deno.serve(async (req) => {
       }
     }
 
+    const email = applicantEmail.toLowerCase();
     const redirectTo = `${PORTAL_SET_PASSWORD_URL}?app_id=${encodeURIComponent(applicationId)}`;
 
-    const { data: inviteData, error: inviteErr } = await supabase.auth.admin.inviteUserByEmail(
-      applicantEmail,
-      { redirectTo }
-    );
+    // 1) Invite (or detect already-registered)
+    const { data: inviteData, error: inviteErr } = await supabase.auth.admin.inviteUserByEmail(email, {
+      redirectTo,
+    });
 
-    // ✅ Idempotency: treat "already registered" as success (do not break console UX)
+    // 2) Determine user_id reliably
+    let userId: string | null = inviteData?.user?.id ?? null;
+
     if (inviteErr) {
       const msg = inviteErr.message || "INVITE_FAILED";
       const lower = msg.toLowerCase();
 
+      // ✅ Idempotency: treat "already registered" as success…
+      // ✅ …BUT enterprise requires we still complete provisioning.
       if (lower.includes("already registered") || lower.includes("already exists")) {
+        userId = await resolveUserIdByEmail(supabase, email);
+        if (!userId) {
+          return json(500, {
+            ok: false,
+            error: "USER_RESOLUTION_FAILED",
+            detail: "User exists but could not be resolved by email.",
+            application_id: applicationId,
+            applicant_email: email,
+          });
+        }
+
+        const { data: rpcData, error: rpcErr } = await supabase.rpc("admissions_complete_provisioning", {
+          p_application_id: applicationId,
+          p_user_id: userId,
+        });
+
+        if (rpcErr) {
+          return json(500, {
+            ok: false,
+            error: "COMPLETE_PROVISIONING_FAILED",
+            detail: rpcErr.message,
+            application_id: applicationId,
+            applicant_email: email,
+            user_id: userId,
+          });
+        }
+
         return json(200, {
           ok: true,
           invited: false,
           already_registered: true,
+          provisioned: true,
+          mode: "existing_user",
           application_id: applicationId,
-          applicant_email: applicantEmail,
+          applicant_email: email,
           redirectTo,
+          user_id: userId,
+          result: rpcData ?? null,
         });
       }
 
@@ -132,17 +196,51 @@ Deno.serve(async (req) => {
         error: "INVITE_FAILED",
         detail: msg,
         application_id: applicationId,
-        applicant_email: applicantEmail,
+        applicant_email: email,
+      });
+    }
+
+    // If invite succeeded but user_id missing (rare), resolve it.
+    if (!userId) {
+      userId = await resolveUserIdByEmail(supabase, email);
+    }
+    if (!userId) {
+      return json(500, {
+        ok: false,
+        error: "USER_RESOLUTION_FAILED",
+        detail: "Invite succeeded but user_id could not be resolved.",
+        application_id: applicationId,
+        applicant_email: email,
+      });
+    }
+
+    // 3) Always complete provisioning (creates membership + bindings idempotently)
+    const { data: rpcData, error: rpcErr } = await supabase.rpc("admissions_complete_provisioning", {
+      p_application_id: applicationId,
+      p_user_id: userId,
+    });
+
+    if (rpcErr) {
+      return json(500, {
+        ok: false,
+        error: "COMPLETE_PROVISIONING_FAILED",
+        detail: rpcErr.message,
+        application_id: applicationId,
+        applicant_email: email,
+        user_id: userId,
       });
     }
 
     return json(200, {
       ok: true,
       invited: true,
+      provisioned: true,
+      mode: "invited_user",
       application_id: applicationId,
-      applicant_email: applicantEmail,
+      applicant_email: email,
       redirectTo,
-      user_id: inviteData?.user?.id ?? null,
+      user_id: userId,
+      result: rpcData ?? null,
     });
   } catch (e) {
     return json(500, {
