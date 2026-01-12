@@ -27,7 +27,7 @@ function pickString(v: unknown): string | null {
   return s.length ? s : null;
 }
 
-/** Resolve an existing Auth user id by email (service role). */
+/** Resolve an Auth user id by email (service role). */
 async function resolveUserIdByEmail(
   supabase: ReturnType<typeof createClient>,
   email: string
@@ -47,20 +47,18 @@ async function resolveUserIdByEmail(
     if (users.length < perPage) break;
     page += 1;
   }
-
   return null;
 }
 
 /**
- * Admissions → Provision Portal Access (Invite / Recovery)
+ * Admissions → Provision Portal Access
  *
- * ✅ GUARANTEE: every click issues a FRESH link/token and sends it.
- * ✅ If user doesn't exist -> invite
- * ✅ If user exists -> recovery (fresh token)
- * ✅ Returns action_link for operator "Copy link" fallback.
- *
- * 🔒 IMPORTANT: DOES NOT call admissions_complete_provisioning.
- * Provisioning completion belongs to Set-Password flow (session-bound).
+ * GUARANTEES:
+ * - Every click issues a FRESH token
+ * - New user → INVITE
+ * - Existing user → RECOVERY
+ * - NEVER completes provisioning here
+ *   (provisioning happens after password set, once)
  */
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
@@ -98,12 +96,12 @@ Deno.serve(async (req) => {
       return json(400, {
         ok: false,
         error: "MISSING_APPLICATION_ID",
-        hint: "Send application_id (or app_id / applicationId / p_application_id).",
       });
     }
 
-    // Resolve email from application row if missing
+    // Resolve email + status from onboarding_applications if needed
     let applicationStatus: string | null = null;
+
     if (!applicantEmail) {
       const { data, error } = await supabase
         .from("onboarding_applications")
@@ -127,12 +125,10 @@ Deno.serve(async (req) => {
         return json(400, {
           ok: false,
           error: "MISSING_APPLICANT_EMAIL",
-          hint: "Provide applicant_email in payload OR ensure onboarding_applications.applicant_email is set.",
           application_id: applicationId,
         });
       }
     } else {
-      // still try to fetch status (nice-to-have)
       const { data } = await supabase
         .from("onboarding_applications")
         .select("status")
@@ -142,23 +138,28 @@ Deno.serve(async (req) => {
     }
 
     const email = applicantEmail.toLowerCase();
-    const redirectTo = `${PORTAL_SET_PASSWORD_URL}?app_id=${encodeURIComponent(applicationId)}`;
+    const redirectTo = `${PORTAL_SET_PASSWORD_URL}?app_id=${encodeURIComponent(
+      applicationId
+    )}`;
 
-    // Detect whether user already exists
+    // Check if user already exists
     const existingUserId = await resolveUserIdByEmail(supabase, email);
 
+    // -----------------------------------------------------------------------
+    // NEW USER → INVITE (fresh token)
+    // -----------------------------------------------------------------------
     if (!existingUserId) {
-      // 1) INVITE (fresh token) + action link fallback
-      const { data: linkData, error: linkErr } = await supabase.auth.admin.generateLink({
-        type: "invite",
-        email,
-        options: { redirectTo },
-      });
+      const { data: linkData, error: linkErr } =
+        await supabase.auth.admin.generateLink({
+          type: "invite",
+          email,
+          options: { redirectTo },
+        });
       if (linkErr) throw linkErr;
 
-      const { data: inviteData, error: inviteErr } = await supabase.auth.admin.inviteUserByEmail(email, {
-        redirectTo,
-      });
+      const { data: inviteData, error: inviteErr } =
+        await supabase.auth.admin.inviteUserByEmail(email, { redirectTo });
+
       if (inviteErr) {
         return json(400, {
           ok: false,
@@ -183,15 +184,23 @@ Deno.serve(async (req) => {
       });
     }
 
-    // 2) USER EXISTS → send RECOVERY (fresh token) + action link fallback
-    const { data: linkData, error: linkErr } = await supabase.auth.admin.generateLink({
-      type: "recovery",
-      email,
-      options: { redirectTo },
-    });
+    // -----------------------------------------------------------------------
+    // EXISTING USER → RECOVERY (fresh token)
+    // -----------------------------------------------------------------------
+    const { data: linkData, error: linkErr } =
+      await supabase.auth.admin.generateLink({
+        type: "recovery",
+        email,
+        options: { redirectTo },
+      });
     if (linkErr) throw linkErr;
 
-    const { error: resetErr } = await supabase.auth.admin.resetPasswordForEmail(email, { redirectTo });
+    // ✅ Correct v2 API (NOT auth.admin)
+    const { error: resetErr } = await supabase.auth.resetPasswordForEmail(
+      email,
+      { redirectTo }
+    );
+
     if (resetErr) {
       return json(400, {
         ok: false,
@@ -206,8 +215,8 @@ Deno.serve(async (req) => {
     return json(200, {
       ok: true,
       mode: "recovery",
-      already_registered: true,
       invited: false,
+      already_registered: true,
       email_sent: true,
       application_id: applicationId,
       application_status: applicationStatus,
