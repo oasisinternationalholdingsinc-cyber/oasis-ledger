@@ -43,7 +43,7 @@ type Tile = {
 
 const HREFS = {
   // 🔒 NO WIRING CHANGES: keep these exactly as your current routes/domains
-  enterLedger: "/(console-ledger)",
+  enterLedger: "/console",
   clientConsole: "https://ledger.oasisintlholdings.com",
   holdingsPublic: "https://oasisintlholdings.com",
   operations: "/console/operations",
