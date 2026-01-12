@@ -2,6 +2,22 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+/**
+ * admissions-provision-portal-access (FINAL — PRISTINE — NO REGRESSIONS)
+ *
+ * GUARANTEES:
+ * ✅ Every click issues a FRESH link/token
+ * ✅ New user → INVITE (email + action_link fallback)
+ * ✅ Existing user → RECOVERY (email + action_link fallback)
+ * ✅ If Supabase throttles recovery email, returns OK + cooldown + action_link
+ * ✅ NEVER completes provisioning here (that happens in Set-Password flow once)
+ *
+ * CONTRACT:
+ * - Accepts: application_id/app_id/applicationId/p_application_id/...
+ * - Accepts: applicant_email/email/applicantEmail/p_applicant_email/...
+ * - If email missing, resolves from onboarding_applications by application_id
+ */
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -27,7 +43,6 @@ function pickString(v: unknown): string | null {
   return s.length ? s : null;
 }
 
-/** Resolve an Auth user id by email (service role). */
 async function resolveUserIdByEmail(
   supabase: ReturnType<typeof createClient>,
   email: string
@@ -47,19 +62,17 @@ async function resolveUserIdByEmail(
     if (users.length < perPage) break;
     page += 1;
   }
+
   return null;
 }
 
-/**
- * Admissions → Provision Portal Access
- *
- * GUARANTEES:
- * - Every click issues a FRESH token
- * - New user → INVITE
- * - Existing user → RECOVERY
- * - NEVER completes provisioning here
- *   (provisioning happens after password set, once)
- */
+function parseRetryAfterSeconds(message: string): number {
+  const m = message.match(/after\s+(\d+)\s+seconds/i);
+  if (!m) return 60;
+  const n = Number(m[1]);
+  return Number.isFinite(n) && n > 0 ? n : 60;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
   if (req.method !== "POST") return json(405, { ok: false, error: "METHOD_NOT_ALLOWED" });
@@ -93,13 +106,10 @@ Deno.serve(async (req) => {
       null;
 
     if (!applicationId) {
-      return json(400, {
-        ok: false,
-        error: "MISSING_APPLICATION_ID",
-      });
+      return json(400, { ok: false, error: "MISSING_APPLICATION_ID" });
     }
 
-    // Resolve email + status from onboarding_applications if needed
+    // Resolve email (and status as a nice-to-have) from onboarding_applications
     let applicationStatus: string | null = null;
 
     if (!applicantEmail) {
@@ -138,27 +148,26 @@ Deno.serve(async (req) => {
     }
 
     const email = applicantEmail.toLowerCase();
-    const redirectTo = `${PORTAL_SET_PASSWORD_URL}?app_id=${encodeURIComponent(
-      applicationId
-    )}`;
+    const redirectTo = `${PORTAL_SET_PASSWORD_URL}?app_id=${encodeURIComponent(applicationId)}`;
 
-    // Check if user already exists
+    // Determine whether Auth user exists
     const existingUserId = await resolveUserIdByEmail(supabase, email);
 
-    // -----------------------------------------------------------------------
+    // ---------------------------------------------------------------------
     // NEW USER → INVITE (fresh token)
-    // -----------------------------------------------------------------------
+    // ---------------------------------------------------------------------
     if (!existingUserId) {
-      const { data: linkData, error: linkErr } =
-        await supabase.auth.admin.generateLink({
-          type: "invite",
-          email,
-          options: { redirectTo },
-        });
+      const { data: linkData, error: linkErr } = await supabase.auth.admin.generateLink({
+        type: "invite",
+        email,
+        options: { redirectTo },
+      });
       if (linkErr) throw linkErr;
 
-      const { data: inviteData, error: inviteErr } =
-        await supabase.auth.admin.inviteUserByEmail(email, { redirectTo });
+      const { data: inviteData, error: inviteErr } = await supabase.auth.admin.inviteUserByEmail(
+        email,
+        { redirectTo }
+      );
 
       if (inviteErr) {
         return json(400, {
@@ -174,6 +183,7 @@ Deno.serve(async (req) => {
         ok: true,
         mode: "invite",
         invited: true,
+        already_registered: false,
         email_sent: true,
         application_id: applicationId,
         application_status: applicationStatus,
@@ -184,28 +194,50 @@ Deno.serve(async (req) => {
       });
     }
 
-    // -----------------------------------------------------------------------
+    // ---------------------------------------------------------------------
     // EXISTING USER → RECOVERY (fresh token)
-    // -----------------------------------------------------------------------
-    const { data: linkData, error: linkErr } =
-      await supabase.auth.admin.generateLink({
-        type: "recovery",
-        email,
-        options: { redirectTo },
-      });
+    // ---------------------------------------------------------------------
+    const { data: linkData, error: linkErr } = await supabase.auth.admin.generateLink({
+      type: "recovery",
+      email,
+      options: { redirectTo },
+    });
     if (linkErr) throw linkErr;
 
     // ✅ Correct v2 API (NOT auth.admin)
-    const { error: resetErr } = await supabase.auth.resetPasswordForEmail(
-      email,
-      { redirectTo }
-    );
+    const { error: resetErr } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
 
     if (resetErr) {
+      const msg = resetErr.message || "RECOVERY_SEND_FAILED";
+      const lower = msg.toLowerCase();
+
+      // ✅ Supabase throttle → treat as OK + cooldown + action_link fallback
+      if (lower.includes("for security purposes") && lower.includes("only request this after")) {
+        const retryAfter = parseRetryAfterSeconds(msg);
+
+        return json(200, {
+          ok: true,
+          mode: "recovery",
+          invited: false,
+          already_registered: true,
+          email_sent: false,
+          rate_limited: true,
+          retry_after_seconds: retryAfter,
+          application_id: applicationId,
+          application_status: applicationStatus,
+          applicant_email: email,
+          user_id: existingUserId,
+          redirectTo,
+          action_link: linkData?.properties?.action_link ?? null,
+          note:
+            "Recovery email throttled by Supabase. Wait for cooldown then retry, or use action_link as an operator fallback.",
+        });
+      }
+
       return json(400, {
         ok: false,
         error: "RECOVERY_SEND_FAILED",
-        detail: resetErr.message,
+        detail: msg,
         application_id: applicationId,
         applicant_email: email,
         user_id: existingUserId,
@@ -218,6 +250,7 @@ Deno.serve(async (req) => {
       invited: false,
       already_registered: true,
       email_sent: true,
+      rate_limited: false,
       application_id: applicationId,
       application_status: applicationStatus,
       applicant_email: email,
