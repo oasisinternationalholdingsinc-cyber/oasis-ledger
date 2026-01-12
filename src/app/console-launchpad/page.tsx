@@ -93,14 +93,14 @@ export default function ConsolePage() {
         return;
       }
 
-      const u = session.user;
-      setEmail(u?.email || "Authenticated");
+      setEmail(session.user?.email || "Authenticated");
       setBooting(false);
     })();
 
+    // ✅ FIX: typed params (no implicit any)
     const { data: sub } = supabase.auth.onAuthStateChange(
-      (_evt: AuthChangeEvent, sess: Session | null) => {
-        if (!sess) {
+      (_event: AuthChangeEvent, session: Session | null) => {
+        if (!session) {
           const next = encodeURIComponent(pathname || "/console");
           router.replace(`/login?next=${next}`);
         }
@@ -170,13 +170,13 @@ export default function ConsolePage() {
         {/* Stocky glass header */}
         <div className="relative overflow-hidden rounded-[28px] border border-white/10 bg-black/25 shadow-[0_30px_140px_rgba(0,0,0,0.65)] backdrop-blur-xl">
           <div className="flex flex-col gap-4 px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
-            {/* Left: system identity */}
+            {/* Left */}
             <div className="min-w-0">
               <div className="text-[11px] uppercase tracking-[0.28em] text-amber-300">OASIS OS</div>
               <div className="mt-1 text-xs text-slate-400">Operator Console • Authority Entrance</div>
             </div>
 
-            {/* Center: digital clock */}
+            {/* Center clock */}
             <div className="flex items-center justify-start sm:justify-center">
               <div className="rounded-full border border-white/10 bg-black/35 px-4 py-2">
                 <div className="text-[10px] uppercase tracking-[0.28em] text-slate-500">System Time</div>
@@ -184,7 +184,7 @@ export default function ConsolePage() {
               </div>
             </div>
 
-            {/* Right: session + sign out */}
+            {/* Right session */}
             <div className="flex items-center justify-between gap-3 sm:justify-end">
               <div className="min-w-0">
                 <div className="text-[10px] uppercase tracking-[0.28em] text-slate-500">Session</div>
@@ -226,7 +226,6 @@ export default function ConsolePage() {
           ))}
         </div>
 
-        {/* Footer note */}
         <div className="mt-14 text-center text-xs text-slate-500">
           {booting ? "Authenticating…" : "Authenticated"} • Execution remains chamber-bound • Console performs no writes
         </div>
