@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
+import type { AuthChangeEvent, Session } from "@supabase/supabase-js";
 
 function cx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
@@ -97,12 +98,14 @@ export default function ConsolePage() {
       setBooting(false);
     })();
 
-    const { data: sub } = supabase.auth.onAuthStateChange((_evt, sess) => {
-      if (!sess) {
-        const next = encodeURIComponent(pathname || "/console");
-        router.replace(`/login?next=${next}`);
+    const { data: sub } = supabase.auth.onAuthStateChange(
+      (_evt: AuthChangeEvent, sess: Session | null) => {
+        if (!sess) {
+          const next = encodeURIComponent(pathname || "/console");
+          router.replace(`/login?next=${next}`);
+        }
       }
-    });
+    );
 
     return () => {
       alive = false;
@@ -209,9 +212,7 @@ export default function ConsolePage() {
         {/* Hero */}
         <div className="mt-10 max-w-3xl">
           <div className="text-[11px] uppercase tracking-[0.28em] text-slate-500">Private Authority Surface</div>
-          <h1 className="mt-3 text-3xl font-semibold text-slate-100">
-            Deliberate access to institutional systems.
-          </h1>
+          <h1 className="mt-3 text-3xl font-semibold text-slate-100">Deliberate access to institutional systems.</h1>
           <p className="mt-4 text-sm leading-relaxed text-slate-400">
             This console is an entrance — not a workspace. It routes to sovereign chambers. Gold indicates verified state
             and authority actions — never decoration.
