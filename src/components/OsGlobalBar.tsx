@@ -9,11 +9,21 @@ import { Shield, ChevronDown, LogOut, Clock3 } from "lucide-react";
 type OsEnv = "RoT" | "SANDBOX";
 const ENV_KEY = "oasis_os_env";
 
-const ENTITY_OPTIONS: Array<{ key: EntityKey; label: string }> = [
-  { key: "holdings" as EntityKey, label: "Oasis International Holdings Inc." },
-  { key: "lounge" as EntityKey, label: "Oasis International Lounge Inc." },
-  { key: "real-estate" as EntityKey, label: "Oasis International Real Estate Inc." },
-];
+type MembershipRow = {
+  entity_id: string | null;
+  role?: string | null;
+  is_admin?: boolean | null;
+};
+
+type EntityRow = {
+  id: string;
+  slug: string;
+  name: string;
+};
+
+function cx(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
 
 function getInitialEnv(): OsEnv {
   if (typeof window === "undefined") return "RoT";
@@ -61,15 +71,20 @@ export function OsGlobalBar() {
   const [envMenuOpen, setEnvMenuOpen] = useState(false);
   const [entityMenuOpen, setEntityMenuOpen] = useState(false);
 
+  const [entityOptions, setEntityOptions] = useState<
+    Array<{ key: EntityKey; label: string }>
+  >([{ key: "workspace" as EntityKey, label: "Workspace" }]);
+
   const clock = useClockLabel24h();
 
+  // keep env in sync across tabs + app
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key === ENV_KEY) setEnvState(getInitialEnv());
     };
     const onEnv = (e: Event) => {
-      const anyE = e as any;
-      const next = (anyE?.detail?.env as OsEnv) ?? getInitialEnv();
+      const anyE = e as unknown as { detail?: { env?: OsEnv } };
+      const next = anyE?.detail?.env ?? getInitialEnv();
       setEnvState(next);
     };
 
@@ -81,19 +96,20 @@ export function OsGlobalBar() {
     };
   }, []);
 
+  // operator pill
   useEffect(() => {
     let mounted = true;
     (async () => {
-      const { data } = await supabase.auth.getUser();
+      const res: any = await (supabase as any).auth.getUser();
       if (!mounted) return;
-      setOperatorEmail(data?.user?.email ?? "—");
+      setOperatorEmail(res?.data?.user?.email ?? "—");
     })();
     return () => {
       mounted = false;
     };
   }, []);
 
-  // Close menus on outside click / ESC
+  // close menus on outside click / ESC
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -111,6 +127,81 @@ export function OsGlobalBar() {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("click", onClick);
     };
+  }, []);
+
+  // ✅ real entities for signed-in user (via memberships -> entities)
+  useEffect(() => {
+    let mounted = true;
+
+    async function loadEntities() {
+      // memberships is canonical in your schema
+      const memRes: any = await (supabase as any)
+        .from("memberships")
+        .select("entity_id, role, is_admin");
+
+      if (!mounted) return;
+
+      const memErr = memRes?.error as unknown;
+      const mems = (memRes?.data ?? []) as MembershipRow[];
+
+      if (memErr || !Array.isArray(mems) || mems.length === 0) {
+        // safe fallback (client dock)
+        setEntityOptions([{ key: "workspace" as EntityKey, label: "Workspace" }]);
+        return;
+      }
+
+      const ids = Array.from(
+        new Set(
+          mems
+            .map((m: MembershipRow) => m.entity_id)
+            .filter((v): v is string => typeof v === "string" && v.length > 0)
+        )
+      );
+
+      if (ids.length === 0) {
+        setEntityOptions([{ key: "workspace" as EntityKey, label: "Workspace" }]);
+        return;
+      }
+
+      const entRes: any = await (supabase as any)
+        .from("entities")
+        .select("id, slug, name")
+        .in("id", ids);
+
+      if (!mounted) return;
+
+      const entErr = entRes?.error as unknown;
+      const ents = (entRes?.data ?? []) as EntityRow[];
+
+      if (entErr || !Array.isArray(ents) || ents.length === 0) {
+        setEntityOptions([{ key: "workspace" as EntityKey, label: "Workspace" }]);
+        return;
+      }
+
+      const opts = ents
+        .filter((e: EntityRow) => e?.slug && e?.name)
+        .sort((a: EntityRow, b: EntityRow) =>
+          a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+        )
+        .map((e: EntityRow) => ({
+          key: e.slug as EntityKey,
+          label: e.name,
+        }));
+
+      setEntityOptions(opts.length ? opts : [{ key: "workspace" as EntityKey, label: "Workspace" }]);
+
+      // ensure activeEntity is valid
+      if (!opts.some((o) => o.key === activeEntity) && opts[0]) {
+        setActiveEntity(opts[0].key);
+      }
+    }
+
+    loadEntities();
+
+    return () => {
+      mounted = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const envMeta = useMemo(() => {
@@ -133,12 +224,12 @@ export function OsGlobalBar() {
   }, [env]);
 
   const activeEntityLabel = useMemo(() => {
-    const hit = ENTITY_OPTIONS.find((e) => e.key === activeEntity);
-    return hit?.label ?? "Oasis International Holdings Inc.";
-  }, [activeEntity]);
+    const hit = entityOptions.find((e) => e.key === activeEntity);
+    return hit?.label ?? entityOptions[0]?.label ?? "Workspace";
+  }, [activeEntity, entityOptions]);
 
   const onSignOut = async () => {
-    await supabase.auth.signOut();
+    await (supabase as any).auth.signOut();
     window.location.href = "/login";
   };
 
@@ -157,7 +248,7 @@ export function OsGlobalBar() {
                 OASIS DIGITAL PARLIAMENT
               </div>
               <div className="text-[13px] font-medium text-white/85">
-                Governance Console <span className="text-[#c9a227]/80">ODP.AI</span>
+                Client Ledger <span className="text-[#c9a227]/80">Dock</span>
               </div>
             </div>
 
@@ -165,7 +256,9 @@ export function OsGlobalBar() {
             <div className="ml-3 hidden items-center gap-2 rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[12px] text-white/75 shadow-[0_0_18px_rgba(0,0,0,0.22)] lg:flex">
               <span className="text-white/50">Operator</span>
               <span className="h-1 w-1 rounded-full bg-white/25" />
-              <span className="max-w-[220px] truncate text-white/90">{operatorEmail}</span>
+              <span className="max-w-[220px] truncate text-white/90">
+                {operatorEmail}
+              </span>
             </div>
           </div>
 
@@ -173,7 +266,9 @@ export function OsGlobalBar() {
           <div className="flex w-1/3 items-center justify-center">
             <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-4 py-2 text-[12px] text-white/85 shadow-[0_0_26px_rgba(201,162,39,0.08)]">
               <Clock3 className="h-4 w-4 text-[#c9a227]/80" />
-              <span className="min-w-[72px] text-center tracking-[0.12em]">{clock}</span>
+              <span className="min-w-[72px] text-center tracking-[0.12em]">
+                {clock}
+              </span>
               <span className="ml-1 h-1.5 w-1.5 rounded-full bg-[#c9a227]/80 shadow-[0_0_12px_rgba(201,162,39,0.55)]" />
             </div>
           </div>
@@ -191,14 +286,19 @@ export function OsGlobalBar() {
               >
                 <span className="text-white/55">Entity</span>
                 <span className="h-1 w-1 rounded-full bg-white/25" />
-                <span className="max-w-[260px] truncate text-white/90">{activeEntityLabel}</span>
+                <span className="max-w-[260px] truncate text-white/90">
+                  {activeEntityLabel}
+                </span>
                 <ChevronDown className="h-4 w-4 text-white/55" />
               </button>
 
               {entityMenuOpen && (
                 <div className="absolute right-0 mt-2 w-[360px] rounded-2xl border border-white/10 bg-black/85 p-2 shadow-[0_14px_50px_rgba(0,0,0,0.62)] backdrop-blur-xl z-[80]">
-                  <div className="px-3 py-2 text-[11px] text-white/55">Switch entity</div>
-                  {ENTITY_OPTIONS.map((opt) => {
+                  <div className="px-3 py-2 text-[11px] text-white/55">
+                    Switch entity
+                  </div>
+
+                  {entityOptions.map((opt) => {
                     const selected = opt.key === activeEntity;
                     return (
                       <button
@@ -207,18 +307,27 @@ export function OsGlobalBar() {
                           setActiveEntity(opt.key);
                           setEntityMenuOpen(false);
                         }}
-                        className={[
+                        className={cx(
                           "flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[13px] transition",
-                          selected ? "bg-white/10 text-white" : "hover:bg-white/5 text-white/85",
-                        ].join(" ")}
+                          selected
+                            ? "bg-white/10 text-white"
+                            : "hover:bg-white/5 text-white/85"
+                        )}
                       >
                         <span className="truncate pr-4">{opt.label}</span>
-                        {selected && <span className="text-[11px] text-[#c9a227]/85">Active</span>}
+                        {selected && (
+                          <span className="text-[11px] text-[#c9a227]/85">
+                            Active
+                          </span>
+                        )}
                       </button>
                     );
                   })}
+
                   <div className="mt-2 rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-[11px] text-white/55">
-                    Entity scoping is enforced across CI modules (Archive, Forge, Council).
+                    Entities shown are derived from your{" "}
+                    <span className="text-white/80">memberships</span> and{" "}
+                    <span className="text-white/80">entities</span> tables.
                   </div>
                 </div>
               )}
@@ -231,16 +340,21 @@ export function OsGlobalBar() {
                   setEnvMenuOpen((v) => !v);
                   setEntityMenuOpen(false);
                 }}
-                className={`flex items-center gap-2 rounded-full border px-4 py-2 text-[12px] transition ${envMeta.pillClass}`}
+                className={cx(
+                  "flex items-center gap-2 rounded-full border px-4 py-2 text-[12px] transition",
+                  envMeta.pillClass
+                )}
               >
-                <span className={`h-2 w-2 rounded-full ${envMeta.dotClass}`} />
+                <span className={cx("h-2 w-2 rounded-full", envMeta.dotClass)} />
                 <span className="font-semibold tracking-wide">{envMeta.label}</span>
                 <ChevronDown className="h-4 w-4 text-white/60" />
               </button>
 
               {envMenuOpen && (
                 <div className="absolute right-0 mt-2 w-[320px] rounded-2xl border border-white/10 bg-black/85 p-2 shadow-[0_14px_50px_rgba(0,0,0,0.62)] backdrop-blur-xl z-[80]">
-                  <div className="px-3 py-2 text-[11px] text-white/55">Switch environment</div>
+                  <div className="px-3 py-2 text-[11px] text-white/55">
+                    Switch environment
+                  </div>
 
                   <button
                     onClick={() => {
@@ -248,15 +362,20 @@ export function OsGlobalBar() {
                       setEnvState("RoT");
                       setEnvMenuOpen(false);
                     }}
-                    className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-[13px] ${
-                      env === "RoT" ? "bg-white/10 text-white" : "hover:bg-white/5 text-white/85"
-                    }`}
+                    className={cx(
+                      "flex w-full items-center justify-between rounded-xl px-3 py-2 text-[13px]",
+                      env === "RoT"
+                        ? "bg-white/10 text-white"
+                        : "hover:bg-white/5 text-white/85"
+                    )}
                   >
                     <span className="flex items-center gap-2">
                       <span className="h-2 w-2 rounded-full bg-[#92f7c6]" />
                       RoT
                     </span>
-                    <span className="text-[11px] text-white/45">System of Record</span>
+                    <span className="text-[11px] text-white/45">
+                      System of Record
+                    </span>
                   </button>
 
                   <button
@@ -265,19 +384,25 @@ export function OsGlobalBar() {
                       setEnvState("SANDBOX");
                       setEnvMenuOpen(false);
                     }}
-                    className={`mt-1 flex w-full items-center justify-between rounded-xl px-3 py-2 text-[13px] ${
-                      env === "SANDBOX" ? "bg-[#2a1e0b]/60 text-[#f5d47a]" : "hover:bg-white/5 text-white/85"
-                    }`}
+                    className={cx(
+                      "mt-1 flex w-full items-center justify-between rounded-xl px-3 py-2 text-[13px]",
+                      env === "SANDBOX"
+                        ? "bg-[#2a1e0b]/60 text-[#f5d47a]"
+                        : "hover:bg-white/5 text-white/85"
+                    )}
                   >
                     <span className="flex items-center gap-2">
                       <span className="h-2 w-2 rounded-full bg-[#f5d47a]" />
                       SANDBOX
                     </span>
-                    <span className="text-[11px] text-white/45">Test artifacts only</span>
+                    <span className="text-[11px] text-white/45">
+                      Test artifacts only
+                    </span>
                   </button>
 
                   <div className="mt-2 rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-[11px] text-white/55">
-                    Modules read <span className="text-white/80">oasis_os_env</span> to select{" "}
+                    Modules read{" "}
+                    <span className="text-white/80">oasis_os_env</span> to select{" "}
                     <span className="text-white/80">*_rot</span> vs{" "}
                     <span className="text-white/80">*_sandbox</span>.
                   </div>
