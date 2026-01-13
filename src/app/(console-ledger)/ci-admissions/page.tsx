@@ -23,7 +23,6 @@ type ScopeMode = "BOTH" | "INTAKE" | "PROVISIONED";
  * entity_id, entity_slug, metadata,
  * ✅ intake_entity_id (new)
  */
-
 type ApplicationRow = {
   id: string;
 
@@ -101,12 +100,6 @@ type TaskRow = {
   last_error: string | null;
   created_at: string | null;
   updated_at: string | null;
-};
-
-const ENTITY_LABELS: Record<string, string> = {
-  holdings: "Oasis International Holdings Inc.",
-  lounge: "Oasis International Lounge Inc.",
-  "real-estate": "Oasis International Real Estate Inc.",
 };
 
 const STATUS_ORDER = [
@@ -262,7 +255,12 @@ export default function CIAdmissionsPage() {
   useOsEnv(); // kept for OS consistency (even if admissions ignores is_test)
 
   const activeEntitySlug = (entityCtx?.activeEntity as string) || "holdings";
-  const activeEntityLabel = useMemo(() => ENTITY_LABELS[activeEntitySlug] ?? activeEntitySlug, [activeEntitySlug]);
+
+  // ✅ NO hardcoded corporate labels. Prefer OS context label if provided; else neutral slug.
+  const activeEntityLabel = useMemo(() => {
+    const label = (entityCtx?.activeEntityLabel as string) || (entityCtx?.activeEntityName as string) || "";
+    return (label && label.trim()) || activeEntitySlug;
+  }, [entityCtx?.activeEntityLabel, entityCtx?.activeEntityName, activeEntitySlug]);
 
   const [entityId, setEntityId] = useState<string | null>((entityCtx?.activeEntityId as string) || null);
 
@@ -978,13 +976,7 @@ export default function CIAdmissionsPage() {
                         ? "bg-emerald-500/14 border border-emerald-400/55 text-slate-50"
                         : "bg-transparent border border-transparent hover:bg-white/[0.05] text-slate-200"
                     )}
-                    title={
-                      m === "BOTH"
-                        ? "intake_entity_id OR entity_id"
-                        : m === "INTAKE"
-                        ? "intake_entity_id only"
-                        : "entity_id only"
-                    }
+                    title={m === "BOTH" ? "intake_entity_id OR entity_id" : m === "INTAKE" ? "intake_entity_id only" : "entity_id only"}
                   >
                     {m === "BOTH" ? "Both" : m === "INTAKE" ? "Intake" : "Provisioned"}
                   </button>
@@ -992,9 +984,7 @@ export default function CIAdmissionsPage() {
               </div>
             </div>
 
-            <div className="text-[11px] text-slate-500">
-              Queue is entity-scoped (intake). Archive is a tab. Hard delete is guarded.
-            </div>
+            <div className="text-[11px] text-slate-500">Queue is entity-scoped (intake). Archive is a tab. Hard delete is guarded.</div>
           </div>
 
           {/* Workspace */}
@@ -1036,8 +1026,7 @@ export default function CIAdmissionsPage() {
                     <ul className="py-2">
                       {filtered.map((a) => {
                         const st = (a.status ?? "—").toUpperCase();
-                        const title =
-                          a.organization_legal_name || a.organization_trade_name || a.applicant_name || "(unnamed)";
+                        const title = a.organization_legal_name || a.organization_trade_name || a.applicant_name || "(unnamed)";
                         const sub = a.applicant_email || a.applicant_phone || a.website || "—";
 
                         const selectedRow = a.id === selectedId;
@@ -1055,12 +1044,7 @@ export default function CIAdmissionsPage() {
                             >
                               <div className="flex items-start justify-between gap-2">
                                 <div className="min-w-0 flex-1">
-                                  <div
-                                    className={cx(
-                                      "truncate text-[14px] font-semibold",
-                                      selectedRow ? "text-slate-50" : "text-slate-100"
-                                    )}
-                                  >
+                                  <div className={cx("truncate text-[14px] font-semibold", selectedRow ? "text-slate-50" : "text-slate-100")}>
                                     {title}
                                   </div>
                                   <div className="mt-1 text-[12px] text-slate-400 truncate">{sub}</div>
@@ -1098,8 +1082,7 @@ export default function CIAdmissionsPage() {
                   <div className="mt-1 text-[13px] text-slate-400">
                     Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
                     <span className="mx-2 text-slate-700">•</span>
-                    Status:{" "}
-                    <span className="text-slate-100 font-semibold">{(selected?.status ?? "—").toUpperCase()}</span>
+                    Status: <span className="text-slate-100 font-semibold">{(selected?.status ?? "—").toUpperCase()}</span>
                   </div>
                 </div>
 
@@ -1143,10 +1126,7 @@ export default function CIAdmissionsPage() {
                       <div className="mt-2 flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="text-[16px] font-semibold text-slate-50 truncate">
-                            {selected.organization_legal_name ||
-                              selected.organization_trade_name ||
-                              selected.applicant_name ||
-                              "(untitled)"}
+                            {selected.organization_legal_name || selected.organization_trade_name || selected.applicant_name || "(untitled)"}
                           </div>
                           <div className="mt-1 text-[13px] text-slate-400">
                             Submitted: {fmtShort(selected.submitted_at || selected.created_at)}
@@ -1211,11 +1191,7 @@ export default function CIAdmissionsPage() {
 
                       {(error || info) && (
                         <div className="text-[13px]">
-                          {error && (
-                            <div className="rounded-2xl border border-red-500/60 bg-red-500/10 px-4 py-3 text-red-200">
-                              {error}
-                            </div>
-                          )}
+                          {error && <div className="rounded-2xl border border-red-500/60 bg-red-500/10 px-4 py-3 text-red-200">{error}</div>}
                           {info && !error && (
                             <div className="rounded-2xl border border-emerald-500/60 bg-emerald-500/10 px-4 py-3 text-emerald-200">
                               {info}
@@ -1421,9 +1397,7 @@ export default function CIAdmissionsPage() {
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-[11px] uppercase tracking-[0.22em] text-sky-100">Provisioning (RPC)</div>
-                      <div className="mt-1 text-[12px] text-slate-400">
-                        Build tasks with checkboxes — UI generates the JSON array for the RPC.
-                      </div>
+                      <div className="mt-1 text-[12px] text-slate-400">Build tasks with checkboxes — UI generates the JSON array for the RPC.</div>
                     </div>
 
                     <div className="shrink-0 text-right">
@@ -1783,7 +1757,7 @@ export default function CIAdmissionsPage() {
         style={{ opacity: 0.38 + wake * 0.62, transform: `translateY(${(1 - wake) * 6}px)` }}
       >
         <span className="tracking-[0.18em] uppercase">Verified Intake · Auditable Decisions · Archive Discipline</span>
-        <span className="text-slate-600">© {new Date().getFullYear()} Oasis International Holdings</span>
+        <span className="text-slate-600">© {new Date().getFullYear()} Oasis</span>
       </div>
 
       {/* Hard Delete Modal */}
@@ -1804,10 +1778,7 @@ export default function CIAdmissionsPage() {
               <div className="rounded-2xl border border-slate-800/60 bg-black/12 px-4 py-4">
                 <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Target</div>
                 <div className="mt-2 text-[13px] text-slate-100">
-                  {(selected?.organization_legal_name ||
-                    selected?.organization_trade_name ||
-                    selected?.applicant_email ||
-                    "—") ?? "—"}
+                  {(selected?.organization_legal_name || selected?.organization_trade_name || selected?.applicant_email || "—") ?? "—"}
                 </div>
                 <div className="mt-1 text-[12px] text-slate-400">
                   id: <span className="font-mono">{selected?.id ?? "—"}</span> · status:{" "}
@@ -1911,9 +1882,7 @@ export default function CIAdmissionsPage() {
                   <div className="mt-2 flex gap-2">
                     <button
                       type="button"
-                      onClick={() =>
-                        setNewTaskChannels((prev) => (prev.includes("email") ? prev.filter((x) => x !== "email") : [...prev, "email"]))
-                      }
+                      onClick={() => setNewTaskChannels((prev) => (prev.includes("email") ? prev.filter((x) => x !== "email") : [...prev, "email"]))}
                       className={cx(
                         "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase",
                         newTaskChannels.includes("email")
@@ -1926,9 +1895,7 @@ export default function CIAdmissionsPage() {
 
                     <button
                       type="button"
-                      onClick={() =>
-                        setNewTaskChannels((prev) => (prev.includes("sms") ? prev.filter((x) => x !== "sms") : [...prev, "sms"]))
-                      }
+                      onClick={() => setNewTaskChannels((prev) => (prev.includes("sms") ? prev.filter((x) => x !== "sms") : [...prev, "sms"]))}
                       className={cx(
                         "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase",
                         newTaskChannels.includes("sms")
@@ -1976,26 +1943,14 @@ export default function CIAdmissionsPage() {
   );
 }
 
-function StatusTabButton({
-  label,
-  value,
-  active,
-  onClick,
-}: {
-  label: string;
-  value: StatusTab;
-  active: boolean;
-  onClick: () => void;
-}) {
+function StatusTabButton({ label, value, active, onClick }: { label: string; value: StatusTab; active: boolean; onClick: () => void }) {
   return (
     <button
       type="button"
       onClick={onClick}
       className={cx(
         "px-4 py-2 rounded-full text-left transition min-w-[110px]",
-        active
-          ? "bg-emerald-500/14 border border-emerald-400/55 text-slate-50"
-          : "bg-transparent border border-transparent hover:bg-white/[0.05] text-slate-200"
+        active ? "bg-emerald-500/14 border border-emerald-400/55 text-slate-50" : "bg-transparent border border-transparent hover:bg-white/[0.05] text-slate-200"
       )}
       title={String(value)}
     >
