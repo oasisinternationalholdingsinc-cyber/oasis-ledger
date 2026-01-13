@@ -145,7 +145,7 @@ export function OsGlobalBar() {
       const mems = (memRes?.data ?? []) as MembershipRow[];
 
       if (memErr || !Array.isArray(mems) || mems.length === 0) {
-        // safe fallback (client dock)
+        // safe fallback
         setEntityOptions([{ key: "workspace" as EntityKey, label: "Workspace" }]);
         return;
       }
@@ -188,7 +188,9 @@ export function OsGlobalBar() {
           label: e.name,
         }));
 
-      setEntityOptions(opts.length ? opts : [{ key: "workspace" as EntityKey, label: "Workspace" }]);
+      setEntityOptions(
+        opts.length ? opts : [{ key: "workspace" as EntityKey, label: "Workspace" }]
+      );
 
       // ensure activeEntity is valid
       if (!opts.some((o) => o.key === activeEntity) && opts[0]) {
@@ -247,8 +249,8 @@ export function OsGlobalBar() {
               <div className="text-[10px] tracking-[0.22em] text-white/55">
                 OASIS DIGITAL PARLIAMENT
               </div>
-              <div className="text-[13px] font-medium text-white/85">
-                Client Ledger <span className="text-[#c9a227]/80">Dock</span>
+              <div className="text-[13px] font-medium text-white/90">
+                Authority Console <span className="text-[#c9a227]/85">OS Dock</span>
               </div>
             </div>
 
@@ -264,12 +266,12 @@ export function OsGlobalBar() {
 
           {/* CENTER clock */}
           <div className="flex w-1/3 items-center justify-center">
-            <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-4 py-2 text-[12px] text-white/85 shadow-[0_0_26px_rgba(201,162,39,0.08)]">
-              <Clock3 className="h-4 w-4 text-[#c9a227]/80" />
-              <span className="min-w-[72px] text-center tracking-[0.12em]">
+            <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-4 py-2 text-[12px] text-white/90 shadow-[0_0_26px_rgba(201,162,39,0.08)]">
+              <Clock3 className="h-4 w-4 text-[#c9a227]/85" />
+              <span className="min-w-[72px] text-center tracking-[0.16em]">
                 {clock}
               </span>
-              <span className="ml-1 h-1.5 w-1.5 rounded-full bg-[#c9a227]/80 shadow-[0_0_12px_rgba(201,162,39,0.55)]" />
+              <span className="ml-1 h-1.5 w-1.5 rounded-full bg-[#c9a227]/85 shadow-[0_0_12px_rgba(201,162,39,0.55)]" />
             </div>
           </div>
 
@@ -282,11 +284,11 @@ export function OsGlobalBar() {
                   setEntityMenuOpen((v) => !v);
                   setEnvMenuOpen(false);
                 }}
-                className="flex items-center gap-2 rounded-full border border-white/10 bg-black/25 px-4 py-2 text-[12px] text-white/85 shadow-[0_0_18px_rgba(0,0,0,0.22)] hover:bg-white/5"
+                className="flex items-center gap-2 rounded-full border border-white/10 bg-black/25 px-4 py-2 text-[12px] text-white/90 shadow-[0_0_18px_rgba(0,0,0,0.22)] hover:bg-white/5"
               >
                 <span className="text-white/55">Entity</span>
                 <span className="h-1 w-1 rounded-full bg-white/25" />
-                <span className="max-w-[260px] truncate text-white/90">
+                <span className="max-w-[260px] truncate text-white/95">
                   {activeEntityLabel}
                 </span>
                 <ChevronDown className="h-4 w-4 text-white/55" />
@@ -316,7 +318,7 @@ export function OsGlobalBar() {
                       >
                         <span className="truncate pr-4">{opt.label}</span>
                         {selected && (
-                          <span className="text-[11px] text-[#c9a227]/85">
+                          <span className="text-[11px] text-[#c9a227]/90">
                             Active
                           </span>
                         )}
@@ -427,7 +429,7 @@ export function OsGlobalBar() {
             {/* Sign out */}
             <button
               onClick={onSignOut}
-              className="flex items-center gap-2 rounded-full border border-white/10 bg-black/25 px-4 py-2 text-[12px] text-white/85 shadow-[0_0_18px_rgba(0,0,0,0.22)] hover:bg-white/5 hover:shadow-[0_0_24px_rgba(201,162,39,0.10)]"
+              className="flex items-center gap-2 rounded-full border border-white/10 bg-black/25 px-4 py-2 text-[12px] text-white/90 shadow-[0_0_18px_rgba(0,0,0,0.22)] hover:bg-white/5 hover:shadow-[0_0_24px_rgba(201,162,39,0.10)]"
             >
               <LogOut className="h-4 w-4 text-white/65" />
               <span>Sign out</span>
