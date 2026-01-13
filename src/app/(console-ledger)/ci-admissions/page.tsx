@@ -9,6 +9,7 @@ import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
 
 type StatusTab = "ALL" | string;
+type ScopeMode = "BOTH" | "INTAKE" | "PROVISIONED";
 
 /**
  * IMPORTANT: v_onboarding_admissions_inbox columns (confirmed):
@@ -159,9 +160,9 @@ function isMissingColumnErr(err: unknown) {
   return msg.includes("does not exist") && msg.includes("column");
 }
 
-/** Admissions enums are Postgres enums in this project; normalize to lowercase for RPC payloads. */
-function enumLower(x: string) {
-  return String(x || "").trim().toLowerCase();
+/** Admissions enums are Postgres enums; payload must be UPPERCASE enum labels. */
+function enumUpper(x: string) {
+  return String(x || "").trim().toUpperCase();
 }
 
 function statusPill(st?: string | null) {
@@ -183,7 +184,7 @@ function safeArray(x: any): string[] {
 }
 
 type UiProvisionTask = {
-  enabled: boolean; // checkbox == include this task in payload
+  enabled: boolean;
   task_key: string;
   title: string;
   notes: string;
@@ -264,6 +265,9 @@ export default function CIAdmissionsPage() {
   const activeEntityLabel = useMemo(() => ENTITY_LABELS[activeEntitySlug] ?? activeEntitySlug, [activeEntitySlug]);
 
   const [entityId, setEntityId] = useState<string | null>((entityCtx?.activeEntityId as string) || null);
+
+  // ✅ Scope mode: BOTH intake+provisioned (default), INTAKE only, PROVISIONED only
+  const [scopeMode, setScopeMode] = useState<ScopeMode>("BOTH");
 
   // UI state
   const [loading, setLoading] = useState(true);
@@ -353,39 +357,38 @@ export default function CIAdmissionsPage() {
       const eid = await ensureEntityId(activeEntitySlug);
 
       // ONLY columns that exist in v_onboarding_admissions_inbox
-      // ✅ ADJUSTMENT: include intake_entity_id (new)
       const baseSelect =
         "id,status,submitted_at,triaged_at,decided_at,provisioned_at,created_at,updated_at,applicant_type,applicant_name,applicant_email,applicant_phone,organization_legal_name,organization_trade_name,website,incorporation_number,jurisdiction_country,jurisdiction_region,intent,requested_services,expected_start_date,risk_tier,risk_notes,created_by,assigned_to,decided_by,entity_id,entity_slug,intake_entity_id,metadata";
 
       const VIEW = "v_onboarding_admissions_inbox";
 
-      /**
-       * ✅ ADJUSTMENT (NO wiring regression):
-       * Admissions visibility must be scoped by intake_entity_id (always set),
-       * while still including provisioned rows that already have entity_id.
-       * So we filter by:
-       *   intake_entity_id = eid  OR  entity_id = eid
-       */
-      const tryByIntakeOrEntityId = async () => {
-        const { data, error } = await supabase
-          .from(VIEW)
-          .select(baseSelect)
-          .or(`intake_entity_id.eq.${eid},entity_id.eq.${eid}`)
-          .order("created_at", { ascending: false });
+      // ✅ Scope query (BOTH/INTAKE/PROVISIONED)
+      const tryByScope = async () => {
+        let q = supabase.from(VIEW).select(baseSelect).order("created_at", { ascending: false });
+
+        if (scopeMode === "INTAKE") q = q.eq("intake_entity_id", eid);
+        else if (scopeMode === "PROVISIONED") q = q.eq("entity_id", eid);
+        else q = q.or(`intake_entity_id.eq.${eid},entity_id.eq.${eid}`);
+
+        const { data, error } = await q;
         if (error) throw error;
         return (data ?? []) as ApplicationRow[];
       };
 
       // Fallback if RLS/view lacks some fields in older envs
       const tryByEntitySlug = async () => {
-        const { data, error } = await supabase.from(VIEW).select(baseSelect).eq("entity_slug", activeEntitySlug).order("created_at", { ascending: false });
+        const { data, error } = await supabase
+          .from(VIEW)
+          .select(baseSelect)
+          .eq("entity_slug", activeEntitySlug)
+          .order("created_at", { ascending: false });
         if (error) throw error;
         return (data ?? []) as ApplicationRow[];
       };
 
       let rows: ApplicationRow[] = [];
       try {
-        rows = await tryByIntakeOrEntityId();
+        rows = await tryByScope();
         if (rows.length === 0) rows = await tryByEntitySlug();
       } catch (e: any) {
         if (isMissingColumnErr(e)) rows = await tryByEntitySlug();
@@ -551,10 +554,11 @@ export default function CIAdmissionsPage() {
     setInfo(null);
 
     try {
-      const next = enumLower(nextStatus);
+      const next = enumUpper(nextStatus);
+
       const { data, error } = await supabase.rpc("admissions_set_status", {
         p_application_id: selected.id,
-        p_next_status: next, // ✅ lowercase enum payload
+        p_next_status: next, // ✅ UPPERCASE enum payload
         p_note: (note ?? "Admissions status update").trim(),
       });
       if (error) throw error;
@@ -576,12 +580,12 @@ export default function CIAdmissionsPage() {
     setInfo(null);
 
     try {
-      const decision = enumLower(decisionKind.trim() || "approved");
-      const rt = riskTier.trim() ? enumLower(riskTier.trim()) : null;
+      const decision = enumUpper(decisionKind.trim() || "APPROVED");
+      const rt = riskTier.trim() ? enumUpper(riskTier.trim()) : null;
 
       const { data, error } = await supabase.rpc("admissions_record_decision", {
         p_application_id: selected.id,
-        p_decision: decision, // ✅ lowercase enum payload
+        p_decision: decision, // ✅ UPPERCASE enum payload
         p_risk_tier: rt,
         p_summary: decisionSummary.trim(),
         p_reason: decisionConditions.trim(),
@@ -611,7 +615,7 @@ export default function CIAdmissionsPage() {
     try {
       let channels: string[] = ["email"];
       let dueAt: string | null = null;
-      let nextStatus = "needs_info";
+      let nextStatus = "NEEDS_INFO";
 
       const raw = requestInfoFields.trim();
       if (raw) {
@@ -624,7 +628,7 @@ export default function CIAdmissionsPage() {
 
         if (Array.isArray(j?.channels)) channels = j.channels.map(String);
         if (typeof j?.due_at === "string" && j.due_at.trim()) dueAt = j.due_at.trim();
-        if (typeof j?.next_status === "string" && j.next_status.trim()) nextStatus = enumLower(j.next_status.trim());
+        if (typeof j?.next_status === "string" && j.next_status.trim()) nextStatus = enumUpper(j.next_status.trim());
       }
 
       const { data, error } = await supabase.rpc("admissions_request_info", {
@@ -632,7 +636,7 @@ export default function CIAdmissionsPage() {
         p_message: msg,
         p_channels: channels,
         p_due_at: dueAt,
-        p_next_status: nextStatus, // ✅ lowercase enum payload
+        p_next_status: nextStatus, // ✅ UPPERCASE enum payload
       });
 
       if (error) throw error;
@@ -671,7 +675,7 @@ export default function CIAdmissionsPage() {
 
       const { data, error } = await supabase.rpc("admissions_create_provisioning_tasks", {
         p_application_id: selected.id,
-        p_tasks: payload, // ✅ JSON array
+        p_tasks: payload,
       });
 
       if (error) throw error;
@@ -781,7 +785,7 @@ export default function CIAdmissionsPage() {
     setTasks([]);
     void reload(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeEntitySlug]);
+  }, [activeEntitySlug, scopeMode]);
 
   // Footer rail “wake”
   const [wake, setWake] = useState(0);
@@ -805,10 +809,7 @@ export default function CIAdmissionsPage() {
 
   const showNoEntityWarning = !entityId;
 
-  // ✅ IMPORTANT: normalize ONCE as lowercase; use for any gating
   const statusNorm = String(selected?.status ?? "").trim().toLowerCase();
-
-  // ✅ HARD BOOLEAN (fixes your TS error: no "" leaks)
   const beginReviewDisabled: boolean = !selected || busy !== null || statusNorm !== "submitted";
 
   const statusUpper = (selected?.status ?? "").toUpperCase();
@@ -908,6 +909,8 @@ export default function CIAdmissionsPage() {
             <div className="mt-2 text-[13px] text-slate-400">
               Entity: <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
               <span className="mx-2 text-slate-700">•</span>
+              Scope: <span className="text-slate-200 font-semibold">{scopeMode}</span>
+              <span className="mx-2 text-slate-700">•</span>
               Intake is auditable. Archive is reversible (status). Hard delete is explicit.
             </div>
           </div>
@@ -949,19 +952,49 @@ export default function CIAdmissionsPage() {
         <div className="w-full max-w-[1540px] h-full rounded-3xl border border-slate-900/80 bg-black/45 shadow-[0_0_70px_rgba(15,23,42,0.75)] px-6 py-5 flex flex-col overflow-hidden">
           {/* Top strip */}
           <div className="shrink-0 mb-4 flex items-center justify-between gap-4">
-            <div className="inline-flex rounded-full bg-slate-950/45 border border-slate-800/80 p-1 overflow-hidden">
-              {statusTabs.map((s) => (
-                <StatusTabButton
-                  key={s}
-                  label={s === "ALL" ? "All" : s}
-                  value={s}
-                  active={String(tab) === String(s)}
-                  onClick={() => setTab(s)}
-                />
-              ))}
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="inline-flex rounded-full bg-slate-950/45 border border-slate-800/80 p-1 overflow-hidden">
+                {statusTabs.map((s) => (
+                  <StatusTabButton
+                    key={s}
+                    label={s === "ALL" ? "All" : s}
+                    value={s}
+                    active={String(tab) === String(s)}
+                    onClick={() => setTab(s)}
+                  />
+                ))}
+              </div>
+
+              {/* Scope toggle */}
+              <div className="inline-flex rounded-full bg-slate-950/45 border border-slate-800/80 p-1">
+                {(["BOTH", "INTAKE", "PROVISIONED"] as ScopeMode[]).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setScopeMode(m)}
+                    className={cx(
+                      "px-3 py-2 rounded-full text-[10px] font-semibold tracking-[0.18em] uppercase transition",
+                      scopeMode === m
+                        ? "bg-emerald-500/14 border border-emerald-400/55 text-slate-50"
+                        : "bg-transparent border border-transparent hover:bg-white/[0.05] text-slate-200"
+                    )}
+                    title={
+                      m === "BOTH"
+                        ? "intake_entity_id OR entity_id"
+                        : m === "INTAKE"
+                        ? "intake_entity_id only"
+                        : "entity_id only"
+                    }
+                  >
+                    {m === "BOTH" ? "Both" : m === "INTAKE" ? "Intake" : "Provisioned"}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            <div className="text-[11px] text-slate-500">Queue is entity-scoped (intake). Archive is a tab. Hard delete is guarded.</div>
+            <div className="text-[11px] text-slate-500">
+              Queue is entity-scoped (intake). Archive is a tab. Hard delete is guarded.
+            </div>
           </div>
 
           {/* Workspace */}
@@ -1003,7 +1036,8 @@ export default function CIAdmissionsPage() {
                     <ul className="py-2">
                       {filtered.map((a) => {
                         const st = (a.status ?? "—").toUpperCase();
-                        const title = a.organization_legal_name || a.organization_trade_name || a.applicant_name || "(unnamed)";
+                        const title =
+                          a.organization_legal_name || a.organization_trade_name || a.applicant_name || "(unnamed)";
                         const sub = a.applicant_email || a.applicant_phone || a.website || "—";
 
                         const selectedRow = a.id === selectedId;
@@ -1021,7 +1055,12 @@ export default function CIAdmissionsPage() {
                             >
                               <div className="flex items-start justify-between gap-2">
                                 <div className="min-w-0 flex-1">
-                                  <div className={cx("truncate text-[14px] font-semibold", selectedRow ? "text-slate-50" : "text-slate-100")}>
+                                  <div
+                                    className={cx(
+                                      "truncate text-[14px] font-semibold",
+                                      selectedRow ? "text-slate-50" : "text-slate-100"
+                                    )}
+                                  >
                                     {title}
                                   </div>
                                   <div className="mt-1 text-[12px] text-slate-400 truncate">{sub}</div>
@@ -1059,7 +1098,8 @@ export default function CIAdmissionsPage() {
                   <div className="mt-1 text-[13px] text-slate-400">
                     Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
                     <span className="mx-2 text-slate-700">•</span>
-                    Status: <span className="text-slate-100 font-semibold">{(selected?.status ?? "—").toUpperCase()}</span>
+                    Status:{" "}
+                    <span className="text-slate-100 font-semibold">{(selected?.status ?? "—").toUpperCase()}</span>
                   </div>
                 </div>
 
@@ -1103,7 +1143,10 @@ export default function CIAdmissionsPage() {
                       <div className="mt-2 flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="text-[16px] font-semibold text-slate-50 truncate">
-                            {selected.organization_legal_name || selected.organization_trade_name || selected.applicant_name || "(untitled)"}
+                            {selected.organization_legal_name ||
+                              selected.organization_trade_name ||
+                              selected.applicant_name ||
+                              "(untitled)"}
                           </div>
                           <div className="mt-1 text-[13px] text-slate-400">
                             Submitted: {fmtShort(selected.submitted_at || selected.created_at)}
@@ -1169,7 +1212,9 @@ export default function CIAdmissionsPage() {
                       {(error || info) && (
                         <div className="text-[13px]">
                           {error && (
-                            <div className="rounded-2xl border border-red-500/60 bg-red-500/10 px-4 py-3 text-red-200">{error}</div>
+                            <div className="rounded-2xl border border-red-500/60 bg-red-500/10 px-4 py-3 text-red-200">
+                              {error}
+                            </div>
                           )}
                           {info && !error && (
                             <div className="rounded-2xl border border-emerald-500/60 bg-emerald-500/10 px-4 py-3 text-emerald-200">
@@ -1344,7 +1389,7 @@ export default function CIAdmissionsPage() {
                     value={requestInfoFields}
                     onChange={(e) => setRequestInfoFields(e.target.value)}
                     disabled={!selected || busy !== null}
-                    placeholder='Optional JSON overrides: {"channels":["email"],"due_at":"2026-01-10T17:00:00Z","next_status":"needs_info"}'
+                    placeholder='Optional JSON overrides: {"channels":["email"],"due_at":"2026-01-10T17:00:00Z","next_status":"NEEDS_INFO"}'
                     className="mt-2 w-full min-h-[72px] resize-none rounded-2xl border border-slate-700/60 bg-slate-950/20 px-4 py-3 text-[12px] text-slate-100 outline-none focus:border-amber-400/60 disabled:opacity-50 font-mono"
                   />
 
@@ -1376,7 +1421,9 @@ export default function CIAdmissionsPage() {
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-[11px] uppercase tracking-[0.22em] text-sky-100">Provisioning (RPC)</div>
-                      <div className="mt-1 text-[12px] text-slate-400">Build tasks with checkboxes — UI generates the JSON array for the RPC.</div>
+                      <div className="mt-1 text-[12px] text-slate-400">
+                        Build tasks with checkboxes — UI generates the JSON array for the RPC.
+                      </div>
                     </div>
 
                     <div className="shrink-0 text-right">
@@ -1757,7 +1804,10 @@ export default function CIAdmissionsPage() {
               <div className="rounded-2xl border border-slate-800/60 bg-black/12 px-4 py-4">
                 <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Target</div>
                 <div className="mt-2 text-[13px] text-slate-100">
-                  {(selected?.organization_legal_name || selected?.organization_trade_name || selected?.applicant_email || "—") ?? "—"}
+                  {(selected?.organization_legal_name ||
+                    selected?.organization_trade_name ||
+                    selected?.applicant_email ||
+                    "—") ?? "—"}
                 </div>
                 <div className="mt-1 text-[12px] text-slate-400">
                   id: <span className="font-mono">{selected?.id ?? "—"}</span> · status:{" "}
@@ -1861,7 +1911,9 @@ export default function CIAdmissionsPage() {
                   <div className="mt-2 flex gap-2">
                     <button
                       type="button"
-                      onClick={() => setNewTaskChannels((prev) => (prev.includes("email") ? prev.filter((x) => x !== "email") : [...prev, "email"]))}
+                      onClick={() =>
+                        setNewTaskChannels((prev) => (prev.includes("email") ? prev.filter((x) => x !== "email") : [...prev, "email"]))
+                      }
                       className={cx(
                         "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase",
                         newTaskChannels.includes("email")
@@ -1874,7 +1926,9 @@ export default function CIAdmissionsPage() {
 
                     <button
                       type="button"
-                      onClick={() => setNewTaskChannels((prev) => (prev.includes("sms") ? prev.filter((x) => x !== "sms") : [...prev, "sms"]))}
+                      onClick={() =>
+                        setNewTaskChannels((prev) => (prev.includes("sms") ? prev.filter((x) => x !== "sms") : [...prev, "sms"]))
+                      }
                       className={cx(
                         "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.16em] uppercase",
                         newTaskChannels.includes("sms")
