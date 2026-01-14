@@ -3,51 +3,65 @@
 export const dynamic = "force-dynamic";
 
 /**
- * CI-ADMISSIONS — AUTHORITY CONSOLE (PRISTINE)
- * --------------------------------------------
- * Role: Institutional intake + decisions ONLY
+ * CI-ADMISSIONS — AUTHORITY CONSOLE (PRISTINE / LOCKED)
+ * ---------------------------------------------------
+ * Decision + intake ONLY.
  *
  * ❌ No auth invites
  * ❌ No provisioning execution
  * ❌ No Edge Functions
  *
  * ✅ Status transitions (RPC)
- * ✅ Decision recording (RPC)
+ * ✅ Decisions (RPC)
  * ✅ Request info (RPC)
  * ✅ Provisioning TASK CREATION ONLY (RPC)
- *
- * Provisioning + Invite happens in CI-Provisioning.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
 
 type InboxRow = {
   id: string;
-  entity_slug: string;
-  applicant_email: string;
-  organization_legal_name: string;
-  status: string;
+  entity_slug: string | null;
+  organization_legal_name: string | null;
+  applicant_email: string | null;
+  status: string | null;
   submitted_at: string | null;
 };
 
-type Decision =
-  | "APPROVED"
-  | "DECLINED"
-  | "NEEDS_INFO";
+type Decision = "APPROVED" | "DECLINED" | "NEEDS_INFO";
 
 export default function AdmissionsAuthorityConsole() {
-  const { entityKey } = useEntity();
-  const { isTest } = useOsEnv();
+  // ----------------------------
+  // ENTITY (NO CORPORATE FALLBACK)
+  // ----------------------------
+  const entityCtx = useEntity() as any;
+  const entityKey: string =
+    entityCtx?.entityKey ||
+    entityCtx?.activeEntity ||
+    entityCtx?.entity_slug ||
+    "";
+
+  // ----------------------------
+  // ENV / LANE (DEFENSIVE READ)
+  // ----------------------------
+  const env = useOsEnv() as any;
+  const isTest: boolean = Boolean(
+    env?.is_test ??
+      env?.isTest ??
+      env?.lane_is_test ??
+      env?.sandbox ??
+      env?.isSandbox
+  );
 
   const [rows, setRows] = useState<InboxRow[]>([]);
   const [selected, setSelected] = useState<InboxRow | null>(null);
   const [loading, setLoading] = useState(false);
 
   // ----------------------------
-  // LOAD INBOX (READ-ONLY VIEW)
+  // LOAD INBOX (VIEW-ONLY)
   // ----------------------------
   async function loadInbox() {
     setLoading(true);
@@ -64,7 +78,8 @@ export default function AdmissionsAuthorityConsole() {
   }
 
   useEffect(() => {
-    loadInbox();
+    if (entityKey) loadInbox();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entityKey, isTest]);
 
   // ----------------------------
@@ -123,7 +138,7 @@ export default function AdmissionsAuthorityConsole() {
         {
           task_key: "portal_access",
           label: "Grant Portal Access",
-          description: "Invite applicant to set password and access portal",
+          description: "Invite applicant to set password",
         },
         {
           task_key: "entity_provisioning",
@@ -132,9 +147,6 @@ export default function AdmissionsAuthorityConsole() {
         },
       ],
     });
-
-    // IMPORTANT: Admissions stops here.
-    // Execution happens in CI-Provisioning.
   }
 
   // ----------------------------
@@ -142,9 +154,7 @@ export default function AdmissionsAuthorityConsole() {
   // ----------------------------
   return (
     <div className="p-6 space-y-6">
-      <h1 className="text-xl font-semibold">
-        Admissions · Authority Console
-      </h1>
+      <h1 className="text-xl font-semibold">Admissions · Authority Console</h1>
 
       <div className="grid grid-cols-[320px_1fr] gap-6">
         {/* INBOX */}
@@ -160,16 +170,22 @@ export default function AdmissionsAuthorityConsole() {
               }`}
             >
               <div className="font-medium">
-                {r.organization_legal_name}
+                {r.organization_legal_name || "—"}
               </div>
               <div className="text-xs text-white/60">
-                {r.applicant_email}
+                {r.applicant_email || "—"}
               </div>
               <div className="text-xs mt-1 text-amber-300">
-                {r.status}
+                {r.status || "—"}
               </div>
             </button>
           ))}
+
+          {!loading && rows.length === 0 && (
+            <div className="text-sm text-white/40 p-4">
+              No applications found.
+            </div>
+          )}
         </div>
 
         {/* DETAIL */}
@@ -185,10 +201,7 @@ export default function AdmissionsAuthorityConsole() {
             </div>
 
             <div className="flex flex-wrap gap-2">
-              <button
-                className="btn"
-                onClick={() => beginReview(selected.id)}
-              >
+              <button className="btn" onClick={() => beginReview(selected.id)}>
                 Begin Review
               </button>
 
@@ -198,7 +211,7 @@ export default function AdmissionsAuthorityConsole() {
                   recordDecision(
                     selected.id,
                     "APPROVED",
-                    "Approved for sandbox testing"
+                    "Approved for onboarding"
                   )
                 }
               >
@@ -228,8 +241,8 @@ export default function AdmissionsAuthorityConsole() {
             </div>
 
             <div className="text-xs text-white/40">
-              Admissions is decision-only. Auth invite and provisioning
-              execute in CI-Provisioning.
+              Admissions is decision-only. Invite and activation run in
+              CI-Provisioning.
             </div>
           </div>
         )}
