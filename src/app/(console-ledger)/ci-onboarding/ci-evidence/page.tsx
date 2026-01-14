@@ -3,13 +3,19 @@
 export const dynamic = "force-dynamic";
 
 import { useEffect, useMemo, useState } from "react";
-import InstitutionalFrame from "@/components/shell/InstitutionalFrame";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
 
 function cx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
+}
+
+function normStatus(s: string | null | undefined) {
+  return (s || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, "_"); // "Needs Info" / "needs-info" -> "NEEDS_INFO"
 }
 
 type InboxRow = {
@@ -24,13 +30,15 @@ type InboxRow = {
   organization_email: string | null;
   created_at: string | null;
   updated_at: string | null;
-  lane_is_test?: boolean | null; // if your view exposes it; safe optional
+
+  // optional if your view exposes it (we will query it only if it exists)
+  lane_is_test?: boolean | null;
 };
 
 type EvidenceRow = {
   id: string;
   application_id: string;
-  kind: string; // enum (user-defined) but reads as string
+  kind: string;
   title: string | null;
   storage_bucket: string | null;
   storage_path: string | null;
@@ -48,8 +56,34 @@ type EvidenceRow = {
 
 type AppTab = "INTAKE" | "ALL";
 
+function Row({
+  k,
+  v,
+  mono,
+}: {
+  k: string;
+  v: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <div className="text-xs uppercase tracking-[0.22em] text-white/35">
+        {k}
+      </div>
+      <div
+        className={cx(
+          "max-w-[70%] text-right text-sm text-white/80",
+          mono && "font-mono text-[12px] leading-5 text-white/70"
+        )}
+      >
+        {v}
+      </div>
+    </div>
+  );
+}
+
 export default function CiEvidencePage() {
-  const { entityKey, entity } = useEntity(); // entityKey is your canonical scope key
+  const { entityKey, entity } = useEntity(); // canonical scope key (slug-like)
   const { isTest } = useOsEnv();
 
   const [apps, setApps] = useState<InboxRow[]>([]);
@@ -69,6 +103,9 @@ export default function CiEvidencePage() {
     null
   );
 
+  // hard refresh trigger
+  const [refreshKey, setRefreshKey] = useState(0);
+
   const selectedApp = useMemo(
     () => apps.find((a) => a.id === selectedAppId) || null,
     [apps, selectedAppId]
@@ -84,19 +121,9 @@ export default function CiEvidencePage() {
     let rows = apps;
 
     if (tab === "INTAKE") {
-      // intake-ish statuses; adjust if your canonical statuses differ
-      const allow = new Set([
-        "SUBMITTED",
-        "TRIAGE",
-        "IN_REVIEW",
-        "UNDER_REVIEW",
-        "NEEDS_INFO",
-        "needs_info",
-        "under_review",
-        "triage",
-        "submitted",
-      ]);
-      rows = rows.filter((r) => (r.status ? allow.has(r.status) : false));
+      // canonical intake statuses (normalize first)
+      const allow = new Set(["SUBMITTED", "IN_REVIEW", "NEEDS_INFO"]);
+      rows = rows.filter((r) => allow.has(normStatus(r.status)));
     }
 
     if (!needle) return rows;
@@ -121,44 +148,69 @@ export default function CiEvidencePage() {
   // -------- load applications (entity + lane scoped) --------
   useEffect(() => {
     let alive = true;
+
     (async () => {
       setAppsLoading(true);
       setAppsErr(null);
 
       try {
-        // Prefer your canonical inbox view if it exists and already scopes by entity.
-        // We still enforce entity + lane on the client as a safety belt.
-        const { data, error } = await supabase
-          .from("v_onboarding_admissions_inbox")
-          .select(
-            [
-              "id",
-              "entity_id",
-              "entity_slug",
-              "status",
-              "applicant_type",
-              "organization_legal_name",
-              "organization_trade_name",
-              "applicant_email",
-              "organization_email",
-              "created_at",
-              "updated_at",
-              "lane_is_test",
-            ].join(",")
-          )
-          .eq("entity_slug", entityKey) // your contract: entityKey = slug-like key
-          .eq("lane_is_test", isTest)
-          .order("created_at", { ascending: false });
+        // Attempt #1: includes lane_is_test (preferred if view exposes it)
+        const baseCols = [
+          "id",
+          "entity_id",
+          "entity_slug",
+          "status",
+          "applicant_type",
+          "organization_legal_name",
+          "organization_trade_name",
+          "applicant_email",
+          "organization_email",
+          "created_at",
+          "updated_at",
+        ];
 
-        if (error) throw error;
+        const tryWithLane = async () => {
+          const { data, error } = await supabase
+            .from("v_onboarding_admissions_inbox")
+            .select([...baseCols, "lane_is_test"].join(","))
+            .eq("entity_slug", entityKey)
+            .eq("lane_is_test", isTest)
+            .order("created_at", { ascending: false });
+
+          return { data, error };
+        };
+
+        const tryWithoutLane = async () => {
+          // If lane column isn't present, fall back to a best-effort load.
+          // (If your view already scopes by lane server-side, this is still safe.)
+          const { data, error } = await supabase
+            .from("v_onboarding_admissions_inbox")
+            .select(baseCols.join(","))
+            .eq("entity_slug", entityKey)
+            .order("created_at", { ascending: false });
+
+          return { data, error };
+        };
+
+        let res = await tryWithLane();
+
+        // If column doesn't exist, retry without it.
+        // Postgres undefined_column is 42703; Supabase often surfaces it in message.
+        if (res.error && /lane_is_test|42703|undefined column/i.test(res.error.message)) {
+          res = await tryWithoutLane();
+        }
+
+        if (res.error) throw res.error;
         if (!alive) return;
 
-        const rows = (data || []) as InboxRow[];
+        const rows = (res.data || []) as InboxRow[];
         setApps(rows);
 
-        // auto-select first
+        // keep selection stable; otherwise pick first
         if (!selectedAppId && rows.length) {
           setSelectedAppId(rows[0].id);
+        } else if (selectedAppId && !rows.some((r) => r.id === selectedAppId)) {
+          setSelectedAppId(rows[0]?.id ?? null);
         }
       } catch (e: any) {
         if (!alive) return;
@@ -173,11 +225,12 @@ export default function CiEvidencePage() {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entityKey, isTest]);
+  }, [entityKey, isTest, refreshKey]);
 
   // -------- load evidence for selected application --------
   useEffect(() => {
     let alive = true;
+
     (async () => {
       setEvidence([]);
       setSelectedEvidenceId(null);
@@ -230,15 +283,14 @@ export default function CiEvidencePage() {
     return () => {
       alive = false;
     };
-  }, [selectedAppId]);
+  }, [selectedAppId, refreshKey]);
 
   async function openEvidence(e: EvidenceRow) {
     if (!e.storage_bucket || !e.storage_path) return;
 
-    // signed url so buckets can remain private
     const { data, error } = await supabase.storage
       .from(e.storage_bucket)
-      .createSignedUrl(e.storage_path, 60); // 60s is enough for click-to-open
+      .createSignedUrl(e.storage_path, 60);
 
     if (error || !data?.signedUrl) {
       alert(error?.message || "Could not create signed URL.");
@@ -260,7 +312,6 @@ export default function CiEvidencePage() {
       return;
     }
 
-    // refresh evidence list
     setEvidence((prev) =>
       prev.map((x) =>
         x.id === e.id
@@ -285,7 +336,7 @@ export default function CiEvidencePage() {
   }, [selectedApp]);
 
   return (
-    <InstitutionalFrame>
+    <div className="h-full w-full">
       <div className="mx-auto w-full max-w-[1400px] px-4 pb-10 pt-6">
         {/* Header */}
         <div className="mb-5 flex items-end justify-between gap-4">
@@ -298,22 +349,15 @@ export default function CiEvidencePage() {
             </div>
             <div className="mt-1 text-sm text-white/50">
               Entity-scoped:{" "}
-              <span className="text-white/70">
-                {entity?.name || entityKey}
-              </span>{" "}
+              <span className="text-white/70">{entity?.name || entityKey}</span>{" "}
               • Lane:{" "}
-              <span className="text-white/70">
-                {isTest ? "SANDBOX" : "RoT"}
-              </span>
+              <span className="text-white/70">{isTest ? "SANDBOX" : "RoT"}</span>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
             <button
-              onClick={() => {
-                // hard refresh both panes
-                setSelectedAppId((x) => x);
-              }}
+              onClick={() => setRefreshKey((n) => n + 1)}
               className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-medium text-white/80 hover:border-amber-300/20 hover:bg-white/7"
             >
               Refresh
@@ -403,7 +447,9 @@ export default function CiEvidencePage() {
                                 {name}
                               </div>
                               <div className="mt-1 truncate text-xs text-white/45">
-                                {a.applicant_email || a.organization_email || "—"}
+                                {a.applicant_email ||
+                                  a.organization_email ||
+                                  "—"}
                               </div>
                             </div>
                             <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/70">
@@ -517,18 +563,9 @@ export default function CiEvidencePage() {
                 ) : (
                   <>
                     <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
-                      <Row
-                        k="Kind"
-                        v={selectedEvidence.kind || "—"}
-                      />
-                      <Row
-                        k="File"
-                        v={selectedEvidence.file_name || "—"}
-                      />
-                      <Row
-                        k="MIME"
-                        v={selectedEvidence.mime_type || "—"}
-                      />
+                      <Row k="Kind" v={selectedEvidence.kind || "—"} />
+                      <Row k="File" v={selectedEvidence.file_name || "—"} />
+                      <Row k="MIME" v={selectedEvidence.mime_type || "—"} />
                       <Row
                         k="Size"
                         v={
@@ -537,11 +574,7 @@ export default function CiEvidencePage() {
                             : "—"
                         }
                       />
-                      <Row
-                        k="Hash"
-                        v={selectedEvidence.file_hash || "—"}
-                        mono
-                      />
+                      <Row k="Hash" v={selectedEvidence.file_hash || "—"} mono />
                       <Row
                         k="Stored"
                         v={
@@ -552,15 +585,16 @@ export default function CiEvidencePage() {
                         }
                         mono
                       />
-                      <Row
-                        k="Uploaded"
-                        v={selectedEvidence.uploaded_at || "—"}
-                      />
+                      <Row k="Uploaded" v={selectedEvidence.uploaded_at || "—"} />
                       <Row
                         k="Verified"
                         v={
                           selectedEvidence.is_verified
-                            ? `YES${selectedEvidence.verified_at ? ` • ${selectedEvidence.verified_at}` : ""}`
+                            ? `YES${
+                                selectedEvidence.verified_at
+                                  ? ` • ${selectedEvidence.verified_at}`
+                                  : ""
+                              }`
                             : "NO"
                         }
                       />
@@ -623,32 +657,10 @@ export default function CiEvidencePage() {
             </div>
           </div>
         </div>
-      </div>
-    </InstitutionalFrame>
-  );
-}
 
-function Row({
-  k,
-  v,
-  mono,
-}: {
-  k: string;
-  v: string;
-  mono?: boolean;
-}) {
-  return (
-    <div className="flex items-start justify-between gap-4">
-      <div className="text-xs uppercase tracking-[0.22em] text-white/35">
-        {k}
-      </div>
-      <div
-        className={cx(
-          "max-w-[70%] text-right text-sm text-white/80",
-          mono && "font-mono text-[12px] leading-5 text-white/70"
-        )}
-      >
-        {v}
+        <div className="mt-5 text-[10px] text-white/35">
+          Source: public.v_onboarding_admissions_inbox • entity_slug={entityKey} • lane={isTest ? "SANDBOX" : "RoT"}
+        </div>
       </div>
     </div>
   );
