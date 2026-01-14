@@ -1,3 +1,4 @@
+// src/app/(console-ledger)/ci-onboarding/ci-admissions/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -56,8 +57,8 @@ type InboxRow = {
 
   metadata: any | null;
 
-  // optional (only if the view exposes it)
-  lane_is_test?: boolean | null;
+  // view may or may not expose this; we handle both
+  is_test?: boolean | null;
 };
 
 type Tab = "INTAKE" | "ALL" | "ARCHIVED";
@@ -90,9 +91,7 @@ function Pill({
 function Field({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
   return (
     <div className="flex items-start justify-between gap-4">
-      <div className="text-xs uppercase tracking-[0.22em] text-white/35">
-        {k}
-      </div>
+      <div className="text-xs uppercase tracking-[0.22em] text-white/35">{k}</div>
       <div
         className={cx(
           "max-w-[68%] text-right text-sm text-white/80",
@@ -105,17 +104,140 @@ function Field({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
   );
 }
 
-function safePrettyJSON(x: any) {
-  try {
-    if (x == null) return "—";
-    return JSON.stringify(x, null, 2);
-  } catch {
-    return "—";
-  }
+// ---------- Oasis OS Modal (replaces browser prompt, no wiring change) ----------
+type ModalProps = {
+  open: boolean;
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
+  footer?: React.ReactNode;
+  onClose: () => void;
+};
+
+function OsModal({ open, title, subtitle, children, footer, onClose }: ModalProps) {
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-[100]">
+      {/* backdrop */}
+      <div
+        className="absolute inset-0 bg-black/60 backdrop-blur-[6px]"
+        onClick={onClose}
+      />
+      {/* dialog */}
+      <div className="absolute inset-0 flex items-center justify-center p-4">
+        <div className="relative w-full max-w-[560px] overflow-hidden rounded-3xl border border-white/10 bg-black/45 shadow-[0_35px_160px_rgba(0,0,0,0.75)]">
+          {/* subtle glow */}
+          <div className="pointer-events-none absolute -top-28 left-1/2 h-56 w-[520px] -translate-x-1/2 rounded-full bg-amber-300/10 blur-3xl" />
+          <div className="relative border-b border-white/10 p-5">
+            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
+              Authority • Decision Window
+            </div>
+            <div className="mt-1 text-xl font-semibold text-white/90">{title}</div>
+            {subtitle ? (
+              <div className="mt-1 text-sm text-white/55">{subtitle}</div>
+            ) : null}
+          </div>
+
+          <div className="relative p-5">{children}</div>
+
+          <div className="relative border-t border-white/10 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <button
+                onClick={onClose}
+                className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-medium text-white/70 hover:bg-white/7"
+              >
+                Cancel
+              </button>
+              {footer}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Input({
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <label className="block">
+      <div className="text-xs uppercase tracking-[0.22em] text-white/35">{label}</div>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="mt-2 w-full rounded-2xl border border-white/10 bg-black/35 px-4 py-3 text-sm text-white/85 placeholder:text-white/35 outline-none focus:border-amber-300/25"
+      />
+    </label>
+  );
+}
+
+function Textarea({
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <label className="block">
+      <div className="text-xs uppercase tracking-[0.22em] text-white/35">{label}</div>
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        rows={4}
+        className="mt-2 w-full resize-none rounded-2xl border border-white/10 bg-black/35 px-4 py-3 text-sm text-white/85 placeholder:text-white/35 outline-none focus:border-amber-300/25"
+      />
+    </label>
+  );
+}
+
+function Select({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  options: Array<{ value: string; label: string }>;
+}) {
+  return (
+    <label className="block">
+      <div className="text-xs uppercase tracking-[0.22em] text-white/35">{label}</div>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="mt-2 w-full rounded-2xl border border-white/10 bg-black/35 px-4 py-3 text-sm text-white/85 outline-none focus:border-amber-300/25"
+      >
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
 }
 
 export default function CiAdmissionsPage() {
-  // ---- entity (defensive, like CI-Evidence) ----
+  // ---- entity (defensive, global bar only) ----
   const ec = useEntity() as any;
   const entityKey: string =
     (ec?.entityKey as string) ||
@@ -126,19 +248,13 @@ export default function CiAdmissionsPage() {
   const entityName: string =
     (ec?.entityName as string) ||
     (ec?.activeEntityName as string) ||
-    (ec?.entities?.find?.(
-      (x: any) => x?.slug === entityKey || x?.key === entityKey
-    )?.name as string) ||
+    (ec?.entities?.find?.((x: any) => x?.slug === entityKey || x?.key === entityKey)?.name as string) ||
     entityKey;
 
-  // ---- env lane (defensive, like CI-Evidence) ----
+  // ---- env lane (defensive) ----
   const env = useOsEnv() as any;
   const isTest: boolean = Boolean(
-    env?.is_test ??
-      env?.isTest ??
-      env?.lane_is_test ??
-      env?.sandbox ??
-      env?.isSandbox
+    env?.is_test ?? env?.isTest ?? env?.lane_is_test ?? env?.sandbox ?? env?.isSandbox
   );
 
   const [rows, setRows] = useState<InboxRow[]>([]);
@@ -154,12 +270,34 @@ export default function CiAdmissionsPage() {
   const [busy, setBusy] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
 
+  // ----- OS modals (instead of browser prompt) -----
+  const [approveOpen, setApproveOpen] = useState(false);
+  const [needsInfoOpen, setNeedsInfoOpen] = useState(false);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+
+  // approve form
+  const [approveSummary, setApproveSummary] = useState("Approved for provisioning.");
+  const [approveReason, setApproveReason] = useState("Meets intake requirements.");
+  const [approveRisk, setApproveRisk] = useState("medium");
+
+  // needs info form
+  const [niMessage, setNiMessage] = useState("Please provide missing information.");
+  const [niChannels, setNiChannels] = useState("email");
+  const [niDueIso, setNiDueIso] = useState(""); // optional ISO string
+
+  // archive form
+  const [archiveNote, setArchiveNote] = useState("Archived by operator.");
+
+  // delete form
+  const [deleteReason, setDeleteReason] = useState("Test data cleanup.");
+
   const selected = useMemo(
     () => rows.find((r) => r.id === selectedId) || null,
     [rows, selectedId]
   );
 
-  // ---- load inbox (lane-safe if view supports lane, else fallback) ----
+  // ---- load inbox (lane-safe via is_test if available, else fallback) ----
   useEffect(() => {
     let alive = true;
 
@@ -205,9 +343,9 @@ export default function CiAdmissionsPage() {
         const tryWithLane = async () => {
           const { data, error } = await supabase
             .from("v_onboarding_admissions_inbox")
-            .select([...cols, "lane_is_test"].join(","))
+            .select([...cols, "is_test"].join(","))
             .eq("entity_slug", entityKey)
-            .eq("lane_is_test", isTest)
+            .eq("is_test", isTest)
             .order("created_at", { ascending: false });
 
           return { data, error };
@@ -224,10 +362,7 @@ export default function CiAdmissionsPage() {
         };
 
         let res = await tryWithLane();
-        if (
-          res.error &&
-          /lane_is_test|42703|undefined column/i.test(res.error.message)
-        ) {
+        if (res.error && /is_test|42703|undefined column/i.test(res.error.message)) {
           res = await tryWithoutLane();
         }
         if (res.error) throw res.error;
@@ -237,8 +372,7 @@ export default function CiAdmissionsPage() {
         setRows(list);
 
         if (!selectedId && list.length) setSelectedId(list[0].id);
-        else if (selectedId && !list.some((r) => r.id === selectedId))
-          setSelectedId(list[0]?.id ?? null);
+        else if (selectedId && !list.some((r) => r.id === selectedId)) setSelectedId(list[0]?.id ?? null);
       } catch (e: any) {
         if (!alive) return;
         setErr(e?.message || "Failed to load admissions inbox.");
@@ -324,53 +458,44 @@ export default function CiAdmissionsPage() {
     await rpc("admissions_begin_review", { p_application_id: selected.id });
   }
 
-  async function approveForProvisioning() {
+  // ✅ FIXED: onboarding_decision enum values are lowercase
+  async function approveForProvisioningConfirmed() {
     if (!selected) return;
-    const summary = prompt(
-      "Decision summary (short):",
-      "Approved for provisioning."
-    );
-    if (summary == null) return;
 
-    const reason = prompt(
-      "Reason / rationale (required):",
-      "Meets intake requirements."
-    );
-    if (reason == null) return;
+    // trim + validate
+    const summary = approveSummary.trim();
+    const reason = approveReason.trim();
+    const risk = approveRisk.trim();
 
-    const risk = prompt(
-      "Risk tier (enum, e.g. low / medium / high):",
-      selected.risk_tier || "medium"
-    );
-    if (risk == null) return;
+    if (!summary) return alert("Decision summary is required.");
+    if (!reason) return alert("Reason / rationale is required.");
+    if (!risk) return alert("Risk tier is required.");
 
     await rpc("admissions_record_decision", {
       p_application_id: selected.id,
-      p_decision: "APPROVE",
-      p_risk_tier: risk,
+      p_decision: "approve", // ✅ enum-correct
+      p_risk_tier: risk, // backend expects lowercase like "medium"
       p_summary: summary,
       p_reason: reason,
     });
+
+    setApproveOpen(false);
   }
 
-  async function needsInfo() {
+  async function needsInfoConfirmed() {
     if (!selected) return;
-    const msg = prompt(
-      "Message to applicant (required):",
-      "Please provide missing information."
-    );
-    if (!msg) return;
 
-    const channelsRaw = prompt("Channels (comma-separated):", "email");
-    const channels = (channelsRaw || "email")
+    const msg = niMessage.trim();
+    if (!msg) return alert("Message is required.");
+
+    const channels = (niChannels || "email")
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
 
-    const dueRaw = prompt("Due at (optional ISO, leave blank):", "");
-    // ✅ build-safe: prompt() can return null
+    const dueStr = (niDueIso ?? "").trim();
     const dueAt =
-      (dueRaw ?? "").trim() ? new Date((dueRaw ?? "").trim()).toISOString() : null;
+      dueStr.length > 0 ? new Date(dueStr).toISOString() : null; // ✅ build-safe (never Date(null))
 
     await rpc("admissions_request_info", {
       p_application_id: selected.id,
@@ -379,32 +504,32 @@ export default function CiAdmissionsPage() {
       p_due_at: dueAt,
       p_next_status: "NEEDS_INFO",
     });
+
+    setNeedsInfoOpen(false);
   }
 
-  async function archiveSoft() {
+  async function archiveSoftConfirmed() {
     if (!selected) return;
-    const note = prompt("Archive note (optional):", "Archived by operator.");
     await rpc("admissions_set_status", {
       p_application_id: selected.id,
       p_next_status: "ARCHIVED",
-      p_note: note || "",
+      p_note: archiveNote || "",
     });
+    setArchiveOpen(false);
   }
 
-  async function hardDelete() {
+  async function hardDeleteConfirmed() {
     if (!selected) return;
-    const ok = confirm(
-      `Hard delete application?\n\n${title}\n\nThis is irreversible. Only allowed for terminal statuses.`
-    );
-    if (!ok) return;
 
-    const reason = prompt("Deletion reason (required):", "Test data cleanup.");
-    if (!reason) return;
+    const reason = deleteReason.trim();
+    if (!reason) return alert("Deletion reason is required.");
 
     await rpc("admissions_delete_application", {
       p_application_id: selected.id,
       p_reason: reason,
     });
+
+    setDeleteOpen(false);
   }
 
   const status = normStatus(selected?.status);
@@ -412,16 +537,207 @@ export default function CiAdmissionsPage() {
   const canApprove = !!selected && ["IN_REVIEW", "NEEDS_INFO"].includes(status);
   const canNeedsInfo = !!selected && ["IN_REVIEW", "SUBMITTED"].includes(status);
   const canArchive = !!selected && status !== "ARCHIVED";
-  const canHardDelete =
-    !!selected && ["DECLINED", "WITHDRAWN", "ARCHIVED"].includes(status);
+  const canHardDelete = !!selected && ["DECLINED", "WITHDRAWN", "ARCHIVED"].includes(status);
 
-  const meta = useMemo(() => {
-    const m = selected?.metadata;
-    return (m && typeof m === "object" ? (m as any) : {}) as any;
-  }, [selected?.metadata]);
+  const statusBadge = useMemo(() => {
+    if (!selected) return null;
+    const s = normStatus(selected.status);
+    const cls =
+      s === "PROVISIONED"
+        ? "border-emerald-300/20 bg-emerald-400/10 text-emerald-200"
+        : s === "NEEDS_INFO"
+        ? "border-amber-300/18 bg-amber-400/10 text-amber-200"
+        : s === "IN_REVIEW"
+        ? "border-sky-300/18 bg-sky-400/10 text-sky-200"
+        : s === "ARCHIVED"
+        ? "border-white/10 bg-white/5 text-white/65"
+        : "border-white/10 bg-white/5 text-white/70";
+
+    return (
+      <span className={cx("rounded-full border px-3 py-1 text-[11px] font-medium", cls)}>
+        {selected.status || "—"}
+      </span>
+    );
+  }, [selected]);
 
   return (
     <div className="h-full w-full">
+      {/* --- OS Modals --- */}
+      <OsModal
+        open={approveOpen}
+        onClose={() => setApproveOpen(false)}
+        title="Approve for Provisioning"
+        subtitle="This enables credential binding (Set Password) and portal activation."
+        footer={
+          <button
+            onClick={approveForProvisioningConfirmed}
+            disabled={busy}
+            className={cx(
+              "rounded-full border px-5 py-2 text-xs font-semibold transition",
+              !busy
+                ? "border-amber-300/22 bg-amber-400/10 text-amber-200 hover:bg-amber-400/14"
+                : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
+            )}
+          >
+            Approve & Continue
+          </button>
+        }
+      >
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-white/10 bg-black/25 p-4 text-sm text-white/65">
+            <div className="text-[11px] uppercase tracking-[0.22em] text-white/35">Application</div>
+            <div className="mt-2 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="truncate text-white/85">{title}</div>
+                <div className="mt-1 truncate text-xs text-white/45">
+                  {selected?.applicant_email || selected?.organization_email || "—"}
+                </div>
+              </div>
+              {statusBadge}
+            </div>
+          </div>
+
+          <Input
+            label="Decision summary"
+            value={approveSummary}
+            onChange={setApproveSummary}
+            placeholder="Approved for provisioning."
+          />
+          <Textarea
+            label="Rationale (required)"
+            value={approveReason}
+            onChange={setApproveReason}
+            placeholder="Meets intake requirements."
+          />
+          <Select
+            label="Risk tier"
+            value={approveRisk}
+            onChange={setApproveRisk}
+            options={[
+              { value: "low", label: "low" },
+              { value: "medium", label: "medium" },
+              { value: "high", label: "high" },
+            ]}
+          />
+
+          <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-xs text-white/55">
+            Enforced by RPC. No direct table updates.
+          </div>
+        </div>
+      </OsModal>
+
+      <OsModal
+        open={needsInfoOpen}
+        onClose={() => setNeedsInfoOpen(false)}
+        title="Request Information"
+        subtitle="Sends a formal request and moves the application to NEEDS_INFO."
+        footer={
+          <button
+            onClick={needsInfoConfirmed}
+            disabled={busy}
+            className={cx(
+              "rounded-full border px-5 py-2 text-xs font-semibold transition",
+              !busy
+                ? "border-amber-300/18 bg-amber-400/10 text-amber-200 hover:bg-amber-400/14"
+                : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
+            )}
+          >
+            Send Request
+          </button>
+        }
+      >
+        <div className="space-y-4">
+          <Textarea
+            label="Message (required)"
+            value={niMessage}
+            onChange={setNiMessage}
+            placeholder="Please provide missing information."
+          />
+          <Input
+            label="Channels (comma-separated)"
+            value={niChannels}
+            onChange={setNiChannels}
+            placeholder="email,sms"
+          />
+          <Input
+            label="Due at (optional ISO)"
+            value={niDueIso}
+            onChange={setNiDueIso}
+            placeholder="2026-01-20T17:00:00Z"
+          />
+          <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-xs text-white/55">
+            Tip: leave Due at empty to omit a deadline.
+          </div>
+        </div>
+      </OsModal>
+
+      <OsModal
+        open={archiveOpen}
+        onClose={() => setArchiveOpen(false)}
+        title="Archive Application"
+        subtitle="Soft archive. Keeps record for audit and removes from intake focus."
+        footer={
+          <button
+            onClick={archiveSoftConfirmed}
+            disabled={busy}
+            className={cx(
+              "rounded-full border px-5 py-2 text-xs font-semibold transition",
+              !busy
+                ? "border-white/10 bg-white/6 text-white/80 hover:bg-white/8 hover:border-amber-300/15"
+                : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
+            )}
+          >
+            Archive
+          </button>
+        }
+      >
+        <div className="space-y-4">
+          <Textarea
+            label="Archive note (optional)"
+            value={archiveNote}
+            onChange={setArchiveNote}
+            placeholder="Archived by operator."
+          />
+          <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-xs text-white/55">
+            Uses admissions_set_status (RPC-only).
+          </div>
+        </div>
+      </OsModal>
+
+      <OsModal
+        open={deleteOpen}
+        onClose={() => setDeleteOpen(false)}
+        title="Hard Delete (Irreversible)"
+        subtitle="Only allowed for terminal statuses (DECLINED/WITHDRAWN/ARCHIVED)."
+        footer={
+          <button
+            onClick={hardDeleteConfirmed}
+            disabled={busy || !canHardDelete}
+            className={cx(
+              "rounded-full border px-5 py-2 text-xs font-semibold transition",
+              canHardDelete && !busy
+                ? "border-rose-300/20 bg-rose-400/10 text-rose-200 hover:bg-rose-400/14"
+                : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
+            )}
+          >
+            Delete
+          </button>
+        }
+      >
+        <div className="space-y-4">
+          <Textarea
+            label="Deletion reason (required)"
+            value={deleteReason}
+            onChange={setDeleteReason}
+            placeholder="Test data cleanup."
+          />
+          <div className="rounded-2xl border border-rose-300/15 bg-rose-400/10 p-4 text-xs text-rose-100/90">
+            This cannot be undone.
+          </div>
+        </div>
+      </OsModal>
+
+      {/* --- Page --- */}
       <div className="mx-auto w-full max-w-[1400px] px-4 pb-10 pt-6">
         <div className="mb-5 flex items-end justify-between gap-4">
           <div>
@@ -433,11 +749,8 @@ export default function CiAdmissionsPage() {
             </div>
             <div className="mt-1 text-sm text-white/50">
               Entity-scoped:{" "}
-              <span className="text-white/70">{entityName || entityKey}</span> •
-              Lane:{" "}
-              <span className="text-white/70">
-                {isTest ? "SANDBOX" : "RoT"}
-              </span>
+              <span className="text-white/70">{entityName || entityKey}</span> • Lane:{" "}
+              <span className="text-white/70">{isTest ? "SANDBOX" : "RoT"}</span>
             </div>
           </div>
 
@@ -467,10 +780,7 @@ export default function CiAdmissionsPage() {
                     <Pill active={tab === "ALL"} onClick={() => setTab("ALL")}>
                       All
                     </Pill>
-                    <Pill
-                      active={tab === "ARCHIVED"}
-                      onClick={() => setTab("ARCHIVED")}
-                    >
+                    <Pill active={tab === "ARCHIVED"} onClick={() => setTab("ARCHIVED")}>
                       Archived
                     </Pill>
                   </div>
@@ -481,10 +791,7 @@ export default function CiAdmissionsPage() {
                     <Pill active={quick === "BOTH"} onClick={() => setQuick("BOTH")}>
                       BOTH
                     </Pill>
-                    <Pill
-                      active={quick === "INTAKE"}
-                      onClick={() => setQuick("INTAKE")}
-                    >
+                    <Pill active={quick === "INTAKE"} onClick={() => setQuick("INTAKE")}>
                       INTAKE
                     </Pill>
                     <Pill
@@ -512,9 +819,7 @@ export default function CiAdmissionsPage() {
                 ) : err ? (
                   <div className="p-4 text-sm text-rose-200">{err}</div>
                 ) : filtered.length === 0 ? (
-                  <div className="p-4 text-sm text-white/50">
-                    No applications found.
-                  </div>
+                  <div className="p-4 text-sm text-white/50">No applications found.</div>
                 ) : (
                   <div className="space-y-2 p-2">
                     {filtered.map((r) => {
@@ -524,6 +829,7 @@ export default function CiAdmissionsPage() {
                         r.organization_legal_name ||
                         r.applicant_email ||
                         r.id;
+
                       const badge = r.status || "—";
                       const sub = r.applicant_email || r.organization_email || "—";
 
@@ -559,8 +865,7 @@ export default function CiAdmissionsPage() {
               </div>
 
               <div className="border-t border-white/10 p-4 text-[11px] text-white/35">
-                Lane note: UI is lane-aware via OS env. Query is lane-filtered
-                only if the view exposes lane columns.
+                Lane note: UI is lane-aware via OS env. Query is lane-filtered only if the view exposes lane columns.
               </div>
             </div>
           </div>
@@ -569,35 +874,28 @@ export default function CiAdmissionsPage() {
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
-                <div className="text-xs font-semibold tracking-wide text-white/80">
-                  Application
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-semibold tracking-wide text-white/80">
+                      Application
+                    </div>
+                    <div className="mt-1 truncate text-sm text-white/60">{title}</div>
+                  </div>
+                  {statusBadge}
                 </div>
-                <div className="mt-1 truncate text-sm text-white/60">{title}</div>
               </div>
 
               <div className="p-4">
                 {!selected ? (
-                  <div className="text-sm text-white/50">
-                    Select an application.
-                  </div>
+                  <div className="text-sm text-white/50">Select an application.</div>
                 ) : (
                   <div className="space-y-4">
                     <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
-                      <Field
-                        k="Org (legal)"
-                        v={selected.organization_legal_name || "—"}
-                      />
-                      <Field
-                        k="Org (trade)"
-                        v={selected.organization_trade_name || "—"}
-                      />
+                      <Field k="Org (legal)" v={selected.organization_legal_name || "—"} />
+                      <Field k="Org (trade)" v={selected.organization_trade_name || "—"} />
                       <Field k="Applicant" v={selected.applicant_email || "—"} />
-                      <Field
-                        k="Org email"
-                        v={selected.organization_email || "—"}
-                      />
+                      <Field k="Org email" v={selected.organization_email || "—"} />
                       <Field k="Type" v={selected.applicant_type || "—"} />
-                      <Field k="Status" v={selected.status || "—"} />
                       <Field k="App ID" v={selected.id} mono />
                       <Field k="Created" v={selected.created_at || "—"} />
                       <Field k="Updated" v={selected.updated_at || "—"} />
@@ -621,35 +919,44 @@ export default function CiAdmissionsPage() {
                       </div>
                     </div>
 
-                    {/* ✅ Metadata panel (Oasis needs this everywhere) */}
-                    <div className="rounded-2xl border border-white/10 bg-black/18 p-4">
-                      <div className="flex items-center justify-between gap-3">
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                      <div className="flex items-center justify-between gap-2">
                         <div className="text-xs font-semibold tracking-wide text-white/80">
                           Metadata
                         </div>
-                        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/60">
+                        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] text-white/65">
                           jsonb
                         </span>
                       </div>
 
-                      <div className="mt-3 space-y-3">
-                        <Field k="source" v={meta?.source ? String(meta.source) : "—"} />
-                        <Field
-                          k="request_brief"
-                          v={meta?.request_brief ? String(meta.request_brief) : "—"}
-                        />
-                        <Field
-                          k="notes"
-                          v={meta?.notes ? String(meta.notes) : "—"}
-                        />
-
-                        <div className="mt-3 rounded-2xl border border-white/10 bg-black/25 p-3">
-                          <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">
-                            raw
+                      <div className="mt-3 space-y-2 text-xs text-white/60">
+                        <div className="flex justify-between gap-4">
+                          <div className="text-white/35 uppercase tracking-[0.22em]">
+                            source
                           </div>
-                          <pre className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-5 text-white/70">
-                            {safePrettyJSON(selected.metadata)}
-                          </pre>
+                          <div className="text-white/75">
+                            {selected.metadata?.source || "—"}
+                          </div>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <div className="text-white/35 uppercase tracking-[0.22em]">
+                            request_brief
+                          </div>
+                          <div className="text-white/75 text-right">
+                            {selected.metadata?.request_brief || "—"}
+                          </div>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <div className="text-white/35 uppercase tracking-[0.22em]">
+                            notes
+                          </div>
+                          <div className="text-white/75 text-right">
+                            {selected.metadata?.notes || "—"}
+                          </div>
+                        </div>
+
+                        <div className="mt-3 rounded-2xl border border-white/10 bg-black/30 p-3 font-mono text-[11px] leading-5 text-white/65">
+                          {selected.metadata ? JSON.stringify(selected.metadata, null, 2) : "null"}
                         </div>
                       </div>
                     </div>
@@ -657,9 +964,9 @@ export default function CiAdmissionsPage() {
                     <div className="rounded-2xl border border-white/10 bg-black/18 p-4 text-sm text-white/60">
                       <div className="font-semibold text-white/80">Read-only</div>
                       <div className="mt-1">
-                        Admissions is authority-only. Invite/activation is handled
-                        in <span className="text-white/75">CI-Provisioning</span>.
-                        Evidence review is separate.
+                        Admissions is authority-only. Invite/activation is handled in{" "}
+                        <span className="text-white/75">CI-Provisioning</span>. Evidence review is
+                        separate.
                       </div>
                     </div>
                   </div>
@@ -675,16 +982,12 @@ export default function CiAdmissionsPage() {
                 <div className="text-xs font-semibold tracking-wide text-white/80">
                   Authority Panel
                 </div>
-                <div className="mt-1 text-sm text-white/60">
-                  Review • Decisions • Archive
-                </div>
+                <div className="mt-1 text-sm text-white/60">Review • Decisions • Archive</div>
               </div>
 
               <div className="p-4">
                 {!selected ? (
-                  <div className="text-sm text-white/50">
-                    Select an application.
-                  </div>
+                  <div className="text-sm text-white/50">Select an application.</div>
                 ) : (
                   <>
                     <div className="flex flex-col gap-2">
@@ -702,7 +1005,13 @@ export default function CiAdmissionsPage() {
                       </button>
 
                       <button
-                        onClick={approveForProvisioning}
+                        onClick={() => {
+                          // seed defaults with current row, so it feels intelligent
+                          setApproveSummary("Approved for provisioning.");
+                          setApproveReason("Meets intake requirements.");
+                          setApproveRisk((selected?.risk_tier || "medium") as string);
+                          setApproveOpen(true);
+                        }}
                         disabled={!canApprove || busy}
                         className={cx(
                           "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
@@ -715,7 +1024,12 @@ export default function CiAdmissionsPage() {
                       </button>
 
                       <button
-                        onClick={needsInfo}
+                        onClick={() => {
+                          setNiMessage("Please provide missing information.");
+                          setNiChannels("email");
+                          setNiDueIso("");
+                          setNeedsInfoOpen(true);
+                        }}
                         disabled={!canNeedsInfo || busy}
                         className={cx(
                           "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
@@ -728,7 +1042,7 @@ export default function CiAdmissionsPage() {
                       </button>
 
                       <button
-                        onClick={archiveSoft}
+                        onClick={() => setArchiveOpen(true)}
                         disabled={!canArchive || busy}
                         className={cx(
                           "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
@@ -741,7 +1055,7 @@ export default function CiAdmissionsPage() {
                       </button>
 
                       <button
-                        onClick={hardDelete}
+                        onClick={() => setDeleteOpen(true)}
                         disabled={!canHardDelete || busy}
                         className={cx(
                           "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
@@ -759,8 +1073,8 @@ export default function CiAdmissionsPage() {
                         Audit trail
                       </div>
                       <div className="mt-2 text-xs text-white/55">
-                        Mutations are RPC-only. No raw updates. Use CI-Provisioning
-                        for invite/activation.
+                        Mutations are RPC-only. No raw updates. Use CI-Provisioning for
+                        invite/activation.
                       </div>
                     </div>
                   </>
@@ -771,8 +1085,7 @@ export default function CiAdmissionsPage() {
         </div>
 
         <div className="mt-5 text-[10px] text-white/35">
-          Source: public.v_onboarding_admissions_inbox • entity_slug={entityKey} •
-          lane={isTest ? "SANDBOX" : "RoT"}
+          Source: public.v_onboarding_admissions_inbox • entity_slug={entityKey} • lane={isTest ? "SANDBOX" : "RoT"}
         </div>
       </div>
     </div>
