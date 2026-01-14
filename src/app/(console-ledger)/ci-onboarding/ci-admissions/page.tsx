@@ -1,4 +1,3 @@
-// ci-onboarding/ci-admissions/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -18,6 +17,7 @@ function normStatus(s: string | null | undefined) {
 type InboxRow = {
   id: string;
   status: string | null;
+
   submitted_at: string | null;
   triaged_at: string | null;
   decided_at: string | null;
@@ -32,14 +32,14 @@ type InboxRow = {
 
   organization_legal_name: string | null;
   organization_trade_name: string | null;
-  organization_email: string | null; // in your view it aliases applicant_email
-  website: string | null;
+  organization_email: string | null;
 
+  website: string | null;
   incorporation_number: string | null;
   jurisdiction_country: string | null;
   jurisdiction_region: string | null;
 
-  intent: string | null; // ✅ use this as the "request"
+  intent: string | null;
   requested_services: any | null;
   expected_start_date: string | null;
 
@@ -56,57 +56,44 @@ type InboxRow = {
 
   metadata: any | null;
 
-  // Optional columns if you later add them to the view
+  // optional (only if the view exposes it)
   lane_is_test?: boolean | null;
-  is_test?: boolean | null;
 };
 
-type AppTab = "INTAKE" | "ALL" | "ARCHIVED";
+type Tab = "INTAKE" | "ALL" | "ARCHIVED";
+type Quick = "BOTH" | "INTAKE" | "PROVISIONED";
 
 function Pill({
   active,
   onClick,
   children,
-  tone,
 }: {
   active: boolean;
   onClick: () => void;
   children: React.ReactNode;
-  tone?: "neutral" | "good" | "warn";
 }) {
-  const base = "rounded-full px-3 py-1 text-[11px] font-medium transition";
-  const activeCls =
-    tone === "good"
-      ? "bg-emerald-400/10 text-emerald-200 ring-1 ring-emerald-300/20"
-      : tone === "warn"
-        ? "bg-amber-400/10 text-amber-200 ring-1 ring-amber-300/20"
-        : "bg-white/8 text-white/85 ring-1 ring-white/12";
-  const idle = "text-white/55 hover:text-white/75";
-
   return (
-    <button onClick={onClick} className={cx(base, active ? activeCls : idle)}>
+    <button
+      onClick={onClick}
+      className={cx(
+        "rounded-full px-3 py-1 text-[11px] font-medium transition",
+        active
+          ? "bg-white/8 text-white/85 ring-1 ring-white/12"
+          : "text-white/55 hover:text-white/75"
+      )}
+    >
       {children}
     </button>
   );
 }
 
-function KV({
-  k,
-  v,
-  mono,
-}: {
-  k: string;
-  v: string;
-  mono?: boolean;
-}) {
+function Field({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
   return (
     <div className="flex items-start justify-between gap-4">
-      <div className="text-xs uppercase tracking-[0.22em] text-white/35">
-        {k}
-      </div>
+      <div className="text-xs uppercase tracking-[0.22em] text-white/35">{k}</div>
       <div
         className={cx(
-          "max-w-[70%] text-right text-sm text-white/80",
+          "max-w-[68%] text-right text-sm text-white/80",
           mono && "font-mono text-[12px] leading-5 text-white/70"
         )}
       >
@@ -117,7 +104,7 @@ function KV({
 }
 
 export default function CiAdmissionsPage() {
-  // ✅ Entity (defensive; matches Evidence page)
+  // ---- entity (defensive, like CI-Evidence) ----
   const ec = useEntity() as any;
   const entityKey: string =
     (ec?.entityKey as string) ||
@@ -128,68 +115,34 @@ export default function CiAdmissionsPage() {
   const entityName: string =
     (ec?.entityName as string) ||
     (ec?.activeEntityName as string) ||
-    (ec?.entities?.find?.(
-      (x: any) => x?.slug === entityKey || x?.key === entityKey
-    )?.name as string) ||
+    (ec?.entities?.find?.((x: any) => x?.slug === entityKey || x?.key === entityKey)?.name as string) ||
     entityKey;
 
-  // ✅ Env (defensive; fixes your build error)
+  // ---- env lane (defensive, like CI-Evidence) ----
   const env = useOsEnv() as any;
   const isTest: boolean = Boolean(
     env?.is_test ?? env?.isTest ?? env?.lane_is_test ?? env?.sandbox ?? env?.isSandbox
   );
 
-  const [tab, setTab] = useState<AppTab>("INTAKE");
-  const [q, setQ] = useState("");
-
   const [rows, setRows] = useState<InboxRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
+  const [tab, setTab] = useState<Tab>("INTAKE");
+  const [quick, setQuick] = useState<Quick>("BOTH");
+  const [q, setQ] = useState("");
+
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
+  const [busy, setBusy] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
-
-  // action state
-  const [busy, setBusy] = useState<string | null>(null);
 
   const selected = useMemo(
     () => rows.find((r) => r.id === selectedId) || null,
     [rows, selectedId]
   );
 
-  const filtered = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    let list = rows;
-
-    if (tab === "INTAKE") {
-      const allow = new Set(["SUBMITTED", "IN_REVIEW", "NEEDS_INFO"]);
-      list = list.filter((r) => allow.has(normStatus(r.status)));
-    } else if (tab === "ARCHIVED") {
-      list = list.filter((r) => normStatus(r.status) === "ARCHIVED");
-    }
-
-    if (!needle) return list;
-
-    return list.filter((r) => {
-      const blob = [
-        r.organization_legal_name,
-        r.organization_trade_name,
-        r.applicant_name,
-        r.applicant_email,
-        r.organization_email,
-        r.status,
-        r.applicant_type,
-        r.id,
-      ]
-        .filter(Boolean)
-        .join(" • ")
-        .toLowerCase();
-      return blob.includes(needle);
-    });
-  }, [rows, q, tab]);
-
-  // -------- load inbox (entity-scoped; lane-safe if lane columns exist) --------
+  // ---- load inbox (lane-safe if view supports lane, else fallback) ----
   useEffect(() => {
     let alive = true;
 
@@ -198,7 +151,7 @@ export default function CiAdmissionsPage() {
       setErr(null);
 
       try {
-        const baseCols = [
+        const cols = [
           "id",
           "status",
           "submitted_at",
@@ -232,50 +185,39 @@ export default function CiAdmissionsPage() {
           "metadata",
         ];
 
-        const tryWithLane = async (laneCol: "lane_is_test" | "is_test") => {
+        const tryWithLane = async () => {
           const { data, error } = await supabase
             .from("v_onboarding_admissions_inbox")
-            .select([...baseCols, laneCol].join(","))
+            .select([...cols, "lane_is_test"].join(","))
             .eq("entity_slug", entityKey)
-            .eq(laneCol, isTest)
+            .eq("lane_is_test", isTest)
             .order("created_at", { ascending: false });
+
           return { data, error };
         };
 
         const tryWithoutLane = async () => {
           const { data, error } = await supabase
             .from("v_onboarding_admissions_inbox")
-            .select(baseCols.join(","))
+            .select(cols.join(","))
             .eq("entity_slug", entityKey)
             .order("created_at", { ascending: false });
+
           return { data, error };
         };
 
-        // Attempt lane-safe first, but fall back cleanly if the view doesn't have the columns.
-        let res = await tryWithLane("lane_is_test");
-        if (
-          res.error &&
-          /lane_is_test|42703|undefined column/i.test(res.error.message)
-        ) {
-          res = await tryWithLane("is_test");
-        }
-        if (
-          res.error &&
-          /is_test|42703|undefined column/i.test(res.error.message)
-        ) {
+        let res = await tryWithLane();
+        if (res.error && /lane_is_test|42703|undefined column/i.test(res.error.message)) {
           res = await tryWithoutLane();
         }
-
         if (res.error) throw res.error;
-        if (!alive) return;
 
+        if (!alive) return;
         const list = (res.data || []) as InboxRow[];
         setRows(list);
 
         if (!selectedId && list.length) setSelectedId(list[0].id);
-        else if (selectedId && !list.some((x) => x.id === selectedId)) {
-          setSelectedId(list[0]?.id ?? null);
-        }
+        else if (selectedId && !list.some((r) => r.id === selectedId)) setSelectedId(list[0]?.id ?? null);
       } catch (e: any) {
         if (!alive) return;
         setErr(e?.message || "Failed to load admissions inbox.");
@@ -291,7 +233,49 @@ export default function CiAdmissionsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entityKey, isTest, refreshKey]);
 
-  const selectedTitle = useMemo(() => {
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    let list = rows;
+
+    const st = (r: InboxRow) => normStatus(r.status);
+
+    if (tab === "INTAKE") {
+      const allow = new Set(["SUBMITTED", "IN_REVIEW", "NEEDS_INFO"]);
+      list = list.filter((r) => allow.has(st(r)));
+    } else if (tab === "ARCHIVED") {
+      list = list.filter((r) => st(r) === "ARCHIVED");
+    }
+
+    if (quick === "INTAKE") {
+      const allow = new Set(["SUBMITTED", "IN_REVIEW", "NEEDS_INFO"]);
+      list = list.filter((r) => allow.has(st(r)));
+    } else if (quick === "PROVISIONED") {
+      const allow = new Set(["PROVISIONED"]);
+      list = list.filter((r) => allow.has(st(r)));
+    }
+
+    if (!needle) return list;
+
+    return list.filter((r) => {
+      const blob = [
+        r.organization_legal_name,
+        r.organization_trade_name,
+        r.applicant_name,
+        r.applicant_email,
+        r.organization_email,
+        r.status,
+        r.applicant_type,
+        r.intent,
+        r.id,
+      ]
+        .filter(Boolean)
+        .join(" • ")
+        .toLowerCase();
+      return blob.includes(needle);
+    });
+  }, [rows, tab, quick, q]);
+
+  const title = useMemo(() => {
     if (!selected) return "Select an application";
     return (
       selected.organization_trade_name ||
@@ -301,98 +285,110 @@ export default function CiAdmissionsPage() {
     );
   }, [selected]);
 
-  async function rpc(name: string, args: Record<string, any>) {
-    const { error } = await supabase.rpc(name, args);
-    if (error) throw error;
+  async function rpc(name: string, args: any) {
+    setBusy(true);
+    try {
+      const { error } = await supabase.rpc(name, args);
+      if (error) throw error;
+      setRefreshKey((n) => n + 1);
+    } catch (e: any) {
+      alert(e?.message || "RPC failed.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function beginReview() {
     if (!selected) return;
-    setBusy("begin");
-    try {
-      await rpc("admissions_begin_review", { p_application_id: selected.id });
-      setRefreshKey((n) => n + 1);
-    } catch (e: any) {
-      alert(e?.message || "Begin review failed.");
-    } finally {
-      setBusy(null);
-    }
+    await rpc("admissions_begin_review", { p_application_id: selected.id });
   }
 
-  async function archive() {
+  async function approveForProvisioning() {
     if (!selected) return;
-    setBusy("archive");
-    try {
-      await rpc("admissions_set_status", {
-        p_application_id: selected.id,
-        p_next_status: "ARCHIVED",
-        p_note: "Archived from console.",
-      });
-      setRefreshKey((n) => n + 1);
-    } catch (e: any) {
-      alert(e?.message || "Archive failed.");
-    } finally {
-      setBusy(null);
-    }
+    const summary = prompt("Decision summary (short):", "Approved for provisioning.");
+    if (summary == null) return;
+
+    const reason = prompt("Reason / rationale (required):", "Meets intake requirements.");
+    if (reason == null) return;
+
+    const risk = prompt("Risk tier (enum, e.g. low / medium / high):", selected.risk_tier || "medium");
+    if (risk == null) return;
+
+    await rpc("admissions_record_decision", {
+      p_application_id: selected.id,
+      p_decision: "APPROVE",
+      p_risk_tier: risk,
+      p_summary: summary,
+      p_reason: reason,
+    });
   }
 
-  /**
-   * ✅ INVITE = AUTH ONLY
-   * Calls the Edge Function that sends a Supabase Auth invite / set-password link.
-   * Provisioning (entity creation/memberships/tasks) stays in CI-Provisioning.
-   */
-  async function runInvite() {
+  async function needsInfo() {
     if (!selected) return;
-    if (!selected.applicant_email) {
-      alert("Missing applicant_email on this application.");
-      return;
-    }
+    const msg = prompt("Message to applicant (required):", "Please provide missing information.");
+    if (!msg) return;
 
-    setBusy("invite");
-    try {
-      const { data, error } = await supabase.functions.invoke(
-        "admissions-provision-portal-access",
-        {
-          body: {
-            application_id: selected.id,
-            applicant_email: selected.applicant_email,
-            // keep body minimal: auth-only contract
-            mode: "INVITE_ONLY",
-          },
-        }
-      );
+    const channelsRaw = prompt("Channels (comma-separated):", "email");
+    const channels = (channelsRaw || "email")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
 
-      if (error) throw error;
+    const dueRaw = prompt("Due at (optional ISO, leave blank):", "");
+    const dueAt = (dueRaw || "").trim() ? new Date(dueRaw).toISOString() : null;
 
-      // If your function returns ok:false, surface it.
-      if (data && data.ok === false) {
-        throw new Error(data.error || data.detail || "Invite failed.");
-      }
-
-      alert("Invite sent. Client will set a password via the secure link.");
-      setRefreshKey((n) => n + 1);
-    } catch (e: any) {
-      alert(e?.message || "Invite failed.");
-    } finally {
-      setBusy(null);
-    }
+    await rpc("admissions_request_info", {
+      p_application_id: selected.id,
+      p_message: msg,
+      p_channels: channels,
+      p_due_at: dueAt,
+      p_next_status: "NEEDS_INFO",
+    });
   }
+
+  async function archiveSoft() {
+    if (!selected) return;
+    const note = prompt("Archive note (optional):", "Archived by operator.");
+    await rpc("admissions_set_status", {
+      p_application_id: selected.id,
+      p_next_status: "ARCHIVED",
+      p_note: note || "",
+    });
+  }
+
+  async function hardDelete() {
+    if (!selected) return;
+    const ok = confirm(
+      `Hard delete application?\n\n${title}\n\nThis is irreversible. Only allowed for terminal statuses.`
+    );
+    if (!ok) return;
+
+    const reason = prompt("Deletion reason (required):", "Test data cleanup.");
+    if (!reason) return;
+
+    await rpc("admissions_delete_application", {
+      p_application_id: selected.id,
+      p_reason: reason,
+    });
+  }
+
+  const status = normStatus(selected?.status);
+  const canBeginReview = !!selected && ["SUBMITTED", "NEEDS_INFO"].includes(status);
+  const canApprove = !!selected && ["IN_REVIEW", "NEEDS_INFO"].includes(status);
+  const canNeedsInfo = !!selected && ["IN_REVIEW", "SUBMITTED"].includes(status);
+  const canArchive = !!selected && status !== "ARCHIVED";
+  const canHardDelete = !!selected && ["DECLINED", "WITHDRAWN", "ARCHIVED"].includes(status);
 
   return (
     <div className="h-full w-full">
       <div className="mx-auto w-full max-w-[1400px] px-4 pb-10 pt-6">
         <div className="mb-5 flex items-end justify-between gap-4">
           <div>
-            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
-              CI • Admissions
-            </div>
-            <div className="mt-1 text-2xl font-semibold text-white/90">
-              Admissions Console
-            </div>
+            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">CI • Admissions</div>
+            <div className="mt-1 text-2xl font-semibold text-white/90">Admissions Console</div>
             <div className="mt-1 text-sm text-white/50">
-              Entity-scoped:{" "}
-              <span className="text-white/70">{entityName || entityKey}</span> •
-              Lane: <span className="text-white/70">{isTest ? "SANDBOX" : "RoT"}</span>
+              Entity-scoped: <span className="text-white/70">{entityName || entityKey}</span> • Lane:{" "}
+              <span className="text-white/70">{isTest ? "SANDBOX" : "RoT"}</span>
             </div>
           </div>
 
@@ -407,31 +403,35 @@ export default function CiAdmissionsPage() {
         </div>
 
         <div className="grid grid-cols-12 gap-4">
-          {/* Left: Queue */}
+          {/* LEFT: queue */}
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
-                <div className="flex items-center justify-between">
-                  <div className="text-xs font-semibold tracking-wide text-white/80">
-                    Inbox
-                  </div>
-                  <div className="flex gap-2">
-                    <Pill
-                      active={tab === "INTAKE"}
-                      onClick={() => setTab("INTAKE")}
-                      tone="good"
-                    >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-xs font-semibold tracking-wide text-white/80">Inbox</div>
+                  <div className="flex items-center gap-2">
+                    <Pill active={tab === "INTAKE"} onClick={() => setTab("INTAKE")}>
                       Intake
                     </Pill>
                     <Pill active={tab === "ALL"} onClick={() => setTab("ALL")}>
                       All
                     </Pill>
-                    <Pill
-                      active={tab === "ARCHIVED"}
-                      onClick={() => setTab("ARCHIVED")}
-                      tone="neutral"
-                    >
+                    <Pill active={tab === "ARCHIVED"} onClick={() => setTab("ARCHIVED")}>
                       Archived
+                    </Pill>
+                  </div>
+                </div>
+
+                <div className="mt-3 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Pill active={quick === "BOTH"} onClick={() => setQuick("BOTH")}>
+                      BOTH
+                    </Pill>
+                    <Pill active={quick === "INTAKE"} onClick={() => setQuick("INTAKE")}>
+                      INTAKE
+                    </Pill>
+                    <Pill active={quick === "PROVISIONED"} onClick={() => setQuick("PROVISIONED")}>
+                      PROVISIONED
                     </Pill>
                   </div>
                 </div>
@@ -455,20 +455,20 @@ export default function CiAdmissionsPage() {
                   <div className="p-4 text-sm text-white/50">No applications found.</div>
                 ) : (
                   <div className="space-y-2 p-2">
-                    {filtered.map((a) => {
-                      const active = a.id === selectedId;
+                    {filtered.map((r) => {
+                      const active = r.id === selectedId;
                       const name =
-                        a.organization_trade_name ||
-                        a.organization_legal_name ||
-                        a.applicant_email ||
-                        a.id;
-
-                      const status = a.status || "—";
+                        r.organization_trade_name ||
+                        r.organization_legal_name ||
+                        r.applicant_email ||
+                        r.id;
+                      const badge = r.status || "—";
+                      const sub = r.applicant_email || r.organization_email || "—";
 
                       return (
                         <button
-                          key={a.id}
-                          onClick={() => setSelectedId(a.id)}
+                          key={r.id}
+                          onClick={() => setSelectedId(r.id)}
                           className={cx(
                             "w-full rounded-2xl border p-4 text-left transition",
                             active
@@ -478,15 +478,11 @@ export default function CiAdmissionsPage() {
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
-                              <div className="truncate text-sm font-semibold text-white/88">
-                                {name}
-                              </div>
-                              <div className="mt-1 truncate text-xs text-white/45">
-                                {a.applicant_email || a.organization_email || "—"}
-                              </div>
+                              <div className="truncate text-sm font-semibold text-white/88">{name}</div>
+                              <div className="mt-1 truncate text-xs text-white/45">{sub}</div>
                             </div>
                             <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/70">
-                              {status}
+                              {badge}
                             </span>
                           </div>
                         </button>
@@ -495,19 +491,70 @@ export default function CiAdmissionsPage() {
                   </div>
                 )}
               </div>
+
+              <div className="border-t border-white/10 p-4 text-[11px] text-white/35">
+                Lane note: UI is lane-aware via OS env. Query is lane-filtered only if the view exposes lane columns.
+              </div>
             </div>
           </div>
 
-          {/* Middle: Application */}
+          {/* MIDDLE: application */}
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
-                <div className="text-xs font-semibold tracking-wide text-white/80">
-                  Application
-                </div>
-                <div className="mt-1 truncate text-sm text-white/60">
-                  {selectedTitle}
-                </div>
+                <div className="text-xs font-semibold tracking-wide text-white/80">Application</div>
+                <div className="mt-1 truncate text-sm text-white/60">{title}</div>
+              </div>
+
+              <div className="p-4">
+                {!selected ? (
+                  <div className="text-sm text-white/50">Select an application.</div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
+                      <Field k="Org (legal)" v={selected.organization_legal_name || "—"} />
+                      <Field k="Org (trade)" v={selected.organization_trade_name || "—"} />
+                      <Field k="Applicant" v={selected.applicant_email || "—"} />
+                      <Field k="Org email" v={selected.organization_email || "—"} />
+                      <Field k="Type" v={selected.applicant_type || "—"} />
+                      <Field k="Status" v={selected.status || "—"} />
+                      <Field k="App ID" v={selected.id} mono />
+                      <Field k="Created" v={selected.created_at || "—"} />
+                      <Field k="Updated" v={selected.updated_at || "—"} />
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                      <div className="text-xs font-semibold tracking-wide text-white/80">Request / Intent</div>
+                      <div className="mt-2 text-sm text-white/75 whitespace-pre-wrap">
+                        {selected.intent || "—"}
+                      </div>
+
+                      <div className="mt-3 text-xs text-white/45">
+                        Requested services:{" "}
+                        <span className="text-white/70">
+                          {selected.requested_services ? JSON.stringify(selected.requested_services) : "—"}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-black/18 p-4 text-sm text-white/60">
+                      <div className="font-semibold text-white/80">Read-only</div>
+                      <div className="mt-1">
+                        Admissions is authority-only. Invite/activation is handled in <span className="text-white/75">CI-Provisioning</span>. Evidence review is separate.
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* RIGHT: authority panel */}
+          <div className="col-span-12 lg:col-span-4">
+            <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
+              <div className="border-b border-white/10 p-4">
+                <div className="text-xs font-semibold tracking-wide text-white/80">Authority Panel</div>
+                <div className="mt-1 text-sm text-white/60">Review • Decisions • Archive</div>
               </div>
 
               <div className="p-4">
@@ -515,135 +562,78 @@ export default function CiAdmissionsPage() {
                   <div className="text-sm text-white/50">Select an application.</div>
                 ) : (
                   <>
-                    <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
-                      <KV k="Status" v={selected.status || "—"} />
-                      <KV k="Applicant" v={selected.applicant_name || "—"} />
-                      <KV k="Applicant Email" v={selected.applicant_email || "—"} mono />
-                      <KV k="Applicant Phone" v={selected.applicant_phone || "—"} />
-                      <KV k="Org Legal" v={selected.organization_legal_name || "—"} />
-                      <KV k="Org Trade" v={selected.organization_trade_name || "—"} />
-                      <KV k="Website" v={selected.website || "—"} />
-                      <KV
-                        k="Jurisdiction"
-                        v={
-                          [selected.jurisdiction_region, selected.jurisdiction_country]
-                            .filter(Boolean)
-                            .join(", ") || "—"
-                        }
-                      />
-                      <KV k="Incorp #" v={selected.incorporation_number || "—"} mono />
-                      <KV
-                        k="Request (intent)"
-                        v={selected.intent || "—"}
-                      />
-                      <KV
-                        k="Services"
-                        v={
-                          selected.requested_services
-                            ? JSON.stringify(selected.requested_services)
-                            : "—"
-                        }
-                        mono
-                      />
-                      <KV k="Start" v={selected.expected_start_date || "—"} />
-                      <KV k="Risk Tier" v={selected.risk_tier || "—"} />
-                      <KV k="Risk Notes" v={selected.risk_notes || "—"} />
-                    </div>
-
-                    <div className="mt-4 grid grid-cols-2 gap-2">
+                    <div className="flex flex-col gap-2">
                       <button
                         onClick={beginReview}
-                        disabled={busy !== null}
+                        disabled={!canBeginReview || busy}
                         className={cx(
                           "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
-                          busy
-                            ? "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
-                            : "border-white/10 bg-white/5 text-white/85 hover:border-amber-300/20 hover:bg-white/7"
+                          canBeginReview && !busy
+                            ? "border-emerald-300/20 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/14"
+                            : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
                         )}
                       >
                         Begin Review
                       </button>
 
                       <button
-                        onClick={archive}
-                        disabled={busy !== null}
+                        onClick={approveForProvisioning}
+                        disabled={!canApprove || busy}
                         className={cx(
                           "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
-                          busy
-                            ? "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
-                            : "border-white/10 bg-white/5 text-white/85 hover:border-amber-300/20 hover:bg-white/7"
+                          canApprove && !busy
+                            ? "border-white/10 bg-white/5 text-white/85 hover:border-amber-300/20 hover:bg-white/7"
+                            : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
                         )}
                       >
-                        Archive
+                        Approve (for Provisioning)
                       </button>
-                    </div>
-
-                    <div className="mt-2 rounded-2xl border border-amber-300/15 bg-amber-400/5 p-4">
-                      <div className="text-[11px] uppercase tracking-[0.22em] text-amber-200/70">
-                        Invite (Auth Only)
-                      </div>
-                      <div className="mt-1 text-sm text-white/70">
-                        Sends a secure set-password link to the applicant.{" "}
-                        <span className="text-white/55">
-                          No entity creation. No memberships. Provisioning happens in CI-Provisioning.
-                        </span>
-                      </div>
 
                       <button
-                        onClick={runInvite}
-                        disabled={busy !== null}
+                        onClick={needsInfo}
+                        disabled={!canNeedsInfo || busy}
                         className={cx(
-                          "mt-3 w-full rounded-2xl border px-4 py-3 text-sm font-semibold transition",
-                          busy
-                            ? "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
-                            : "border-emerald-300/20 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/14"
+                          "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
+                          canNeedsInfo && !busy
+                            ? "border-amber-300/18 bg-amber-400/10 text-amber-200 hover:bg-amber-400/14"
+                            : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
                         )}
                       >
-                        {busy === "invite" ? "Sending Invite…" : "Run Invite"}
+                        Needs Info
+                      </button>
+
+                      <button
+                        onClick={archiveSoft}
+                        disabled={!canArchive || busy}
+                        className={cx(
+                          "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
+                          canArchive && !busy
+                            ? "border-white/10 bg-white/4 text-white/75 hover:bg-white/6"
+                            : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
+                        )}
+                      >
+                        Archive (soft)
+                      </button>
+
+                      <button
+                        onClick={hardDelete}
+                        disabled={!canHardDelete || busy}
+                        className={cx(
+                          "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
+                          canHardDelete && !busy
+                            ? "border-rose-300/20 bg-rose-400/10 text-rose-200 hover:bg-rose-400/14"
+                            : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
+                        )}
+                      >
+                        Hard Delete
                       </button>
                     </div>
 
-                    <div className="pt-3 text-xs text-white/40">
-                      Admissions is read-only authority + decisions. Provisioning is a separate module.
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Right: Metadata / operator view */}
-          <div className="col-span-12 lg:col-span-4">
-            <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
-              <div className="border-b border-white/10 p-4">
-                <div className="text-xs font-semibold tracking-wide text-white/80">
-                  Operator Notes
-                </div>
-                <div className="mt-1 truncate text-sm text-white/60">
-                  {selected ? "Metadata + internal context" : "Select an application"}
-                </div>
-              </div>
-
-              <div className="p-4">
-                {!selected ? (
-                  <div className="text-sm text-white/50">Select an application.</div>
-                ) : (
-                  <>
-                    <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                      <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">
-                        Raw metadata
+                    <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-4">
+                      <div className="text-[11px] uppercase tracking-[0.22em] text-white/35">Audit trail</div>
+                      <div className="mt-2 text-xs text-white/55">
+                        Mutations are RPC-only. No raw updates. Use CI-Provisioning for invite/activation.
                       </div>
-                      <pre className="mt-3 max-h-[360px] overflow-auto whitespace-pre-wrap break-words rounded-2xl border border-white/10 bg-black/25 p-3 text-[12px] leading-5 text-white/70">
-                        {JSON.stringify(selected.metadata ?? {}, null, 2)}
-                      </pre>
-                      <div className="mt-3 text-xs text-white/40">
-                        If you want the “email body” visible in-console, store it in metadata (or add a dedicated column/event feed).
-                      </div>
-                    </div>
-
-                    <div className="mt-4 text-[10px] text-white/35">
-                      Source: public.v_onboarding_admissions_inbox • entity_slug={entityKey} •
-                      env={isTest ? "SANDBOX" : "RoT"}
                     </div>
                   </>
                 )}
@@ -653,7 +643,7 @@ export default function CiAdmissionsPage() {
         </div>
 
         <div className="mt-5 text-[10px] text-white/35">
-          Lane note: UI is lane-aware via OS env. Query is lane-filtered only if the view exposes lane columns.
+          Source: public.v_onboarding_admissions_inbox • entity_slug={entityKey} • lane={isTest ? "SANDBOX" : "RoT"}
         </div>
       </div>
     </div>
