@@ -1,4 +1,4 @@
-// src/app/(os)/ci-evidence/page.tsx
+// src/app/(console-ledger)/ci-onboarding/ci-evidence/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -12,10 +12,7 @@ function cx(...xs: Array<string | false | null | undefined>) {
 }
 
 function normStatus(s: string | null | undefined) {
-  return (s || "")
-    .trim()
-    .toUpperCase()
-    .replace(/[\s-]+/g, "_"); // "Needs Info" / "needs-info" -> "NEEDS_INFO"
+  return (s || "").trim().toUpperCase().replace(/[\s-]+/g, "_");
 }
 
 type InboxRow = {
@@ -30,8 +27,6 @@ type InboxRow = {
   organization_email: string | null;
   created_at: string | null;
   updated_at: string | null;
-
-  // optional if your view exposes it (we will query it only if it exists)
   lane_is_test?: boolean | null;
 };
 
@@ -83,7 +78,22 @@ function Row({
 }
 
 export default function CiEvidencePage() {
-  const { entityKey, entity } = useEntity(); // canonical scope key (slug-like)
+  // ✅ FIX: your EntityContextValue does NOT expose `entity` (TS error).
+  // We keep wiring intact by reading only stable fields, with safe fallbacks.
+  const ec = useEntity() as any;
+  const entityKey: string =
+    (ec?.entityKey as string) ||
+    (ec?.activeEntity as string) ||
+    (ec?.entity_slug as string) ||
+    "";
+
+  const entityName: string =
+    (ec?.entityName as string) ||
+    (ec?.activeEntityName as string) ||
+    (ec?.entities?.find?.((x: any) => x?.slug === entityKey || x?.key === entityKey)
+      ?.name as string) ||
+    entityKey;
+
   const { isTest } = useOsEnv();
 
   const [apps, setApps] = useState<InboxRow[]>([]);
@@ -103,7 +113,6 @@ export default function CiEvidencePage() {
     null
   );
 
-  // hard refresh trigger
   const [refreshKey, setRefreshKey] = useState(0);
 
   const selectedApp = useMemo(
@@ -121,7 +130,6 @@ export default function CiEvidencePage() {
     let rows = apps;
 
     if (tab === "INTAKE") {
-      // canonical intake statuses (normalize first)
       const allow = new Set(["SUBMITTED", "IN_REVIEW", "NEEDS_INFO"]);
       rows = rows.filter((r) => allow.has(normStatus(r.status)));
     }
@@ -154,7 +162,6 @@ export default function CiEvidencePage() {
       setAppsErr(null);
 
       try {
-        // Attempt #1: includes lane_is_test (preferred if view exposes it)
         const baseCols = [
           "id",
           "entity_id",
@@ -176,27 +183,23 @@ export default function CiEvidencePage() {
             .eq("entity_slug", entityKey)
             .eq("lane_is_test", isTest)
             .order("created_at", { ascending: false });
-
           return { data, error };
         };
 
         const tryWithoutLane = async () => {
-          // If lane column isn't present, fall back to a best-effort load.
-          // (If your view already scopes by lane server-side, this is still safe.)
           const { data, error } = await supabase
             .from("v_onboarding_admissions_inbox")
             .select(baseCols.join(","))
             .eq("entity_slug", entityKey)
             .order("created_at", { ascending: false });
-
           return { data, error };
         };
 
         let res = await tryWithLane();
-
-        // If column doesn't exist, retry without it.
-        // Postgres undefined_column is 42703; Supabase often surfaces it in message.
-        if (res.error && /lane_is_test|42703|undefined column/i.test(res.error.message)) {
+        if (
+          res.error &&
+          /lane_is_test|42703|undefined column/i.test(res.error.message)
+        ) {
           res = await tryWithoutLane();
         }
 
@@ -206,7 +209,6 @@ export default function CiEvidencePage() {
         const rows = (res.data || []) as InboxRow[];
         setApps(rows);
 
-        // keep selection stable; otherwise pick first
         if (!selectedAppId && rows.length) {
           setSelectedAppId(rows[0].id);
         } else if (selectedAppId && !rows.some((r) => r.id === selectedAppId)) {
@@ -338,7 +340,6 @@ export default function CiEvidencePage() {
   return (
     <div className="h-full w-full">
       <div className="mx-auto w-full max-w-[1400px] px-4 pb-10 pt-6">
-        {/* Header */}
         <div className="mb-5 flex items-end justify-between gap-4">
           <div>
             <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
@@ -349,9 +350,11 @@ export default function CiEvidencePage() {
             </div>
             <div className="mt-1 text-sm text-white/50">
               Entity-scoped:{" "}
-              <span className="text-white/70">{entity?.name || entityKey}</span>{" "}
-              • Lane:{" "}
-              <span className="text-white/70">{isTest ? "SANDBOX" : "RoT"}</span>
+              <span className="text-white/70">{entityName || entityKey}</span> •
+              Lane:{" "}
+              <span className="text-white/70">
+                {isTest ? "SANDBOX" : "RoT"}
+              </span>
             </div>
           </div>
 
@@ -365,9 +368,8 @@ export default function CiEvidencePage() {
           </div>
         </div>
 
-        {/* 3-column grid */}
         <div className="grid grid-cols-12 gap-4">
-          {/* Left: Applications */}
+          {/* Left */}
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
@@ -465,7 +467,7 @@ export default function CiEvidencePage() {
             </div>
           </div>
 
-          {/* Middle: Evidence list */}
+          {/* Middle */}
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
@@ -539,7 +541,7 @@ export default function CiEvidencePage() {
             </div>
           </div>
 
-          {/* Right: Details + actions */}
+          {/* Right */}
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
@@ -659,7 +661,8 @@ export default function CiEvidencePage() {
         </div>
 
         <div className="mt-5 text-[10px] text-white/35">
-          Source: public.v_onboarding_admissions_inbox • entity_slug={entityKey} • lane={isTest ? "SANDBOX" : "RoT"}
+          Source: public.v_onboarding_admissions_inbox • entity_slug={entityKey} •
+          lane={isTest ? "SANDBOX" : "RoT"}
         </div>
       </div>
     </div>
