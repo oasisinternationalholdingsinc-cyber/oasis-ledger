@@ -19,28 +19,26 @@ type InboxRow = {
   id: string;
   entity_id: string | null;
   entity_slug: string | null;
+
   status: string | null;
 
   organization_legal_name: string | null;
   organization_trade_name: string | null;
+
   applicant_email: string | null;
   organization_email: string | null;
 
-  created_at: string | null;
-  updated_at: string | null;
+  // provisioning signals (optional, view-dependent)
+  primary_contact_user_id?: string | null;
+  provisioned_at?: string | null;
 
   lane_is_test?: boolean | null;
+
+  created_at: string | null;
+  updated_at: string | null;
 };
 
-type Tab = "READY" | "ALL";
-
-function Badge({ text }: { text: string }) {
-  return (
-    <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/70">
-      {text}
-    </span>
-  );
-}
+type AppTab = "READY" | "ALL";
 
 function Row({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
   return (
@@ -59,7 +57,7 @@ function Row({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
 }
 
 export default function CiProvisioningPage() {
-  // ✅ Entity (defensive — matches CI-Evidence)
+  // ✅ EntityContextValue varies across repo. Read defensively like CI-Evidence.
   const ec = useEntity() as any;
   const entityKey: string =
     (ec?.entityKey as string) ||
@@ -73,37 +71,36 @@ export default function CiProvisioningPage() {
     (ec?.entities?.find?.((x: any) => x?.slug === entityKey || x?.key === entityKey)?.name as string) ||
     entityKey;
 
-  // ✅ Lane (defensive — matches CI-Evidence)
+  // ✅ OsEnvContextValue varies. NEVER destructure isTest.
   const env = useOsEnv() as any;
-  const isTest: boolean = Boolean(env?.is_test ?? env?.isTest ?? env?.lane_is_test ?? env?.sandbox ?? env?.isSandbox);
+  const isTest: boolean = Boolean(
+    env?.is_test ?? env?.isTest ?? env?.lane_is_test ?? env?.sandbox ?? env?.isSandbox
+  );
 
   const [apps, setApps] = useState<InboxRow[]>([]);
   const [appsLoading, setAppsLoading] = useState(true);
   const [appsErr, setAppsErr] = useState<string | null>(null);
 
-  const [tab, setTab] = useState<Tab>("READY");
+  const [tab, setTab] = useState<AppTab>("READY");
   const [q, setQ] = useState("");
+
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  const [busy, setBusy] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
-  const [selectedAppId, setSelectedAppId] = useState<string | null>(null);
+  const selected = useMemo(() => apps.find((a) => a.id === selectedId) || null, [apps, selectedId]);
 
-  // Provisioning read model (what the module needs)
-  const [primaryContactUserId, setPrimaryContactUserId] = useState<string | null>(null);
-  const [provisioned, setProvisioned] = useState<boolean>(false);
-
-  const selectedApp = useMemo(
-    () => apps.find((a) => a.id === selectedAppId) || null,
-    [apps, selectedAppId]
-  );
-
-  const filteredApps = useMemo(() => {
+  const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
     let rows = apps;
 
-    // READY tab = things we can actually act on (NOT archived)
     if (tab === "READY") {
-      const deny = new Set(["ARCHIVED"]);
-      rows = rows.filter((r) => !deny.has(normStatus(r.status)));
+      // "Ready" means: approved for provisioning but not provisioned yet.
+      // We keep it forgiving: allow NEEDS_INFO too (your screenshot shows it),
+      // but the operator sees readiness flags in the middle panel.
+      const allow = new Set(["APPROVED", "NEEDS_INFO", "IN_REVIEW", "SUBMITTED"]);
+      rows = rows.filter((r) => allow.has(normStatus(r.status)));
     }
 
     if (!needle) return rows;
@@ -124,7 +121,7 @@ export default function CiProvisioningPage() {
     });
   }, [apps, q, tab]);
 
-  // -------- load applications (entity + lane scoped, lane fallback) --------
+  // -------- load applications (entity + lane scoped) --------
   useEffect(() => {
     let alive = true;
 
@@ -146,10 +143,13 @@ export default function CiProvisioningPage() {
           "updated_at",
         ];
 
+        // optional provisioning cols (may not exist in view)
+        const optCols = ["primary_contact_user_id", "provisioned_at"];
+
         const tryWithLane = async () => {
           const { data, error } = await supabase
             .from("v_onboarding_admissions_inbox")
-            .select([...baseCols, "lane_is_test"].join(","))
+            .select([...baseCols, ...optCols, "lane_is_test"].join(","))
             .eq("entity_slug", entityKey)
             .eq("lane_is_test", isTest)
             .order("created_at", { ascending: false });
@@ -159,15 +159,34 @@ export default function CiProvisioningPage() {
         const tryWithoutLane = async () => {
           const { data, error } = await supabase
             .from("v_onboarding_admissions_inbox")
-            .select(baseCols.join(","))
+            .select([...baseCols, ...optCols].join(","))
             .eq("entity_slug", entityKey)
             .order("created_at", { ascending: false });
+
+          if (error && /42703|column|undefined/i.test(error.message)) {
+            const r2 = await supabase
+              .from("v_onboarding_admissions_inbox")
+              .select(baseCols.join(","))
+              .eq("entity_slug", entityKey)
+              .order("created_at", { ascending: false });
+            return { data: r2.data, error: r2.error };
+          }
+
           return { data, error };
         };
 
         let res = await tryWithLane();
+
         if (res.error && /lane_is_test|42703|undefined column/i.test(res.error.message)) {
           res = await tryWithoutLane();
+        } else if (res.error && /primary_contact_user_id|provisioned_at/i.test(res.error.message)) {
+          const { data, error } = await supabase
+            .from("v_onboarding_admissions_inbox")
+            .select([...baseCols, "lane_is_test"].join(","))
+            .eq("entity_slug", entityKey)
+            .eq("lane_is_test", isTest)
+            .order("created_at", { ascending: false });
+          res = { data, error };
         }
 
         if (res.error) throw res.error;
@@ -176,8 +195,8 @@ export default function CiProvisioningPage() {
         const rows = (res.data || []) as InboxRow[];
         setApps(rows);
 
-        if (!selectedAppId && rows.length) setSelectedAppId(rows[0].id);
-        else if (selectedAppId && !rows.some((r) => r.id === selectedAppId)) setSelectedAppId(rows[0]?.id ?? null);
+        if (!selectedId && rows.length) setSelectedId(rows[0].id);
+        else if (selectedId && !rows.some((r) => r.id === selectedId)) setSelectedId(rows[0]?.id ?? null);
       } catch (e: any) {
         if (!alive) return;
         setAppsErr(e?.message || "Failed to load applications.");
@@ -193,105 +212,82 @@ export default function CiProvisioningPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entityKey, isTest, refreshKey]);
 
-  // -------- load provisioning state for selected app (defensive) --------
-  useEffect(() => {
-    let alive = true;
+  const appTitle = useMemo(() => {
+    if (!selected) return "No application selected";
+    return (
+      selected.organization_trade_name ||
+      selected.organization_legal_name ||
+      selected.applicant_email ||
+      selected.id
+    );
+  }, [selected]);
 
-    (async () => {
-      setPrimaryContactUserId(null);
-      setProvisioned(false);
+  const looksReady = useMemo(() => {
+    if (!selected) return false;
+    // treat "APPROVED" as ready, but don't hard-require it to avoid breaking flows
+    return normStatus(selected.status) === "APPROVED" || normStatus(selected.status) === "NEEDS_INFO" || normStatus(selected.status) === "IN_REVIEW";
+  }, [selected]);
 
-      if (!selectedAppId) return;
+  const hasUserId = useMemo(() => {
+    if (!selected) return false;
+    return !!(selected as any).primary_contact_user_id;
+  }, [selected]);
 
-      try {
-        // We read the authoritative provisioning state from the base application row.
-        // Some columns may not exist in earlier schema revisions; tolerate failures.
-        const baseTry = await supabase
-          .from("onboarding_applications")
-          .select("id,status,primary_contact_user_id")
-          .eq("id", selectedAppId)
-          .maybeSingle();
+  const provisioned = useMemo(() => {
+    if (!selected) return false;
+    return normStatus(selected.status) === "PROVISIONED" || !!(selected as any).provisioned_at;
+  }, [selected]);
 
-        if (!alive) return;
-
-        if (!baseTry.error && baseTry.data) {
-          const st = normStatus(baseTry.data.status);
-          setPrimaryContactUserId((baseTry.data as any)?.primary_contact_user_id ?? null);
-          setProvisioned(st === "PROVISIONED");
-          return;
-        }
-
-        // If the table/column set differs in this env, we still operate safely:
-        // - Invite can run based on applicant_email
-        // - Complete Provisioning requires user_id (which comes after invite + set-password)
-      } catch {
-        // swallow — UI will remain in safe "unknown" state
-      }
-    })();
-
-    return () => {
-      alive = false;
-    };
-  }, [selectedAppId, refreshKey]);
-
-  // ---------------- Actions ----------------
   async function runInvite() {
-    if (!selectedApp) return;
+    if (!selected) return;
 
-    // Minimal payload: application_id + email (server can resolve more)
-    const payload = {
-      application_id: selectedApp.id,
-      applicant_email: selectedApp.applicant_email,
-      entity_slug: entityKey,
-      lane_is_test: isTest,
-    };
+    setBusy("invite");
+    try {
+      // ✅ Wiring-safe default: invoke Edge Function if it exists
+      // (matches what your Network panel showed).
+      const { data, error } = await supabase.functions.invoke("admissions-provision-portal-access", {
+        body: { application_id: selected.id },
+      });
 
-    // ✅ Standard Supabase Edge Functions invocation
-    const { data, error } = await supabase.functions.invoke("admissions-provision-portal-access", {
-      body: payload,
-    });
+      if (error) throw error;
 
-    if (error) return alert(error.message);
-    if ((data as any)?.ok === false) return alert((data as any)?.detail || (data as any)?.error || "Invite failed.");
+      // best-effort refresh
+      setRefreshKey((n) => n + 1);
 
-    alert("Invite sent. Next step: user completes Set Password, then return here to Complete Provisioning.");
-    setRefreshKey((n) => n + 1);
+      // optional toast
+      if (data?.ok === false) alert(data?.error || "Invite failed.");
+    } catch (e: any) {
+      alert(e?.message || "Invite failed.");
+    } finally {
+      setBusy(null);
+    }
   }
 
   async function completeProvisioning() {
-    if (!selectedAppId) return;
+    if (!selected) return;
 
-    if (!primaryContactUserId) {
+    const primaryUserId = (selected as any).primary_contact_user_id as string | null | undefined;
+    if (!primaryUserId) {
       alert("Missing primary_contact_user_id. This is normally set after Invite → Set Password.");
       return;
     }
 
-    const { error } = await supabase.rpc("admissions_complete_provisioning", {
-      p_application_id: selectedAppId,
-      p_user_id: primaryContactUserId,
-    });
+    setBusy("complete");
+    try {
+      const { error } = await supabase.rpc("admissions_complete_provisioning" as any, {
+        p_application_id: selected.id,
+        p_user_id: primaryUserId,
+      } as any);
 
-    if (error) return alert(error.message);
+      if (error) throw error;
 
-    alert("Provisioning complete (entity + memberships).");
-    setRefreshKey((n) => n + 1);
+      setRefreshKey((n) => n + 1);
+    } catch (e: any) {
+      alert(e?.message || "Complete provisioning failed.");
+    } finally {
+      setBusy(null);
+    }
   }
-
-  const looksReady = useMemo(() => {
-    if (!selectedApp) return false;
-    // “Ready” here means: not archived AND has an email to invite
-    return normStatus(selectedApp.status) !== "ARCHIVED" && !!selectedApp.applicant_email;
-  }, [selectedApp]);
-
-  const appTitle = useMemo(() => {
-    if (!selectedApp) return "No application selected";
-    return (
-      selectedApp.organization_trade_name ||
-      selectedApp.organization_legal_name ||
-      selectedApp.applicant_email ||
-      selectedApp.id
-    );
-  }, [selectedApp]);
 
   return (
     <div className="h-full w-full">
@@ -306,12 +302,14 @@ export default function CiProvisioningPage() {
             </div>
           </div>
 
-          <button
-            onClick={() => setRefreshKey((n) => n + 1)}
-            className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-medium text-white/80 hover:border-amber-300/20 hover:bg-white/7"
-          >
-            Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setRefreshKey((n) => n + 1)}
+              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-medium text-white/80 hover:border-amber-300/20 hover:bg-white/7"
+            >
+              Refresh
+            </button>
+          </div>
         </div>
 
         <div className="grid grid-cols-12 gap-4">
@@ -337,9 +335,7 @@ export default function CiProvisioningPage() {
                       onClick={() => setTab("ALL")}
                       className={cx(
                         "rounded-full px-3 py-1 text-[11px] font-medium",
-                        tab === "ALL"
-                          ? "bg-white/8 text-white/85 ring-1 ring-white/12"
-                          : "text-white/55 hover:text-white/75"
+                        tab === "ALL" ? "bg-white/8 text-white/85 ring-1 ring-white/12" : "text-white/55 hover:text-white/75"
                       )}
                     >
                       All
@@ -362,17 +358,18 @@ export default function CiProvisioningPage() {
                   <div className="p-4 text-sm text-white/50">Loading…</div>
                 ) : appsErr ? (
                   <div className="p-4 text-sm text-rose-200">{appsErr}</div>
-                ) : filteredApps.length === 0 ? (
+                ) : filtered.length === 0 ? (
                   <div className="p-4 text-sm text-white/50">No applications found.</div>
                 ) : (
                   <div className="space-y-2 p-2">
-                    {filteredApps.map((a) => {
-                      const active = a.id === selectedAppId;
+                    {filtered.map((a) => {
+                      const active = a.id === selectedId;
                       const name = a.organization_trade_name || a.organization_legal_name || a.applicant_email || a.id;
+                      const status = a.status || "—";
                       return (
                         <button
                           key={a.id}
-                          onClick={() => setSelectedAppId(a.id)}
+                          onClick={() => setSelectedId(a.id)}
                           className={cx(
                             "w-full rounded-2xl border p-4 text-left transition",
                             active
@@ -387,7 +384,9 @@ export default function CiProvisioningPage() {
                                 {a.applicant_email || a.organization_email || "—"}
                               </div>
                             </div>
-                            <Badge text={a.status || "—"} />
+                            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/70">
+                              {status}
+                            </span>
                           </div>
                         </button>
                       );
@@ -403,18 +402,18 @@ export default function CiProvisioningPage() {
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
                 <div className="text-xs font-semibold tracking-wide text-white/80">Readiness</div>
-                <div className="mt-1 truncate text-sm text-white/60">{selectedAppId ? appTitle : "Select an application"}</div>
+                <div className="mt-1 truncate text-sm text-white/60">{selected ? appTitle : "Select an application"}</div>
               </div>
 
               <div className="p-4">
-                {!selectedApp ? (
+                {!selected ? (
                   <div className="text-sm text-white/50">Select an application.</div>
                 ) : (
                   <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
-                    <Row k="Looks Ready" v={looksReady ? "YES" : "NO"} />
-                    <Row k="Has User ID" v={primaryContactUserId ? "YES" : "NO"} />
-                    <Row k="Provisioned" v={provisioned ? "YES" : "NO"} />
-                    <Row k="App ID" v={selectedApp.id} mono />
+                    <Row k="LOOKS READY" v={looksReady ? "YES" : "NO"} />
+                    <Row k="HAS USER ID" v={hasUserId ? "YES" : "NO"} />
+                    <Row k="PROVISIONED" v={provisioned ? "YES" : "NO"} />
+                    <Row k="APP ID" v={selected.id} mono />
                   </div>
                 )}
               </div>
@@ -426,50 +425,52 @@ export default function CiProvisioningPage() {
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
                 <div className="text-xs font-semibold tracking-wide text-white/80">Authority</div>
-                <div className="mt-1 truncate text-sm text-white/60">{selectedApp ? appTitle : "Select an application"}</div>
+                <div className="mt-1 truncate text-sm text-white/60">{selected ? appTitle : "Select an application"}</div>
               </div>
 
               <div className="p-4">
-                {!selectedApp ? (
+                {!selected ? (
                   <div className="text-sm text-white/50">Select an application.</div>
                 ) : (
                   <>
-                    <div className="flex flex-col gap-2">
-                      <button
-                        onClick={runInvite}
-                        disabled={!looksReady}
-                        className={cx(
-                          "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
-                          looksReady
-                            ? "border-white/10 bg-white/5 text-white/85 hover:border-amber-300/20 hover:bg-white/7"
-                            : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
-                        )}
-                      >
-                        Run Invite
-                      </button>
+                    <button
+                      onClick={runInvite}
+                      disabled={busy === "invite"}
+                      className={cx(
+                        "w-full rounded-2xl border px-4 py-3 text-sm font-semibold transition",
+                        busy === "invite"
+                          ? "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
+                          : "border-white/10 bg-white/5 text-white/85 hover:border-amber-300/20 hover:bg-white/7"
+                      )}
+                    >
+                      Run Invite
+                    </button>
 
-                      <button
-                        onClick={completeProvisioning}
-                        disabled={!primaryContactUserId || provisioned}
-                        className={cx(
-                          "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
-                          primaryContactUserId && !provisioned
-                            ? "border-emerald-300/20 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/14"
-                            : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
-                        )}
-                      >
-                        Complete Provisioning
-                      </button>
-                    </div>
+                    <button
+                      onClick={completeProvisioning}
+                      disabled={busy === "complete" || !hasUserId}
+                      className={cx(
+                        "mt-2 w-full rounded-2xl border px-4 py-3 text-sm font-semibold transition",
+                        busy === "complete" || !hasUserId
+                          ? "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
+                          : "border-emerald-300/20 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/14"
+                      )}
+                    >
+                      Complete Provisioning
+                    </button>
 
-                    <div className="mt-3 rounded-2xl border border-amber-300/15 bg-amber-400/5 p-3 text-xs text-amber-100/80">
-                      {primaryContactUserId
-                        ? "User ID present. You can Complete Provisioning."
-                        : "Missing primary_contact_user_id. This is normally set after Invite → Set Password."}
-                    </div>
+                    <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-4">
+                      <div className="text-[11px] uppercase tracking-[0.24em] text-white/45">Operator Notes</div>
+                      <div className="mt-2 text-xs text-white/55">
+                        RPC-only controls. Invite grants portal access (Set Password). Complete Provisioning calls{" "}
+                        <span className="font-mono text-white/70">admissions_complete_provisioning(app_id, user_id)</span>.
+                      </div>
 
-                    <div className="mt-3 text-xs text-white/40">
-                      RPC-only controls. Invite grants portal access (Set Password). Ledger activation happens only after provisioning.
+                      {!hasUserId ? (
+                        <div className="mt-3 rounded-2xl border border-amber-300/20 bg-amber-400/10 p-3 text-xs text-amber-200">
+                          Missing <span className="font-mono">primary_contact_user_id</span>. This is normally set after Invite → Set Password.
+                        </div>
+                      ) : null}
                     </div>
                   </>
                 )}
