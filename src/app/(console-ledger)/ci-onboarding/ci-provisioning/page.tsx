@@ -14,6 +14,15 @@ function normStatus(s: string | null | undefined) {
   return (s || "").trim().toUpperCase().replace(/[\s-]+/g, "_");
 }
 
+function safePrettyJSON(x: any) {
+  try {
+    if (x == null) return "—";
+    return JSON.stringify(x, null, 2);
+  } catch {
+    return "—";
+  }
+}
+
 type InboxRow = {
   id: string;
   status: string | null;
@@ -28,6 +37,9 @@ type InboxRow = {
 
   entity_slug: string | null;
   created_at: string | null;
+
+  requested_services?: any | null;
+  metadata?: any | null;
 
   lane_is_test?: boolean | null;
 };
@@ -101,6 +113,9 @@ export default function CiProvisioningPage() {
           "primary_contact_user_id",
           "entity_slug",
           "created_at",
+          // ✅ Oasis needs this everywhere
+          "requested_services",
+          "metadata",
         ];
 
         const tryWithLane = async () => {
@@ -155,13 +170,14 @@ export default function CiProvisioningPage() {
     let list = apps;
 
     if (tab === "READY") {
-      // “Ready” means: approved/decisioned intake AND has an applicant email.
-      // (We don’t hard-assume exact enum names; we accept common ones.)
-      const okStatuses = new Set(["APPROVED", "APPROVE", "PROVISIONING", "IN_PROVISIONING", "NEEDS_INFO"]);
+      // ✅ Conservative readiness gate: has contact email
+      // (Do NOT assume backend enum casing here; just require a contact + not archived/declined/withdrawn.)
       list = list.filter((a) => {
         const st = normStatus(a.status);
         const hasEmail = !!(a.applicant_email || a.organization_email);
-        return hasEmail && (okStatuses.has(st) || st === "IN_REVIEW" || st === "SUBMITTED");
+        if (!hasEmail) return false;
+        if (["ARCHIVED", "DECLINED", "WITHDRAWN"].includes(st)) return false;
+        return true;
       });
     }
 
@@ -196,9 +212,20 @@ export default function CiProvisioningPage() {
   const looksReady = useMemo(() => {
     if (!selected) return false;
     const hasEmail = !!(selected.applicant_email || selected.organization_email);
-    // In your UX, invite can happen before primary_contact_user_id exists.
     return hasEmail;
   }, [selected]);
+
+  const meta = useMemo(() => {
+    const m = selected?.metadata;
+    return (m && typeof m === "object" ? (m as any) : {}) as any;
+  }, [selected?.metadata]);
+
+  async function ensureSessionOrThrow() {
+    const { data, error } = await supabase.auth.getSession();
+    if (error) throw error;
+    if (!data.session) throw new Error("Not authenticated. Please sign in again.");
+    return data.session;
+  }
 
   async function runInvite() {
     if (!selected) return;
@@ -206,7 +233,9 @@ export default function CiProvisioningPage() {
     setNote(null);
 
     try {
-      // Keep this aligned to your existing backend contract:
+      // ✅ these endpoints are auth-gated by design
+      await ensureSessionOrThrow();
+
       // Edge Function: admissions-provision-portal-access
       const { data, error } = await supabase.functions.invoke("admissions-provision-portal-access", {
         body: { application_id: selected.id },
@@ -214,7 +243,6 @@ export default function CiProvisioningPage() {
 
       if (error) throw error;
 
-      // Show any returned info, then refresh to pick up primary_contact_user_id when it arrives.
       setNote(data?.message || "Invite issued.");
       setRefreshKey((n) => n + 1);
     } catch (e: any) {
@@ -237,6 +265,8 @@ export default function CiProvisioningPage() {
     setNote(null);
 
     try {
+      await ensureSessionOrThrow();
+
       // RPC-only:
       // admissions_complete_provisioning(p_application_id, p_user_id)
       const { error } = await supabase.rpc("admissions_complete_provisioning", {
@@ -365,23 +395,68 @@ export default function CiProvisioningPage() {
             </div>
           </div>
 
-          {/* Middle: readiness */}
+          {/* Middle: readiness + metadata */}
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
                 <div className="text-xs font-semibold tracking-wide text-white/80">Readiness</div>
-                <div className="mt-1 truncate text-sm text-white/60">{selectedId ? appTitle : "Select an application"}</div>
+                <div className="mt-1 truncate text-sm text-white/60">
+                  {selectedId ? appTitle : "Select an application"}
+                </div>
               </div>
 
               <div className="p-4">
                 {!selected ? (
                   <div className="text-sm text-white/50">Select an application.</div>
                 ) : (
-                  <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
-                    <Row k="Looks ready" v={looksReady ? "YES" : "NO"} />
-                    <Row k="Has user id" v={selected.primary_contact_user_id ? "YES" : "NO"} />
-                    <Row k="Provisioned" v={normStatus(selected.status) === "PROVISIONED" ? "YES" : "NO"} />
-                    <Row k="App ID" v={selected.id} />
+                  <div className="space-y-4">
+                    <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
+                      <Row k="Looks ready" v={looksReady ? "YES" : "NO"} />
+                      <Row k="Has user id" v={selected.primary_contact_user_id ? "YES" : "NO"} />
+                      <Row k="Provisioned" v={normStatus(selected.status) === "PROVISIONED" ? "YES" : "NO"} />
+                      <Row k="App ID" v={selected.id} />
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                      <div className="text-xs font-semibold tracking-wide text-white/80">Requested services</div>
+                      <div className="mt-2 text-sm text-white/75 whitespace-pre-wrap">
+                        {selected.requested_services ? JSON.stringify(selected.requested_services) : "—"}
+                      </div>
+                    </div>
+
+                    {/* ✅ Metadata panel (same contract as Admissions) */}
+                    <div className="rounded-2xl border border-white/10 bg-black/18 p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-xs font-semibold tracking-wide text-white/80">Metadata</div>
+                        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/60">
+                          jsonb
+                        </span>
+                      </div>
+
+                      <div className="mt-3 space-y-3">
+                        <Row k="source" v={meta?.source ? String(meta.source) : "—"} />
+                        <Row
+                          k="request_brief"
+                          v={meta?.request_brief ? String(meta.request_brief) : "—"}
+                        />
+                        <Row k="notes" v={meta?.notes ? String(meta.notes) : "—"} />
+
+                        <div className="mt-3 rounded-2xl border border-white/10 bg-black/25 p-3">
+                          <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">raw</div>
+                          <pre className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-5 text-white/70">
+                            {safePrettyJSON(selected.metadata)}
+                          </pre>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-black/18 p-4 text-sm text-white/60">
+                      <div className="font-semibold text-white/80">Authority-only</div>
+                      <div className="mt-1">
+                        Invite is auth-gated. If you’re signed out, the backend will reject with{" "}
+                        <span className="font-mono text-white/70">Not authenticated</span>.
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>
@@ -393,7 +468,9 @@ export default function CiProvisioningPage() {
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
                 <div className="text-xs font-semibold tracking-wide text-white/80">Authority</div>
-                <div className="mt-1 truncate text-sm text-white/60">{selected ? appTitle : "Select an application"}</div>
+                <div className="mt-1 truncate text-sm text-white/60">
+                  {selected ? appTitle : "Select an application"}
+                </div>
               </div>
 
               <div className="p-4">
@@ -425,12 +502,14 @@ export default function CiProvisioningPage() {
                   </button>
 
                   <div className="pt-2 text-xs text-white/40">
-                    RPC-only controls. Invite grants portal access (Set Password). Ledger activation happens only after provisioning.
+                    RPC-only controls. Invite grants portal access (Set Password). Ledger activation happens only after
+                    provisioning.
                   </div>
 
                   {selected && !selected.primary_contact_user_id && (
                     <div className="mt-2 rounded-2xl border border-amber-300/18 bg-amber-400/10 p-3 text-xs text-amber-100/90">
-                      Missing <span className="font-mono">primary_contact_user_id</span>. This is normally set after Invite → Set Password.
+                      Missing <span className="font-mono">primary_contact_user_id</span>. This is normally set after
+                      Invite → Set Password.
                     </div>
                   )}
 

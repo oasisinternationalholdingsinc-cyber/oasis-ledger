@@ -90,7 +90,9 @@ function Pill({
 function Field({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
   return (
     <div className="flex items-start justify-between gap-4">
-      <div className="text-xs uppercase tracking-[0.22em] text-white/35">{k}</div>
+      <div className="text-xs uppercase tracking-[0.22em] text-white/35">
+        {k}
+      </div>
       <div
         className={cx(
           "max-w-[68%] text-right text-sm text-white/80",
@@ -101,6 +103,15 @@ function Field({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
       </div>
     </div>
   );
+}
+
+function safePrettyJSON(x: any) {
+  try {
+    if (x == null) return "—";
+    return JSON.stringify(x, null, 2);
+  } catch {
+    return "—";
+  }
 }
 
 export default function CiAdmissionsPage() {
@@ -115,13 +126,19 @@ export default function CiAdmissionsPage() {
   const entityName: string =
     (ec?.entityName as string) ||
     (ec?.activeEntityName as string) ||
-    (ec?.entities?.find?.((x: any) => x?.slug === entityKey || x?.key === entityKey)?.name as string) ||
+    (ec?.entities?.find?.(
+      (x: any) => x?.slug === entityKey || x?.key === entityKey
+    )?.name as string) ||
     entityKey;
 
   // ---- env lane (defensive, like CI-Evidence) ----
   const env = useOsEnv() as any;
   const isTest: boolean = Boolean(
-    env?.is_test ?? env?.isTest ?? env?.lane_is_test ?? env?.sandbox ?? env?.isSandbox
+    env?.is_test ??
+      env?.isTest ??
+      env?.lane_is_test ??
+      env?.sandbox ??
+      env?.isSandbox
   );
 
   const [rows, setRows] = useState<InboxRow[]>([]);
@@ -207,7 +224,10 @@ export default function CiAdmissionsPage() {
         };
 
         let res = await tryWithLane();
-        if (res.error && /lane_is_test|42703|undefined column/i.test(res.error.message)) {
+        if (
+          res.error &&
+          /lane_is_test|42703|undefined column/i.test(res.error.message)
+        ) {
           res = await tryWithoutLane();
         }
         if (res.error) throw res.error;
@@ -217,7 +237,8 @@ export default function CiAdmissionsPage() {
         setRows(list);
 
         if (!selectedId && list.length) setSelectedId(list[0].id);
-        else if (selectedId && !list.some((r) => r.id === selectedId)) setSelectedId(list[0]?.id ?? null);
+        else if (selectedId && !list.some((r) => r.id === selectedId))
+          setSelectedId(list[0]?.id ?? null);
       } catch (e: any) {
         if (!alive) return;
         setErr(e?.message || "Failed to load admissions inbox.");
@@ -305,13 +326,22 @@ export default function CiAdmissionsPage() {
 
   async function approveForProvisioning() {
     if (!selected) return;
-    const summary = prompt("Decision summary (short):", "Approved for provisioning.");
+    const summary = prompt(
+      "Decision summary (short):",
+      "Approved for provisioning."
+    );
     if (summary == null) return;
 
-    const reason = prompt("Reason / rationale (required):", "Meets intake requirements.");
+    const reason = prompt(
+      "Reason / rationale (required):",
+      "Meets intake requirements."
+    );
     if (reason == null) return;
 
-    const risk = prompt("Risk tier (enum, e.g. low / medium / high):", selected.risk_tier || "medium");
+    const risk = prompt(
+      "Risk tier (enum, e.g. low / medium / high):",
+      selected.risk_tier || "medium"
+    );
     if (risk == null) return;
 
     await rpc("admissions_record_decision", {
@@ -325,7 +355,10 @@ export default function CiAdmissionsPage() {
 
   async function needsInfo() {
     if (!selected) return;
-    const msg = prompt("Message to applicant (required):", "Please provide missing information.");
+    const msg = prompt(
+      "Message to applicant (required):",
+      "Please provide missing information."
+    );
     if (!msg) return;
 
     const channelsRaw = prompt("Channels (comma-separated):", "email");
@@ -335,7 +368,9 @@ export default function CiAdmissionsPage() {
       .filter(Boolean);
 
     const dueRaw = prompt("Due at (optional ISO, leave blank):", "");
-    const dueAt = (dueRaw || "").trim() ? new Date(dueRaw).toISOString() : null;
+    // ✅ build-safe: prompt() can return null
+    const dueAt =
+      (dueRaw ?? "").trim() ? new Date((dueRaw ?? "").trim()).toISOString() : null;
 
     await rpc("admissions_request_info", {
       p_application_id: selected.id,
@@ -377,18 +412,32 @@ export default function CiAdmissionsPage() {
   const canApprove = !!selected && ["IN_REVIEW", "NEEDS_INFO"].includes(status);
   const canNeedsInfo = !!selected && ["IN_REVIEW", "SUBMITTED"].includes(status);
   const canArchive = !!selected && status !== "ARCHIVED";
-  const canHardDelete = !!selected && ["DECLINED", "WITHDRAWN", "ARCHIVED"].includes(status);
+  const canHardDelete =
+    !!selected && ["DECLINED", "WITHDRAWN", "ARCHIVED"].includes(status);
+
+  const meta = useMemo(() => {
+    const m = selected?.metadata;
+    return (m && typeof m === "object" ? (m as any) : {}) as any;
+  }, [selected?.metadata]);
 
   return (
     <div className="h-full w-full">
       <div className="mx-auto w-full max-w-[1400px] px-4 pb-10 pt-6">
         <div className="mb-5 flex items-end justify-between gap-4">
           <div>
-            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">CI • Admissions</div>
-            <div className="mt-1 text-2xl font-semibold text-white/90">Admissions Console</div>
+            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
+              CI • Admissions
+            </div>
+            <div className="mt-1 text-2xl font-semibold text-white/90">
+              Admissions Console
+            </div>
             <div className="mt-1 text-sm text-white/50">
-              Entity-scoped: <span className="text-white/70">{entityName || entityKey}</span> • Lane:{" "}
-              <span className="text-white/70">{isTest ? "SANDBOX" : "RoT"}</span>
+              Entity-scoped:{" "}
+              <span className="text-white/70">{entityName || entityKey}</span> •
+              Lane:{" "}
+              <span className="text-white/70">
+                {isTest ? "SANDBOX" : "RoT"}
+              </span>
             </div>
           </div>
 
@@ -408,7 +457,9 @@ export default function CiAdmissionsPage() {
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
                 <div className="flex items-center justify-between gap-3">
-                  <div className="text-xs font-semibold tracking-wide text-white/80">Inbox</div>
+                  <div className="text-xs font-semibold tracking-wide text-white/80">
+                    Inbox
+                  </div>
                   <div className="flex items-center gap-2">
                     <Pill active={tab === "INTAKE"} onClick={() => setTab("INTAKE")}>
                       Intake
@@ -416,7 +467,10 @@ export default function CiAdmissionsPage() {
                     <Pill active={tab === "ALL"} onClick={() => setTab("ALL")}>
                       All
                     </Pill>
-                    <Pill active={tab === "ARCHIVED"} onClick={() => setTab("ARCHIVED")}>
+                    <Pill
+                      active={tab === "ARCHIVED"}
+                      onClick={() => setTab("ARCHIVED")}
+                    >
                       Archived
                     </Pill>
                   </div>
@@ -427,10 +481,16 @@ export default function CiAdmissionsPage() {
                     <Pill active={quick === "BOTH"} onClick={() => setQuick("BOTH")}>
                       BOTH
                     </Pill>
-                    <Pill active={quick === "INTAKE"} onClick={() => setQuick("INTAKE")}>
+                    <Pill
+                      active={quick === "INTAKE"}
+                      onClick={() => setQuick("INTAKE")}
+                    >
                       INTAKE
                     </Pill>
-                    <Pill active={quick === "PROVISIONED"} onClick={() => setQuick("PROVISIONED")}>
+                    <Pill
+                      active={quick === "PROVISIONED"}
+                      onClick={() => setQuick("PROVISIONED")}
+                    >
                       PROVISIONED
                     </Pill>
                   </div>
@@ -452,7 +512,9 @@ export default function CiAdmissionsPage() {
                 ) : err ? (
                   <div className="p-4 text-sm text-rose-200">{err}</div>
                 ) : filtered.length === 0 ? (
-                  <div className="p-4 text-sm text-white/50">No applications found.</div>
+                  <div className="p-4 text-sm text-white/50">
+                    No applications found.
+                  </div>
                 ) : (
                   <div className="space-y-2 p-2">
                     {filtered.map((r) => {
@@ -478,8 +540,12 @@ export default function CiAdmissionsPage() {
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
-                              <div className="truncate text-sm font-semibold text-white/88">{name}</div>
-                              <div className="mt-1 truncate text-xs text-white/45">{sub}</div>
+                              <div className="truncate text-sm font-semibold text-white/88">
+                                {name}
+                              </div>
+                              <div className="mt-1 truncate text-xs text-white/45">
+                                {sub}
+                              </div>
                             </div>
                             <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/70">
                               {badge}
@@ -493,7 +559,8 @@ export default function CiAdmissionsPage() {
               </div>
 
               <div className="border-t border-white/10 p-4 text-[11px] text-white/35">
-                Lane note: UI is lane-aware via OS env. Query is lane-filtered only if the view exposes lane columns.
+                Lane note: UI is lane-aware via OS env. Query is lane-filtered
+                only if the view exposes lane columns.
               </div>
             </div>
           </div>
@@ -502,20 +569,33 @@ export default function CiAdmissionsPage() {
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
-                <div className="text-xs font-semibold tracking-wide text-white/80">Application</div>
+                <div className="text-xs font-semibold tracking-wide text-white/80">
+                  Application
+                </div>
                 <div className="mt-1 truncate text-sm text-white/60">{title}</div>
               </div>
 
               <div className="p-4">
                 {!selected ? (
-                  <div className="text-sm text-white/50">Select an application.</div>
+                  <div className="text-sm text-white/50">
+                    Select an application.
+                  </div>
                 ) : (
                   <div className="space-y-4">
                     <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
-                      <Field k="Org (legal)" v={selected.organization_legal_name || "—"} />
-                      <Field k="Org (trade)" v={selected.organization_trade_name || "—"} />
+                      <Field
+                        k="Org (legal)"
+                        v={selected.organization_legal_name || "—"}
+                      />
+                      <Field
+                        k="Org (trade)"
+                        v={selected.organization_trade_name || "—"}
+                      />
                       <Field k="Applicant" v={selected.applicant_email || "—"} />
-                      <Field k="Org email" v={selected.organization_email || "—"} />
+                      <Field
+                        k="Org email"
+                        v={selected.organization_email || "—"}
+                      />
                       <Field k="Type" v={selected.applicant_type || "—"} />
                       <Field k="Status" v={selected.status || "—"} />
                       <Field k="App ID" v={selected.id} mono />
@@ -524,23 +604,62 @@ export default function CiAdmissionsPage() {
                     </div>
 
                     <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                      <div className="text-xs font-semibold tracking-wide text-white/80">Request / Intent</div>
-                      <div className="mt-2 text-sm text-white/75 whitespace-pre-wrap">
+                      <div className="text-xs font-semibold tracking-wide text-white/80">
+                        Request / Intent
+                      </div>
+                      <div className="mt-2 whitespace-pre-wrap text-sm text-white/75">
                         {selected.intent || "—"}
                       </div>
 
                       <div className="mt-3 text-xs text-white/45">
                         Requested services:{" "}
                         <span className="text-white/70">
-                          {selected.requested_services ? JSON.stringify(selected.requested_services) : "—"}
+                          {selected.requested_services
+                            ? JSON.stringify(selected.requested_services)
+                            : "—"}
                         </span>
+                      </div>
+                    </div>
+
+                    {/* ✅ Metadata panel (Oasis needs this everywhere) */}
+                    <div className="rounded-2xl border border-white/10 bg-black/18 p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-xs font-semibold tracking-wide text-white/80">
+                          Metadata
+                        </div>
+                        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/60">
+                          jsonb
+                        </span>
+                      </div>
+
+                      <div className="mt-3 space-y-3">
+                        <Field k="source" v={meta?.source ? String(meta.source) : "—"} />
+                        <Field
+                          k="request_brief"
+                          v={meta?.request_brief ? String(meta.request_brief) : "—"}
+                        />
+                        <Field
+                          k="notes"
+                          v={meta?.notes ? String(meta.notes) : "—"}
+                        />
+
+                        <div className="mt-3 rounded-2xl border border-white/10 bg-black/25 p-3">
+                          <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">
+                            raw
+                          </div>
+                          <pre className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-5 text-white/70">
+                            {safePrettyJSON(selected.metadata)}
+                          </pre>
+                        </div>
                       </div>
                     </div>
 
                     <div className="rounded-2xl border border-white/10 bg-black/18 p-4 text-sm text-white/60">
                       <div className="font-semibold text-white/80">Read-only</div>
                       <div className="mt-1">
-                        Admissions is authority-only. Invite/activation is handled in <span className="text-white/75">CI-Provisioning</span>. Evidence review is separate.
+                        Admissions is authority-only. Invite/activation is handled
+                        in <span className="text-white/75">CI-Provisioning</span>.
+                        Evidence review is separate.
                       </div>
                     </div>
                   </div>
@@ -553,13 +672,19 @@ export default function CiAdmissionsPage() {
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
-                <div className="text-xs font-semibold tracking-wide text-white/80">Authority Panel</div>
-                <div className="mt-1 text-sm text-white/60">Review • Decisions • Archive</div>
+                <div className="text-xs font-semibold tracking-wide text-white/80">
+                  Authority Panel
+                </div>
+                <div className="mt-1 text-sm text-white/60">
+                  Review • Decisions • Archive
+                </div>
               </div>
 
               <div className="p-4">
                 {!selected ? (
-                  <div className="text-sm text-white/50">Select an application.</div>
+                  <div className="text-sm text-white/50">
+                    Select an application.
+                  </div>
                 ) : (
                   <>
                     <div className="flex flex-col gap-2">
@@ -630,9 +755,12 @@ export default function CiAdmissionsPage() {
                     </div>
 
                     <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-4">
-                      <div className="text-[11px] uppercase tracking-[0.22em] text-white/35">Audit trail</div>
+                      <div className="text-[11px] uppercase tracking-[0.22em] text-white/35">
+                        Audit trail
+                      </div>
                       <div className="mt-2 text-xs text-white/55">
-                        Mutations are RPC-only. No raw updates. Use CI-Provisioning for invite/activation.
+                        Mutations are RPC-only. No raw updates. Use CI-Provisioning
+                        for invite/activation.
                       </div>
                     </div>
                   </>
@@ -643,7 +771,8 @@ export default function CiAdmissionsPage() {
         </div>
 
         <div className="mt-5 text-[10px] text-white/35">
-          Source: public.v_onboarding_admissions_inbox • entity_slug={entityKey} • lane={isTest ? "SANDBOX" : "RoT"}
+          Source: public.v_onboarding_admissions_inbox • entity_slug={entityKey} •
+          lane={isTest ? "SANDBOX" : "RoT"}
         </div>
       </div>
     </div>
