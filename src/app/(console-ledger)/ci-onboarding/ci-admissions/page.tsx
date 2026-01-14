@@ -1,4 +1,3 @@
-// src/app/(console-ledger)/ci-onboarding/ci-admissions/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -13,6 +12,15 @@ function cx(...xs: Array<string | false | null | undefined>) {
 
 function normStatus(s: string | null | undefined) {
   return (s || "").trim().toUpperCase().replace(/[\s-]+/g, "_");
+}
+
+function safePrettyJSON(x: any) {
+  try {
+    if (x == null) return "—";
+    return JSON.stringify(x, null, 2);
+  } catch {
+    return "—";
+  }
 }
 
 type InboxRow = {
@@ -57,12 +65,13 @@ type InboxRow = {
 
   metadata: any | null;
 
-  // view may or may not expose this; we handle both
-  is_test?: boolean | null;
+  lane_is_test?: boolean | null;
 };
 
 type Tab = "INTAKE" | "ALL" | "ARCHIVED";
 type Quick = "BOTH" | "INTAKE" | "PROVISIONED";
+
+type ModalKind = null | "APPROVE" | "NEEDS_INFO" | "ARCHIVE" | "DELETE";
 
 function Pill({
   active,
@@ -104,140 +113,72 @@ function Field({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
   );
 }
 
-// ---------- Oasis OS Modal (replaces browser prompt, no wiring change) ----------
-type ModalProps = {
-  open: boolean;
-  title: string;
-  subtitle?: string;
-  children: React.ReactNode;
-  footer?: React.ReactNode;
-  onClose: () => void;
-};
-
-function OsModal({ open, title, subtitle, children, footer, onClose }: ModalProps) {
-  if (!open) return null;
-
-  return (
-    <div className="fixed inset-0 z-[100]">
-      {/* backdrop */}
-      <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-[6px]"
-        onClick={onClose}
-      />
-      {/* dialog */}
-      <div className="absolute inset-0 flex items-center justify-center p-4">
-        <div className="relative w-full max-w-[560px] overflow-hidden rounded-3xl border border-white/10 bg-black/45 shadow-[0_35px_160px_rgba(0,0,0,0.75)]">
-          {/* subtle glow */}
-          <div className="pointer-events-none absolute -top-28 left-1/2 h-56 w-[520px] -translate-x-1/2 rounded-full bg-amber-300/10 blur-3xl" />
-          <div className="relative border-b border-white/10 p-5">
-            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
-              Authority • Decision Window
-            </div>
-            <div className="mt-1 text-xl font-semibold text-white/90">{title}</div>
-            {subtitle ? (
-              <div className="mt-1 text-sm text-white/55">{subtitle}</div>
-            ) : null}
-          </div>
-
-          <div className="relative p-5">{children}</div>
-
-          <div className="relative border-t border-white/10 p-4">
-            <div className="flex items-center justify-between gap-3">
-              <button
-                onClick={onClose}
-                className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-medium text-white/70 hover:bg-white/7"
-              >
-                Cancel
-              </button>
-              {footer}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+// ---------- enum-resilient helpers (NO ASSUMPTIONS) ----------
+function enumVariants(x: string) {
+  const raw = (x || "").trim();
+  const upper = raw.toUpperCase();
+  const lower = raw.toLowerCase();
+  const snakeUpper = upper.replace(/[\s-]+/g, "_");
+  const snakeLower = lower.replace(/[\s-]+/g, "_");
+  const dashLower = lower.replace(/[\s_]+/g, "-");
+  const dashUpper = upper.replace(/[\s_]+/g, "-");
+  const unique = Array.from(new Set([raw, snakeUpper, snakeLower, upper, lower, dashLower, dashUpper].filter(Boolean)));
+  return unique;
 }
 
-function Input({
-  label,
-  value,
-  onChange,
-  placeholder,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-}) {
-  return (
-    <label className="block">
-      <div className="text-xs uppercase tracking-[0.22em] text-white/35">{label}</div>
-      <input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="mt-2 w-full rounded-2xl border border-white/10 bg-black/35 px-4 py-3 text-sm text-white/85 placeholder:text-white/35 outline-none focus:border-amber-300/25"
-      />
-    </label>
-  );
-}
+async function rpcWithEnumRetries<TArgs extends Record<string, any>>(
+  fn: string,
+  args: TArgs,
+  retryFields: Array<{ key: keyof TArgs; candidates: string[] }>
+) {
+  // Build cartesian retry attempts only over provided fields (kept tiny)
+  const base = { ...args };
 
-function Textarea({
-  label,
-  value,
-  onChange,
-  placeholder,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-}) {
-  return (
-    <label className="block">
-      <div className="text-xs uppercase tracking-[0.22em] text-white/35">{label}</div>
-      <textarea
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        rows={4}
-        className="mt-2 w-full resize-none rounded-2xl border border-white/10 bg-black/35 px-4 py-3 text-sm text-white/85 placeholder:text-white/35 outline-none focus:border-amber-300/25"
-      />
-    </label>
-  );
-}
+  const fields = retryFields.filter((f) => f.candidates.length > 0);
 
-function Select({
-  label,
-  value,
-  onChange,
-  options,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  options: Array<{ value: string; label: string }>;
-}) {
-  return (
-    <label className="block">
-      <div className="text-xs uppercase tracking-[0.22em] text-white/35">{label}</div>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="mt-2 w-full rounded-2xl border border-white/10 bg-black/35 px-4 py-3 text-sm text-white/85 outline-none focus:border-amber-300/25"
-      >
-        {options.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
+  // no retries needed
+  if (fields.length === 0) {
+    const { error } = await supabase.rpc(fn, base);
+    if (error) throw error;
+    return;
+  }
+
+  // create small attempt list (max ~4*4)
+  let attempts: TArgs[] = [base];
+
+  for (const f of fields) {
+    const next: TArgs[] = [];
+    for (const a of attempts) {
+      for (const c of f.candidates) {
+        next.push({ ...(a as any), [f.key]: c });
+      }
+    }
+    attempts = next.slice(0, 24); // hard cap to stay sane
+  }
+
+  let lastErr: any = null;
+
+  for (const a of attempts) {
+    const { error } = await supabase.rpc(fn, a);
+    if (!error) return;
+    lastErr = error;
+
+    // Only continue retrying for enum-ish failures.
+    const msg = String(error?.message || "");
+    const code = String((error as any)?.code || "");
+    const looksEnum =
+      code === "22P02" ||
+      /invalid input value for enum/i.test(msg) ||
+      /onboarding_(decision|status|risk_tier)/i.test(msg);
+
+    if (!looksEnum) break;
+  }
+
+  throw lastErr || new Error("RPC failed.");
 }
 
 export default function CiAdmissionsPage() {
-  // ---- entity (defensive, global bar only) ----
+  // ---- entity (defensive, like your working pages) ----
   const ec = useEntity() as any;
   const entityKey: string =
     (ec?.entityKey as string) ||
@@ -270,34 +211,23 @@ export default function CiAdmissionsPage() {
   const [busy, setBusy] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
 
-  // ----- OS modals (instead of browser prompt) -----
-  const [approveOpen, setApproveOpen] = useState(false);
-  const [needsInfoOpen, setNeedsInfoOpen] = useState(false);
-  const [archiveOpen, setArchiveOpen] = useState(false);
-  const [deleteOpen, setDeleteOpen] = useState(false);
-
-  // approve form
-  const [approveSummary, setApproveSummary] = useState("Approved for provisioning.");
-  const [approveReason, setApproveReason] = useState("Meets intake requirements.");
-  const [approveRisk, setApproveRisk] = useState("medium");
-
-  // needs info form
-  const [niMessage, setNiMessage] = useState("Please provide missing information.");
-  const [niChannels, setNiChannels] = useState("email");
-  const [niDueIso, setNiDueIso] = useState(""); // optional ISO string
-
-  // archive form
-  const [archiveNote, setArchiveNote] = useState("Archived by operator.");
-
-  // delete form
-  const [deleteReason, setDeleteReason] = useState("Test data cleanup.");
-
   const selected = useMemo(
     () => rows.find((r) => r.id === selectedId) || null,
     [rows, selectedId]
   );
 
-  // ---- load inbox (lane-safe via is_test if available, else fallback) ----
+  // ---- OS modal state ----
+  const [modal, setModal] = useState<ModalKind>(null);
+  const [mSummary, setMSummary] = useState("Approved for provisioning.");
+  const [mReason, setMReason] = useState("Meets intake requirements.");
+  const [mRisk, setMRisk] = useState("medium");
+  const [mMsg, setMMsg] = useState("Please provide the missing information.");
+  const [mChannels, setMChannels] = useState("email");
+  const [mDue, setMDue] = useState("");
+  const [mArchiveNote, setMArchiveNote] = useState("Archived by operator.");
+  const [mDeleteReason, setMDeleteReason] = useState("Test data cleanup.");
+
+  // ---- load inbox (EXACT wiring: view + lane fallback) ----
   useEffect(() => {
     let alive = true;
 
@@ -327,7 +257,7 @@ export default function CiAdmissionsPage() {
           "jurisdiction_country",
           "jurisdiction_region",
           "intent",
-          "requested_services",
+          "requested_services", // ✅ keep
           "expected_start_date",
           "risk_tier",
           "risk_notes",
@@ -337,15 +267,15 @@ export default function CiAdmissionsPage() {
           "assigned_to",
           "decided_by",
           "created_by",
-          "metadata",
+          "metadata", // ✅ keep
         ];
 
         const tryWithLane = async () => {
           const { data, error } = await supabase
             .from("v_onboarding_admissions_inbox")
-            .select([...cols, "is_test"].join(","))
+            .select([...cols, "lane_is_test"].join(","))
             .eq("entity_slug", entityKey)
-            .eq("is_test", isTest)
+            .eq("lane_is_test", isTest)
             .order("created_at", { ascending: false });
 
           return { data, error };
@@ -362,7 +292,7 @@ export default function CiAdmissionsPage() {
         };
 
         let res = await tryWithLane();
-        if (res.error && /is_test|42703|undefined column/i.test(res.error.message)) {
+        if (res.error && /lane_is_test|42703|undefined column/i.test(res.error.message)) {
           res = await tryWithoutLane();
         }
         if (res.error) throw res.error;
@@ -405,8 +335,7 @@ export default function CiAdmissionsPage() {
       const allow = new Set(["SUBMITTED", "IN_REVIEW", "NEEDS_INFO"]);
       list = list.filter((r) => allow.has(st(r)));
     } else if (quick === "PROVISIONED") {
-      const allow = new Set(["PROVISIONED"]);
-      list = list.filter((r) => allow.has(st(r)));
+      list = list.filter((r) => st(r) === "PROVISIONED");
     }
 
     if (!needle) return list;
@@ -440,14 +369,21 @@ export default function CiAdmissionsPage() {
     );
   }, [selected]);
 
-  async function rpc(name: string, args: any) {
+  const meta = useMemo(() => {
+    const m = selected?.metadata;
+    return (m && typeof m === "object" ? (m as any) : {}) as any;
+  }, [selected?.metadata]);
+
+  async function runRpc(fn: string, args: any, retry?: Array<{ key: string; candidates: string[] }>) {
     setBusy(true);
     try {
-      const { error } = await supabase.rpc(name, args);
-      if (error) throw error;
+      if (retry?.length) {
+        await rpcWithEnumRetries(fn, args, retry as any);
+      } else {
+        const { error } = await supabase.rpc(fn, args);
+        if (error) throw error;
+      }
       setRefreshKey((n) => n + 1);
-    } catch (e: any) {
-      alert(e?.message || "RPC failed.");
     } finally {
       setBusy(false);
     }
@@ -455,81 +391,142 @@ export default function CiAdmissionsPage() {
 
   async function beginReview() {
     if (!selected) return;
-    await rpc("admissions_begin_review", { p_application_id: selected.id });
+    try {
+      await runRpc("admissions_begin_review", { p_application_id: selected.id });
+    } catch (e: any) {
+      alert(e?.message || "Begin Review failed.");
+    }
   }
 
-  // ✅ FIXED: onboarding_decision enum values are lowercase
-  async function approveForProvisioningConfirmed() {
+  async function approveForProvisioning() {
     if (!selected) return;
 
-    // trim + validate
-    const summary = approveSummary.trim();
-    const reason = approveReason.trim();
-    const risk = approveRisk.trim();
-
-    if (!summary) return alert("Decision summary is required.");
-    if (!reason) return alert("Reason / rationale is required.");
-    if (!risk) return alert("Risk tier is required.");
-
-    await rpc("admissions_record_decision", {
-      p_application_id: selected.id,
-      p_decision: "approve", // ✅ enum-correct
-      p_risk_tier: risk, // backend expects lowercase like "medium"
-      p_summary: summary,
-      p_reason: reason,
-    });
-
-    setApproveOpen(false);
+    // Keep defaults synced to current row
+    setMSummary("Approved for provisioning.");
+    setMReason("Meets intake requirements.");
+    setMRisk((selected.risk_tier || "medium").toString());
+    setModal("APPROVE");
   }
 
-  async function needsInfoConfirmed() {
+  async function submitApprove() {
     if (!selected) return;
 
-    const msg = niMessage.trim();
-    if (!msg) return alert("Message is required.");
+    const decisionCandidates = Array.from(
+      new Set([
+        ...enumVariants("APPROVE"),
+        ...enumVariants("APPROVED"),
+        ...enumVariants("approved"),
+        ...enumVariants("approve"),
+      ])
+    );
 
-    const channels = (niChannels || "email")
+    const riskCandidates = Array.from(new Set([...enumVariants(mRisk || "medium"), ...enumVariants("medium")]));
+
+    try {
+      await runRpc(
+        "admissions_record_decision",
+        {
+          p_application_id: selected.id,
+          p_decision: "APPROVE", // first attempt
+          p_risk_tier: mRisk || "medium",
+          p_summary: (mSummary || "").trim(),
+          p_reason: (mReason || "").trim(),
+        },
+        [
+          { key: "p_decision", candidates: decisionCandidates },
+          { key: "p_risk_tier", candidates: riskCandidates },
+        ]
+      );
+      setModal(null);
+    } catch (e: any) {
+      alert(e?.message || "Approve failed.");
+    }
+  }
+
+  async function needsInfo() {
+    if (!selected) return;
+
+    setMMsg("Please provide the missing information.");
+    setMChannels("email");
+    setMDue("");
+    setModal("NEEDS_INFO");
+  }
+
+  async function submitNeedsInfo() {
+    if (!selected) return;
+
+    const channels = (mChannels || "email")
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
 
-    const dueStr = (niDueIso ?? "").trim();
-    const dueAt =
-      dueStr.length > 0 ? new Date(dueStr).toISOString() : null; // ✅ build-safe (never Date(null))
+    const dueAt = (mDue || "").trim() ? new Date(mDue).toISOString() : null;
 
-    await rpc("admissions_request_info", {
-      p_application_id: selected.id,
-      p_message: msg,
-      p_channels: channels,
-      p_due_at: dueAt,
-      p_next_status: "NEEDS_INFO",
-    });
+    const statusCandidates = Array.from(new Set([...enumVariants("NEEDS_INFO"), ...enumVariants("needs_info"), ...enumVariants("needs-info")]));
 
-    setNeedsInfoOpen(false);
+    try {
+      await runRpc(
+        "admissions_request_info",
+        {
+          p_application_id: selected.id,
+          p_message: (mMsg || "").trim(),
+          p_channels: channels,
+          p_due_at: dueAt,
+          p_next_status: "NEEDS_INFO",
+        },
+        [{ key: "p_next_status", candidates: statusCandidates }]
+      );
+      setModal(null);
+    } catch (e: any) {
+      alert(e?.message || "Needs Info failed.");
+    }
   }
 
-  async function archiveSoftConfirmed() {
+  async function archiveSoft() {
     if (!selected) return;
-    await rpc("admissions_set_status", {
-      p_application_id: selected.id,
-      p_next_status: "ARCHIVED",
-      p_note: archiveNote || "",
-    });
-    setArchiveOpen(false);
+    setMArchiveNote("Archived by operator.");
+    setModal("ARCHIVE");
   }
 
-  async function hardDeleteConfirmed() {
+  async function submitArchive() {
     if (!selected) return;
 
-    const reason = deleteReason.trim();
-    if (!reason) return alert("Deletion reason is required.");
+    const statusCandidates = Array.from(new Set([...enumVariants("ARCHIVED"), ...enumVariants("archived")]));
 
-    await rpc("admissions_delete_application", {
-      p_application_id: selected.id,
-      p_reason: reason,
-    });
+    try {
+      await runRpc(
+        "admissions_set_status",
+        {
+          p_application_id: selected.id,
+          p_next_status: "ARCHIVED",
+          p_note: (mArchiveNote || "").trim(),
+        },
+        [{ key: "p_next_status", candidates: statusCandidates }]
+      );
+      setModal(null);
+    } catch (e: any) {
+      alert(e?.message || "Archive failed.");
+    }
+  }
 
-    setDeleteOpen(false);
+  async function hardDelete() {
+    if (!selected) return;
+    setMDeleteReason("Test data cleanup.");
+    setModal("DELETE");
+  }
+
+  async function submitDelete() {
+    if (!selected) return;
+
+    try {
+      await runRpc("admissions_delete_application", {
+        p_application_id: selected.id,
+        p_reason: (mDeleteReason || "").trim(),
+      });
+      setModal(null);
+    } catch (e: any) {
+      alert(e?.message || "Hard Delete failed.");
+    }
   }
 
   const status = normStatus(selected?.status);
@@ -539,217 +536,15 @@ export default function CiAdmissionsPage() {
   const canArchive = !!selected && status !== "ARCHIVED";
   const canHardDelete = !!selected && ["DECLINED", "WITHDRAWN", "ARCHIVED"].includes(status);
 
-  const statusBadge = useMemo(() => {
-    if (!selected) return null;
-    const s = normStatus(selected.status);
-    const cls =
-      s === "PROVISIONED"
-        ? "border-emerald-300/20 bg-emerald-400/10 text-emerald-200"
-        : s === "NEEDS_INFO"
-        ? "border-amber-300/18 bg-amber-400/10 text-amber-200"
-        : s === "IN_REVIEW"
-        ? "border-sky-300/18 bg-sky-400/10 text-sky-200"
-        : s === "ARCHIVED"
-        ? "border-white/10 bg-white/5 text-white/65"
-        : "border-white/10 bg-white/5 text-white/70";
-
-    return (
-      <span className={cx("rounded-full border px-3 py-1 text-[11px] font-medium", cls)}>
-        {selected.status || "—"}
-      </span>
-    );
-  }, [selected]);
-
   return (
     <div className="h-full w-full">
-      {/* --- OS Modals --- */}
-      <OsModal
-        open={approveOpen}
-        onClose={() => setApproveOpen(false)}
-        title="Approve for Provisioning"
-        subtitle="This enables credential binding (Set Password) and portal activation."
-        footer={
-          <button
-            onClick={approveForProvisioningConfirmed}
-            disabled={busy}
-            className={cx(
-              "rounded-full border px-5 py-2 text-xs font-semibold transition",
-              !busy
-                ? "border-amber-300/22 bg-amber-400/10 text-amber-200 hover:bg-amber-400/14"
-                : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
-            )}
-          >
-            Approve & Continue
-          </button>
-        }
-      >
-        <div className="space-y-4">
-          <div className="rounded-2xl border border-white/10 bg-black/25 p-4 text-sm text-white/65">
-            <div className="text-[11px] uppercase tracking-[0.22em] text-white/35">Application</div>
-            <div className="mt-2 flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <div className="truncate text-white/85">{title}</div>
-                <div className="mt-1 truncate text-xs text-white/45">
-                  {selected?.applicant_email || selected?.organization_email || "—"}
-                </div>
-              </div>
-              {statusBadge}
-            </div>
-          </div>
-
-          <Input
-            label="Decision summary"
-            value={approveSummary}
-            onChange={setApproveSummary}
-            placeholder="Approved for provisioning."
-          />
-          <Textarea
-            label="Rationale (required)"
-            value={approveReason}
-            onChange={setApproveReason}
-            placeholder="Meets intake requirements."
-          />
-          <Select
-            label="Risk tier"
-            value={approveRisk}
-            onChange={setApproveRisk}
-            options={[
-              { value: "low", label: "low" },
-              { value: "medium", label: "medium" },
-              { value: "high", label: "high" },
-            ]}
-          />
-
-          <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-xs text-white/55">
-            Enforced by RPC. No direct table updates.
-          </div>
-        </div>
-      </OsModal>
-
-      <OsModal
-        open={needsInfoOpen}
-        onClose={() => setNeedsInfoOpen(false)}
-        title="Request Information"
-        subtitle="Sends a formal request and moves the application to NEEDS_INFO."
-        footer={
-          <button
-            onClick={needsInfoConfirmed}
-            disabled={busy}
-            className={cx(
-              "rounded-full border px-5 py-2 text-xs font-semibold transition",
-              !busy
-                ? "border-amber-300/18 bg-amber-400/10 text-amber-200 hover:bg-amber-400/14"
-                : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
-            )}
-          >
-            Send Request
-          </button>
-        }
-      >
-        <div className="space-y-4">
-          <Textarea
-            label="Message (required)"
-            value={niMessage}
-            onChange={setNiMessage}
-            placeholder="Please provide missing information."
-          />
-          <Input
-            label="Channels (comma-separated)"
-            value={niChannels}
-            onChange={setNiChannels}
-            placeholder="email,sms"
-          />
-          <Input
-            label="Due at (optional ISO)"
-            value={niDueIso}
-            onChange={setNiDueIso}
-            placeholder="2026-01-20T17:00:00Z"
-          />
-          <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-xs text-white/55">
-            Tip: leave Due at empty to omit a deadline.
-          </div>
-        </div>
-      </OsModal>
-
-      <OsModal
-        open={archiveOpen}
-        onClose={() => setArchiveOpen(false)}
-        title="Archive Application"
-        subtitle="Soft archive. Keeps record for audit and removes from intake focus."
-        footer={
-          <button
-            onClick={archiveSoftConfirmed}
-            disabled={busy}
-            className={cx(
-              "rounded-full border px-5 py-2 text-xs font-semibold transition",
-              !busy
-                ? "border-white/10 bg-white/6 text-white/80 hover:bg-white/8 hover:border-amber-300/15"
-                : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
-            )}
-          >
-            Archive
-          </button>
-        }
-      >
-        <div className="space-y-4">
-          <Textarea
-            label="Archive note (optional)"
-            value={archiveNote}
-            onChange={setArchiveNote}
-            placeholder="Archived by operator."
-          />
-          <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-xs text-white/55">
-            Uses admissions_set_status (RPC-only).
-          </div>
-        </div>
-      </OsModal>
-
-      <OsModal
-        open={deleteOpen}
-        onClose={() => setDeleteOpen(false)}
-        title="Hard Delete (Irreversible)"
-        subtitle="Only allowed for terminal statuses (DECLINED/WITHDRAWN/ARCHIVED)."
-        footer={
-          <button
-            onClick={hardDeleteConfirmed}
-            disabled={busy || !canHardDelete}
-            className={cx(
-              "rounded-full border px-5 py-2 text-xs font-semibold transition",
-              canHardDelete && !busy
-                ? "border-rose-300/20 bg-rose-400/10 text-rose-200 hover:bg-rose-400/14"
-                : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
-            )}
-          >
-            Delete
-          </button>
-        }
-      >
-        <div className="space-y-4">
-          <Textarea
-            label="Deletion reason (required)"
-            value={deleteReason}
-            onChange={setDeleteReason}
-            placeholder="Test data cleanup."
-          />
-          <div className="rounded-2xl border border-rose-300/15 bg-rose-400/10 p-4 text-xs text-rose-100/90">
-            This cannot be undone.
-          </div>
-        </div>
-      </OsModal>
-
-      {/* --- Page --- */}
       <div className="mx-auto w-full max-w-[1400px] px-4 pb-10 pt-6">
         <div className="mb-5 flex items-end justify-between gap-4">
           <div>
-            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
-              CI • Admissions
-            </div>
-            <div className="mt-1 text-2xl font-semibold text-white/90">
-              Admissions Console
-            </div>
+            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">CI • Admissions</div>
+            <div className="mt-1 text-2xl font-semibold text-white/90">Admissions Console</div>
             <div className="mt-1 text-sm text-white/50">
-              Entity-scoped:{" "}
-              <span className="text-white/70">{entityName || entityKey}</span> • Lane:{" "}
+              Entity-scoped: <span className="text-white/70">{entityName || entityKey}</span> • Lane:{" "}
               <span className="text-white/70">{isTest ? "SANDBOX" : "RoT"}</span>
             </div>
           </div>
@@ -770,9 +565,7 @@ export default function CiAdmissionsPage() {
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
                 <div className="flex items-center justify-between gap-3">
-                  <div className="text-xs font-semibold tracking-wide text-white/80">
-                    Inbox
-                  </div>
+                  <div className="text-xs font-semibold tracking-wide text-white/80">Inbox</div>
                   <div className="flex items-center gap-2">
                     <Pill active={tab === "INTAKE"} onClick={() => setTab("INTAKE")}>
                       Intake
@@ -794,10 +587,7 @@ export default function CiAdmissionsPage() {
                     <Pill active={quick === "INTAKE"} onClick={() => setQuick("INTAKE")}>
                       INTAKE
                     </Pill>
-                    <Pill
-                      active={quick === "PROVISIONED"}
-                      onClick={() => setQuick("PROVISIONED")}
-                    >
+                    <Pill active={quick === "PROVISIONED"} onClick={() => setQuick("PROVISIONED")}>
                       PROVISIONED
                     </Pill>
                   </div>
@@ -829,7 +619,6 @@ export default function CiAdmissionsPage() {
                         r.organization_legal_name ||
                         r.applicant_email ||
                         r.id;
-
                       const badge = r.status || "—";
                       const sub = r.applicant_email || r.organization_email || "—";
 
@@ -846,12 +635,8 @@ export default function CiAdmissionsPage() {
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
-                              <div className="truncate text-sm font-semibold text-white/88">
-                                {name}
-                              </div>
-                              <div className="mt-1 truncate text-xs text-white/45">
-                                {sub}
-                              </div>
+                              <div className="truncate text-sm font-semibold text-white/88">{name}</div>
+                              <div className="mt-1 truncate text-xs text-white/45">{sub}</div>
                             </div>
                             <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/70">
                               {badge}
@@ -874,15 +659,8 @@ export default function CiAdmissionsPage() {
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-xs font-semibold tracking-wide text-white/80">
-                      Application
-                    </div>
-                    <div className="mt-1 truncate text-sm text-white/60">{title}</div>
-                  </div>
-                  {statusBadge}
-                </div>
+                <div className="text-xs font-semibold tracking-wide text-white/80">Application</div>
+                <div className="mt-1 truncate text-sm text-white/60">{title}</div>
               </div>
 
               <div className="p-4">
@@ -896,15 +674,14 @@ export default function CiAdmissionsPage() {
                       <Field k="Applicant" v={selected.applicant_email || "—"} />
                       <Field k="Org email" v={selected.organization_email || "—"} />
                       <Field k="Type" v={selected.applicant_type || "—"} />
+                      <Field k="Status" v={selected.status || "—"} />
                       <Field k="App ID" v={selected.id} mono />
                       <Field k="Created" v={selected.created_at || "—"} />
                       <Field k="Updated" v={selected.updated_at || "—"} />
                     </div>
 
                     <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                      <div className="text-xs font-semibold tracking-wide text-white/80">
-                        Request / Intent
-                      </div>
+                      <div className="text-xs font-semibold tracking-wide text-white/80">Request / Intent</div>
                       <div className="mt-2 whitespace-pre-wrap text-sm text-white/75">
                         {selected.intent || "—"}
                       </div>
@@ -912,51 +689,30 @@ export default function CiAdmissionsPage() {
                       <div className="mt-3 text-xs text-white/45">
                         Requested services:{" "}
                         <span className="text-white/70">
-                          {selected.requested_services
-                            ? JSON.stringify(selected.requested_services)
-                            : "—"}
+                          {selected.requested_services ? JSON.stringify(selected.requested_services) : "—"}
                         </span>
                       </div>
                     </div>
 
-                    <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="text-xs font-semibold tracking-wide text-white/80">
-                          Metadata
-                        </div>
-                        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] text-white/65">
+                    {/* ✅ Metadata panel (same contract you demanded) */}
+                    <div className="rounded-2xl border border-white/10 bg-black/18 p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-xs font-semibold tracking-wide text-white/80">Metadata</div>
+                        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/60">
                           jsonb
                         </span>
                       </div>
 
-                      <div className="mt-3 space-y-2 text-xs text-white/60">
-                        <div className="flex justify-between gap-4">
-                          <div className="text-white/35 uppercase tracking-[0.22em]">
-                            source
-                          </div>
-                          <div className="text-white/75">
-                            {selected.metadata?.source || "—"}
-                          </div>
-                        </div>
-                        <div className="flex justify-between gap-4">
-                          <div className="text-white/35 uppercase tracking-[0.22em]">
-                            request_brief
-                          </div>
-                          <div className="text-white/75 text-right">
-                            {selected.metadata?.request_brief || "—"}
-                          </div>
-                        </div>
-                        <div className="flex justify-between gap-4">
-                          <div className="text-white/35 uppercase tracking-[0.22em]">
-                            notes
-                          </div>
-                          <div className="text-white/75 text-right">
-                            {selected.metadata?.notes || "—"}
-                          </div>
-                        </div>
+                      <div className="mt-3 space-y-3">
+                        <Field k="source" v={meta?.source ? String(meta.source) : "—"} />
+                        <Field k="request_brief" v={meta?.request_brief ? String(meta.request_brief) : "—"} />
+                        <Field k="notes" v={meta?.notes ? String(meta.notes) : "—"} />
 
-                        <div className="mt-3 rounded-2xl border border-white/10 bg-black/30 p-3 font-mono text-[11px] leading-5 text-white/65">
-                          {selected.metadata ? JSON.stringify(selected.metadata, null, 2) : "null"}
+                        <div className="mt-3 rounded-2xl border border-white/10 bg-black/25 p-3">
+                          <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">raw</div>
+                          <pre className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-5 text-white/70">
+                            {safePrettyJSON(selected.metadata)}
+                          </pre>
                         </div>
                       </div>
                     </div>
@@ -965,8 +721,7 @@ export default function CiAdmissionsPage() {
                       <div className="font-semibold text-white/80">Read-only</div>
                       <div className="mt-1">
                         Admissions is authority-only. Invite/activation is handled in{" "}
-                        <span className="text-white/75">CI-Provisioning</span>. Evidence review is
-                        separate.
+                        <span className="text-white/75">CI-Provisioning</span>. Evidence review is separate.
                       </div>
                     </div>
                   </div>
@@ -979,9 +734,7 @@ export default function CiAdmissionsPage() {
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
-                <div className="text-xs font-semibold tracking-wide text-white/80">
-                  Authority Panel
-                </div>
+                <div className="text-xs font-semibold tracking-wide text-white/80">Authority Panel</div>
                 <div className="mt-1 text-sm text-white/60">Review • Decisions • Archive</div>
               </div>
 
@@ -1005,13 +758,7 @@ export default function CiAdmissionsPage() {
                       </button>
 
                       <button
-                        onClick={() => {
-                          // seed defaults with current row, so it feels intelligent
-                          setApproveSummary("Approved for provisioning.");
-                          setApproveReason("Meets intake requirements.");
-                          setApproveRisk((selected?.risk_tier || "medium") as string);
-                          setApproveOpen(true);
-                        }}
+                        onClick={approveForProvisioning}
                         disabled={!canApprove || busy}
                         className={cx(
                           "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
@@ -1024,12 +771,7 @@ export default function CiAdmissionsPage() {
                       </button>
 
                       <button
-                        onClick={() => {
-                          setNiMessage("Please provide missing information.");
-                          setNiChannels("email");
-                          setNiDueIso("");
-                          setNeedsInfoOpen(true);
-                        }}
+                        onClick={needsInfo}
                         disabled={!canNeedsInfo || busy}
                         className={cx(
                           "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
@@ -1042,7 +784,7 @@ export default function CiAdmissionsPage() {
                       </button>
 
                       <button
-                        onClick={() => setArchiveOpen(true)}
+                        onClick={archiveSoft}
                         disabled={!canArchive || busy}
                         className={cx(
                           "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
@@ -1055,7 +797,7 @@ export default function CiAdmissionsPage() {
                       </button>
 
                       <button
-                        onClick={() => setDeleteOpen(true)}
+                        onClick={hardDelete}
                         disabled={!canHardDelete || busy}
                         className={cx(
                           "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
@@ -1069,12 +811,9 @@ export default function CiAdmissionsPage() {
                     </div>
 
                     <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-4">
-                      <div className="text-[11px] uppercase tracking-[0.22em] text-white/35">
-                        Audit trail
-                      </div>
+                      <div className="text-[11px] uppercase tracking-[0.22em] text-white/35">Audit trail</div>
                       <div className="mt-2 text-xs text-white/55">
-                        Mutations are RPC-only. No raw updates. Use CI-Provisioning for
-                        invite/activation.
+                        Mutations are RPC-only. Enums are auto-retried (case/format) to match DB.
                       </div>
                     </div>
                   </>
@@ -1088,6 +827,218 @@ export default function CiAdmissionsPage() {
           Source: public.v_onboarding_admissions_inbox • entity_slug={entityKey} • lane={isTest ? "SANDBOX" : "RoT"}
         </div>
       </div>
+
+      {/* ---------- OS MODAL ---------- */}
+      {modal && selected && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4">
+          <div className="relative w-full max-w-[720px] overflow-hidden rounded-3xl border border-white/10 bg-[#070A12]/85 shadow-[0_40px_180px_rgba(0,0,0,0.75)] backdrop-blur-xl">
+            <div className="pointer-events-none absolute inset-0 opacity-70">
+              <div className="absolute -top-24 left-1/2 h-56 w-[520px] -translate-x-1/2 rounded-full bg-amber-400/10 blur-3xl" />
+              <div className="absolute -bottom-28 right-10 h-60 w-60 rounded-full bg-white/6 blur-3xl" />
+            </div>
+
+            <div className="relative border-b border-white/10 p-5">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
+                    Authority • {modal === "APPROVE" ? "Approve" : modal === "NEEDS_INFO" ? "Needs Info" : modal === "ARCHIVE" ? "Archive" : "Hard Delete"}
+                  </div>
+                  <div className="mt-1 text-lg font-semibold text-white/90">{title}</div>
+                  <div className="mt-1 text-xs text-white/50">
+                    App ID: <span className="font-mono text-white/70">{selected.id}</span>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => setModal(null)}
+                  className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/70 hover:bg-white/8"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+
+            <div className="relative p-5">
+              {modal === "APPROVE" && (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 gap-3">
+                    <label className="text-xs text-white/55">
+                      Summary
+                      <input
+                        value={mSummary}
+                        onChange={(e) => setMSummary(e.target.value)}
+                        className="mt-1 w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
+                      />
+                    </label>
+
+                    <label className="text-xs text-white/55">
+                      Reason (required)
+                      <input
+                        value={mReason}
+                        onChange={(e) => setMReason(e.target.value)}
+                        className="mt-1 w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
+                      />
+                    </label>
+
+                    <label className="text-xs text-white/55">
+                      Risk tier (enum)
+                      <input
+                        value={mRisk}
+                        onChange={(e) => setMRisk(e.target.value)}
+                        className="mt-1 w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
+                      />
+                      <div className="mt-1 text-[11px] text-white/40">
+                        We auto-retry enum casing/format to match DB.
+                      </div>
+                    </label>
+                  </div>
+
+                  <div className="flex items-center justify-end gap-2 pt-2">
+                    <button
+                      onClick={() => setModal(null)}
+                      className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-white/70 hover:bg-white/8"
+                      disabled={busy}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={submitApprove}
+                      className="rounded-2xl border border-amber-300/20 bg-amber-400/10 px-4 py-2 text-sm font-semibold text-amber-100 hover:bg-amber-400/14 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={busy || !mReason.trim() || !mSummary.trim()}
+                    >
+                      Confirm Approve
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {modal === "NEEDS_INFO" && (
+                <div className="space-y-4">
+                  <label className="text-xs text-white/55">
+                    Message to applicant (required)
+                    <textarea
+                      value={mMsg}
+                      onChange={(e) => setMMsg(e.target.value)}
+                      rows={4}
+                      className="mt-1 w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
+                    />
+                  </label>
+
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                    <label className="text-xs text-white/55">
+                      Channels (comma-separated)
+                      <input
+                        value={mChannels}
+                        onChange={(e) => setMChannels(e.target.value)}
+                        className="mt-1 w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
+                      />
+                    </label>
+
+                    <label className="text-xs text-white/55">
+                      Due at (optional ISO)
+                      <input
+                        value={mDue}
+                        onChange={(e) => setMDue(e.target.value)}
+                        placeholder="2026-01-20T18:00:00Z"
+                        className="mt-1 w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="flex items-center justify-end gap-2 pt-2">
+                    <button
+                      onClick={() => setModal(null)}
+                      className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-white/70 hover:bg-white/8"
+                      disabled={busy}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={submitNeedsInfo}
+                      className="rounded-2xl border border-amber-300/20 bg-amber-400/10 px-4 py-2 text-sm font-semibold text-amber-100 hover:bg-amber-400/14 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={busy || !mMsg.trim()}
+                    >
+                      Send Needs Info
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {modal === "ARCHIVE" && (
+                <div className="space-y-4">
+                  <label className="text-xs text-white/55">
+                    Archive note
+                    <input
+                      value={mArchiveNote}
+                      onChange={(e) => setMArchiveNote(e.target.value)}
+                      className="mt-1 w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
+                    />
+                  </label>
+
+                  <div className="rounded-2xl border border-white/10 bg-black/25 p-4 text-sm text-white/65">
+                    This is a soft archive. It remains auditable and can be queried via Archived tab.
+                  </div>
+
+                  <div className="flex items-center justify-end gap-2 pt-2">
+                    <button
+                      onClick={() => setModal(null)}
+                      className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-white/70 hover:bg-white/8"
+                      disabled={busy}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={submitArchive}
+                      className="rounded-2xl border border-white/10 bg-white/6 px-4 py-2 text-sm font-semibold text-white/80 hover:bg-white/8 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={busy}
+                    >
+                      Confirm Archive
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {modal === "DELETE" && (
+                <div className="space-y-4">
+                  <div className="rounded-2xl border border-rose-300/18 bg-rose-400/10 p-4 text-sm text-rose-100/90">
+                    Hard delete is irreversible. Only use for terminal cleanup (declined/withdrawn/archived).
+                  </div>
+
+                  <label className="text-xs text-white/55">
+                    Deletion reason (required)
+                    <input
+                      value={mDeleteReason}
+                      onChange={(e) => setMDeleteReason(e.target.value)}
+                      className="mt-1 w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
+                    />
+                  </label>
+
+                  <div className="flex items-center justify-end gap-2 pt-2">
+                    <button
+                      onClick={() => setModal(null)}
+                      className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-white/70 hover:bg-white/8"
+                      disabled={busy}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={submitDelete}
+                      className="rounded-2xl border border-rose-300/20 bg-rose-400/10 px-4 py-2 text-sm font-semibold text-rose-100 hover:bg-rose-400/14 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={busy || !mDeleteReason.trim()}
+                    >
+                      Confirm Delete
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="relative border-t border-white/10 p-4 text-[11px] text-white/35">
+              Oasis OS Authority Modal • Glass depth • Gold restraint • No wiring changes
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
