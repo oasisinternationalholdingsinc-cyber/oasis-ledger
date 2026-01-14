@@ -51,20 +51,10 @@ type EvidenceRow = {
 
 type AppTab = "INTAKE" | "ALL";
 
-function Row({
-  k,
-  v,
-  mono,
-}: {
-  k: string;
-  v: string;
-  mono?: boolean;
-}) {
+function Row({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
   return (
     <div className="flex items-start justify-between gap-4">
-      <div className="text-xs uppercase tracking-[0.22em] text-white/35">
-        {k}
-      </div>
+      <div className="text-xs uppercase tracking-[0.22em] text-white/35">{k}</div>
       <div
         className={cx(
           "max-w-[70%] text-right text-sm text-white/80",
@@ -78,8 +68,7 @@ function Row({
 }
 
 export default function CiEvidencePage() {
-  // ✅ FIX: your EntityContextValue does NOT expose `entity` (TS error).
-  // We keep wiring intact by reading only stable fields, with safe fallbacks.
+  // ✅ FIX #1: EntityContextValue doesn't expose `entity` in your repo
   const ec = useEntity() as any;
   const entityKey: string =
     (ec?.entityKey as string) ||
@@ -90,11 +79,15 @@ export default function CiEvidencePage() {
   const entityName: string =
     (ec?.entityName as string) ||
     (ec?.activeEntityName as string) ||
-    (ec?.entities?.find?.((x: any) => x?.slug === entityKey || x?.key === entityKey)
-      ?.name as string) ||
+    (ec?.entities?.find?.((x: any) => x?.slug === entityKey || x?.key === entityKey)?.name as string) ||
     entityKey;
 
-  const { isTest } = useOsEnv();
+  // ✅ FIX #2: OsEnvContextValue doesn't expose `isTest` in your repo
+  // We read it defensively from any common field names.
+  const env = useOsEnv() as any;
+  const isTest: boolean = Boolean(
+    env?.is_test ?? env?.isTest ?? env?.lane_is_test ?? env?.sandbox ?? env?.isSandbox
+  );
 
   const [apps, setApps] = useState<InboxRow[]>([]);
   const [appsLoading, setAppsLoading] = useState(true);
@@ -109,9 +102,7 @@ export default function CiEvidencePage() {
   const [evLoading, setEvLoading] = useState(false);
   const [evErr, setEvErr] = useState<string | null>(null);
 
-  const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(
-    null
-  );
+  const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(null);
 
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -196,10 +187,7 @@ export default function CiEvidencePage() {
         };
 
         let res = await tryWithLane();
-        if (
-          res.error &&
-          /lane_is_test|42703|undefined column/i.test(res.error.message)
-        ) {
+        if (res.error && /lane_is_test|42703|undefined column/i.test(res.error.message)) {
           res = await tryWithoutLane();
         }
 
@@ -317,11 +305,7 @@ export default function CiEvidencePage() {
     setEvidence((prev) =>
       prev.map((x) =>
         x.id === e.id
-          ? {
-              ...x,
-              is_verified: next,
-              verified_at: next ? new Date().toISOString() : null,
-            }
+          ? { ...x, is_verified: next, verified_at: next ? new Date().toISOString() : null }
           : x
       )
     );
@@ -342,19 +326,11 @@ export default function CiEvidencePage() {
       <div className="mx-auto w-full max-w-[1400px] px-4 pb-10 pt-6">
         <div className="mb-5 flex items-end justify-between gap-4">
           <div>
-            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
-              CI • Evidence
-            </div>
-            <div className="mt-1 text-2xl font-semibold text-white/90">
-              Evidence Review
-            </div>
+            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">CI • Evidence</div>
+            <div className="mt-1 text-2xl font-semibold text-white/90">Evidence Review</div>
             <div className="mt-1 text-sm text-white/50">
-              Entity-scoped:{" "}
-              <span className="text-white/70">{entityName || entityKey}</span> •
-              Lane:{" "}
-              <span className="text-white/70">
-                {isTest ? "SANDBOX" : "RoT"}
-              </span>
+              Entity-scoped: <span className="text-white/70">{entityName || entityKey}</span> • Lane:{" "}
+              <span className="text-white/70">{isTest ? "SANDBOX" : "RoT"}</span>
             </div>
           </div>
 
@@ -374,9 +350,7 @@ export default function CiEvidencePage() {
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
                 <div className="flex items-center justify-between">
-                  <div className="text-xs font-semibold tracking-wide text-white/80">
-                    Applications
-                  </div>
+                  <div className="text-xs font-semibold tracking-wide text-white/80">Applications</div>
                   <div className="flex gap-2">
                     <button
                       onClick={() => setTab("INTAKE")}
@@ -419,18 +393,13 @@ export default function CiEvidencePage() {
                 ) : appsErr ? (
                   <div className="p-4 text-sm text-rose-200">{appsErr}</div>
                 ) : filteredApps.length === 0 ? (
-                  <div className="p-4 text-sm text-white/50">
-                    No applications found.
-                  </div>
+                  <div className="p-4 text-sm text-white/50">No applications found.</div>
                 ) : (
                   <div className="space-y-2 p-2">
                     {filteredApps.map((a) => {
                       const active = a.id === selectedAppId;
                       const name =
-                        a.organization_trade_name ||
-                        a.organization_legal_name ||
-                        a.applicant_email ||
-                        a.id;
+                        a.organization_trade_name || a.organization_legal_name || a.applicant_email || a.id;
                       const status = a.status || "—";
                       return (
                         <button
@@ -445,13 +414,9 @@ export default function CiEvidencePage() {
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
-                              <div className="truncate text-sm font-semibold text-white/88">
-                                {name}
-                              </div>
+                              <div className="truncate text-sm font-semibold text-white/88">{name}</div>
                               <div className="mt-1 truncate text-xs text-white/45">
-                                {a.applicant_email ||
-                                  a.organization_email ||
-                                  "—"}
+                                {a.applicant_email || a.organization_email || "—"}
                               </div>
                             </div>
                             <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/70">
@@ -471,9 +436,7 @@ export default function CiEvidencePage() {
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
-                <div className="text-xs font-semibold tracking-wide text-white/80">
-                  Evidence
-                </div>
+                <div className="text-xs font-semibold tracking-wide text-white/80">Evidence</div>
                 <div className="mt-1 truncate text-sm text-white/60">
                   {selectedAppId ? appTitle : "Select an application"}
                 </div>
@@ -481,24 +444,18 @@ export default function CiEvidencePage() {
 
               <div className="max-h-[560px] overflow-auto p-2">
                 {!selectedAppId ? (
-                  <div className="p-4 text-sm text-white/50">
-                    Select an application to view evidence.
-                  </div>
+                  <div className="p-4 text-sm text-white/50">Select an application to view evidence.</div>
                 ) : evLoading ? (
                   <div className="p-4 text-sm text-white/50">Loading…</div>
                 ) : evErr ? (
                   <div className="p-4 text-sm text-rose-200">{evErr}</div>
                 ) : evidence.length === 0 ? (
-                  <div className="p-4 text-sm text-white/50">
-                    No evidence uploaded yet.
-                  </div>
+                  <div className="p-4 text-sm text-white/50">No evidence uploaded yet.</div>
                 ) : (
                   <div className="space-y-2 p-2">
                     {evidence.map((e) => {
                       const active = e.id === selectedEvidenceId;
-                      const title =
-                        e.title ||
-                        (e.kind ? e.kind.replaceAll("_", " ") : "Evidence");
+                      const title = e.title || (e.kind ? e.kind.replaceAll("_", " ") : "Evidence");
                       const badge = e.is_verified ? "VERIFIED" : "PENDING";
                       return (
                         <button
@@ -513,9 +470,7 @@ export default function CiEvidencePage() {
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
-                              <div className="truncate text-sm font-semibold text-white/88">
-                                {title}
-                              </div>
+                              <div className="truncate text-sm font-semibold text-white/88">{title}</div>
                               <div className="mt-1 truncate text-xs text-white/45">
                                 {e.file_name || e.storage_path || "—"}
                               </div>
@@ -545,23 +500,17 @@ export default function CiEvidencePage() {
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
-                <div className="text-xs font-semibold tracking-wide text-white/80">
-                  Details
-                </div>
+                <div className="text-xs font-semibold tracking-wide text-white/80">Details</div>
                 <div className="mt-1 truncate text-sm text-white/60">
                   {selectedEvidence
-                    ? selectedEvidence.title ||
-                      selectedEvidence.kind?.replaceAll("_", " ") ||
-                      selectedEvidence.id
+                    ? selectedEvidence.title || selectedEvidence.kind?.replaceAll("_", " ") || selectedEvidence.id
                     : "Select evidence"}
                 </div>
               </div>
 
               <div className="p-4">
                 {!selectedEvidence ? (
-                  <div className="text-sm text-white/50">
-                    Select an evidence item to review.
-                  </div>
+                  <div className="text-sm text-white/50">Select an evidence item to review.</div>
                 ) : (
                   <>
                     <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
@@ -580,8 +529,7 @@ export default function CiEvidencePage() {
                       <Row
                         k="Stored"
                         v={
-                          selectedEvidence.storage_bucket &&
-                          selectedEvidence.storage_path
+                          selectedEvidence.storage_bucket && selectedEvidence.storage_path
                             ? `${selectedEvidence.storage_bucket}/${selectedEvidence.storage_path}`
                             : "—"
                         }
@@ -592,11 +540,7 @@ export default function CiEvidencePage() {
                         k="Verified"
                         v={
                           selectedEvidence.is_verified
-                            ? `YES${
-                                selectedEvidence.verified_at
-                                  ? ` • ${selectedEvidence.verified_at}`
-                                  : ""
-                              }`
+                            ? `YES${selectedEvidence.verified_at ? ` • ${selectedEvidence.verified_at}` : ""}`
                             : "NO"
                         }
                       />
@@ -605,14 +549,10 @@ export default function CiEvidencePage() {
                     <div className="mt-4 flex flex-col gap-2">
                       <button
                         onClick={() => openEvidence(selectedEvidence)}
-                        disabled={
-                          !selectedEvidence.storage_bucket ||
-                          !selectedEvidence.storage_path
-                        }
+                        disabled={!selectedEvidence.storage_bucket || !selectedEvidence.storage_path}
                         className={cx(
                           "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
-                          selectedEvidence.storage_bucket &&
-                            selectedEvidence.storage_path
+                          selectedEvidence.storage_bucket && selectedEvidence.storage_path
                             ? "border-white/10 bg-white/5 text-white/85 hover:border-amber-300/20 hover:bg-white/7"
                             : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
                         )}
@@ -649,8 +589,7 @@ export default function CiEvidencePage() {
                       </div>
 
                       <div className="pt-2 text-xs text-white/40">
-                        Read-only console. Evidence submission happens in the
-                        public portal. Verification is RPC-only.
+                        Read-only console. Evidence submission happens in the public portal. Verification is RPC-only.
                       </div>
                     </div>
                   </>
@@ -661,8 +600,7 @@ export default function CiEvidencePage() {
         </div>
 
         <div className="mt-5 text-[10px] text-white/35">
-          Source: public.v_onboarding_admissions_inbox • entity_slug={entityKey} •
-          lane={isTest ? "SANDBOX" : "RoT"}
+          Source: public.v_onboarding_admissions_inbox • entity_slug={entityKey} • lane={isTest ? "SANDBOX" : "RoT"}
         </div>
       </div>
     </div>
