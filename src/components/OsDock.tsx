@@ -11,7 +11,7 @@ import {
   Flame,       // CI-Forge – Execution / Fire
   ShieldAlert, // CI-Sentinel – Guardian / Alerts
   Archive,     // CI-Archive – Vault / Records
-  IdCard,      // CI-Admissions – Intake / Authority Gateway
+  IdCard,      // CI-Onboarding – Intake / Authority Gateway
 } from "lucide-react";
 
 type DockItem = {
@@ -55,8 +55,8 @@ const CORE_ITEMS: DockItem[] = [
 
 const FUTURE_ITEMS: DockItem[] = [
   {
-    href: "/ci-admissions",
-    label: "CI-Admissions",
+    href: "/ci-onboarding",
+    label: "CI-Onboarding",
     Icon: IdCard,
     tintClass: "text-amber-200",
     moduleKey: "admissions",
