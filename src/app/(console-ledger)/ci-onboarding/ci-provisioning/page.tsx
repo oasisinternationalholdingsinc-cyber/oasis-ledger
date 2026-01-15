@@ -1,19 +1,20 @@
+// src/app/(console-ledger)/ci-onboarding/ci-provisioning/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
+
+/**
+ * CI • Provisioning (LOCKED CONTRACT)
+ * ✅ SAME OS + modal language as CI-Admissions (no drift)
+ * ✅ Queue source: public.v_onboarding_admissions_inbox (same as Admissions)
+ * ✅ Invite = authentication only (Edge Function) → enables portal evidence upload
+ * ✅ Complete Provisioning = creation (RPC) → entity + memberships
+ * ✅ Complete Provisioning FIX: admissions_complete_provisioning requires (p_application_id, p_user_id)
+ */
 
 import { useEffect, useMemo, useState } from "react";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
-
-/**
- * CI • Provisioning (OS-aligned to CI-Admissions)
- * ✅ Uses the SAME source view as Admissions: public.v_onboarding_admissions_inbox
- * ✅ Lane-safe: tries lane_is_test if present, falls back if not
- * ✅ Invite = auth only (Edge Function)
- * ✅ Complete Provisioning = creation (RPC)
- * ✅ Same OsModal + 3-column console layout
- */
 
 function cx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
@@ -55,42 +56,9 @@ type InboxRow = {
   lane_is_test?: boolean | null;
 };
 
-type TopTab = "READY" | "PROVISIONED" | "ALL";
+type QueueTab = "READY" | "PROVISIONED" | "ALL";
 
-function Pill({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={cx(
-        "rounded-full px-3 py-1 text-[11px] font-medium transition",
-        active
-          ? "bg-white/8 text-white/85 ring-1 ring-white/12"
-          : "text-white/55 hover:text-white/80"
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
-function Row({ k, v }: { k: string; v: string }) {
-  return (
-    <div className="flex items-start justify-between gap-4">
-      <div className="text-xs uppercase tracking-[0.22em] text-white/35">{k}</div>
-      <div className="max-w-[70%] text-right text-sm text-white/80">{v}</div>
-    </div>
-  );
-}
-
-/** Minimal OS Modal (same as CI-Admissions) */
+/** Minimal OS Modal (same pattern as CI-Admissions) */
 function OsModal({
   open,
   title,
@@ -130,7 +98,9 @@ function OsModal({
               Authority • Action
             </div>
             <div className="mt-2 text-xl font-semibold text-white/90">{title}</div>
-            {subtitle ? <div className="mt-1 text-sm text-white/55">{subtitle}</div> : null}
+            {subtitle ? (
+              <div className="mt-1 text-sm text-white/55">{subtitle}</div>
+            ) : null}
           </div>
 
           <div className="relative p-5">{children}</div>
@@ -168,15 +138,48 @@ function OsModal({
         </div>
 
         <div className="mt-3 text-center text-[10px] text-white/35">
-          Invite = authentication only • Complete Provisioning = creation • Mutations are authority-only
+          Mutations are RPC/Functions only • Lane-safe via OsEnv + view lane column when present
         </div>
       </div>
     </div>
   );
 }
 
+function Pill({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={cx(
+        "rounded-full px-3 py-1 text-[11px] font-medium transition",
+        active
+          ? "bg-white/8 text-white/85 ring-1 ring-white/12"
+          : "text-white/55 hover:text-white/80"
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Row({ k, v }: { k: string; v: string }) {
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <div className="text-xs uppercase tracking-[0.22em] text-white/35">{k}</div>
+      <div className="max-w-[70%] text-right text-sm text-white/80">{v}</div>
+    </div>
+  );
+}
+
 export default function CiProvisioningPage() {
-  // ---- entity (defensive; same pattern as Admissions) ----
+  // ---- entity (defensive) ----
   const ec = useEntity() as any;
   const entityKey: string =
     (ec?.entityKey as string) ||
@@ -190,7 +193,7 @@ export default function CiProvisioningPage() {
     (ec?.entities?.find?.((x: any) => x?.slug === entityKey || x?.key === entityKey)?.name as string) ||
     entityKey;
 
-  // ---- env lane (defensive; same pattern as Admissions) ----
+  // ---- env lane (defensive) ----
   const env = useOsEnv() as any;
   const isTest: boolean = Boolean(
     env?.is_test ?? env?.isTest ?? env?.lane_is_test ?? env?.sandbox ?? env?.isSandbox
@@ -200,7 +203,7 @@ export default function CiProvisioningPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  const [topTab, setTopTab] = useState<TopTab>("READY");
+  const [tab, setTab] = useState<QueueTab>("READY");
   const [q, setQ] = useState("");
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -233,7 +236,7 @@ export default function CiProvisioningPage() {
     return (m && typeof m === "object" ? (m as any) : {}) as any;
   }, [selected?.metadata]);
 
-  // ---- load queue from SAME view as Admissions (lane-safe fallback) ----
+  // ---- load queue (same source as Admissions) ----
   useEffect(() => {
     let alive = true;
 
@@ -277,16 +280,16 @@ export default function CiProvisioningPage() {
         };
 
         let res = await tryWithLane();
-        if (res.error && /lane_is_test|42703|undefined column|schema cache/i.test(res.error.message)) {
+        if (res.error && /lane_is_test|42703|undefined column/i.test(res.error.message)) {
           res = await tryWithoutLane();
         }
 
         if (res.error) throw res.error;
         if (!alive) return;
 
-        const list = (res.data || []) as InboxRow[];
-        setApps(list);
+        setApps((res.data || []) as InboxRow[]);
 
+        const list = (res.data || []) as InboxRow[];
         if (!selectedId && list.length) setSelectedId(list[0].id);
         else if (selectedId && !list.some((r) => r.id === selectedId))
           setSelectedId(list[0]?.id ?? null);
@@ -305,21 +308,21 @@ export default function CiProvisioningPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entityKey, isTest, refreshKey]);
 
-  // ---- provisioning-focused filter (client-side; no schema assumptions) ----
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
     let list = apps;
 
-    const stIn = (a: InboxRow, allowed: string[]) => allowed.includes(normStatus(a.status));
-
-    if (topTab === "READY") {
-      // Ready for invite/evidence/provisioning actions (keep wide, no regressions)
-      list = list.filter((a) =>
-        stIn(a, ["SUBMITTED", "IN_REVIEW", "NEEDS_INFO", "APPROVED", "PROVISIONING"])
-      );
-    } else if (topTab === "PROVISIONED") {
-      list = list.filter((a) => stIn(a, ["PROVISIONED"]));
-    }
+    // Queue tabs (client-side; DB statuses are enum + may be lowercase)
+    if (tab === "READY") {
+      // Ready for invite / evidence / provisioning: approved OR provisioning OR needs_info
+      // (You can still invite even in needs_info so they can upload.)
+      list = list.filter((a) => {
+        const st = normStatus(a.status);
+        return ["APPROVED", "PROVISIONING", "NEEDS_INFO", "IN_REVIEW", "SUBMITTED", "TRIAGE"].includes(st);
+      });
+    } else if (tab === "PROVISIONED") {
+      list = list.filter((a) => normStatus(a.status) === "PROVISIONED");
+    } // ALL = no extra filter
 
     if (!needle) return list;
 
@@ -337,62 +340,87 @@ export default function CiProvisioningPage() {
         .toLowerCase();
       return blob.includes(needle);
     });
-  }, [apps, topTab, q]);
+  }, [apps, tab, q]);
 
-  const statusBadge = (stRaw: string | null) => {
-    const st = normStatus(stRaw);
-    const base = "rounded-full border px-3 py-1 text-[11px] font-medium";
-    if (st === "NEEDS_INFO") return `${base} border-amber-300/18 bg-amber-400/10 text-amber-100/90`;
-    if (st === "IN_REVIEW") return `${base} border-sky-300/18 bg-sky-400/10 text-sky-100/90`;
-    if (st === "APPROVED" || st === "PROVISIONING")
-      return `${base} border-emerald-300/18 bg-emerald-400/10 text-emerald-100/90`;
-    if (st === "PROVISIONED") return `${base} border-emerald-300/18 bg-emerald-400/10 text-emerald-100/90`;
-    return `${base} border-white/10 bg-white/5 text-white/70`;
-  };
+  // ---------------------------
+  // Actions
+  // ---------------------------
 
-  // ---------------- authority actions (NO NEW WIRING) ----------------
-
-  async function sendPortalInvite() {
+  /**
+   * Invite (AUTH ONLY): Edge Function that grants portal access (evidence upload).
+   * NOTE: This is intentionally NOT creation.
+   */
+  async function rpcSendPortalInvite() {
     if (!selected) return;
     setBusy(true);
     setNote(null);
     try {
-      // ✅ Existing Edge Function (auth only)
-      const { error } = await supabase.functions.invoke("admissions-provision-portal-access", {
+      // canonical Edge Function name (already used in your system)
+      const { data, error } = await supabase.functions.invoke("admissions-provision-portal-access", {
         body: { application_id: selected.id },
       });
       if (error) throw error;
 
-      setNote("Portal access invite sent (authentication only).");
+      // optional: show returned info if present
+      const msg =
+        (data && (data.message || data.detail)) ||
+        "Portal access invite sent (auth-only).";
+      setNote(String(msg));
       setInviteOpen(false);
       setRefreshKey((n) => n + 1);
     } catch (e: any) {
-      alert(e?.message || "Invite failed.");
+      alert(e?.message || "Send Portal Access Invite failed.");
     } finally {
       setBusy(false);
     }
   }
 
-  async function completeProvisioning() {
+  /**
+   * Complete provisioning (CREATION): RPC creates entity + memberships.
+   * ✅ FIX: admissions_complete_provisioning requires p_application_id + p_user_id.
+   */
+  async function rpcCompleteProvisioning() {
     if (!selected) return;
     setBusy(true);
     setNote(null);
     try {
-      // ✅ Existing RPC (creation)
+      const { data: auth, error: authErr } = await supabase.auth.getUser();
+      if (authErr) throw authErr;
+
+      const uid = auth?.user?.id;
+      if (!uid) throw new Error("No operator session (auth.uid missing).");
+
       const { error } = await supabase.rpc("admissions_complete_provisioning", {
         p_application_id: selected.id,
+        p_user_id: uid,
       });
       if (error) throw error;
 
-      setNote("Complete provisioning finished (entity + memberships created).");
+      setNote("Provisioning completed (entity + memberships created).");
       setCompleteOpen(false);
       setRefreshKey((n) => n + 1);
     } catch (e: any) {
-      alert(e?.message || "Complete provisioning failed.");
+      alert(e?.message || "Complete Provisioning failed.");
     } finally {
       setBusy(false);
     }
   }
+
+  const statusBadge = (stRaw: string | null) => {
+    const st = normStatus(stRaw);
+    const base = "rounded-full border px-3 py-1 text-[11px] font-medium";
+    if (st === "NEEDS_INFO")
+      return `${base} border-amber-300/18 bg-amber-400/10 text-amber-100/90`;
+    if (st === "IN_REVIEW" || st === "UNDER_REVIEW" || st === "TRIAGE")
+      return `${base} border-sky-300/18 bg-sky-400/10 text-sky-100/90`;
+    if (st === "APPROVED" || st === "PROVISIONING")
+      return `${base} border-amber-300/18 bg-amber-400/10 text-amber-100/90`;
+    if (st === "PROVISIONED")
+      return `${base} border-emerald-300/18 bg-emerald-400/10 text-emerald-100/90`;
+    if (st === "ARCHIVED")
+      return `${base} border-white/10 bg-white/5 text-white/55`;
+    return `${base} border-white/10 bg-white/5 text-white/70`;
+  };
 
   return (
     <div className="h-full w-full">
@@ -407,8 +435,9 @@ export default function CiProvisioningPage() {
               Provisioning Console
             </div>
             <div className="mt-1 text-sm text-white/50">
-              Entity-scoped: <span className="text-white/70">{entityName || entityKey}</span> • Lane:{" "}
-              <span className="text-white/70">{isTest ? "SANDBOX" : "RoT"}</span>
+              Entity-scoped:{" "}
+              <span className="text-white/70">{entityName || entityKey}</span> •
+              Lane: <span className="text-white/70">{isTest ? "SANDBOX" : "RoT"}</span>
             </div>
           </div>
 
@@ -427,16 +456,21 @@ export default function CiProvisioningPage() {
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
-                <div className="text-xs font-semibold tracking-wide text-white/80">Queue</div>
+                <div className="text-xs font-semibold tracking-wide text-white/80">
+                  Queue
+                </div>
 
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <Pill active={topTab === "READY"} onClick={() => setTopTab("READY")}>
+                  <Pill active={tab === "READY"} onClick={() => setTab("READY")}>
                     READY
                   </Pill>
-                  <Pill active={topTab === "PROVISIONED"} onClick={() => setTopTab("PROVISIONED")}>
+                  <Pill
+                    active={tab === "PROVISIONED"}
+                    onClick={() => setTab("PROVISIONED")}
+                  >
                     PROVISIONED
                   </Pill>
-                  <Pill active={topTab === "ALL"} onClick={() => setTopTab("ALL")}>
+                  <Pill active={tab === "ALL"} onClick={() => setTab("ALL")}>
                     ALL
                   </Pill>
                 </div>
@@ -456,11 +490,11 @@ export default function CiProvisioningPage() {
                   <div className="p-4 text-sm text-white/50">Loading…</div>
                 ) : err ? (
                   <div className="p-4 text-sm text-rose-200">{err}</div>
-                ) : (topTab === "ALL" ? apps : filtered).length === 0 ? (
+                ) : filtered.length === 0 ? (
                   <div className="p-4 text-sm text-white/50">No applications found.</div>
                 ) : (
                   <div className="space-y-2 p-2">
-                    {(topTab === "ALL" ? apps : filtered).map((a) => {
+                    {filtered.map((a) => {
                       const active = a.id === selectedId;
                       const name =
                         a.organization_trade_name ||
@@ -502,11 +536,13 @@ export default function CiProvisioningPage() {
             </div>
           </div>
 
-          {/* Middle: details */}
+          {/* Middle: application */}
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
-                <div className="text-xs font-semibold tracking-wide text-white/80">Application</div>
+                <div className="text-xs font-semibold tracking-wide text-white/80">
+                  Application
+                </div>
                 <div className="mt-1 truncate text-sm text-white/60">
                   {selected ? appTitle : "Select an application"}
                 </div>
@@ -529,19 +565,26 @@ export default function CiProvisioningPage() {
 
                     <div className="rounded-2xl border border-white/10 bg-black/18 p-4">
                       <div className="flex items-center justify-between gap-3">
-                        <div className="text-xs font-semibold tracking-wide text-white/80">Metadata</div>
+                        <div className="text-xs font-semibold tracking-wide text-white/80">
+                          Metadata
+                        </div>
                         <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/60">
                           jsonb
                         </span>
                       </div>
 
-                      <div className="mt-3 rounded-2xl border border-white/10 bg-black/25 p-3">
-                        <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">
-                          raw
+                      <div className="mt-3 space-y-3">
+                        <Row k="source" v={meta?.source ? String(meta.source) : "—"} />
+                        <Row k="notes" v={meta?.notes ? String(meta.notes) : "—"} />
+
+                        <div className="mt-3 rounded-2xl border border-white/10 bg-black/25 p-3">
+                          <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">
+                            raw
+                          </div>
+                          <pre className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-5 text-white/70">
+                            {safePrettyJSON(selected.metadata)}
+                          </pre>
                         </div>
-                        <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-5 text-white/70">
-                          {safePrettyJSON(meta)}
-                        </pre>
                       </div>
                     </div>
 
@@ -560,7 +603,9 @@ export default function CiProvisioningPage() {
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
-                <div className="text-xs font-semibold tracking-wide text-white/80">Authority Panel</div>
+                <div className="text-xs font-semibold tracking-wide text-white/80">
+                  Authority Panel
+                </div>
                 <div className="mt-1 truncate text-sm text-white/60">
                   Invite • Evidence • Complete Provisioning
                 </div>
@@ -574,7 +619,7 @@ export default function CiProvisioningPage() {
                     className={cx(
                       "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
                       selected && !busy
-                        ? "border-amber-300/20 bg-amber-400/10 text-amber-100 hover:bg-amber-400/14 hover:border-amber-300/25"
+                        ? "border-amber-300/20 bg-amber-400/12 text-amber-100 hover:bg-amber-400/16"
                         : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
                     )}
                   >
@@ -597,7 +642,8 @@ export default function CiProvisioningPage() {
                   <div className="mt-2 rounded-2xl border border-white/10 bg-black/18 p-4 text-sm text-white/60">
                     <div className="font-semibold text-white/80">Locked contract</div>
                     <div className="mt-1">
-                      Invite = authentication only (enables portal evidence upload). Complete Provisioning = creation (entity + memberships).
+                      Invite = authentication only (enables portal evidence upload). Complete
+                      Provisioning = creation (entity + memberships).
                     </div>
                   </div>
                 </div>
@@ -617,40 +663,42 @@ export default function CiProvisioningPage() {
         open={inviteOpen}
         title="Send portal access invite"
         subtitle={selected ? appTitle : undefined}
-        confirmText={busy ? "Working…" : "Send Invite"}
+        confirmText={busy ? "Working…" : "Send invite"}
         cancelText="Cancel"
         busy={busy}
         onClose={() => (!busy ? setInviteOpen(false) : null)}
-        onConfirm={sendPortalInvite}
+        onConfirm={rpcSendPortalInvite}
       >
-        <div className="space-y-3">
-          <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-white/75">
-            This action grants authentication access only, so the applicant can log into the Portal and upload evidence.
-            <div className="mt-2 text-xs text-white/45">
-              No entity is created here.
-            </div>
+        <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
+          <div className="text-sm text-white/75">
+            This grants <span className="text-white/90 font-semibold">authentication access only</span> so the
+            applicant can enter the portal and upload evidence.
+          </div>
+          <div className="text-xs text-white/45">
+            No entity is created here. Evidence review happens in CI-Evidence.
           </div>
         </div>
       </OsModal>
 
-      {/* Complete modal */}
+      {/* Complete provisioning modal */}
       <OsModal
         open={completeOpen}
         title="Complete provisioning"
         subtitle={selected ? appTitle : undefined}
-        confirmText={busy ? "Working…" : "Create Entity"}
+        confirmText={busy ? "Working…" : "Complete"}
         cancelText="Cancel"
         danger
         busy={busy}
         onClose={() => (!busy ? setCompleteOpen(false) : null)}
-        onConfirm={completeProvisioning}
+        onConfirm={rpcCompleteProvisioning}
       >
-        <div className="space-y-3">
-          <div className="rounded-2xl border border-rose-300/15 bg-rose-500/10 p-4 text-sm text-rose-100/90">
-            This will create the entity + memberships and mark the application as PROVISIONED.
-            <div className="mt-2 text-xs text-rose-100/70">
-              Use only after evidence has been reviewed/approved.
-            </div>
+        <div className="space-y-3 rounded-2xl border border-rose-300/15 bg-rose-500/10 p-4">
+          <div className="text-sm text-rose-50/90">
+            This will create the entity + memberships and mark the application as{" "}
+            <span className="font-semibold">PROVISIONED</span>.
+          </div>
+          <div className="text-xs text-rose-100/70">
+            Use only after evidence has been reviewed/approved. (Creation action)
           </div>
         </div>
       </OsModal>
