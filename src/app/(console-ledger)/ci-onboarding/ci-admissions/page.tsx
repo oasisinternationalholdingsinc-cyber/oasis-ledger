@@ -23,6 +23,16 @@ function safePrettyJSON(x: any) {
   }
 }
 
+function slugifyKey(s: string) {
+  return (s || "")
+    .toLowerCase()
+    .trim()
+    .replace(/['"]/g, "")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 60);
+}
+
 type InboxRow = {
   id: string;
   status: string | null;
@@ -76,7 +86,9 @@ function Pill({
 function Row({ k, v }: { k: string; v: string }) {
   return (
     <div className="flex items-start justify-between gap-4">
-      <div className="text-xs uppercase tracking-[0.22em] text-white/35">{k}</div>
+      <div className="text-xs uppercase tracking-[0.22em] text-white/35">
+        {k}
+      </div>
       <div className="max-w-[70%] text-right text-sm text-white/80">{v}</div>
     </div>
   );
@@ -121,7 +133,9 @@ function OsModal({
             <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
               Authority • Action
             </div>
-            <div className="mt-2 text-xl font-semibold text-white/90">{title}</div>
+            <div className="mt-2 text-xl font-semibold text-white/90">
+              {title}
+            </div>
             {subtitle ? (
               <div className="mt-1 text-sm text-white/55">{subtitle}</div>
             ) : null}
@@ -162,11 +176,91 @@ function OsModal({
         </div>
 
         <div className="mt-3 text-center text-[10px] text-white/35">
-          Mutations are RPC-only • Lane-safe via OsEnv + view lane column when present
+          Mutations are RPC-only • Lane-safe via OsEnv + view lane column when
+          present
         </div>
       </div>
     </div>
   );
+}
+
+/** --- Doc checklist defaults (feeds client portal tasks) --- */
+type TaskDraft = {
+  enabled: boolean;
+  title: string;
+  task_key: string;
+  required: boolean;
+  notes: string;
+  channels: { portal: boolean; email: boolean; sms: boolean };
+  due?: string; // YYYY-MM-DD
+};
+
+function buildDefaultDocTasks(): TaskDraft[] {
+  const defs: Array<{
+    title: string;
+    key: string;
+    required: boolean;
+    notes: string;
+  }> = [
+    {
+      title: "Articles of Incorporation",
+      key: "articles_of_incorporation",
+      required: true,
+      notes: "Upload the stamped/issued PDF (or equivalent).",
+    },
+    {
+      title: "Certificate of Status / Good Standing",
+      key: "certificate_of_status",
+      required: false,
+      notes: "If available, upload a recent certificate (PDF).",
+    },
+    {
+      title: "Bylaws / Operating Agreement",
+      key: "bylaws_or_operating_agreement",
+      required: true,
+      notes: "Upload the current bylaws / operating agreement (PDF).",
+    },
+    {
+      title: "Director / Officer Register",
+      key: "director_officer_register",
+      required: true,
+      notes: "Upload the signed/dated register (PDF).",
+    },
+    {
+      title: "Share Register / Cap Table",
+      key: "share_register",
+      required: true,
+      notes: "Upload the current share register or cap table (PDF).",
+    },
+    {
+      title: "Registered Office / Address Evidence",
+      key: "registered_office_evidence",
+      required: false,
+      notes: "If applicable, upload proof of registered office address.",
+    },
+    {
+      title: "ID for Authorized Signer",
+      key: "authorized_signer_id",
+      required: false,
+      notes: "Government-issued ID for the signer (redact sensitive numbers).",
+    },
+    {
+      title: "Prior Resolutions / Minute Book Extract",
+      key: "prior_resolutions_extract",
+      required: false,
+      notes: "If available, upload relevant past resolutions (PDF).",
+    },
+  ];
+
+  return defs.map((d) => ({
+    enabled: false,
+    title: d.title,
+    task_key: d.key,
+    required: d.required,
+    notes: d.notes,
+    channels: { portal: true, email: false, sms: false },
+    due: "",
+  }));
 }
 
 export default function CiAdmissionsPage() {
@@ -181,13 +275,19 @@ export default function CiAdmissionsPage() {
   const entityName: string =
     (ec?.entityName as string) ||
     (ec?.activeEntityName as string) ||
-    (ec?.entities?.find?.((x: any) => x?.slug === entityKey || x?.key === entityKey)?.name as string) ||
+    (ec?.entities?.find?.(
+      (x: any) => x?.slug === entityKey || x?.key === entityKey
+    )?.name as string) ||
     entityKey;
 
   // ---- env lane (defensive) ----
   const env = useOsEnv() as any;
   const isTest: boolean = Boolean(
-    env?.is_test ?? env?.isTest ?? env?.lane_is_test ?? env?.sandbox ?? env?.isSandbox
+    env?.is_test ??
+      env?.isTest ??
+      env?.lane_is_test ??
+      env?.sandbox ??
+      env?.isSandbox
   );
 
   const [apps, setApps] = useState<InboxRow[]>([]);
@@ -207,22 +307,37 @@ export default function CiAdmissionsPage() {
   // ---- modals ----
   const [approveOpen, setApproveOpen] = useState(false);
   const [needsInfoOpen, setNeedsInfoOpen] = useState(false);
+  const [tasksOpen, setTasksOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
   const [approveRisk, setApproveRisk] = useState("medium");
-  const [approveSummary, setApproveSummary] = useState("Approved for provisioning.");
+  const [approveSummary, setApproveSummary] = useState(
+    "Approved for provisioning."
+  );
   const [approveReason, setApproveReason] = useState("");
 
   const [infoMessage, setInfoMessage] = useState("");
   const [infoDue, setInfoDue] = useState<string>("");
-  const [infoChannels, setInfoChannels] = useState<{ email: boolean; sms: boolean }>({
+  const [infoChannels, setInfoChannels] = useState<{
+    email: boolean;
+    sms: boolean;
+  }>({
     email: true,
     sms: false,
   });
 
+  const [taskTemplates, setTaskTemplates] = useState<TaskDraft[]>(
+    () => buildDefaultDocTasks()
+  );
+  const [taskCustomTitle, setTaskCustomTitle] = useState("");
+  const [taskCustomNotes, setTaskCustomNotes] = useState("");
+  const [taskCustomRequired, setTaskCustomRequired] = useState(true);
+
   const [archiveNote, setArchiveNote] = useState("Archived by authority.");
-  const [deleteReason, setDeleteReason] = useState("Hard delete (test / duplicate).");
+  const [deleteReason, setDeleteReason] = useState(
+    "Hard delete (test / duplicate)."
+  );
 
   const selected = useMemo(
     () => apps.find((a) => a.id === selectedId) || null,
@@ -288,7 +403,10 @@ export default function CiAdmissionsPage() {
         };
 
         let res = await tryWithLane();
-        if (res.error && /lane_is_test|42703|undefined column/i.test(res.error.message)) {
+        if (
+          res.error &&
+          /lane_is_test|42703|undefined column/i.test(res.error.message)
+        ) {
           res = await tryWithoutLane();
         }
 
@@ -322,14 +440,11 @@ export default function CiAdmissionsPage() {
 
     // top tabs
     if (topTab === "INBOX") {
-      list = list.filter((a) => {
-        const st = normStatus(a.status);
-        return !["ARCHIVED"].includes(st);
-      });
+      list = list.filter((a) => normStatus(a.status) !== "ARCHIVED");
     } else if (topTab === "INTAKE") {
       list = list.filter((a) => {
         const st = normStatus(a.status);
-        return ["SUBMITTED", "TRIAGE", "UNDER_REVIEW", "NEEDS_INFO", "needs_info"].includes(st);
+        return ["SUBMITTED", "IN_REVIEW", "NEEDS_INFO"].includes(st);
       });
     } else if (topTab === "ARCHIVED") {
       list = list.filter((a) => normStatus(a.status) === "ARCHIVED");
@@ -338,10 +453,7 @@ export default function CiAdmissionsPage() {
     // sub tabs (in INBOX view)
     if (topTab === "INBOX") {
       if (subTab === "INTAKE") {
-        list = list.filter((a) => {
-          const st = normStatus(a.status);
-          return !["PROVISIONED"].includes(st);
-        });
+        list = list.filter((a) => normStatus(a.status) !== "PROVISIONED");
       } else if (subTab === "PROVISIONED") {
         list = list.filter((a) => normStatus(a.status) === "PROVISIONED");
       }
@@ -388,19 +500,16 @@ export default function CiAdmissionsPage() {
     setBusy(true);
     setNote(null);
     try {
-      // ✅ SAFE WRAPPER (enum-proof + idempotent)
-      const { data, error } = await supabase.rpc("admissions_record_decision_safe", {
+      const { error } = await supabase.rpc("admissions_record_decision", {
         p_application_id: selected.id,
-        p_decision_text: "approve",
-        p_risk_tier_text: approveRisk,
+        p_decision: "APPROVED",
+        p_risk_tier: (approveRisk || "medium").toLowerCase(),
         p_summary: approveSummary || "Approved for provisioning.",
-        p_reason: approveReason || null,
+        p_reason: approveReason || "",
       });
       if (error) throw error;
 
-      const msg =
-        data?.idempotent ? "Already decided (no-op)." : "Approved for provisioning.";
-      setNote(msg);
+      setNote("Approved for provisioning.");
       setApproveOpen(false);
       setRefreshKey((n) => n + 1);
     } catch (e: any) {
@@ -434,8 +543,7 @@ export default function CiAdmissionsPage() {
         p_message: infoMessage.trim(),
         p_channels: channels,
         p_due_at: dueAt,
-        // ✅ use lowercase enum label that exists in your list
-        p_next_status: "needs_info",
+        p_next_status: "NEEDS_INFO",
       });
 
       if (error) throw error;
@@ -452,6 +560,81 @@ export default function CiAdmissionsPage() {
     }
   }
 
+  function resetTasksToDefaults() {
+    setTaskTemplates(buildDefaultDocTasks());
+    setTaskCustomTitle("");
+    setTaskCustomNotes("");
+    setTaskCustomRequired(true);
+  }
+
+  async function rpcCreateTasks() {
+    if (!selected) return;
+
+    // build payload (only enabled tasks)
+    const enabled = taskTemplates.filter((t) => t.enabled);
+
+    const customTitle = taskCustomTitle.trim();
+    const customTask =
+      customTitle.length > 0
+        ? {
+            enabled: true,
+            title: customTitle,
+            task_key: slugifyKey(customTitle),
+            required: Boolean(taskCustomRequired),
+            notes: taskCustomNotes.trim() || "Upload the requested document (PDF).",
+            channels: { portal: true, email: false, sms: false },
+            due: "",
+          }
+        : null;
+
+    const all = customTask ? [...enabled, customTask] : enabled;
+
+    if (all.length === 0) {
+      alert("Select at least one document (or add a custom one).");
+      return;
+    }
+
+    const tasksPayload = all.map((t) => {
+      const ch: string[] = [];
+      if (t.channels.portal) ch.push("portal");
+      if (t.channels.email) ch.push("email");
+      if (t.channels.sms) ch.push("sms");
+
+      const due_at =
+        t.due && t.due.trim()
+          ? new Date(`${t.due}T23:59:00`).toISOString()
+          : null;
+
+      return {
+        title: t.title,
+        task_key: t.task_key || slugifyKey(t.title),
+        required: Boolean(t.required),
+        notes: t.notes || "",
+        channels: ch,
+        due_at,
+      };
+    });
+
+    setBusy(true);
+    setNote(null);
+    try {
+      const { error } = await supabase.rpc("admissions_create_provisioning_tasks", {
+        p_application_id: selected.id,
+        p_tasks: tasksPayload,
+      });
+      if (error) throw error;
+
+      setNote("Document tasks created (client portal updated).");
+      setTasksOpen(false);
+      resetTasksToDefaults();
+      setRefreshKey((n) => n + 1);
+    } catch (e: any) {
+      alert(e?.message || "Create tasks failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function rpcArchiveSoft() {
     if (!selected) return;
     setBusy(true);
@@ -459,7 +642,7 @@ export default function CiAdmissionsPage() {
     try {
       const { error } = await supabase.rpc("admissions_set_status", {
         p_application_id: selected.id,
-        p_next_status: "archived",
+        p_next_status: "ARCHIVED",
         p_note: archiveNote || "Archived by authority.",
       });
       if (error) throw error;
@@ -498,12 +681,15 @@ export default function CiAdmissionsPage() {
 
   const statusBadge = (stRaw: string | null) => {
     const st = normStatus(stRaw);
-    const base =
-      "rounded-full border px-3 py-1 text-[11px] font-medium";
-    if (st === "NEEDS_INFO") return `${base} border-amber-300/18 bg-amber-400/10 text-amber-100/90`;
-    if (st === "UNDER_REVIEW") return `${base} border-sky-300/18 bg-sky-400/10 text-sky-100/90`;
-    if (st === "PROVISIONED") return `${base} border-emerald-300/18 bg-emerald-400/10 text-emerald-100/90`;
-    if (st === "ARCHIVED") return `${base} border-white/10 bg-white/5 text-white/55`;
+    const base = "rounded-full border px-3 py-1 text-[11px] font-medium";
+    if (st === "NEEDS_INFO")
+      return `${base} border-amber-300/18 bg-amber-400/10 text-amber-100/90`;
+    if (st === "IN_REVIEW")
+      return `${base} border-sky-300/18 bg-sky-400/10 text-sky-100/90`;
+    if (st === "PROVISIONED")
+      return `${base} border-emerald-300/18 bg-emerald-400/10 text-emerald-100/90`;
+    if (st === "ARCHIVED")
+      return `${base} border-white/10 bg-white/5 text-white/55`;
     return `${base} border-white/10 bg-white/5 text-white/70`;
   };
 
@@ -520,7 +706,9 @@ export default function CiAdmissionsPage() {
               Admissions Console
             </div>
             <div className="mt-1 text-sm text-white/50">
-              Entity-scoped: <span className="text-white/70">{entityName || entityKey}</span> • Lane:{" "}
+              Entity-scoped:{" "}
+              <span className="text-white/70">{entityName || entityKey}</span> •
+              Lane:{" "}
               <span className="text-white/70">{isTest ? "SANDBOX" : "RoT"}</span>
             </div>
           </div>
@@ -546,16 +734,28 @@ export default function CiAdmissionsPage() {
 
                 <div className="mt-3 flex items-center justify-between gap-2">
                   <div className="flex flex-wrap gap-2">
-                    <Pill active={topTab === "INBOX"} onClick={() => setTopTab("INBOX")}>
+                    <Pill
+                      active={topTab === "INBOX"}
+                      onClick={() => setTopTab("INBOX")}
+                    >
                       Inbox
                     </Pill>
-                    <Pill active={topTab === "INTAKE"} onClick={() => setTopTab("INTAKE")}>
+                    <Pill
+                      active={topTab === "INTAKE"}
+                      onClick={() => setTopTab("INTAKE")}
+                    >
                       Intake
                     </Pill>
-                    <Pill active={topTab === "ALL"} onClick={() => setTopTab("ALL")}>
+                    <Pill
+                      active={topTab === "ALL"}
+                      onClick={() => setTopTab("ALL")}
+                    >
                       All
                     </Pill>
-                    <Pill active={topTab === "ARCHIVED"} onClick={() => setTopTab("ARCHIVED")}>
+                    <Pill
+                      active={topTab === "ARCHIVED"}
+                      onClick={() => setTopTab("ARCHIVED")}
+                    >
                       Archived
                     </Pill>
                   </div>
@@ -563,13 +763,22 @@ export default function CiAdmissionsPage() {
 
                 {topTab === "INBOX" && (
                   <div className="mt-3 flex flex-wrap gap-2">
-                    <Pill active={subTab === "BOTH"} onClick={() => setSubTab("BOTH")}>
+                    <Pill
+                      active={subTab === "BOTH"}
+                      onClick={() => setSubTab("BOTH")}
+                    >
                       BOTH
                     </Pill>
-                    <Pill active={subTab === "INTAKE"} onClick={() => setSubTab("INTAKE")}>
+                    <Pill
+                      active={subTab === "INTAKE"}
+                      onClick={() => setSubTab("INTAKE")}
+                    >
                       INTAKE
                     </Pill>
-                    <Pill active={subTab === "PROVISIONED"} onClick={() => setSubTab("PROVISIONED")}>
+                    <Pill
+                      active={subTab === "PROVISIONED"}
+                      onClick={() => setSubTab("PROVISIONED")}
+                    >
                       PROVISIONED
                     </Pill>
                   </div>
@@ -591,7 +800,9 @@ export default function CiAdmissionsPage() {
                 ) : err ? (
                   <div className="p-4 text-sm text-rose-200">{err}</div>
                 ) : filtered.length === 0 ? (
-                  <div className="p-4 text-sm text-white/50">No applications found.</div>
+                  <div className="p-4 text-sm text-white/50">
+                    No applications found.
+                  </div>
                 ) : (
                   <div className="space-y-2 p-2">
                     {filtered.map((a) => {
@@ -614,12 +825,16 @@ export default function CiAdmissionsPage() {
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
-                              <div className="truncate text-sm font-semibold text-white/88">{name}</div>
+                              <div className="truncate text-sm font-semibold text-white/88">
+                                {name}
+                              </div>
                               <div className="mt-1 truncate text-xs text-white/45">
                                 {a.applicant_email || "—"}
                               </div>
                             </div>
-                            <span className={statusBadge(a.status)}>{a.status || "—"}</span>
+                            <span className={statusBadge(a.status)}>
+                              {a.status || "—"}
+                            </span>
                           </div>
                         </button>
                       );
@@ -629,7 +844,8 @@ export default function CiAdmissionsPage() {
               </div>
 
               <div className="border-t border-white/10 p-3 text-[10px] text-white/35">
-                Lane note: UI is lane-aware via OS env. Query is lane-filtered only if the view exposes lane columns.
+                Lane note: UI is lane-aware via OS env. Query is lane-filtered
+                only if the view exposes lane columns.
               </div>
             </div>
           </div>
@@ -648,12 +864,20 @@ export default function CiAdmissionsPage() {
 
               <div className="p-4">
                 {!selected ? (
-                  <div className="text-sm text-white/50">Select an application.</div>
+                  <div className="text-sm text-white/50">
+                    Select an application.
+                  </div>
                 ) : (
                   <div className="space-y-4">
                     <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
-                      <Row k="Org (legal)" v={selected.organization_legal_name || "—"} />
-                      <Row k="Org (trade)" v={selected.organization_trade_name || "—"} />
+                      <Row
+                        k="Org (legal)"
+                        v={selected.organization_legal_name || "—"}
+                      />
+                      <Row
+                        k="Org (trade)"
+                        v={selected.organization_trade_name || "—"}
+                      />
                       <Row k="Applicant" v={selected.applicant_email || "—"} />
                       <Row k="Status" v={selected.status || "—"} />
                       <Row k="App ID" v={selected.id} />
@@ -665,13 +889,15 @@ export default function CiAdmissionsPage() {
                       <div className="text-xs font-semibold tracking-wide text-white/80">
                         Request / Intent
                       </div>
-                      <div className="mt-2 text-sm text-white/75 whitespace-pre-wrap">
+                      <div className="mt-2 whitespace-pre-wrap text-sm text-white/75">
                         {meta?.request_brief ? String(meta.request_brief) : "—"}
                       </div>
                       <div className="mt-2 text-xs text-white/45">
                         Requested services:{" "}
                         <span className="text-white/70">
-                          {selected.requested_services ? JSON.stringify(selected.requested_services) : "—"}
+                          {selected.requested_services
+                            ? JSON.stringify(selected.requested_services)
+                            : "—"}
                         </span>
                       </div>
                     </div>
@@ -687,8 +913,14 @@ export default function CiAdmissionsPage() {
                       </div>
 
                       <div className="mt-3 space-y-3">
-                        <Row k="source" v={meta?.source ? String(meta.source) : "—"} />
-                        <Row k="notes" v={meta?.notes ? String(meta.notes) : "—"} />
+                        <Row
+                          k="source"
+                          v={meta?.source ? String(meta.source) : "—"}
+                        />
+                        <Row
+                          k="notes"
+                          v={meta?.notes ? String(meta.notes) : "—"}
+                        />
 
                         <div className="mt-3 rounded-2xl border border-white/10 bg-black/25 p-3">
                           <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">
@@ -720,7 +952,7 @@ export default function CiAdmissionsPage() {
                   Authority Panel
                 </div>
                 <div className="mt-1 truncate text-sm text-white/60">
-                  Review • Decisions • Archive
+                  Review • Requests • Tasks • Decisions
                 </div>
               </div>
 
@@ -740,16 +972,16 @@ export default function CiAdmissionsPage() {
                   </button>
 
                   <button
-                    onClick={() => setApproveOpen(true)}
+                    onClick={() => setTasksOpen(true)}
                     disabled={!selected || busy}
                     className={cx(
                       "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
                       selected && !busy
-                        ? "border-white/10 bg-white/5 text-white/85 hover:border-amber-300/20 hover:bg-white/7"
+                        ? "border-white/10 bg-amber-400/10 text-amber-100 hover:bg-amber-400/14 hover:border-amber-300/25"
                         : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
                     )}
                   >
-                    Approve (for Provisioning)
+                    Request Documents (Tasks)
                   </button>
 
                   <button
@@ -762,7 +994,20 @@ export default function CiAdmissionsPage() {
                         : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
                     )}
                   >
-                    Needs Info
+                    Needs Info (Message)
+                  </button>
+
+                  <button
+                    onClick={() => setApproveOpen(true)}
+                    disabled={!selected || busy}
+                    className={cx(
+                      "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
+                      selected && !busy
+                        ? "border-white/10 bg-white/5 text-white/85 hover:border-amber-300/20 hover:bg-white/7"
+                        : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
+                    )}
+                  >
+                    Approve (Decision)
                   </button>
 
                   <button
@@ -792,9 +1037,11 @@ export default function CiAdmissionsPage() {
                   </button>
 
                   <div className="mt-2 rounded-2xl border border-white/10 bg-black/18 p-4 text-sm text-white/60">
-                    <div className="font-semibold text-white/80">Audit Trail</div>
+                    <div className="font-semibold text-white/80">Contract</div>
                     <div className="mt-1">
-                      Mutations are RPC-only. Enums are normalized server-side (decision-safe wrapper).
+                      Tasks feed client portal evidence. Mutations are RPC-only.
+                      Lane is read from OS env; inbox is lane-filtered when view
+                      exposes <span className="font-mono">lane_is_test</span>.
                     </div>
                   </div>
                 </div>
@@ -805,7 +1052,8 @@ export default function CiAdmissionsPage() {
 
         {/* footer */}
         <div className="mt-5 text-[10px] text-white/35">
-          Source: public.v_onboarding_admissions_inbox • entity_slug={entityKey} • lane={isTest ? "SANDBOX" : "RoT"}
+          Source: public.v_onboarding_admissions_inbox • entity_slug={entityKey} •
+          lane={isTest ? "SANDBOX" : "RoT"}
         </div>
       </div>
 
@@ -822,7 +1070,9 @@ export default function CiAdmissionsPage() {
       >
         <div className="space-y-4">
           <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-            <div className="text-xs font-semibold tracking-wide text-white/80">Risk tier</div>
+            <div className="text-xs font-semibold tracking-wide text-white/80">
+              Risk tier
+            </div>
             <select
               value={approveRisk}
               onChange={(e) => setApproveRisk(e.target.value)}
@@ -835,7 +1085,9 @@ export default function CiAdmissionsPage() {
           </div>
 
           <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-            <div className="text-xs font-semibold tracking-wide text-white/80">Decision summary</div>
+            <div className="text-xs font-semibold tracking-wide text-white/80">
+              Decision summary
+            </div>
             <input
               value={approveSummary}
               onChange={(e) => setApproveSummary(e.target.value)}
@@ -843,12 +1095,18 @@ export default function CiAdmissionsPage() {
               placeholder="Approved for provisioning."
             />
             <div className="mt-3 text-xs text-white/40">
-              Uses <span className="font-mono text-white/65">admissions_record_decision_safe</span> (enum-proof + idempotent).
+              Calls{" "}
+              <span className="font-mono text-white/65">
+                admissions_record_decision
+              </span>{" "}
+              (production contract).
             </div>
           </div>
 
           <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-            <div className="text-xs font-semibold tracking-wide text-white/80">Reason (optional)</div>
+            <div className="text-xs font-semibold tracking-wide text-white/80">
+              Reason (optional)
+            </div>
             <textarea
               value={approveReason}
               onChange={(e) => setApproveReason(e.target.value)}
@@ -872,7 +1130,9 @@ export default function CiAdmissionsPage() {
       >
         <div className="space-y-4">
           <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-            <div className="text-xs font-semibold tracking-wide text-white/80">Message</div>
+            <div className="text-xs font-semibold tracking-wide text-white/80">
+              Message
+            </div>
             <textarea
               value={infoMessage}
               onChange={(e) => setInfoMessage(e.target.value)}
@@ -883,12 +1143,16 @@ export default function CiAdmissionsPage() {
 
           <div className="grid grid-cols-12 gap-3">
             <div className="col-span-12 md:col-span-6 rounded-2xl border border-white/10 bg-black/20 p-4">
-              <div className="text-xs font-semibold tracking-wide text-white/80">Channels</div>
+              <div className="text-xs font-semibold tracking-wide text-white/80">
+                Channels
+              </div>
               <label className="mt-2 flex items-center gap-2 text-sm text-white/75">
                 <input
                   type="checkbox"
                   checked={infoChannels.email}
-                  onChange={(e) => setInfoChannels((s) => ({ ...s, email: e.target.checked }))}
+                  onChange={(e) =>
+                    setInfoChannels((s) => ({ ...s, email: e.target.checked }))
+                  }
                 />
                 Email
               </label>
@@ -896,21 +1160,214 @@ export default function CiAdmissionsPage() {
                 <input
                   type="checkbox"
                   checked={infoChannels.sms}
-                  onChange={(e) => setInfoChannels((s) => ({ ...s, sms: e.target.checked }))}
+                  onChange={(e) =>
+                    setInfoChannels((s) => ({ ...s, sms: e.target.checked }))
+                  }
                 />
                 SMS
               </label>
             </div>
 
             <div className="col-span-12 md:col-span-6 rounded-2xl border border-white/10 bg-black/20 p-4">
-              <div className="text-xs font-semibold tracking-wide text-white/80">Due date (optional)</div>
+              <div className="text-xs font-semibold tracking-wide text-white/80">
+                Due date (optional)
+              </div>
               <input
                 type="date"
                 value={infoDue}
                 onChange={(e) => setInfoDue(e.target.value)}
                 className="mt-2 w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
               />
-              <div className="mt-2 text-xs text-white/40">Sets due_at to end-of-day UTC.</div>
+              <div className="mt-2 text-xs text-white/40">
+                Sets due_at to end-of-day UTC.
+              </div>
+            </div>
+          </div>
+        </div>
+      </OsModal>
+
+      {/* Tasks modal (RESTORED) */}
+      <OsModal
+        open={tasksOpen}
+        title="Request documents (client tasks)"
+        subtitle={selected ? appTitle : undefined}
+        confirmText={busy ? "Working…" : "Create tasks"}
+        cancelText="Cancel"
+        busy={busy}
+        onClose={() => {
+          if (busy) return;
+          setTasksOpen(false);
+          resetTasksToDefaults();
+        }}
+        onConfirm={rpcCreateTasks}
+      >
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+            <div className="text-xs font-semibold tracking-wide text-white/80">
+              Checklist (auto-populated)
+            </div>
+            <div className="mt-2 text-xs text-white/45">
+              These tasks surface in the client portal and drive the evidence
+              upload lane.
+            </div>
+
+            <div className="mt-4 max-h-[260px] overflow-auto rounded-2xl border border-white/10 bg-black/25 p-2">
+              <div className="space-y-2 p-2">
+                {taskTemplates.map((t, idx) => (
+                  <div
+                    key={t.task_key}
+                    className="rounded-2xl border border-white/10 bg-black/20 p-3"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <label className="flex items-start gap-3">
+                        <input
+                          type="checkbox"
+                          checked={t.enabled}
+                          onChange={(e) => {
+                            const on = e.target.checked;
+                            setTaskTemplates((prev) => {
+                              const next = [...prev];
+                              next[idx] = { ...next[idx], enabled: on };
+                              return next;
+                            });
+                          }}
+                          className="mt-1"
+                        />
+                        <div className="min-w-0">
+                          <div className="text-sm font-semibold text-white/85">
+                            {t.title}
+                          </div>
+                          <div className="mt-1 text-xs text-white/45">
+                            {t.notes}
+                          </div>
+                          <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-white/55">
+                            <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5">
+                              key:{" "}
+                              <span className="font-mono text-white/70">
+                                {t.task_key}
+                              </span>
+                            </span>
+                            <span
+                              className={cx(
+                                "rounded-full border px-2 py-0.5",
+                                t.required
+                                  ? "border-amber-300/20 bg-amber-400/10 text-amber-100/85"
+                                  : "border-white/10 bg-white/5 text-white/60"
+                              )}
+                            >
+                              {t.required ? "required" : "optional"}
+                            </span>
+                          </div>
+                        </div>
+                      </label>
+
+                      <div className="flex flex-col items-end gap-2">
+                        <label className="flex items-center gap-2 text-xs text-white/65">
+                          <input
+                            type="checkbox"
+                            checked={t.required}
+                            onChange={(e) => {
+                              const on = e.target.checked;
+                              setTaskTemplates((prev) => {
+                                const next = [...prev];
+                                next[idx] = { ...next[idx], required: on };
+                                return next;
+                              });
+                            }}
+                          />
+                          Required
+                        </label>
+
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] text-white/45">Due</span>
+                          <input
+                            type="date"
+                            value={t.due || ""}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setTaskTemplates((prev) => {
+                                const next = [...prev];
+                                next[idx] = { ...next[idx], due: v };
+                                return next;
+                              });
+                            }}
+                            className="rounded-xl border border-white/10 bg-black/30 px-2 py-1 text-[12px] text-white/80 outline-none focus:border-amber-300/25"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                disabled={busy}
+                onClick={() =>
+                  setTaskTemplates((prev) =>
+                    prev.map((t) => ({ ...t, enabled: true }))
+                  )
+                }
+                className={cx(
+                  "rounded-full border px-3 py-1.5 text-[11px] font-semibold transition",
+                  busy
+                    ? "border-white/10 bg-white/3 text-white/35"
+                    : "border-white/10 bg-white/5 text-white/75 hover:bg-white/7 hover:border-white/15"
+                )}
+              >
+                Select all
+              </button>
+              <button
+                disabled={busy}
+                onClick={() =>
+                  setTaskTemplates((prev) =>
+                    prev.map((t) => ({ ...t, enabled: false }))
+                  )
+                }
+                className={cx(
+                  "rounded-full border px-3 py-1.5 text-[11px] font-semibold transition",
+                  busy
+                    ? "border-white/10 bg-white/3 text-white/35"
+                    : "border-white/10 bg-white/5 text-white/75 hover:bg-white/7 hover:border-white/15"
+                )}
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+            <div className="text-xs font-semibold tracking-wide text-white/80">
+              Add custom document (optional)
+            </div>
+            <input
+              value={taskCustomTitle}
+              onChange={(e) => setTaskCustomTitle(e.target.value)}
+              className="mt-2 w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
+              placeholder="e.g., Shareholder Agreement"
+            />
+            <textarea
+              value={taskCustomNotes}
+              onChange={(e) => setTaskCustomNotes(e.target.value)}
+              className="mt-3 min-h-[78px] w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
+              placeholder="Notes for the client (what to upload, format, etc.)"
+            />
+            <label className="mt-3 flex items-center gap-2 text-sm text-white/70">
+              <input
+                type="checkbox"
+                checked={taskCustomRequired}
+                onChange={(e) => setTaskCustomRequired(e.target.checked)}
+              />
+              Required
+            </label>
+
+            <div className="mt-3 text-xs text-white/40">
+              Calls{" "}
+              <span className="font-mono text-white/65">
+                admissions_create_provisioning_tasks
+              </span>{" "}
+              with a JSONB task list.
             </div>
           </div>
         </div>
@@ -928,7 +1385,9 @@ export default function CiAdmissionsPage() {
         onConfirm={rpcArchiveSoft}
       >
         <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
-          <div className="text-xs font-semibold tracking-wide text-white/80">Note</div>
+          <div className="text-xs font-semibold tracking-wide text-white/80">
+            Note
+          </div>
           <input
             value={archiveNote}
             onChange={(e) => setArchiveNote(e.target.value)}
@@ -936,7 +1395,8 @@ export default function CiAdmissionsPage() {
             placeholder="Archived by authority."
           />
           <div className="text-xs text-white/40">
-            Sets status to <span className="font-mono text-white/65">archived</span> via RPC.
+            Sets status to{" "}
+            <span className="font-mono text-white/65">ARCHIVED</span> via RPC.
           </div>
         </div>
       </OsModal>
@@ -954,7 +1414,9 @@ export default function CiAdmissionsPage() {
         onConfirm={rpcHardDelete}
       >
         <div className="space-y-3 rounded-2xl border border-rose-300/15 bg-rose-500/10 p-4">
-          <div className="text-xs font-semibold tracking-wide text-rose-100/90">Reason</div>
+          <div className="text-xs font-semibold tracking-wide text-rose-100/90">
+            Reason
+          </div>
           <input
             value={deleteReason}
             onChange={(e) => setDeleteReason(e.target.value)}
@@ -962,7 +1424,9 @@ export default function CiAdmissionsPage() {
             placeholder="Why is this being deleted?"
           />
           <div className="text-xs text-rose-100/70">
-            This calls <span className="font-mono">admissions_delete_application</span>. Use only for test/duplicates.
+            This calls{" "}
+            <span className="font-mono">admissions_delete_application</span>. Use
+            only for test/duplicates.
           </div>
         </div>
       </OsModal>
