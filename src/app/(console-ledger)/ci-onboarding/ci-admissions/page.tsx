@@ -1,3 +1,4 @@
+```tsx
 // src/app/(console-ledger)/ci-onboarding/ci-admissions/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
@@ -13,10 +14,11 @@ export const dynamic = "force-dynamic";
  *    - Set Status (RPC: admissions_set_status)
  *    - Approve = Record Decision + Set Status approved (two calls; no blur)
  *
- * ✅ Adds (NO wiring changes):
- *    - Archive Application (calls admissions_set_status → archived)
- *    - Hard Delete Application (RPC: admissions_delete_application) + reason required
- *    - Create Tasks supports custom tasks in addition to preloaded chips (still text[] payload)
+ * ✅ Adds (NO wiring changes to RPC names / flow):
+ *    - Create Tasks now supports per-task metadata:
+ *        due_at (date), required (toggle), notes (text)
+ *      while keeping preloaded chips + custom tasks.
+ *    - Payload is jsonb array (objects) so portal can display Due/Required/Notes.
  *
  * ❌ Removes any selection of non-existent columns (e.g. request_brief)
  */
@@ -201,6 +203,24 @@ function Row({ k, v }: { k: string; v: string }) {
   );
 }
 
+// ---- Task meta model (client-only; sent to RPC as jsonb) ----
+type TaskMeta = {
+  due_date?: string; // YYYY-MM-DD from <input type="date">
+  required?: boolean;
+  notes?: string;
+};
+
+function taskTokenId(t: string) {
+  return (t || "").trim().toUpperCase();
+}
+
+function dateToDueAtISO(yyyy_mm_dd: string) {
+  const d = (yyyy_mm_dd || "").trim();
+  if (!d) return null;
+  // stable, lane-agnostic: interpret as end-of-day UTC
+  return `${d}T23:59:59.000Z`;
+}
+
 export default function CiAdmissionsPage() {
   // ---- entity (defensive) ----
   const ec = useEntity() as any;
@@ -249,6 +269,7 @@ export default function CiAdmissionsPage() {
   // Tasks inputs
   const [taskList, setTaskList] = useState<string[]>([]);
   const [customTask, setCustomTask] = useState<string>("");
+  const [taskMetaById, setTaskMetaById] = useState<Record<string, TaskMeta>>({});
 
   // Archive / delete inputs
   const [archiveNote, setArchiveNote] = useState<string>("Archived by authority.");
@@ -293,6 +314,13 @@ export default function CiAdmissionsPage() {
     { label: "Schedule verification", value: "SCHEDULE_VERIFICATION", hint: "Queue hash/verify + registry followup" },
   ];
 
+  const PRELOADED_MAP = useMemo(() => {
+    const m = new Map<string, { label: string; value: string; hint: string }>();
+    for (const t of PRELOADED_TASKS) m.set(t.value.toUpperCase(), t);
+    return m;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function uniqTasks(xs: string[]) {
     const out: string[] = [];
     const seen = new Set<string>();
@@ -307,6 +335,15 @@ export default function CiAdmissionsPage() {
     return out;
   }
 
+  function ensureMetaDefaultsForTask(taskValue: string) {
+    const id = taskTokenId(taskValue);
+    if (!id) return;
+    setTaskMetaById((prev) => {
+      if (prev[id]) return prev;
+      return { ...prev, [id]: { required: true } };
+    });
+  }
+
   function toggleTask(v: string) {
     const key = (v || "").trim();
     if (!key) return;
@@ -315,18 +352,25 @@ export default function CiAdmissionsPage() {
       if (has) return prev.filter((x) => (x || "").trim().toUpperCase() !== key.toUpperCase());
       return uniqTasks([...prev, key]);
     });
+    ensureMetaDefaultsForTask(key);
   }
 
   function addCustomTask() {
     const v = (customTask || "").trim();
     if (!v) return;
     setTaskList((prev) => uniqTasks([...prev, v]));
+    ensureMetaDefaultsForTask(v);
     setCustomTask("");
   }
 
   function removeTask(v: string) {
-    const key = (v || "").trim().toUpperCase();
-    setTaskList((prev) => prev.filter((x) => (x || "").trim().toUpperCase() !== key));
+    const keyUpper = (v || "").trim().toUpperCase();
+    setTaskList((prev) => prev.filter((x) => (x || "").trim().toUpperCase() !== keyUpper));
+    setTaskMetaById((prev) => {
+      const next = { ...prev };
+      delete next[keyUpper];
+      return next;
+    });
   }
 
   function resetModalPayload(kind: ModalKind) {
@@ -342,8 +386,13 @@ export default function CiAdmissionsPage() {
 
     if (kind === "CREATE_TASKS") {
       // default preloaded suggestions (restored)
-      setTaskList(["SEND_PORTAL_INVITE", "EVIDENCE_CHECKLIST"]);
+      const defaults = ["SEND_PORTAL_INVITE", "EVIDENCE_CHECKLIST"];
+      setTaskList(defaults);
       setCustomTask("");
+      // meta defaults (required true, due/notes empty)
+      const base: Record<string, TaskMeta> = {};
+      for (const t of defaults) base[taskTokenId(t)] = { required: true };
+      setTaskMetaById(base);
     }
 
     if (kind === "RECORD_DECISION") {
@@ -394,7 +443,6 @@ export default function CiAdmissionsPage() {
 
       try {
         // IMPORTANT: only select columns that actually exist on the view
-        // (no request_brief, no made-up fields)
         const cols = [
           "id",
           "status",
@@ -502,7 +550,7 @@ export default function CiAdmissionsPage() {
   }, [apps, tab, intakePill, q]);
 
   // ---------------------------
-  // RPC Actions (NO CHANGES)
+  // RPC Actions (NO REGRESSION)
   // ---------------------------
 
   async function rpcRequestInfo() {
@@ -529,24 +577,59 @@ export default function CiAdmissionsPage() {
     }
   }
 
+  function taskDisplay(t: string) {
+    const raw = (t || "").trim();
+    const id = taskTokenId(raw);
+    const pre = PRELOADED_MAP.get(id);
+    return {
+      id,
+      raw,
+      isPreloaded: Boolean(pre),
+      label: pre?.label || raw,
+      hint: pre?.hint || "",
+      // for preloaded: stable key; for custom: let SQL generate by sending key='custom'
+      keyForRPC: pre ? pre.value : "custom",
+      titleForRPC: pre ? pre.label : raw,
+    };
+  }
+
   async function rpcCreateTasks() {
     if (!selected) return;
-    const tasks = (taskList || []).map((t) => (t || "").trim()).filter(Boolean);
-    if (!tasks.length) {
+
+    const rawTasks = (taskList || []).map((t) => (t || "").trim()).filter(Boolean);
+    if (!rawTasks.length) {
       alert("Add at least one task.");
       return;
     }
+
+    // Build jsonb array of task objects:
+    // [{key,title,notes,due_at,required}, ...]
+    const payload = rawTasks.map((t) => {
+      const d = taskDisplay(t);
+      const meta = taskMetaById[d.id] || {};
+      const notes = (meta.notes || "").trim();
+      const due_at = meta.due_date ? dateToDueAtISO(meta.due_date) : null;
+      const required = meta.required ?? true;
+
+      return {
+        key: d.keyForRPC,                // preloaded key or "custom"
+        title: d.titleForRPC,            // what client sees
+        notes: notes || null,
+        due_at,
+        required,
+      };
+    });
 
     setBusy(true);
     setNote(null);
     try {
       const { error } = await supabase.rpc("admissions_create_provisioning_tasks", {
         p_application_id: selected.id,
-        p_tasks: tasks,
+        p_tasks: payload, // ✅ jsonb array
       });
       if (error) throw error;
 
-      setNote("Tasks created.");
+      setNote("Tasks created (with due date / required / notes).");
       setModal("NONE");
       setRefreshKey((n) => n + 1);
     } catch (e: any) {
@@ -734,6 +817,15 @@ export default function CiAdmissionsPage() {
     if (modal === "APPROVE") return rpcApproveComposed();
     if (modal === "ARCHIVE_APP") return rpcArchiveApplication();
     if (modal === "HARD_DELETE_APP") return rpcHardDeleteApplication();
+  }
+
+  function setTaskMeta(taskValue: string, patch: Partial<TaskMeta>) {
+    const id = taskTokenId(taskValue);
+    if (!id) return;
+    setTaskMetaById((prev) => {
+      const cur = prev[id] || { required: true };
+      return { ...prev, [id]: { ...cur, ...patch } };
+    });
   }
 
   // ---------------------------
@@ -1147,11 +1239,12 @@ export default function CiAdmissionsPage() {
 
         {modal === "CREATE_TASKS" ? (
           <div className="space-y-3">
+            {/* Preloaded chips */}
             <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
               <div className="text-xs uppercase tracking-[0.22em] text-white/35">preloaded tasks</div>
               <div className="mt-3 flex flex-wrap gap-2">
                 {PRELOADED_TASKS.map((t) => {
-                  const active = taskList.includes(t.value);
+                  const active = taskList.some((x) => taskTokenId(x) === t.value.toUpperCase());
                   return (
                     <button
                       key={t.value}
@@ -1171,7 +1264,7 @@ export default function CiAdmissionsPage() {
               </div>
             </div>
 
-            {/* ✅ Custom task input (still text[] payload; no wiring change) */}
+            {/* Custom task input */}
             <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
               <div className="text-xs uppercase tracking-[0.22em] text-white/35">custom task</div>
               <div className="mt-2 flex items-center gap-2">
@@ -1184,7 +1277,7 @@ export default function CiAdmissionsPage() {
                       addCustomTask();
                     }
                   }}
-                  placeholder="e.g. VERIFY INCORPORATION, COLLECT DIRECTOR LIST…"
+                  placeholder="e.g. Driver License Verification, Corporate Profile, Director List…"
                   className="w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-2 text-sm text-white/85 placeholder:text-white/35 outline-none focus:border-amber-300/25"
                 />
                 <button
@@ -1196,33 +1289,119 @@ export default function CiAdmissionsPage() {
                 </button>
               </div>
               <div className="mt-2 text-xs text-white/45">
-                Adds to the same task list (text[]) — preloaded and custom tasks are equivalent.
+                Custom tasks are treated as first-class evidence requests. You can set due date, required, and notes below.
               </div>
             </div>
 
-            {/* ✅ Selected tasks as removable chips */}
+            {/* Selected (upgraded: metadata per task) */}
             <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-              <div className="text-xs uppercase tracking-[0.22em] text-white/35">selected</div>
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-xs uppercase tracking-[0.22em] text-white/35">selected</div>
+                <div className="text-[11px] text-white/45">
+                  {taskList.length ? `${taskList.length} selected` : "—"}
+                </div>
+              </div>
 
               {taskList.length ? (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {taskList.map((t) => (
-                    <button
-                      key={t}
-                      type="button"
-                      onClick={() => removeTask(t)}
-                      className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/75 hover:border-white/16 hover:bg-white/7"
-                      title="Remove"
-                    >
-                      {t} <span className="ml-1 text-white/35">×</span>
-                    </button>
-                  ))}
+                <div className="mt-3 space-y-2">
+                  {taskList.map((t) => {
+                    const d = taskDisplay(t);
+                    const m = taskMetaById[d.id] || { required: true };
+
+                    return (
+                      <div
+                        key={d.id}
+                        className="rounded-2xl border border-white/10 bg-black/25 p-3"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="truncate text-sm font-semibold text-white/85">{d.label}</div>
+                            <div className="mt-1 text-[11px] text-white/45">
+                              {d.isPreloaded ? (
+                                <>
+                                  Key: <span className="text-white/70 font-semibold">{d.keyForRPC}</span>
+                                </>
+                              ) : (
+                                <>
+                                  Key: <span className="text-white/70 font-semibold">custom (auto)</span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => removeTask(t)}
+                            className="shrink-0 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/70 hover:border-white/16 hover:bg-white/7"
+                            title="Remove"
+                          >
+                            Remove <span className="ml-1 text-white/35">×</span>
+                          </button>
+                        </div>
+
+                        <div className="mt-3 grid grid-cols-12 gap-2">
+                          {/* Required */}
+                          <div className="col-span-12 sm:col-span-4">
+                            <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">
+                              required
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setTaskMeta(t, { required: !(m.required ?? true) })}
+                              className={cx(
+                                "mt-2 w-full rounded-2xl border px-3 py-2 text-xs font-semibold transition",
+                                (m.required ?? true)
+                                  ? "border-amber-300/18 bg-amber-400/10 text-amber-100 hover:bg-amber-400/14"
+                                  : "border-white/10 bg-white/5 text-white/70 hover:bg-white/7 hover:border-white/15"
+                              )}
+                            >
+                              {(m.required ?? true) ? "Required" : "Optional"}
+                            </button>
+                          </div>
+
+                          {/* Due date */}
+                          <div className="col-span-12 sm:col-span-4">
+                            <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">
+                              due date
+                            </div>
+                            <input
+                              type="date"
+                              value={m.due_date || ""}
+                              onChange={(e) => setTaskMeta(t, { due_date: e.target.value })}
+                              className="mt-2 w-full rounded-2xl border border-white/10 bg-black/25 px-3 py-2 text-xs text-white/85 outline-none focus:border-amber-300/25"
+                            />
+                          </div>
+
+                          {/* Notes */}
+                          <div className="col-span-12 sm:col-span-4">
+                            <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">
+                              notes
+                            </div>
+                            <input
+                              value={m.notes || ""}
+                              onChange={(e) => setTaskMeta(t, { notes: e.target.value })}
+                              placeholder="e.g. clear photo, both sides"
+                              className="mt-2 w-full rounded-2xl border border-white/10 bg-black/25 px-3 py-2 text-xs text-white/85 placeholder:text-white/35 outline-none focus:border-amber-300/25"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               ) : (
                 <div className="mt-2 text-sm text-white/60">—</div>
               )}
 
-              <div className="mt-3 text-xs text-white/45">RPC receives a text[] exactly as selected.</div>
+              <div className="mt-3 text-xs text-white/45">
+                RPC receives a jsonb[] of task objects (key/title/required/due_at/notes). Portal will display due date and notes.
+              </div>
+            </div>
+
+            {/* small safety note */}
+            <div className="rounded-2xl border border-white/10 bg-black/18 p-4 text-xs text-white/55">
+              <span className="text-white/75 font-semibold">No regression:</span> preloaded chips still work exactly the same.
+              This only adds optional metadata so clients see <span className="text-white/75 font-semibold">Due</span> and <span className="text-white/75 font-semibold">Required</span>.
             </div>
           </div>
         ) : null}
@@ -1363,3 +1542,4 @@ export default function CiAdmissionsPage() {
     </div>
   );
 }
+```
