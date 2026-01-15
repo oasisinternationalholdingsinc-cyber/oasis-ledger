@@ -1,227 +1,193 @@
+// src/app/(console-ledger)/ci-parliament/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+/**
+ * CI • Parliament (OS Launchpad Surface — NO REGRESSION)
+ * ✅ Wiring preserved: same routes (/ci-council, /ci-amendments, /ci-votes, /ci-constitution)
+ * ✅ No RPC changes, no authority changes, no data flow changes
+ * ✅ OS-matched calm launchpad pattern (same TileCard grammar as CI-Onboarding)
+ * ✅ Mobile-safe: stacks vertically on iPhone, 2x2 on large screens
+ */
 
-type TabKey = "council" | "amendments" | "votes" | "constitution";
+import Link from "next/link";
+import { useMemo } from "react";
+import { useEntity } from "@/components/OsEntityContext";
+import { useOsEnv } from "@/components/OsEnvContext";
 
-export default function CIParliamentPage() {
-  const router = useRouter();
-  const [activeTab, setActiveTab] = useState<TabKey>("council");
+function cx(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
 
-  const go = (path: string) => {
-    router.push(path);
-  };
+type Tile = {
+  eyebrow: string;
+  title: string;
+  description: string;
+  href: string;
+  badge?: string;
+  cta: string;
+  disabled?: boolean;
+};
 
-  return (
-    <div className="h-full flex flex-col px-8 pt-6 pb-6">
-      {/* Header under OS bar */}
-      <div className="mb-4 shrink-0">
-        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">
-          Oasis Digital Parliament
+function TileCard(t: Tile) {
+  const shell =
+    "group relative overflow-hidden rounded-3xl border border-white/10 bg-black/20 p-7 shadow-[0_28px_120px_rgba(0,0,0,0.55)] transition";
+  const hover =
+    "hover:border-amber-300/25 hover:bg-black/28 hover:shadow-[0_0_0_1px_rgba(250,204,21,0.12),0_34px_140px_rgba(0,0,0,0.70)]";
+  const glow =
+    "before:pointer-events-none before:absolute before:inset-0 before:opacity-0 before:transition before:duration-500 " +
+    "before:bg-[radial-gradient(900px_circle_at_20%_0%,rgba(250,204,21,0.14),transparent_55%),radial-gradient(700px_circle_at_80%_120%,rgba(59,130,246,0.12),transparent_60%)] " +
+    "group-hover:before:opacity-100";
+  const topLine = "absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/20 to-transparent";
+
+  const content = (
+    <div className={cx(shell, !t.disabled && hover, glow, t.disabled && "opacity-60")}>
+      <div className={topLine} />
+
+      <div className="relative z-10">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">{t.eyebrow}</div>
+            <div className="mt-2 text-xl font-semibold text-white/90">{t.title}</div>
+          </div>
+
+          {t.badge ? (
+            <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-3 py-1 text-[11px] font-medium text-amber-100">
+              {t.badge}
+            </span>
+          ) : null}
         </div>
-        <h1 className="mt-1 text-xl font-semibold text-slate-50">
-          Parliament · Legislative &amp; Constitutional Authority
-        </h1>
-        <p className="mt-1 text-xs text-slate-400 max-w-3xl">
-          Proposals, amendments, votes, and constitutional objects that define
-          how the governance ledger is allowed to evolve.
-        </p>
-      </div>
 
-      {/* Main window frame */}
-      <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
-        <div className="w-full max-w-[1500px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-6 py-5 flex flex-col overflow-hidden">
-          {/* Top tabs row */}
-          <div className="shrink-0 mb-4">
-            <div className="inline-flex rounded-full bg-slate-950/70 border border-slate-800 p-1">
-              <TabButton
-                label="Council"
-                description="Proposals & deliberation"
-                active={activeTab === "council"}
-                onClick={() => setActiveTab("council")}
-              />
-              <TabButton
-                label="Amendments"
-                description="Legislative timeline"
-                active={activeTab === "amendments"}
-                onClick={() => setActiveTab("amendments")}
-              />
-              <TabButton
-                label="Votes"
-                description="Approvals & rejections"
-                active={activeTab === "votes"}
-                onClick={() => setActiveTab("votes")}
-              />
-              <TabButton
-                label="Constitution"
-                description="Core protected objects"
-                active={activeTab === "constitution"}
-                onClick={() => setActiveTab("constitution")}
-              />
-            </div>
-          </div>
+        <p className="mt-4 max-w-[56ch] text-sm leading-6 text-white/55">{t.description}</p>
 
-          {/* Active tab content */}
-          <div className="flex-1 min-h-0">
-            {activeTab === "council" && (
-              <section className="h-full rounded-2xl border border-slate-800 bg-slate-950/40 px-5 py-4 flex flex-col">
-                <h2 className="text-sm font-semibold text-slate-100 mb-2">
-                  Council · Proposals & Deliberation
-                </h2>
-                <p className="text-xs text-slate-400 max-w-2xl mb-4">
-                  The Council console hosts drafted resolutions and governance
-                  records awaiting debate, revision, or approval. It is where
-                  CI-Alchemy drafts are reviewed before becoming active law in
-                  the ledger.
-                </p>
-
-                <div className="mt-2 flex flex-wrap gap-3">
-                  <button
-                    type="button"
-                    onClick={() => go("/ci-council")}
-                    className="rounded-full px-5 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase bg-emerald-500 text-black hover:bg-emerald-400 transition"
-                  >
-                    Open CI-Council Console
-                  </button>
-                  <span className="text-[11px] text-slate-500 self-center">
-                    Live queue sourced from{" "}
-                    <span className="font-semibold text-slate-300">
-                      governance_ledger
-                    </span>{" "}
-                    (safe-mode decisions wired UI-only for now).
-                  </span>
-                </div>
-              </section>
+        <div className="mt-6 flex items-center justify-between">
+          <div className="text-xs text-white/35">Legislative Authority</div>
+          <div
+            className={cx(
+              "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-xs font-semibold transition",
+              t.disabled
+                ? "border-white/10 bg-white/5 text-white/35"
+                : "border-amber-300/20 bg-amber-300/10 text-amber-100 group-hover:bg-amber-300/14"
             )}
-
-            {activeTab === "amendments" && (
-              <section className="h-full rounded-2xl border border-slate-800 bg-slate-950/40 px-5 py-4 flex flex-col">
-                <h2 className="text-sm font-semibold text-slate-100 mb-2">
-                  Amendments · Schema Legislative Timeline
-                </h2>
-                <p className="text-xs text-slate-400 max-w-3xl mb-4">
-                  Read-only record of every governed schema change: when it was
-                  proposed, how it was classified, and when it became active law
-                  in the ledger. Backed by{" "}
-                  <span className="font-semibold text-slate-300">
-                    schema_change_log
-                  </span>{" "}
-                  and constitutional mappings.
-                </p>
-
-                <div className="mt-2 flex flex-wrap gap-3">
-                  <button
-                    type="button"
-                    onClick={() => go("/ci-amendments")}
-                    className="rounded-full px-5 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase bg-sky-500 text-black hover:bg-sky-400 transition"
-                  >
-                    Open CI-Amendments Timeline
-                  </button>
-                  <span className="text-[11px] text-slate-500 self-center">
-                    Full filters, scopes, and constitutional-only view live in
-                    the dedicated console.
-                  </span>
-                </div>
-              </section>
-            )}
-
-            {activeTab === "votes" && (
-              <section className="h-full rounded-2xl border border-slate-800 bg-slate-950/40 px-5 py-4 flex flex-col">
-                <h2 className="text-sm font-semibold text-slate-100 mb-2">
-                  Votes · Approvals & Rejections
-                </h2>
-                <p className="text-xs text-slate-400 max-w-3xl mb-4">
-                  Official ledger of all recorded governance and schema votes:
-                  who approved, who rejected, in what role, and when. This
-                  console is the democratic record that backs every governed
-                  change.
-                </p>
-
-                <div className="mt-2 flex flex-wrap gap-3">
-                  <button
-                    type="button"
-                    onClick={() => go("/ci-votes")}
-                    className="rounded-full px-5 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase bg-fuchsia-500 text-black hover:bg-fuchsia-400 transition"
-                  >
-                    Open CI-Votes Record
-                  </button>
-                  <span className="text-[11px] text-slate-500 self-center">
-                    Read-only UI wired to the governed voting ledger (open /
-                    passed / failed / withdrawn / constitutional-only filters).
-                  </span>
-                </div>
-              </section>
-            )}
-
-            {activeTab === "constitution" && (
-              <section className="h-full rounded-2xl border border-slate-800 bg-slate-950/40 px-5 py-4 flex flex-col">
-                <h2 className="text-sm font-semibold text-slate-100 mb-2">
-                  Constitution · Core Protected Objects
-                </h2>
-                <p className="text-xs text-slate-400 max-w-3xl mb-4">
-                  Catalogue of tables, views, triggers, and policies designated
-                  as{" "}
-                  <span className="font-semibold text-emerald-300">
-                    constitutional
-                  </span>
-                  . These objects cannot be changed without a CI-Amendments
-                  proposal and CI-Votes approval.
-                </p>
-
-                <div className="mt-2 flex flex-wrap gap-3">
-                  <button
-                    type="button"
-                    onClick={() => go("/ci-constitution")}
-                    className="rounded-full px-5 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase bg-emerald-500 text-black hover:bg-emerald-400 transition"
-                  >
-                    Open CI-Constitution Catalogue
-                  </button>
-                  <span className="text-[11px] text-slate-500 self-center">
-                    Backed by{" "}
-                    <span className="font-semibold text-slate-300">
-                      constitutional_objects
-                    </span>{" "}
-                    and related mapping to schema change log.
-                  </span>
-                </div>
-              </section>
-            )}
-          </div>
-
-          {/* Footer strip */}
-          <div className="mt-4 text-[10px] text-slate-500 flex items-center justify-between">
-            <span>Parliament Workspace · Oasis Digital Parliament</span>
-            <span>Governance OS • Core legislative &amp; constitutional layer</span>
+          >
+            {t.cta}
+            <span aria-hidden className={cx("transition", t.disabled ? "" : "group-hover:translate-x-0.5")}>
+              →
+            </span>
           </div>
         </div>
       </div>
     </div>
   );
+
+  if (t.disabled) return <div>{content}</div>;
+
+  return (
+    <Link href={t.href} className="block">
+      {content}
+    </Link>
+  );
 }
 
-type TabButtonProps = {
-  label: string;
-  description: string;
-  active: boolean;
-  onClick: () => void;
-};
+export default function CIParliamentPage() {
+  // Entity (defensive — same pattern you used in CI-Onboarding / CI-Evidence)
+  const ec = useEntity() as any;
+  const entityKey: string =
+    (ec?.entityKey as string) || (ec?.activeEntity as string) || (ec?.entity_slug as string) || "";
 
-function TabButton({ label, description, active, onClick }: TabButtonProps) {
+  const entityName: string =
+    (ec?.entityName as string) ||
+    (ec?.activeEntityName as string) ||
+    (ec?.entities?.find?.((x: any) => x?.slug === entityKey || x?.key === entityKey)?.name as string) ||
+    entityKey;
+
+  // Lane (defensive — same pattern you used in CI-Onboarding / CI-Evidence)
+  const env = useOsEnv() as any;
+  const isTest: boolean = Boolean(env?.is_test ?? env?.isTest ?? env?.lane_is_test ?? env?.sandbox ?? env?.isSandbox);
+
+  const tiles: Tile[] = useMemo(
+    () => [
+      {
+        eyebrow: "CI • Parliament",
+        title: "CI-Council",
+        description:
+          "Deliberation console for drafted resolutions and governance records. Review, approve, or reject — then hand off to Forge for signature execution.",
+        href: "/ci-council",
+        badge: "Authority",
+        cta: "Open Council",
+      },
+      {
+        eyebrow: "CI • Parliament",
+        title: "CI-Amendments",
+        description:
+          "Legislative timeline of governed schema changes. Proposals, classifications, and when changes became active law under constitutional rules.",
+        href: "/ci-amendments",
+        badge: "Timeline",
+        cta: "Open Amendments",
+      },
+      {
+        eyebrow: "CI • Parliament",
+        title: "CI-Votes",
+        description:
+          "Official record of approvals and rejections: who voted, in what role, and when. The democratic ledger backing every governed change.",
+        href: "/ci-votes",
+        badge: "Record",
+        cta: "Open Votes",
+      },
+      {
+        eyebrow: "CI • Parliament",
+        title: "CI-Constitution",
+        description:
+          "Catalogue of protected objects designated constitutional. Changes require amendments + votes approval before they can take effect in the ledger.",
+        href: "/ci-constitution",
+        badge: "Protected",
+        cta: "Open Constitution",
+      },
+    ],
+    []
+  );
+
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={[
-        "px-4 py-2 rounded-full text-left transition min-w-[150px]",
-        active
-          ? "bg-emerald-500/15 border border-emerald-400/70 text-slate-50"
-          : "bg-transparent border border-transparent hover:bg-slate-900/60 text-slate-300",
-      ].join(" ")}
-    >
-      <div className="text-xs font-semibold">{label}</div>
-      <div className="text-[10px] text-slate-400">{description}</div>
-    </button>
+    <div className="h-full w-full">
+      <div className="mx-auto w-full max-w-[1400px] px-4 pb-12 pt-8">
+        <div className="mb-7 flex items-end justify-between gap-4">
+          <div>
+            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">Oasis Digital Parliament</div>
+            <div className="mt-1 text-3xl font-semibold text-white/90">Launchpad</div>
+            <div className="mt-2 text-sm text-white/50">
+              Entity-scoped: <span className="text-white/70">{entityName || entityKey || "—"}</span> • Lane:{" "}
+              <span className="text-white/70">{isTest ? "SANDBOX" : "RoT"}</span>
+            </div>
+          </div>
+
+          <div className="hidden sm:flex items-center gap-2">
+            <span className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs text-white/60">
+              Proposals → Amendments → Votes → Constitutional Law
+            </span>
+          </div>
+        </div>
+
+        {/* Mobile-first: stacks; Large: 2x2 calm grid */}
+        <div className="grid grid-cols-12 gap-4">
+          <div className="col-span-12 lg:col-span-6">
+            <TileCard {...tiles[0]} />
+          </div>
+          <div className="col-span-12 lg:col-span-6">
+            <TileCard {...tiles[1]} />
+          </div>
+          <div className="col-span-12 lg:col-span-6">
+            <TileCard {...tiles[2]} />
+          </div>
+          <div className="col-span-12 lg:col-span-6">
+            <TileCard {...tiles[3]} />
+          </div>
+        </div>
+
+        <div className="mt-6 text-[10px] text-white/35">
+          Parliament is the legislative and constitutional authority surface. Operational execution remains inside the dedicated consoles
+          (Council, Amendments, Votes, Constitution) — this page is the calm entry point.
+        </div>
+      </div>
+    </div>
   );
 }
