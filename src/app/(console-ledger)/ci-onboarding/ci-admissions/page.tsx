@@ -1,7 +1,8 @@
+// src/app/(os)/ci-onboarding/ci-admissions/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
@@ -14,257 +15,122 @@ function normStatus(s: string | null | undefined) {
   return (s || "").trim().toUpperCase().replace(/[\s-]+/g, "_");
 }
 
-function safePrettyJSON(x: any) {
-  try {
-    if (x == null) return "—";
-    return JSON.stringify(x, null, 2);
-  } catch {
-    return "—";
-  }
+function toLowerEnum(s: string) {
+  return s.trim().toLowerCase().replace(/\s+/g, "_");
 }
 
-function slugifyKey(s: string) {
-  return (s || "")
-    .toLowerCase()
-    .trim()
-    .replace(/['"]/g, "")
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 60);
+function nowPlusDays(days: number) {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return d.toISOString();
 }
 
 type InboxRow = {
   id: string;
+  entity_id: string | null;
+  entity_slug: string | null;
   status: string | null;
 
-  applicant_email: string | null;
-  applicant_name?: string | null;
-
+  applicant_type: string | null;
   organization_legal_name: string | null;
   organization_trade_name: string | null;
+  applicant_email: string | null;
+  organization_email: string | null;
 
-  primary_contact_user_id: string | null;
-
-  entity_slug: string | null;
-  created_at: string | null;
-  updated_at?: string | null;
-
-  requested_services?: any | null;
+  request_brief?: string | null;
+  intent?: string | null;
+  services_label?: string | null;
   metadata?: any | null;
 
-  // optional lane exposure from view
+  created_at: string | null;
+  updated_at: string | null;
+
   lane_is_test?: boolean | null;
 };
 
-type TopTab = "INBOX" | "INTAKE" | "ALL" | "ARCHIVED";
-type SubTab = "BOTH" | "INTAKE" | "PROVISIONED";
+type DecisionRow = {
+  decision: string | null;
+  risk_tier: string | null;
+  summary: string | null;
+  reason: string | null;
+  created_at: string | null;
+};
 
-function Pill({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={cx(
-        "rounded-full px-3 py-1 text-[11px] font-medium transition",
-        active
-          ? "bg-white/8 text-white/85 ring-1 ring-white/12"
-          : "text-white/55 hover:text-white/80"
-      )}
-    >
-      {children}
-    </button>
-  );
+type Tab = "INBOX" | "INTAKE" | "ALL" | "ARCHIVED";
+type LaneFilter = "BOTH" | "INTAKE" | "PROVISIONED";
+
+type ActionModal =
+  | { kind: "BEGIN_REVIEW" }
+  | { kind: "NEEDS_INFO" }
+  | { kind: "TASKS" }
+  | { kind: "APPROVE" }
+  | { kind: "ARCHIVE" }
+  | { kind: "HARD_DELETE" }
+  | null;
+
+type TaskItem = {
+  id: string;
+  label: string;
+  done: boolean;
+};
+
+function FieldLabel({ children }: { children: string }) {
+  return <div className="text-[11px] uppercase tracking-[0.28em] text-white/40">{children}</div>;
 }
 
-function Row({ k, v }: { k: string; v: string }) {
+function KV({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
   return (
     <div className="flex items-start justify-between gap-4">
-      <div className="text-xs uppercase tracking-[0.22em] text-white/35">
-        {k}
+      <div className="text-xs uppercase tracking-[0.22em] text-white/35">{k}</div>
+      <div
+        className={cx(
+          "max-w-[70%] text-right text-sm text-white/80",
+          mono && "font-mono text-[12px] leading-5 text-white/70"
+        )}
+      >
+        {v}
       </div>
-      <div className="max-w-[70%] text-right text-sm text-white/80">{v}</div>
     </div>
   );
 }
 
-/** Minimal OS Modal (no external deps, consistent glass + gold restraint) */
-function OsModal({
-  open,
+function ModalShell({
   title,
   subtitle,
   children,
-  confirmText = "Confirm",
-  cancelText = "Cancel",
   danger,
-  busy,
   onClose,
-  onConfirm,
 }: {
-  open: boolean;
   title: string;
   subtitle?: string;
   children: React.ReactNode;
-  confirmText?: string;
-  cancelText?: string;
   danger?: boolean;
-  busy?: boolean;
   onClose: () => void;
-  onConfirm: () => void;
 }) {
-  if (!open) return null;
-
   return (
-    <div className="fixed inset-0 z-[100]">
+    <div className="fixed inset-0 z-[80] flex items-center justify-center px-4">
+      <div className="absolute inset-0 bg-black/65 backdrop-blur-sm" onClick={onClose} />
       <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-[6px]"
-        onClick={busy ? undefined : onClose}
-      />
-      <div className="absolute left-1/2 top-1/2 w-[94vw] max-w-[560px] -translate-x-1/2 -translate-y-1/2">
-        <div className="relative overflow-hidden rounded-3xl border border-white/12 bg-[#070A12]/80 shadow-[0_40px_160px_rgba(0,0,0,0.70)]">
-          <div className="pointer-events-none absolute inset-0 opacity-60 [background:radial-gradient(900px_500px_at_70%_-20%,rgba(250,204,21,0.14),transparent_55%),radial-gradient(700px_420px_at_10%_0%,rgba(56,189,248,0.10),transparent_50%)]" />
-          <div className="relative border-b border-white/10 p-5">
-            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
-              Authority • Action
-            </div>
-            <div className="mt-2 text-xl font-semibold text-white/90">
-              {title}
-            </div>
-            {subtitle ? (
-              <div className="mt-1 text-sm text-white/55">{subtitle}</div>
-            ) : null}
+        className={cx(
+          "relative w-full max-w-[560px] overflow-hidden rounded-3xl border shadow-[0_40px_180px_rgba(0,0,0,0.70)]",
+          danger ? "border-rose-300/20 bg-[#12060b]/90" : "border-white/12 bg-[#071018]/92"
+        )}
+      >
+        <div className="border-b border-white/10 px-6 py-5">
+          <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
+            Authority • Action
           </div>
-
-          <div className="relative p-5">{children}</div>
-
-          <div className="relative flex items-center justify-end gap-2 border-t border-white/10 p-4">
-            <button
-              disabled={busy}
-              onClick={onClose}
-              className={cx(
-                "rounded-full border px-4 py-2 text-xs font-semibold transition",
-                busy
-                  ? "border-white/10 bg-white/3 text-white/35"
-                  : "border-white/10 bg-white/5 text-white/75 hover:bg-white/7 hover:border-white/15"
-              )}
-            >
-              {cancelText}
-            </button>
-            <button
-              disabled={busy}
-              onClick={onConfirm}
-              className={cx(
-                "rounded-full border px-4 py-2 text-xs font-semibold transition",
-                danger
-                  ? busy
-                    ? "border-rose-300/15 bg-rose-500/10 text-rose-200/40"
-                    : "border-rose-300/20 bg-rose-500/12 text-rose-100 hover:bg-rose-500/16"
-                  : busy
-                  ? "border-amber-300/15 bg-amber-400/10 text-amber-100/40"
-                  : "border-amber-300/20 bg-amber-400/12 text-amber-100 hover:bg-amber-400/16"
-              )}
-            >
-              {confirmText}
-            </button>
-          </div>
+          <div className="mt-1 text-xl font-semibold text-white/90">{title}</div>
+          {subtitle ? <div className="mt-1 text-sm text-white/55">{subtitle}</div> : null}
         </div>
-
-        <div className="mt-3 text-center text-[10px] text-white/35">
-          Mutations are RPC-only • Lane-safe via OsEnv + view lane column when
-          present
-        </div>
+        <div className="px-6 py-5">{children}</div>
       </div>
     </div>
   );
 }
 
-/** --- Doc checklist defaults (feeds client portal tasks) --- */
-type TaskDraft = {
-  enabled: boolean;
-  title: string;
-  task_key: string;
-  required: boolean;
-  notes: string;
-  channels: { portal: boolean; email: boolean; sms: boolean };
-  due?: string; // YYYY-MM-DD
-};
-
-function buildDefaultDocTasks(): TaskDraft[] {
-  const defs: Array<{
-    title: string;
-    key: string;
-    required: boolean;
-    notes: string;
-  }> = [
-    {
-      title: "Articles of Incorporation",
-      key: "articles_of_incorporation",
-      required: true,
-      notes: "Upload the stamped/issued PDF (or equivalent).",
-    },
-    {
-      title: "Certificate of Status / Good Standing",
-      key: "certificate_of_status",
-      required: false,
-      notes: "If available, upload a recent certificate (PDF).",
-    },
-    {
-      title: "Bylaws / Operating Agreement",
-      key: "bylaws_or_operating_agreement",
-      required: true,
-      notes: "Upload the current bylaws / operating agreement (PDF).",
-    },
-    {
-      title: "Director / Officer Register",
-      key: "director_officer_register",
-      required: true,
-      notes: "Upload the signed/dated register (PDF).",
-    },
-    {
-      title: "Share Register / Cap Table",
-      key: "share_register",
-      required: true,
-      notes: "Upload the current share register or cap table (PDF).",
-    },
-    {
-      title: "Registered Office / Address Evidence",
-      key: "registered_office_evidence",
-      required: false,
-      notes: "If applicable, upload proof of registered office address.",
-    },
-    {
-      title: "ID for Authorized Signer",
-      key: "authorized_signer_id",
-      required: false,
-      notes: "Government-issued ID for the signer (redact sensitive numbers).",
-    },
-    {
-      title: "Prior Resolutions / Minute Book Extract",
-      key: "prior_resolutions_extract",
-      required: false,
-      notes: "If available, upload relevant past resolutions (PDF).",
-    },
-  ];
-
-  return defs.map((d) => ({
-    enabled: false,
-    title: d.title,
-    task_key: d.key,
-    required: d.required,
-    notes: d.notes,
-    channels: { portal: true, email: false, sms: false },
-    due: "",
-  }));
-}
-
 export default function CiAdmissionsPage() {
-  // ---- entity (defensive) ----
+  // --- Entity / Env (defensive; NO corporate fallbacks) ---
   const ec = useEntity() as any;
   const entityKey: string =
     (ec?.entityKey as string) ||
@@ -275,77 +141,66 @@ export default function CiAdmissionsPage() {
   const entityName: string =
     (ec?.entityName as string) ||
     (ec?.activeEntityName as string) ||
-    (ec?.entities?.find?.(
-      (x: any) => x?.slug === entityKey || x?.key === entityKey
-    )?.name as string) ||
+    (ec?.entities?.find?.((x: any) => x?.slug === entityKey || x?.key === entityKey)?.name as string) ||
     entityKey;
 
-  // ---- env lane (defensive) ----
   const env = useOsEnv() as any;
   const isTest: boolean = Boolean(
-    env?.is_test ??
-      env?.isTest ??
-      env?.lane_is_test ??
-      env?.sandbox ??
-      env?.isSandbox
+    env?.is_test ?? env?.isTest ?? env?.lane_is_test ?? env?.sandbox ?? env?.isSandbox
   );
 
-  const [apps, setApps] = useState<InboxRow[]>([]);
+  // --- Inbox ---
+  const [rows, setRows] = useState<InboxRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  const [topTab, setTopTab] = useState<TopTab>("INBOX");
-  const [subTab, setSubTab] = useState<SubTab>("BOTH");
+  const [tab, setTab] = useState<Tab>("INBOX");
+  const [laneFilter, setLaneFilter] = useState<LaneFilter>("BOTH");
   const [q, setQ] = useState("");
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = useMemo(() => rows.find((r) => r.id === selectedId) || null, [rows, selectedId]);
 
+  // --- Decision snapshot (audit layer) ---
+  const [latestDecision, setLatestDecision] = useState<DecisionRow | null>(null);
+  const [decisionErr, setDecisionErr] = useState<string | null>(null);
+
+  // --- Modal ---
+  const [modal, setModal] = useState<ActionModal>(null);
   const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState<string | null>(null);
+
   const [refreshKey, setRefreshKey] = useState(0);
 
-  // ---- modals ----
-  const [approveOpen, setApproveOpen] = useState(false);
-  const [needsInfoOpen, setNeedsInfoOpen] = useState(false);
-  const [tasksOpen, setTasksOpen] = useState(false);
-  const [archiveOpen, setArchiveOpen] = useState(false);
-  const [deleteOpen, setDeleteOpen] = useState(false);
-
-  const [approveRisk, setApproveRisk] = useState("medium");
-  const [approveSummary, setApproveSummary] = useState(
-    "Approved for provisioning."
+  // --- Needs Info (message) ---
+  const [needsInfoMsg, setNeedsInfoMsg] = useState(
+    "Please upload the requested incorporation and governance evidence."
   );
-  const [approveReason, setApproveReason] = useState("");
+  const [needsInfoDueDays, setNeedsInfoDueDays] = useState(7);
 
-  const [infoMessage, setInfoMessage] = useState("");
-  const [infoDue, setInfoDue] = useState<string>("");
-  const [infoChannels, setInfoChannels] = useState<{
-    email: boolean;
-    sms: boolean;
-  }>({
-    email: true,
-    sms: false,
-  });
+  // --- Tasks (doc checklist) ---
+  const defaultTasksRef = useRef<TaskItem[]>([
+    { id: "incorp", label: "Articles of Incorporation (or equivalent formation document)", done: true },
+    { id: "good", label: "Certificate of Status / Good Standing (recent)", done: true },
+    { id: "dir", label: "Directors / Officers register (current)", done: false },
+    { id: "share", label: "Share register / cap table snapshot (current)", done: false },
+    { id: "res", label: "Initial organizing resolutions / bylaws / operating agreement", done: false },
+    { id: "auth", label: "Authorized signer evidence (who can sign / bind)", done: false },
+    { id: "id", label: "Signer identity evidence (gov ID) for primary operator", done: false },
+  ]);
+  const [tasks, setTasks] = useState<TaskItem[]>(() => defaultTasksRef.current);
+  const [customTask, setCustomTask] = useState("");
 
-  const [taskTemplates, setTaskTemplates] = useState<TaskDraft[]>(
-    () => buildDefaultDocTasks()
-  );
-  const [taskCustomTitle, setTaskCustomTitle] = useState("");
-  const [taskCustomNotes, setTaskCustomNotes] = useState("");
-  const [taskCustomRequired, setTaskCustomRequired] = useState(true);
+  // --- Approve (decision) ---
+  const [riskTier, setRiskTier] = useState("medium");
+  const [decisionSummary, setDecisionSummary] = useState("Meets intake requirements.");
+  const [decisionReason, setDecisionReason] = useState("");
 
-  const [archiveNote, setArchiveNote] = useState("Archived by authority.");
-  const [deleteReason, setDeleteReason] = useState(
-    "Hard delete (test / duplicate)."
-  );
-
-  const selected = useMemo(
-    () => apps.find((a) => a.id === selectedId) || null,
-    [apps, selectedId]
-  );
+  // --- Archive/Delete reasons ---
+  const [archiveReason, setArchiveReason] = useState("Operator archived this application.");
+  const [deleteReason, setDeleteReason] = useState("Operator hard-deleted a terminal onboarding record.");
 
   const appTitle = useMemo(() => {
-    if (!selected) return "Select an application";
+    if (!selected) return "No application selected";
     return (
       selected.organization_trade_name ||
       selected.organization_legal_name ||
@@ -354,12 +209,7 @@ export default function CiAdmissionsPage() {
     );
   }, [selected]);
 
-  const meta = useMemo(() => {
-    const m = selected?.metadata;
-    return (m && typeof m === "object" ? (m as any) : {}) as any;
-  }, [selected?.metadata]);
-
-  // ---- load inbox (lane-safe if column exists, else fallback) ----
+  // -------- load inbox (entity + lane scoped when available) --------
   useEffect(() => {
     let alive = true;
 
@@ -368,57 +218,58 @@ export default function CiAdmissionsPage() {
       setErr(null);
 
       try {
-        const cols = [
+        const baseCols = [
           "id",
+          "entity_id",
+          "entity_slug",
           "status",
-          "applicant_email",
-          "applicant_name",
+          "applicant_type",
           "organization_legal_name",
           "organization_trade_name",
-          "primary_contact_user_id",
-          "entity_slug",
+          "applicant_email",
+          "organization_email",
+          "request_brief",
+          "intent",
+          "services_label",
+          "metadata",
           "created_at",
           "updated_at",
-          "requested_services",
-          "metadata",
         ];
 
         const tryWithLane = async () => {
           const { data, error } = await supabase
             .from("v_onboarding_admissions_inbox")
-            .select([...cols, "lane_is_test"].join(","))
+            .select([...baseCols, "lane_is_test"].join(","))
             .eq("entity_slug", entityKey)
             .eq("lane_is_test", isTest)
             .order("created_at", { ascending: false });
+
           return { data, error };
         };
 
         const tryWithoutLane = async () => {
           const { data, error } = await supabase
             .from("v_onboarding_admissions_inbox")
-            .select(cols.join(","))
+            .select(baseCols.join(","))
             .eq("entity_slug", entityKey)
             .order("created_at", { ascending: false });
+
           return { data, error };
         };
 
         let res = await tryWithLane();
-        if (
-          res.error &&
-          /lane_is_test|42703|undefined column/i.test(res.error.message)
-        ) {
+        if (res.error && /lane_is_test|42703|undefined column/i.test(res.error.message)) {
           res = await tryWithoutLane();
         }
 
         if (res.error) throw res.error;
         if (!alive) return;
 
-        const list = (res.data || []) as InboxRow[];
-        setApps(list);
+        const data = (res.data || []) as InboxRow[];
+        setRows(data);
 
-        if (!selectedId && list.length) setSelectedId(list[0].id);
-        else if (selectedId && !list.some((r) => r.id === selectedId))
-          setSelectedId(list[0]?.id ?? null);
+        if (!selectedId && data.length) setSelectedId(data[0].id);
+        else if (selectedId && !data.some((r) => r.id === selectedId)) setSelectedId(data[0]?.id ?? null);
       } catch (e: any) {
         if (!alive) return;
         setErr(e?.message || "Failed to load admissions inbox.");
@@ -434,59 +285,100 @@ export default function CiAdmissionsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entityKey, isTest, refreshKey]);
 
+  // -------- load latest decision (audit layer) --------
+  useEffect(() => {
+    let alive = true;
+
+    (async () => {
+      setLatestDecision(null);
+      setDecisionErr(null);
+      if (!selectedId) return;
+
+      try {
+        const { data, error } = await supabase
+          .from("onboarding_decisions")
+          .select("decision,risk_tier,summary,reason,created_at")
+          .eq("application_id", selectedId)
+          .order("created_at", { ascending: false })
+          .limit(1);
+
+        if (error) throw error;
+        if (!alive) return;
+
+        setLatestDecision((data?.[0] as DecisionRow) || null);
+      } catch (e: any) {
+        if (!alive) return;
+        // non-fatal (audit layer shouldn’t break console)
+        setDecisionErr(e?.message || "Could not load decision history.");
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, [selectedId, refreshKey]);
+
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    let list = apps;
+    let data = rows;
 
-    // top tabs
-    if (topTab === "INBOX") {
-      list = list.filter((a) => normStatus(a.status) !== "ARCHIVED");
-    } else if (topTab === "INTAKE") {
-      list = list.filter((a) => {
-        const st = normStatus(a.status);
-        return ["SUBMITTED", "IN_REVIEW", "NEEDS_INFO"].includes(st);
-      });
-    } else if (topTab === "ARCHIVED") {
-      list = list.filter((a) => normStatus(a.status) === "ARCHIVED");
+    const st = (r: InboxRow) => normStatus(r.status);
+
+    // Tab
+    if (tab === "INBOX") {
+      // active working set
+      const hide = new Set(["ARCHIVED", "WITHDRAWN", "DECLINED"]);
+      data = data.filter((r) => !hide.has(st(r)));
+    } else if (tab === "INTAKE") {
+      const allow = new Set(["SUBMITTED", "TRIAGE", "IN_REVIEW", "NEEDS_INFO"]);
+      data = data.filter((r) => allow.has(st(r)));
+    } else if (tab === "ARCHIVED") {
+      data = data.filter((r) => st(r) === "ARCHIVED");
+    } // ALL keeps everything
+
+    // Lane Filter chip (UI-level)
+    if (laneFilter === "INTAKE") {
+      const allow = new Set(["SUBMITTED", "TRIAGE", "IN_REVIEW", "NEEDS_INFO"]);
+      data = data.filter((r) => allow.has(st(r)));
+    } else if (laneFilter === "PROVISIONED") {
+      const allow = new Set(["APPROVED", "PROVISIONING", "PROVISIONED"]);
+      data = data.filter((r) => allow.has(st(r)));
     }
 
-    // sub tabs (in INBOX view)
-    if (topTab === "INBOX") {
-      if (subTab === "INTAKE") {
-        list = list.filter((a) => normStatus(a.status) !== "PROVISIONED");
-      } else if (subTab === "PROVISIONED") {
-        list = list.filter((a) => normStatus(a.status) === "PROVISIONED");
-      }
-    }
+    if (!needle) return data;
 
-    if (!needle) return list;
-
-    return list.filter((a) => {
+    return data.filter((r) => {
       const blob = [
-        a.organization_trade_name,
-        a.organization_legal_name,
-        a.applicant_name,
-        a.applicant_email,
-        a.status,
-        a.id,
+        r.organization_legal_name,
+        r.organization_trade_name,
+        r.applicant_email,
+        r.organization_email,
+        r.status,
+        r.applicant_type,
+        r.id,
       ]
         .filter(Boolean)
         .join(" • ")
         .toLowerCase();
       return blob.includes(needle);
     });
-  }, [apps, topTab, subTab, q]);
+  }, [rows, q, tab, laneFilter]);
 
+  function closeModal() {
+    if (busy) return;
+    setModal(null);
+  }
+
+  // --- RPC helpers (NO new wiring; use existing RPCs) ---
   async function rpcBeginReview() {
     if (!selected) return;
     setBusy(true);
-    setNote(null);
     try {
       const { error } = await supabase.rpc("admissions_begin_review", {
         p_application_id: selected.id,
       });
       if (error) throw error;
-      setNote("Review started.");
+      setModal(null);
       setRefreshKey((n) => n + 1);
     } catch (e: any) {
       alert(e?.message || "Begin Review failed.");
@@ -495,63 +387,19 @@ export default function CiAdmissionsPage() {
     }
   }
 
-  async function rpcApprove() {
-    if (!selected) return;
-    setBusy(true);
-    setNote(null);
-    try {
-      const { error } = await supabase.rpc("admissions_record_decision", {
-        p_application_id: selected.id,
-        p_decision: "APPROVED",
-        p_risk_tier: (approveRisk || "medium").toLowerCase(),
-        p_summary: approveSummary || "Approved for provisioning.",
-        p_reason: approveReason || "",
-      });
-      if (error) throw error;
-
-      setNote("Approved for provisioning.");
-      setApproveOpen(false);
-      setRefreshKey((n) => n + 1);
-    } catch (e: any) {
-      alert(e?.message || "Approve failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function rpcNeedsInfo() {
     if (!selected) return;
-    const channels: string[] = [];
-    if (infoChannels.email) channels.push("email");
-    if (infoChannels.sms) channels.push("sms");
-
-    if (!infoMessage.trim()) {
-      alert("Message is required.");
-      return;
-    }
-
     setBusy(true);
-    setNote(null);
     try {
-      const dueAt =
-        infoDue && infoDue.trim()
-          ? new Date(`${infoDue}T23:59:00`).toISOString()
-          : null;
-
       const { error } = await supabase.rpc("admissions_request_info", {
         p_application_id: selected.id,
-        p_message: infoMessage.trim(),
-        p_channels: channels,
-        p_due_at: dueAt,
-        p_next_status: "NEEDS_INFO",
+        p_message: needsInfoMsg,
+        p_channels: ["email"],
+        p_due_at: new Date(nowPlusDays(Math.max(1, Number(needsInfoDueDays) || 7))),
+        p_next_status: "needs_info", // enum in prod is lowercase
       });
-
       if (error) throw error;
-
-      setNote("Needs Info sent.");
-      setNeedsInfoOpen(false);
-      setInfoMessage("");
-      setInfoDue("");
+      setModal(null);
       setRefreshKey((n) => n + 1);
     } catch (e: any) {
       alert(e?.message || "Needs Info failed.");
@@ -560,76 +408,64 @@ export default function CiAdmissionsPage() {
     }
   }
 
-  function resetTasksToDefaults() {
-    setTaskTemplates(buildDefaultDocTasks());
-    setTaskCustomTitle("");
-    setTaskCustomNotes("");
-    setTaskCustomRequired(true);
-  }
-
   async function rpcCreateTasks() {
     if (!selected) return;
-
-    // build payload (only enabled tasks)
-    const enabled = taskTemplates.filter((t) => t.enabled);
-
-    const customTitle = taskCustomTitle.trim();
-    const customTask =
-      customTitle.length > 0
-        ? {
-            enabled: true,
-            title: customTitle,
-            task_key: slugifyKey(customTitle),
-            required: Boolean(taskCustomRequired),
-            notes: taskCustomNotes.trim() || "Upload the requested document (PDF).",
-            channels: { portal: true, email: false, sms: false },
-            due: "",
-          }
-        : null;
-
-    const all = customTask ? [...enabled, customTask] : enabled;
-
-    if (all.length === 0) {
-      alert("Select at least one document (or add a custom one).");
-      return;
-    }
-
-    const tasksPayload = all.map((t) => {
-      const ch: string[] = [];
-      if (t.channels.portal) ch.push("portal");
-      if (t.channels.email) ch.push("email");
-      if (t.channels.sms) ch.push("sms");
-
-      const due_at =
-        t.due && t.due.trim()
-          ? new Date(`${t.due}T23:59:00`).toISOString()
-          : null;
-
-      return {
-        title: t.title,
-        task_key: t.task_key || slugifyKey(t.title),
-        required: Boolean(t.required),
-        notes: t.notes || "",
-        channels: ch,
-        due_at,
-      };
-    });
-
     setBusy(true);
-    setNote(null);
     try {
+      const cleaned = tasks
+        .map((t) => ({ id: t.id, label: t.label, required: true, checked: t.done }))
+        .filter((t) => t.label.trim().length > 0);
+
+      // JSONB payload; keep stable shape for auditability
+      const payload = {
+        checklist: cleaned,
+        created_from: "ci-admissions",
+        note: "Document checklist tasks created by operator.",
+      };
+
       const { error } = await supabase.rpc("admissions_create_provisioning_tasks", {
         p_application_id: selected.id,
-        p_tasks: tasksPayload,
+        p_tasks: payload,
       });
       if (error) throw error;
 
-      setNote("Document tasks created (client portal updated).");
-      setTasksOpen(false);
-      resetTasksToDefaults();
+      setModal(null);
       setRefreshKey((n) => n + 1);
     } catch (e: any) {
-      alert(e?.message || "Create tasks failed.");
+      alert(e?.message || "Create Tasks failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rpcApproveDecision() {
+    if (!selected) return;
+    setBusy(true);
+    try {
+      // ✅ Decision layer for audit (onboarding_decisions)
+      // Use SAFE wrapper (text) so we don’t fight enum casing in UI.
+      const { error: e1 } = await supabase.rpc("admissions_record_decision_safe", {
+        p_application_id: selected.id,
+        p_risk_tier_text: String(riskTier || "medium"),
+        p_decision_text: "approved",
+        p_summary: decisionSummary || "Meets intake requirements.",
+        p_reason: decisionReason || "",
+      });
+      if (e1) throw e1;
+
+      // ✅ Status flip (this is what you’re missing right now)
+      // Status enum in prod is lowercase (approved/provisioning/etc.)
+      const { error: e2 } = await supabase.rpc("admissions_set_status_enum", {
+        p_application_id: selected.id,
+        p_next_status: "approved",
+        p_note: "Approved for provisioning.",
+      });
+      if (e2) throw e2;
+
+      setModal(null);
+      setRefreshKey((n) => n + 1);
+    } catch (e: any) {
+      alert(e?.message || "Approve failed.");
     } finally {
       setBusy(false);
     }
@@ -638,17 +474,13 @@ export default function CiAdmissionsPage() {
   async function rpcArchiveSoft() {
     if (!selected) return;
     setBusy(true);
-    setNote(null);
     try {
-      const { error } = await supabase.rpc("admissions_set_status", {
+      const { error } = await supabase.rpc("admissions_archive_application", {
         p_application_id: selected.id,
-        p_next_status: "ARCHIVED",
-        p_note: archiveNote || "Archived by authority.",
+        p_reason: archiveReason || "Operator archived.",
       });
       if (error) throw error;
-
-      setNote("Archived.");
-      setArchiveOpen(false);
+      setModal(null);
       setRefreshKey((n) => n + 1);
     } catch (e: any) {
       alert(e?.message || "Archive failed.");
@@ -660,55 +492,45 @@ export default function CiAdmissionsPage() {
   async function rpcHardDelete() {
     if (!selected) return;
     setBusy(true);
-    setNote(null);
     try {
-      const { error } = await supabase.rpc("admissions_delete_application", {
+      // You have both delete variants in your function inventory; hard delete is terminal-only by design.
+      const { error } = await supabase.rpc("admissions_hard_delete_application", {
         p_application_id: selected.id,
-        p_reason: deleteReason || "Hard delete.",
+        p_reason: deleteReason || "Operator hard delete.",
       });
       if (error) throw error;
 
-      setNote("Deleted.");
-      setDeleteOpen(false);
+      setModal(null);
+      // after delete, refresh list
       setSelectedId(null);
       setRefreshKey((n) => n + 1);
     } catch (e: any) {
-      alert(e?.message || "Hard Delete failed.");
+      alert(e?.message || "Hard delete failed.");
     } finally {
       setBusy(false);
     }
   }
 
-  const statusBadge = (stRaw: string | null) => {
-    const st = normStatus(stRaw);
-    const base = "rounded-full border px-3 py-1 text-[11px] font-medium";
-    if (st === "NEEDS_INFO")
-      return `${base} border-amber-300/18 bg-amber-400/10 text-amber-100/90`;
-    if (st === "IN_REVIEW")
-      return `${base} border-sky-300/18 bg-sky-400/10 text-sky-100/90`;
-    if (st === "PROVISIONED")
-      return `${base} border-emerald-300/18 bg-emerald-400/10 text-emerald-100/90`;
-    if (st === "ARCHIVED")
-      return `${base} border-white/10 bg-white/5 text-white/55`;
-    return `${base} border-white/10 bg-white/5 text-white/70`;
-  };
+  // --- Derived banner: decision recorded but status didn’t flip (for visibility) ---
+  const statusNorm = normStatus(selected?.status);
+  const decisionNorm = normStatus(latestDecision?.decision);
+  const showsDecisionMismatch =
+    !!selected &&
+    !!latestDecision &&
+    decisionNorm === "APPROVED" &&
+    statusNorm !== "APPROVED" &&
+    statusNorm !== "PROVISIONING" &&
+    statusNorm !== "PROVISIONED";
 
   return (
     <div className="h-full w-full">
       <div className="mx-auto w-full max-w-[1400px] px-4 pb-10 pt-6">
-        {/* Header */}
         <div className="mb-5 flex items-end justify-between gap-4">
           <div>
-            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
-              CI • Admissions
-            </div>
-            <div className="mt-1 text-2xl font-semibold text-white/90">
-              Admissions Console
-            </div>
+            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">CI • Admissions</div>
+            <div className="mt-1 text-2xl font-semibold text-white/90">Admissions Console</div>
             <div className="mt-1 text-sm text-white/50">
-              Entity-scoped:{" "}
-              <span className="text-white/70">{entityName || entityKey}</span> •
-              Lane:{" "}
+              Entity-scoped: <span className="text-white/70">{entityName || entityKey}</span> • Lane:{" "}
               <span className="text-white/70">{isTest ? "SANDBOX" : "RoT"}</span>
             </div>
           </div>
@@ -724,65 +546,47 @@ export default function CiAdmissionsPage() {
         </div>
 
         <div className="grid grid-cols-12 gap-4">
-          {/* Left: inbox */}
+          {/* Left: Inbox */}
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
-                <div className="text-xs font-semibold tracking-wide text-white/80">
-                  Inbox
-                </div>
+                <div className="flex items-center justify-between">
+                  <div className="text-xs font-semibold tracking-wide text-white/80">Inbox</div>
 
-                <div className="mt-3 flex items-center justify-between gap-2">
-                  <div className="flex flex-wrap gap-2">
-                    <Pill
-                      active={topTab === "INBOX"}
-                      onClick={() => setTopTab("INBOX")}
-                    >
-                      Inbox
-                    </Pill>
-                    <Pill
-                      active={topTab === "INTAKE"}
-                      onClick={() => setTopTab("INTAKE")}
-                    >
-                      Intake
-                    </Pill>
-                    <Pill
-                      active={topTab === "ALL"}
-                      onClick={() => setTopTab("ALL")}
-                    >
-                      All
-                    </Pill>
-                    <Pill
-                      active={topTab === "ARCHIVED"}
-                      onClick={() => setTopTab("ARCHIVED")}
-                    >
-                      Archived
-                    </Pill>
+                  <div className="flex gap-2">
+                    {(["INBOX", "INTAKE", "ALL", "ARCHIVED"] as Tab[]).map((t) => (
+                      <button
+                        key={t}
+                        onClick={() => setTab(t)}
+                        className={cx(
+                          "rounded-full px-3 py-1 text-[11px] font-medium",
+                          tab === t
+                            ? "bg-white/8 text-white/85 ring-1 ring-white/12"
+                            : "text-white/55 hover:text-white/75"
+                        )}
+                      >
+                        {t === "INBOX" ? "Inbox" : t === "INTAKE" ? "Intake" : t === "ALL" ? "All" : "Archived"}
+                      </button>
+                    ))}
                   </div>
                 </div>
 
-                {topTab === "INBOX" && (
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <Pill
-                      active={subTab === "BOTH"}
-                      onClick={() => setSubTab("BOTH")}
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {(["BOTH", "INTAKE", "PROVISIONED"] as LaneFilter[]).map((f) => (
+                    <button
+                      key={f}
+                      onClick={() => setLaneFilter(f)}
+                      className={cx(
+                        "rounded-full px-3 py-1 text-[11px] font-medium",
+                        laneFilter === f
+                          ? "bg-emerald-400/10 text-emerald-200 ring-1 ring-emerald-300/20"
+                          : "text-white/55 hover:text-white/75"
+                      )}
                     >
-                      BOTH
-                    </Pill>
-                    <Pill
-                      active={subTab === "INTAKE"}
-                      onClick={() => setSubTab("INTAKE")}
-                    >
-                      INTAKE
-                    </Pill>
-                    <Pill
-                      active={subTab === "PROVISIONED"}
-                      onClick={() => setSubTab("PROVISIONED")}
-                    >
-                      PROVISIONED
-                    </Pill>
-                  </div>
-                )}
+                      {f}
+                    </button>
+                  ))}
+                </div>
 
                 <div className="mt-3">
                   <input
@@ -800,22 +604,17 @@ export default function CiAdmissionsPage() {
                 ) : err ? (
                   <div className="p-4 text-sm text-rose-200">{err}</div>
                 ) : filtered.length === 0 ? (
-                  <div className="p-4 text-sm text-white/50">
-                    No applications found.
-                  </div>
+                  <div className="p-4 text-sm text-white/50">No applications found.</div>
                 ) : (
                   <div className="space-y-2 p-2">
-                    {filtered.map((a) => {
-                      const active = a.id === selectedId;
-                      const name =
-                        a.organization_trade_name ||
-                        a.organization_legal_name ||
-                        a.applicant_email ||
-                        a.id;
+                    {filtered.map((r) => {
+                      const active = r.id === selectedId;
+                      const name = r.organization_trade_name || r.organization_legal_name || r.applicant_email || r.id;
+                      const status = r.status || "—";
                       return (
                         <button
-                          key={a.id}
-                          onClick={() => setSelectedId(a.id)}
+                          key={r.id}
+                          onClick={() => setSelectedId(r.id)}
                           className={cx(
                             "w-full rounded-2xl border p-4 text-left transition",
                             active
@@ -825,15 +624,13 @@ export default function CiAdmissionsPage() {
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
-                              <div className="truncate text-sm font-semibold text-white/88">
-                                {name}
-                              </div>
+                              <div className="truncate text-sm font-semibold text-white/88">{name}</div>
                               <div className="mt-1 truncate text-xs text-white/45">
-                                {a.applicant_email || "—"}
+                                {r.applicant_email || r.organization_email || "—"}
                               </div>
                             </div>
-                            <span className={statusBadge(a.status)}>
-                              {a.status || "—"}
+                            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/70">
+                              {status}
                             </span>
                           </div>
                         </button>
@@ -843,20 +640,17 @@ export default function CiAdmissionsPage() {
                 )}
               </div>
 
-              <div className="border-t border-white/10 p-3 text-[10px] text-white/35">
-                Lane note: UI is lane-aware via OS env. Query is lane-filtered
-                only if the view exposes lane columns.
+              <div className="border-t border-white/10 p-4 text-[11px] text-white/40">
+                Lane note: UI is lane-aware via OS env. Query is lane-filtered only if the view exposes lane columns.
               </div>
             </div>
           </div>
 
-          {/* Middle: application details */}
+          {/* Middle: Application */}
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
-                <div className="text-xs font-semibold tracking-wide text-white/80">
-                  Application
-                </div>
+                <div className="text-xs font-semibold tracking-wide text-white/80">Application</div>
                 <div className="mt-1 truncate text-sm text-white/60">
                   {selected ? appTitle : "Select an application"}
                 </div>
@@ -864,572 +658,472 @@ export default function CiAdmissionsPage() {
 
               <div className="p-4">
                 {!selected ? (
-                  <div className="text-sm text-white/50">
-                    Select an application.
-                  </div>
+                  <div className="text-sm text-white/50">Select an application to review.</div>
                 ) : (
-                  <div className="space-y-4">
+                  <>
+                    {showsDecisionMismatch ? (
+                      <div className="mb-4 rounded-2xl border border-amber-300/20 bg-amber-400/10 p-4">
+                        <div className="text-sm font-semibold text-amber-200">
+                          Decision recorded • status not flipped
+                        </div>
+                        <div className="mt-1 text-xs text-white/60">
+                          Latest decision is <span className="text-white/80">APPROVED</span>, but application status
+                          remains <span className="text-white/80">{selected.status || "—"}</span>. Use{" "}
+                          <span className="text-white/80">Approve (Decision)</span> again or set status via authority
+                          action (RPC-only).
+                        </div>
+                      </div>
+                    ) : null}
+
                     <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
-                      <Row
-                        k="Org (legal)"
-                        v={selected.organization_legal_name || "—"}
-                      />
-                      <Row
-                        k="Org (trade)"
-                        v={selected.organization_trade_name || "—"}
-                      />
-                      <Row k="Applicant" v={selected.applicant_email || "—"} />
-                      <Row k="Status" v={selected.status || "—"} />
-                      <Row k="App ID" v={selected.id} />
-                      <Row k="Created" v={selected.created_at || "—"} />
-                      <Row k="Updated" v={selected.updated_at || "—"} />
+                      <KV k="Org (Legal)" v={selected.organization_legal_name || "—"} />
+                      <KV k="Org (Trade)" v={selected.organization_trade_name || "—"} />
+                      <KV k="Applicant" v={selected.applicant_email || "—"} />
+                      <KV k="Status" v={selected.status || "—"} />
+                      <KV k="App ID" v={selected.id} mono />
+                      <KV k="Created" v={selected.created_at || "—"} />
+                      <KV k="Updated" v={selected.updated_at || "—"} />
                     </div>
 
-                    <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                      <div className="text-xs font-semibold tracking-wide text-white/80">
-                        Request / Intent
+                    <div className="mt-4 rounded-2xl border border-white/10 bg-black/18 p-4">
+                      <FieldLabel>Request / Intent</FieldLabel>
+                      <div className="mt-2 text-sm text-white/75">
+                        {selected.request_brief || selected.intent || "—"}
                       </div>
-                      <div className="mt-2 whitespace-pre-wrap text-sm text-white/75">
-                        {meta?.request_brief ? String(meta.request_brief) : "—"}
-                      </div>
-                      <div className="mt-2 text-xs text-white/45">
-                        Requested services:{" "}
-                        <span className="text-white/70">
-                          {selected.requested_services
-                            ? JSON.stringify(selected.requested_services)
-                            : "—"}
-                        </span>
-                      </div>
+
+                      {selected.services_label ? (
+                        <div className="mt-2 text-xs text-white/45">
+                          Requested services:{" "}
+                          <span className="text-white/70">{selected.services_label}</span>
+                        </div>
+                      ) : null}
                     </div>
 
-                    <div className="rounded-2xl border border-white/10 bg-black/18 p-4">
+                    <div className="mt-4 rounded-2xl border border-white/10 bg-black/18 p-4">
                       <div className="flex items-center justify-between gap-3">
-                        <div className="text-xs font-semibold tracking-wide text-white/80">
-                          Metadata
-                        </div>
-                        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/60">
-                          jsonb
-                        </span>
-                      </div>
-
-                      <div className="mt-3 space-y-3">
-                        <Row
-                          k="source"
-                          v={meta?.source ? String(meta.source) : "—"}
-                        />
-                        <Row
-                          k="notes"
-                          v={meta?.notes ? String(meta.notes) : "—"}
-                        />
-
-                        <div className="mt-3 rounded-2xl border border-white/10 bg-black/25 p-3">
-                          <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">
-                            raw
+                        <div>
+                          <FieldLabel>Decision (audit)</FieldLabel>
+                          <div className="mt-2 text-sm text-white/75">
+                            {latestDecision ? (
+                              <>
+                                <span className="text-white/90 font-semibold">
+                                  {latestDecision.decision || "—"}
+                                </span>
+                                {latestDecision.risk_tier ? (
+                                  <span className="ml-2 rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[11px] text-white/70">
+                                    {latestDecision.risk_tier}
+                                  </span>
+                                ) : null}
+                              </>
+                            ) : (
+                              "No decision recorded yet."
+                            )}
                           </div>
-                          <pre className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-5 text-white/70">
-                            {safePrettyJSON(selected.metadata)}
-                          </pre>
+                          {latestDecision?.summary ? (
+                            <div className="mt-2 text-xs text-white/55">{latestDecision.summary}</div>
+                          ) : null}
+                          {latestDecision?.reason ? (
+                            <div className="mt-2 text-xs text-white/45">{latestDecision.reason}</div>
+                          ) : null}
+                          {decisionErr ? <div className="mt-2 text-xs text-rose-200">{decisionErr}</div> : null}
+                        </div>
+
+                        <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] text-white/60">
+                          RPC-only
                         </div>
                       </div>
                     </div>
 
-                    {note && (
-                      <div className="rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-white/70">
-                        {note}
-                      </div>
-                    )}
-                  </div>
+                    <div className="mt-4 text-xs text-white/40">
+                      (No raw JSON panel here — keeping the operator surface calm.)
+                    </div>
+                  </>
                 )}
               </div>
             </div>
           </div>
 
-          {/* Right: authority */}
+          {/* Right: Authority Panel */}
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
-                <div className="text-xs font-semibold tracking-wide text-white/80">
-                  Authority Panel
-                </div>
-                <div className="mt-1 truncate text-sm text-white/60">
-                  Review • Requests • Tasks • Decisions
-                </div>
+                <div className="text-xs font-semibold tracking-wide text-white/80">Authority Panel</div>
+                <div className="mt-1 text-sm text-white/55">Review • Requests • Tasks • Decisions</div>
               </div>
 
               <div className="p-4">
-                <div className="flex flex-col gap-2">
-                  <button
-                    onClick={rpcBeginReview}
-                    disabled={!selected || busy}
-                    className={cx(
-                      "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
-                      selected && !busy
-                        ? "border-white/10 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/14 hover:border-emerald-300/25"
-                        : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
-                    )}
-                  >
-                    Begin Review
-                  </button>
+                {!selected ? (
+                  <div className="text-sm text-white/50">Select an application to access authority actions.</div>
+                ) : (
+                  <>
+                    <div className="space-y-2">
+                      <button
+                        onClick={() => setModal({ kind: "BEGIN_REVIEW" })}
+                        className="w-full rounded-2xl border border-emerald-300/18 bg-emerald-500/10 px-4 py-3 text-sm font-semibold text-emerald-100 hover:bg-emerald-500/14"
+                      >
+                        Begin Review
+                      </button>
 
-                  <button
-                    onClick={() => setTasksOpen(true)}
-                    disabled={!selected || busy}
-                    className={cx(
-                      "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
-                      selected && !busy
-                        ? "border-white/10 bg-amber-400/10 text-amber-100 hover:bg-amber-400/14 hover:border-amber-300/25"
-                        : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
-                    )}
-                  >
-                    Request Documents (Tasks)
-                  </button>
+                      <button
+                        onClick={() => {
+                          setTasks(defaultTasksRef.current.map((t) => ({ ...t })));
+                          setCustomTask("");
+                          setModal({ kind: "TASKS" });
+                        }}
+                        className="w-full rounded-2xl border border-amber-300/14 bg-amber-400/10 px-4 py-3 text-sm font-semibold text-amber-100 hover:bg-amber-400/14"
+                      >
+                        Request Documents (Tasks)
+                      </button>
 
-                  <button
-                    onClick={() => setNeedsInfoOpen(true)}
-                    disabled={!selected || busy}
-                    className={cx(
-                      "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
-                      selected && !busy
-                        ? "border-white/10 bg-white/5 text-white/85 hover:border-amber-300/20 hover:bg-white/7"
-                        : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
-                    )}
-                  >
-                    Needs Info (Message)
-                  </button>
+                      <button
+                        onClick={() => setModal({ kind: "NEEDS_INFO" })}
+                        className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-white/85 hover:border-white/16 hover:bg-white/7"
+                      >
+                        Needs Info (Message)
+                      </button>
 
-                  <button
-                    onClick={() => setApproveOpen(true)}
-                    disabled={!selected || busy}
-                    className={cx(
-                      "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
-                      selected && !busy
-                        ? "border-white/10 bg-white/5 text-white/85 hover:border-amber-300/20 hover:bg-white/7"
-                        : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
-                    )}
-                  >
-                    Approve (Decision)
-                  </button>
+                      <button
+                        onClick={() => setModal({ kind: "APPROVE" })}
+                        className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-white/85 hover:border-white/16 hover:bg-white/7"
+                      >
+                        Approve (Decision)
+                      </button>
 
-                  <button
-                    onClick={() => setArchiveOpen(true)}
-                    disabled={!selected || busy}
-                    className={cx(
-                      "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
-                      selected && !busy
-                        ? "border-white/10 bg-white/5 text-white/70 hover:border-white/16 hover:bg-white/7"
-                        : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
-                    )}
-                  >
-                    Archive (soft)
-                  </button>
+                      <button
+                        onClick={() => setModal({ kind: "ARCHIVE" })}
+                        className="w-full rounded-2xl border border-white/10 bg-white/4 px-4 py-3 text-sm font-semibold text-white/75 hover:border-white/16 hover:bg-white/6"
+                      >
+                        Archive (soft)
+                      </button>
 
-                  <button
-                    onClick={() => setDeleteOpen(true)}
-                    disabled={!selected || busy}
-                    className={cx(
-                      "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
-                      selected && !busy
-                        ? "border-rose-300/18 bg-rose-500/10 text-rose-100 hover:bg-rose-500/14"
-                        : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
-                    )}
-                  >
-                    Hard Delete
-                  </button>
-
-                  <div className="mt-2 rounded-2xl border border-white/10 bg-black/18 p-4 text-sm text-white/60">
-                    <div className="font-semibold text-white/80">Contract</div>
-                    <div className="mt-1">
-                      Tasks feed client portal evidence. Mutations are RPC-only.
-                      Lane is read from OS env; inbox is lane-filtered when view
-                      exposes <span className="font-mono">lane_is_test</span>.
+                      <button
+                        onClick={() => setModal({ kind: "HARD_DELETE" })}
+                        className="w-full rounded-2xl border border-rose-300/18 bg-rose-500/10 px-4 py-3 text-sm font-semibold text-rose-100 hover:bg-rose-500/14"
+                      >
+                        Hard Delete
+                      </button>
                     </div>
-                  </div>
+
+                    <div className="mt-4 rounded-2xl border border-white/10 bg-black/18 p-4 text-xs text-white/50">
+                      <div className="text-white/70 font-semibold">Contract</div>
+                      <div className="mt-2">
+                        Tasks feed client portal evidence. Mutations are RPC-only. Lane is read from OS env; inbox is
+                        lane-filtered when the view exposes lane columns.
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-5 text-[10px] text-white/35">
+          Source: public.v_onboarding_admissions_inbox • entity_slug={entityKey} • lane={isTest ? "SANDBOX" : "RoT"}
+        </div>
+      </div>
+
+      {/* --- Modals --- */}
+      {modal?.kind === "BEGIN_REVIEW" && selected ? (
+        <ModalShell title="Begin review" subtitle={appTitle} onClose={closeModal}>
+          <div className="rounded-2xl border border-emerald-300/15 bg-emerald-500/10 p-4 text-sm text-emerald-100">
+            This moves the application into <span className="font-semibold">IN_REVIEW</span> (RPC-only).
+          </div>
+
+          <div className="mt-5 flex items-center justify-end gap-2">
+            <button
+              onClick={closeModal}
+              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-semibold text-white/75 hover:bg-white/7"
+            >
+              Cancel
+            </button>
+            <button
+              disabled={busy}
+              onClick={rpcBeginReview}
+              className={cx(
+                "rounded-full border border-emerald-300/18 bg-emerald-500/12 px-4 py-2 text-xs font-semibold text-emerald-100",
+                busy && "opacity-60"
+              )}
+            >
+              {busy ? "Working…" : "Begin Review"}
+            </button>
+          </div>
+        </ModalShell>
+      ) : null}
+
+      {modal?.kind === "NEEDS_INFO" && selected ? (
+        <ModalShell title="Needs info" subtitle={appTitle} onClose={closeModal}>
+          <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
+            <FieldLabel>Message</FieldLabel>
+            <textarea
+              value={needsInfoMsg}
+              onChange={(e) => setNeedsInfoMsg(e.target.value)}
+              rows={4}
+              className="mt-2 w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white/85 placeholder:text-white/35 outline-none focus:border-amber-300/25"
+              placeholder="What do you need from the applicant?"
+            />
+
+            <div className="mt-3 flex items-center gap-3">
+              <div className="flex-1">
+                <FieldLabel>Due (days)</FieldLabel>
+                <input
+                  value={String(needsInfoDueDays)}
+                  onChange={(e) => setNeedsInfoDueDays(Number(e.target.value || 7))}
+                  className="mt-2 w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
+                />
+              </div>
+              <div className="flex-1">
+                <FieldLabel>Channel</FieldLabel>
+                <div className="mt-2 rounded-2xl border border-white/10 bg-black/25 px-4 py-2 text-sm text-white/70">
+                  email
                 </div>
               </div>
             </div>
           </div>
-        </div>
 
-        {/* footer */}
-        <div className="mt-5 text-[10px] text-white/35">
-          Source: public.v_onboarding_admissions_inbox • entity_slug={entityKey} •
-          lane={isTest ? "SANDBOX" : "RoT"}
-        </div>
-      </div>
-
-      {/* Approve modal */}
-      <OsModal
-        open={approveOpen}
-        title="Approve for provisioning"
-        subtitle={selected ? appTitle : undefined}
-        confirmText={busy ? "Working…" : "Approve"}
-        cancelText="Cancel"
-        busy={busy}
-        onClose={() => (!busy ? setApproveOpen(false) : null)}
-        onConfirm={rpcApprove}
-      >
-        <div className="space-y-4">
-          <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-            <div className="text-xs font-semibold tracking-wide text-white/80">
-              Risk tier
-            </div>
-            <select
-              value={approveRisk}
-              onChange={(e) => setApproveRisk(e.target.value)}
-              className="mt-2 w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
+          <div className="mt-5 flex items-center justify-end gap-2">
+            <button
+              onClick={closeModal}
+              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-semibold text-white/75 hover:bg-white/7"
             >
-              <option value="low">low</option>
-              <option value="medium">medium</option>
-              <option value="high">high</option>
-            </select>
+              Cancel
+            </button>
+            <button
+              disabled={busy}
+              onClick={rpcNeedsInfo}
+              className={cx(
+                "rounded-full border border-white/12 bg-white/8 px-4 py-2 text-xs font-semibold text-white/85 hover:bg-white/10",
+                busy && "opacity-60"
+              )}
+            >
+              {busy ? "Working…" : "Send Needs Info"}
+            </button>
+          </div>
+        </ModalShell>
+      ) : null}
+
+      {modal?.kind === "TASKS" && selected ? (
+        <ModalShell title="Request documents (tasks)" subtitle={appTitle} onClose={closeModal}>
+          <div className="rounded-2xl border border-amber-300/12 bg-amber-400/10 p-4 text-sm text-amber-100">
+            This creates a checklist task payload for provisioning/evidence. (RPC-only)
           </div>
 
-          <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-            <div className="text-xs font-semibold tracking-wide text-white/80">
-              Decision summary
-            </div>
-            <input
-              value={approveSummary}
-              onChange={(e) => setApproveSummary(e.target.value)}
-              className="mt-2 w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
-              placeholder="Approved for provisioning."
-            />
-            <div className="mt-3 text-xs text-white/40">
-              Calls{" "}
-              <span className="font-mono text-white/65">
-                admissions_record_decision
-              </span>{" "}
-              (production contract).
-            </div>
-          </div>
-
-          <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-            <div className="text-xs font-semibold tracking-wide text-white/80">
-              Reason (optional)
-            </div>
-            <textarea
-              value={approveReason}
-              onChange={(e) => setApproveReason(e.target.value)}
-              className="mt-2 min-h-[88px] w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
-              placeholder="Operator rationale (optional)."
-            />
-          </div>
-        </div>
-      </OsModal>
-
-      {/* Needs info modal */}
-      <OsModal
-        open={needsInfoOpen}
-        title="Request additional information"
-        subtitle={selected ? appTitle : undefined}
-        confirmText={busy ? "Working…" : "Send request"}
-        cancelText="Cancel"
-        busy={busy}
-        onClose={() => (!busy ? setNeedsInfoOpen(false) : null)}
-        onConfirm={rpcNeedsInfo}
-      >
-        <div className="space-y-4">
-          <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-            <div className="text-xs font-semibold tracking-wide text-white/80">
-              Message
-            </div>
-            <textarea
-              value={infoMessage}
-              onChange={(e) => setInfoMessage(e.target.value)}
-              className="mt-2 min-h-[110px] w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
-              placeholder="What do you need from the applicant?"
-            />
-          </div>
-
-          <div className="grid grid-cols-12 gap-3">
-            <div className="col-span-12 md:col-span-6 rounded-2xl border border-white/10 bg-black/20 p-4">
-              <div className="text-xs font-semibold tracking-wide text-white/80">
-                Channels
-              </div>
-              <label className="mt-2 flex items-center gap-2 text-sm text-white/75">
-                <input
-                  type="checkbox"
-                  checked={infoChannels.email}
-                  onChange={(e) =>
-                    setInfoChannels((s) => ({ ...s, email: e.target.checked }))
-                  }
-                />
-                Email
-              </label>
-              <label className="mt-2 flex items-center gap-2 text-sm text-white/75">
-                <input
-                  type="checkbox"
-                  checked={infoChannels.sms}
-                  onChange={(e) =>
-                    setInfoChannels((s) => ({ ...s, sms: e.target.checked }))
-                  }
-                />
-                SMS
-              </label>
+          <div className="mt-4 rounded-2xl border border-white/10 bg-black/25 p-4">
+            <FieldLabel>Checklist</FieldLabel>
+            <div className="mt-3 space-y-2">
+              {tasks.map((t) => (
+                <label
+                  key={t.id}
+                  className="flex cursor-pointer items-center justify-between gap-3 rounded-2xl border border-white/10 bg-black/15 px-4 py-3 hover:border-white/14"
+                >
+                  <div className="text-sm text-white/80">{t.label}</div>
+                  <input
+                    type="checkbox"
+                    checked={t.done}
+                    onChange={(e) =>
+                      setTasks((prev) => prev.map((x) => (x.id === t.id ? { ...x, done: e.target.checked } : x)))
+                    }
+                    className="h-4 w-4 accent-amber-300"
+                  />
+                </label>
+              ))}
             </div>
 
-            <div className="col-span-12 md:col-span-6 rounded-2xl border border-white/10 bg-black/20 p-4">
-              <div className="text-xs font-semibold tracking-wide text-white/80">
-                Due date (optional)
-              </div>
+            <div className="mt-4 flex items-center gap-2">
               <input
-                type="date"
-                value={infoDue}
-                onChange={(e) => setInfoDue(e.target.value)}
-                className="mt-2 w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
+                value={customTask}
+                onChange={(e) => setCustomTask(e.target.value)}
+                placeholder="Add custom checklist item…"
+                className="flex-1 rounded-2xl border border-white/10 bg-black/25 px-4 py-2 text-sm text-white/85 placeholder:text-white/35 outline-none focus:border-amber-300/25"
               />
-              <div className="mt-2 text-xs text-white/40">
-                Sets due_at to end-of-day UTC.
-              </div>
-            </div>
-          </div>
-        </div>
-      </OsModal>
-
-      {/* Tasks modal (RESTORED) */}
-      <OsModal
-        open={tasksOpen}
-        title="Request documents (client tasks)"
-        subtitle={selected ? appTitle : undefined}
-        confirmText={busy ? "Working…" : "Create tasks"}
-        cancelText="Cancel"
-        busy={busy}
-        onClose={() => {
-          if (busy) return;
-          setTasksOpen(false);
-          resetTasksToDefaults();
-        }}
-        onConfirm={rpcCreateTasks}
-      >
-        <div className="space-y-4">
-          <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-            <div className="text-xs font-semibold tracking-wide text-white/80">
-              Checklist (auto-populated)
-            </div>
-            <div className="mt-2 text-xs text-white/45">
-              These tasks surface in the client portal and drive the evidence
-              upload lane.
-            </div>
-
-            <div className="mt-4 max-h-[260px] overflow-auto rounded-2xl border border-white/10 bg-black/25 p-2">
-              <div className="space-y-2 p-2">
-                {taskTemplates.map((t, idx) => (
-                  <div
-                    key={t.task_key}
-                    className="rounded-2xl border border-white/10 bg-black/20 p-3"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <label className="flex items-start gap-3">
-                        <input
-                          type="checkbox"
-                          checked={t.enabled}
-                          onChange={(e) => {
-                            const on = e.target.checked;
-                            setTaskTemplates((prev) => {
-                              const next = [...prev];
-                              next[idx] = { ...next[idx], enabled: on };
-                              return next;
-                            });
-                          }}
-                          className="mt-1"
-                        />
-                        <div className="min-w-0">
-                          <div className="text-sm font-semibold text-white/85">
-                            {t.title}
-                          </div>
-                          <div className="mt-1 text-xs text-white/45">
-                            {t.notes}
-                          </div>
-                          <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-white/55">
-                            <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5">
-                              key:{" "}
-                              <span className="font-mono text-white/70">
-                                {t.task_key}
-                              </span>
-                            </span>
-                            <span
-                              className={cx(
-                                "rounded-full border px-2 py-0.5",
-                                t.required
-                                  ? "border-amber-300/20 bg-amber-400/10 text-amber-100/85"
-                                  : "border-white/10 bg-white/5 text-white/60"
-                              )}
-                            >
-                              {t.required ? "required" : "optional"}
-                            </span>
-                          </div>
-                        </div>
-                      </label>
-
-                      <div className="flex flex-col items-end gap-2">
-                        <label className="flex items-center gap-2 text-xs text-white/65">
-                          <input
-                            type="checkbox"
-                            checked={t.required}
-                            onChange={(e) => {
-                              const on = e.target.checked;
-                              setTaskTemplates((prev) => {
-                                const next = [...prev];
-                                next[idx] = { ...next[idx], required: on };
-                                return next;
-                              });
-                            }}
-                          />
-                          Required
-                        </label>
-
-                        <div className="flex items-center gap-2">
-                          <span className="text-[11px] text-white/45">Due</span>
-                          <input
-                            type="date"
-                            value={t.due || ""}
-                            onChange={(e) => {
-                              const v = e.target.value;
-                              setTaskTemplates((prev) => {
-                                const next = [...prev];
-                                next[idx] = { ...next[idx], due: v };
-                                return next;
-                              });
-                            }}
-                            className="rounded-xl border border-white/10 bg-black/30 px-2 py-1 text-[12px] text-white/80 outline-none focus:border-amber-300/25"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="mt-3 flex flex-wrap gap-2">
               <button
-                disabled={busy}
-                onClick={() =>
-                  setTaskTemplates((prev) =>
-                    prev.map((t) => ({ ...t, enabled: true }))
-                  )
-                }
-                className={cx(
-                  "rounded-full border px-3 py-1.5 text-[11px] font-semibold transition",
-                  busy
-                    ? "border-white/10 bg-white/3 text-white/35"
-                    : "border-white/10 bg-white/5 text-white/75 hover:bg-white/7 hover:border-white/15"
-                )}
+                onClick={() => {
+                  const v = customTask.trim();
+                  if (!v) return;
+                  setTasks((prev) => [
+                    { id: `custom_${Date.now()}`, label: v, done: false },
+                    ...prev,
+                  ]);
+                  setCustomTask("");
+                }}
+                className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-xs font-semibold text-white/80 hover:bg-white/7"
               >
-                Select all
-              </button>
-              <button
-                disabled={busy}
-                onClick={() =>
-                  setTaskTemplates((prev) =>
-                    prev.map((t) => ({ ...t, enabled: false }))
-                  )
-                }
-                className={cx(
-                  "rounded-full border px-3 py-1.5 text-[11px] font-semibold transition",
-                  busy
-                    ? "border-white/10 bg-white/3 text-white/35"
-                    : "border-white/10 bg-white/5 text-white/75 hover:bg-white/7 hover:border-white/15"
-                )}
-              >
-                Clear
+                Add
               </button>
             </div>
           </div>
 
-          <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-            <div className="text-xs font-semibold tracking-wide text-white/80">
-              Add custom document (optional)
+          <div className="mt-5 flex items-center justify-end gap-2">
+            <button
+              onClick={closeModal}
+              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-semibold text-white/75 hover:bg-white/7"
+            >
+              Cancel
+            </button>
+            <button
+              disabled={busy}
+              onClick={rpcCreateTasks}
+              className={cx(
+                "rounded-full border border-amber-300/16 bg-amber-400/12 px-4 py-2 text-xs font-semibold text-amber-100 hover:bg-amber-400/14",
+                busy && "opacity-60"
+              )}
+            >
+              {busy ? "Working…" : "Create Tasks"}
+            </button>
+          </div>
+        </ModalShell>
+      ) : null}
+
+      {modal?.kind === "APPROVE" && selected ? (
+        <ModalShell title="Approve (decision)" subtitle={appTitle} onClose={closeModal}>
+          <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
+            <FieldLabel>Decision</FieldLabel>
+            <div className="mt-2 text-sm text-white/75">
+              This writes an auditable decision record and flips application status to{" "}
+              <span className="text-white/90 font-semibold">APPROVED</span>.
             </div>
-            <input
-              value={taskCustomTitle}
-              onChange={(e) => setTaskCustomTitle(e.target.value)}
-              className="mt-2 w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
-              placeholder="e.g., Shareholder Agreement"
-            />
-            <textarea
-              value={taskCustomNotes}
-              onChange={(e) => setTaskCustomNotes(e.target.value)}
-              className="mt-3 min-h-[78px] w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
-              placeholder="Notes for the client (what to upload, format, etc.)"
-            />
-            <label className="mt-3 flex items-center gap-2 text-sm text-white/70">
+
+            <div className="mt-4 grid grid-cols-2 gap-3">
+              <div>
+                <FieldLabel>Risk tier</FieldLabel>
+                <select
+                  value={riskTier}
+                  onChange={(e) => setRiskTier(e.target.value)}
+                  className="mt-2 w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
+                >
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                </select>
+              </div>
+              <div>
+                <FieldLabel>Decision</FieldLabel>
+                <div className="mt-2 rounded-2xl border border-white/10 bg-black/25 px-4 py-2 text-sm text-white/70">
+                  approved
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4">
+              <FieldLabel>Summary</FieldLabel>
               <input
-                type="checkbox"
-                checked={taskCustomRequired}
-                onChange={(e) => setTaskCustomRequired(e.target.checked)}
+                value={decisionSummary}
+                onChange={(e) => setDecisionSummary(e.target.value)}
+                className="mt-2 w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
+                placeholder="Short decision summary for audit."
               />
-              Required
-            </label>
+            </div>
 
-            <div className="mt-3 text-xs text-white/40">
-              Calls{" "}
-              <span className="font-mono text-white/65">
-                admissions_create_provisioning_tasks
-              </span>{" "}
-              with a JSONB task list.
+            <div className="mt-4">
+              <FieldLabel>Reason (optional)</FieldLabel>
+              <textarea
+                value={decisionReason}
+                onChange={(e) => setDecisionReason(e.target.value)}
+                rows={3}
+                className="mt-2 w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white/85 outline-none focus:border-amber-300/25"
+                placeholder="Optional rationale."
+              />
             </div>
           </div>
-        </div>
-      </OsModal>
 
-      {/* Archive modal */}
-      <OsModal
-        open={archiveOpen}
-        title="Archive application (soft)"
-        subtitle={selected ? appTitle : undefined}
-        confirmText={busy ? "Working…" : "Archive"}
-        cancelText="Cancel"
-        busy={busy}
-        onClose={() => (!busy ? setArchiveOpen(false) : null)}
-        onConfirm={rpcArchiveSoft}
-      >
-        <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
-          <div className="text-xs font-semibold tracking-wide text-white/80">
-            Note
+          <div className="mt-5 flex items-center justify-end gap-2">
+            <button
+              onClick={closeModal}
+              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-semibold text-white/75 hover:bg-white/7"
+            >
+              Cancel
+            </button>
+            <button
+              disabled={busy}
+              onClick={rpcApproveDecision}
+              className={cx(
+                "rounded-full border border-white/12 bg-white/8 px-4 py-2 text-xs font-semibold text-white/90 hover:bg-white/10",
+                busy && "opacity-60"
+              )}
+            >
+              {busy ? "Working…" : "Approve"}
+            </button>
           </div>
-          <input
-            value={archiveNote}
-            onChange={(e) => setArchiveNote(e.target.value)}
-            className="mt-2 w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-white/85 outline-none focus:border-amber-300/25"
-            placeholder="Archived by authority."
-          />
-          <div className="text-xs text-white/40">
-            Sets status to{" "}
-            <span className="font-mono text-white/65">ARCHIVED</span> via RPC.
-          </div>
-        </div>
-      </OsModal>
+        </ModalShell>
+      ) : null}
 
-      {/* Delete modal */}
-      <OsModal
-        open={deleteOpen}
-        title="Hard delete (irreversible)"
-        subtitle={selected ? appTitle : undefined}
-        confirmText={busy ? "Working…" : "Delete"}
-        cancelText="Cancel"
-        danger
-        busy={busy}
-        onClose={() => (!busy ? setDeleteOpen(false) : null)}
-        onConfirm={rpcHardDelete}
-      >
-        <div className="space-y-3 rounded-2xl border border-rose-300/15 bg-rose-500/10 p-4">
-          <div className="text-xs font-semibold tracking-wide text-rose-100/90">
-            Reason
+      {modal?.kind === "ARCHIVE" && selected ? (
+        <ModalShell title="Archive (soft)" subtitle={appTitle} onClose={closeModal}>
+          <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
+            <div className="text-sm text-white/75">
+              Soft archive moves the record to <span className="text-white/90 font-semibold">ARCHIVED</span> and keeps
+              audit history. (RPC-only)
+            </div>
+
+            <div className="mt-4">
+              <FieldLabel>Reason</FieldLabel>
+              <textarea
+                value={archiveReason}
+                onChange={(e) => setArchiveReason(e.target.value)}
+                rows={3}
+                className="mt-2 w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white/85 outline-none focus:border-amber-300/25"
+              />
+            </div>
           </div>
-          <input
-            value={deleteReason}
-            onChange={(e) => setDeleteReason(e.target.value)}
-            className="mt-2 w-full rounded-2xl border border-rose-300/15 bg-black/30 px-3 py-2 text-sm text-rose-50/90 outline-none focus:border-rose-300/25"
-            placeholder="Why is this being deleted?"
-          />
-          <div className="text-xs text-rose-100/70">
-            This calls{" "}
-            <span className="font-mono">admissions_delete_application</span>. Use
-            only for test/duplicates.
+
+          <div className="mt-5 flex items-center justify-end gap-2">
+            <button
+              onClick={closeModal}
+              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-semibold text-white/75 hover:bg-white/7"
+            >
+              Cancel
+            </button>
+            <button
+              disabled={busy}
+              onClick={rpcArchiveSoft}
+              className={cx(
+                "rounded-full border border-white/12 bg-white/8 px-4 py-2 text-xs font-semibold text-white/85 hover:bg-white/10",
+                busy && "opacity-60"
+              )}
+            >
+              {busy ? "Working…" : "Archive"}
+            </button>
           </div>
-        </div>
-      </OsModal>
+        </ModalShell>
+      ) : null}
+
+      {modal?.kind === "HARD_DELETE" && selected ? (
+        <ModalShell title="Hard delete" subtitle={appTitle} danger onClose={closeModal}>
+          <div className="rounded-2xl border border-rose-300/18 bg-rose-500/12 p-4 text-sm text-rose-100">
+            Hard delete is operator-only and intended for terminal statuses (DECLINED / WITHDRAWN / ARCHIVED).
+            This action is irreversible.
+          </div>
+
+          <div className="mt-4 rounded-2xl border border-white/10 bg-black/25 p-4">
+            <FieldLabel>Reason</FieldLabel>
+            <textarea
+              value={deleteReason}
+              onChange={(e) => setDeleteReason(e.target.value)}
+              rows={3}
+              className="mt-2 w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white/85 outline-none focus:border-rose-300/25"
+            />
+          </div>
+
+          <div className="mt-5 flex items-center justify-end gap-2">
+            <button
+              onClick={closeModal}
+              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-semibold text-white/75 hover:bg-white/7"
+            >
+              Cancel
+            </button>
+            <button
+              disabled={busy}
+              onClick={rpcHardDelete}
+              className={cx(
+                "rounded-full border border-rose-300/18 bg-rose-500/14 px-4 py-2 text-xs font-semibold text-rose-100 hover:bg-rose-500/18",
+                busy && "opacity-60"
+              )}
+            >
+              {busy ? "Working…" : "Delete permanently"}
+            </button>
+          </div>
+        </ModalShell>
+      ) : null}
     </div>
   );
 }
