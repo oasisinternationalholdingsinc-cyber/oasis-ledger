@@ -1,4 +1,3 @@
-```tsx
 // src/app/(console-ledger)/ci-onboarding/ci-admissions/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
@@ -125,7 +124,9 @@ function OsModal({
               Authority • Action
             </div>
             <div className="mt-2 text-xl font-semibold text-white/90">{title}</div>
-            {subtitle ? <div className="mt-1 text-sm text-white/55">{subtitle}</div> : null}
+            {subtitle ? (
+              <div className="mt-1 text-sm text-white/55">{subtitle}</div>
+            ) : null}
           </div>
 
           <div className="relative p-5">{children}</div>
@@ -218,7 +219,7 @@ function dateToDueAtISO(yyyy_mm_dd: string) {
   const d = (yyyy_mm_dd || "").trim();
   if (!d) return null;
   // stable, lane-agnostic: interpret as end-of-day UTC
-  return `${d}T23:59:59.000Z`;
+  return d + "T23:59:59.000Z";
 }
 
 export default function CiAdmissionsPage() {
@@ -233,7 +234,9 @@ export default function CiAdmissionsPage() {
   const entityName: string =
     (ec?.entityName as string) ||
     (ec?.activeEntityName as string) ||
-    (ec?.entities?.find?.((x: any) => x?.slug === entityKey || x?.key === entityKey)?.name as string) ||
+    (ec?.entities?.find?.(
+      (x: any) => x?.slug === entityKey || x?.key === entityKey
+    )?.name as string) ||
     entityKey;
 
   // ---- env lane (defensive) ----
@@ -261,7 +264,9 @@ export default function CiAdmissionsPage() {
   const [modal, setModal] = useState<ModalKind>("NONE");
 
   // Request Info inputs
-  const [reqMessage, setReqMessage] = useState("Please upload the requested evidence so we can complete review.");
+  const [reqMessage, setReqMessage] = useState(
+    "Please upload the requested evidence so we can complete review."
+  );
   const [reqChannels, setReqChannels] = useState<Array<"email" | "sms">>(["email"]);
   const [reqDays, setReqDays] = useState(7);
   const [reqNextStatus, setReqNextStatus] = useState("needs_info");
@@ -279,7 +284,9 @@ export default function CiAdmissionsPage() {
   const [decision, setDecision] = useState<"approved" | "declined">("approved");
   const [riskTier, setRiskTier] = useState<string>("low");
   const [decisionSummary, setDecisionSummary] = useState<string>("Approved for onboarding.");
-  const [decisionReason, setDecisionReason] = useState<string>("Evidence appears sufficient for admission.");
+  const [decisionReason, setDecisionReason] = useState<string>(
+    "Evidence appears sufficient for admission."
+  );
 
   // Set status inputs
   const [statusNext, setStatusNext] = useState<string>("in_review");
@@ -374,7 +381,6 @@ export default function CiAdmissionsPage() {
   }
 
   function resetModalPayload(kind: ModalKind) {
-    // keep defaults calm + deterministic; preload from selected when possible
     setNote(null);
 
     if (kind === "REQUEST_INFO") {
@@ -385,11 +391,9 @@ export default function CiAdmissionsPage() {
     }
 
     if (kind === "CREATE_TASKS") {
-      // default preloaded suggestions (restored)
       const defaults = ["SEND_PORTAL_INVITE", "EVIDENCE_CHECKLIST"];
       setTaskList(defaults);
       setCustomTask("");
-      // meta defaults (required true, due/notes empty)
       const base: Record<string, TaskMeta> = {};
       for (const t of defaults) base[taskTokenId(t)] = { required: true };
       setTaskMetaById(base);
@@ -403,7 +407,6 @@ export default function CiAdmissionsPage() {
     }
 
     if (kind === "APPROVE") {
-      // Approve is a composed action: record_decision + set_status(approved)
       setDecision("approved");
       setRiskTier("low");
       setDecisionSummary("Approved for onboarding.");
@@ -414,7 +417,6 @@ export default function CiAdmissionsPage() {
 
     if (kind === "SET_STATUS") {
       const st = normStatusUpper(selected?.status);
-      // small smart default: if submitted -> in_review, otherwise leave in_review
       setStatusNext(st === "SUBMITTED" ? "in_review" : "in_review");
       setStatusNote("");
     }
@@ -442,7 +444,6 @@ export default function CiAdmissionsPage() {
       setErr(null);
 
       try {
-        // IMPORTANT: only select columns that actually exist on the view
         const cols = [
           "id",
           "status",
@@ -509,9 +510,7 @@ export default function CiAdmissionsPage() {
     const needle = q.trim().toLowerCase();
     let list = apps;
 
-    // Main tabs
     if (tab === "INBOX") {
-      // Active queue (exclude archived/withdrawn/declined if present)
       list = list.filter((a) => {
         const st = normStatusUpper(a.status);
         return !["ARCHIVED", "WITHDRAWN", "DECLINED"].includes(st);
@@ -519,7 +518,6 @@ export default function CiAdmissionsPage() {
     } else if (tab === "ARCHIVED") {
       list = list.filter((a) => normStatusUpper(a.status) === "ARCHIVED");
     } else if (tab === "INTAKE") {
-      // intake pills (restored)
       list = list.filter((a) => {
         const st = normStatusUpper(a.status);
         const isProvisioned = st === "PROVISIONED";
@@ -587,7 +585,6 @@ export default function CiAdmissionsPage() {
       isPreloaded: Boolean(pre),
       label: pre?.label || raw,
       hint: pre?.hint || "",
-      // for preloaded: stable key; for custom: let SQL generate by sending key='custom'
       keyForRPC: pre ? pre.value : "custom",
       titleForRPC: pre ? pre.label : raw,
     };
@@ -602,18 +599,16 @@ export default function CiAdmissionsPage() {
       return;
     }
 
-    // Build jsonb array of task objects:
-    // [{key,title,notes,due_at,required}, ...]
     const payload = rawTasks.map((t) => {
       const d = taskDisplay(t);
-      const meta = taskMetaById[d.id] || {};
-      const notes = (meta.notes || "").trim();
-      const due_at = meta.due_date ? dateToDueAtISO(meta.due_date) : null;
-      const required = meta.required ?? true;
+      const m = taskMetaById[d.id] || {};
+      const notes = (m.notes || "").trim();
+      const due_at = m.due_date ? dateToDueAtISO(m.due_date) : null;
+      const required = m.required ?? true;
 
       return {
-        key: d.keyForRPC,                // preloaded key or "custom"
-        title: d.titleForRPC,            // what client sees
+        key: d.keyForRPC,
+        title: d.titleForRPC,
         notes: notes || null,
         due_at,
         required,
@@ -625,7 +620,7 @@ export default function CiAdmissionsPage() {
     try {
       const { error } = await supabase.rpc("admissions_create_provisioning_tasks", {
         p_application_id: selected.id,
-        p_tasks: payload, // ✅ jsonb array
+        p_tasks: payload,
       });
       if (error) throw error;
 
@@ -646,8 +641,8 @@ export default function CiAdmissionsPage() {
     try {
       const { error } = await supabase.rpc("admissions_record_decision", {
         p_application_id: selected.id,
-        p_decision: decision, // enum should accept 'approved'/'declined' (lowercase)
-        p_risk_tier: riskTier, // must match your enum labels
+        p_decision: decision,
+        p_risk_tier: riskTier,
         p_summary: decisionSummary,
         p_reason: decisionReason,
       });
@@ -737,7 +732,6 @@ export default function CiAdmissionsPage() {
   }
 
   async function rpcApproveComposed() {
-    // ✅ APPROVE = record_decision + set_status(approved)
     if (!selected) return;
     setBusy(true);
     setNote(null);
@@ -781,7 +775,6 @@ export default function CiAdmissionsPage() {
     return `${base} border-white/10 bg-white/5 text-white/70`;
   };
 
-  // modal routing
   const modalOpen = modal !== "NONE";
 
   const modalTitle = useMemo(() => {
@@ -912,11 +905,7 @@ export default function CiAdmissionsPage() {
                   <div className="space-y-2 p-2">
                     {filtered.map((a) => {
                       const active = a.id === selectedId;
-                      const name =
-                        a.organization_trade_name ||
-                        a.organization_legal_name ||
-                        a.applicant_email ||
-                        a.id;
+                      const name = a.organization_trade_name || a.organization_legal_name || a.applicant_email || a.id;
 
                       return (
                         <button
@@ -954,9 +943,7 @@ export default function CiAdmissionsPage() {
             <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
               <div className="border-b border-white/10 p-4">
                 <div className="text-xs font-semibold tracking-wide text-white/80">Application</div>
-                <div className="mt-1 truncate text-sm text-white/60">
-                  {selected ? appTitle : "Select an application"}
-                </div>
+                <div className="mt-1 truncate text-sm text-white/60">{selected ? appTitle : "Select an application"}</div>
               </div>
 
               <div className="p-4">
@@ -996,9 +983,7 @@ export default function CiAdmissionsPage() {
                     </div>
 
                     {note ? (
-                      <div className="rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-white/70">
-                        {note}
-                      </div>
+                      <div className="rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-white/70">{note}</div>
                     ) : null}
                   </div>
                 )}
@@ -1138,8 +1123,8 @@ export default function CiAdmissionsPage() {
                       <div className="font-semibold text-white/80">No regressions</div>
                       <div className="mt-1">
                         Approve logs a decision{" "}
-                        <span className="text-white/85 font-semibold">and</span> sets status to approved.
-                        “Set Status” remains a separate operational control.
+                        <span className="text-white/85 font-semibold">and</span> sets status to approved. “Set Status”
+                        remains a separate operational control.
                       </div>
                     </div>
                   </div>
@@ -1189,9 +1174,7 @@ export default function CiAdmissionsPage() {
                       <button
                         key={c}
                         onClick={() =>
-                          setReqChannels((prev) =>
-                            active ? prev.filter((x) => x !== c) : [...prev, c]
-                          )
+                          setReqChannels((prev) => (active ? prev.filter((x) => x !== c) : [...prev, c]))
                         }
                         className={cx(
                           "rounded-full border px-3 py-1 text-[11px] font-medium transition",
@@ -1297,9 +1280,7 @@ export default function CiAdmissionsPage() {
             <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
               <div className="flex items-center justify-between gap-3">
                 <div className="text-xs uppercase tracking-[0.22em] text-white/35">selected</div>
-                <div className="text-[11px] text-white/45">
-                  {taskList.length ? `${taskList.length} selected` : "—"}
-                </div>
+                <div className="text-[11px] text-white/45">{taskList.length ? `${taskList.length} selected` : "—"}</div>
               </div>
 
               {taskList.length ? (
@@ -1309,10 +1290,7 @@ export default function CiAdmissionsPage() {
                     const m = taskMetaById[d.id] || { required: true };
 
                     return (
-                      <div
-                        key={d.id}
-                        className="rounded-2xl border border-white/10 bg-black/25 p-3"
-                      >
+                      <div key={d.id} className="rounded-2xl border border-white/10 bg-black/25 p-3">
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <div className="truncate text-sm font-semibold text-white/85">{d.label}</div>
@@ -1342,9 +1320,7 @@ export default function CiAdmissionsPage() {
                         <div className="mt-3 grid grid-cols-12 gap-2">
                           {/* Required */}
                           <div className="col-span-12 sm:col-span-4">
-                            <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">
-                              required
-                            </div>
+                            <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">required</div>
                             <button
                               type="button"
                               onClick={() => setTaskMeta(t, { required: !(m.required ?? true) })}
@@ -1361,9 +1337,7 @@ export default function CiAdmissionsPage() {
 
                           {/* Due date */}
                           <div className="col-span-12 sm:col-span-4">
-                            <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">
-                              due date
-                            </div>
+                            <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">due date</div>
                             <input
                               type="date"
                               value={m.due_date || ""}
@@ -1374,9 +1348,7 @@ export default function CiAdmissionsPage() {
 
                           {/* Notes */}
                           <div className="col-span-12 sm:col-span-4">
-                            <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">
-                              notes
-                            </div>
+                            <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">notes</div>
                             <input
                               value={m.notes || ""}
                               onChange={(e) => setTaskMeta(t, { notes: e.target.value })}
@@ -1398,10 +1370,10 @@ export default function CiAdmissionsPage() {
               </div>
             </div>
 
-            {/* small safety note */}
             <div className="rounded-2xl border border-white/10 bg-black/18 p-4 text-xs text-white/55">
               <span className="text-white/75 font-semibold">No regression:</span> preloaded chips still work exactly the same.
-              This only adds optional metadata so clients see <span className="text-white/75 font-semibold">Due</span> and <span className="text-white/75 font-semibold">Required</span>.
+              This only adds optional metadata so clients see <span className="text-white/75 font-semibold">Due</span> and{" "}
+              <span className="text-white/75 font-semibold">Required</span>.
             </div>
           </div>
         ) : null}
@@ -1542,4 +1514,3 @@ export default function CiAdmissionsPage() {
     </div>
   );
 }
-```
