@@ -6,6 +6,8 @@ import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
 
+/* -------------------------------- helpers -------------------------------- */
+
 function cx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
@@ -13,38 +15,6 @@ function cx(...xs: Array<string | false | null | undefined>) {
 function normStatus(s: string | null | undefined) {
   return (s || "").trim().toUpperCase().replace(/[\s-]+/g, "_");
 }
-
-function safePrettyJSON(x: any) {
-  try {
-    if (x == null) return "—";
-    return JSON.stringify(x, null, 2);
-  } catch {
-    return "—";
-  }
-}
-
-type InboxRow = {
-  id: string;
-  status: string | null;
-
-  applicant_email: string | null;
-  organization_email: string | null;
-
-  organization_legal_name: string | null;
-  organization_trade_name: string | null;
-
-  primary_contact_user_id: string | null;
-
-  entity_slug: string | null;
-  created_at: string | null;
-
-  requested_services?: any | null;
-  metadata?: any | null;
-
-  lane_is_test?: boolean | null;
-};
-
-type AppTab = "READY" | "ALL";
 
 function Row({ k, v }: { k: string; v: string }) {
   return (
@@ -55,152 +25,145 @@ function Row({ k, v }: { k: string; v: string }) {
   );
 }
 
+/* -------------------------------- OS MODAL -------------------------------- */
+
+function OsModal({
+  open,
+  title,
+  subtitle,
+  children,
+  confirmText = "Confirm",
+  cancelText = "Cancel",
+  danger,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  open: boolean;
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
+  confirmText?: string;
+  cancelText?: string;
+  danger?: boolean;
+  busy?: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-[100]">
+      <div
+        className="absolute inset-0 bg-black/60 backdrop-blur-[6px]"
+        onClick={busy ? undefined : onClose}
+      />
+      <div className="absolute left-1/2 top-1/2 w-[94vw] max-w-[560px] -translate-x-1/2 -translate-y-1/2">
+        <div className="relative overflow-hidden rounded-3xl border border-white/12 bg-[#070A12]/80 shadow-[0_40px_160px_rgba(0,0,0,0.70)]">
+          <div className="pointer-events-none absolute inset-0 opacity-60 [background:radial-gradient(900px_500px_at_70%_-20%,rgba(250,204,21,0.14),transparent_55%),radial-gradient(700px_420px_at_10%_0%,rgba(56,189,248,0.10),transparent_50%)]" />
+          <div className="relative border-b border-white/10 p-5">
+            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
+              Authority • Action
+            </div>
+            <div className="mt-2 text-xl font-semibold text-white/90">{title}</div>
+            {subtitle && (
+              <div className="mt-1 text-sm text-white/55">{subtitle}</div>
+            )}
+          </div>
+
+          <div className="relative p-5">{children}</div>
+
+          <div className="relative flex items-center justify-end gap-2 border-t border-white/10 p-4">
+            <button
+              disabled={busy}
+              onClick={onClose}
+              className={cx(
+                "rounded-full border px-4 py-2 text-xs font-semibold transition",
+                busy
+                  ? "border-white/10 bg-white/3 text-white/35"
+                  : "border-white/10 bg-white/5 text-white/75 hover:bg-white/7 hover:border-white/15"
+              )}
+            >
+              {cancelText}
+            </button>
+            <button
+              disabled={busy}
+              onClick={onConfirm}
+              className={cx(
+                "rounded-full border px-4 py-2 text-xs font-semibold transition",
+                danger
+                  ? busy
+                    ? "border-rose-300/15 bg-rose-500/10 text-rose-200/40"
+                    : "border-rose-300/20 bg-rose-500/12 text-rose-100 hover:bg-rose-500/16"
+                  : busy
+                  ? "border-amber-300/15 bg-amber-400/10 text-amber-100/40"
+                  : "border-amber-300/20 bg-amber-400/12 text-amber-100 hover:bg-amber-400/16"
+              )}
+            >
+              {confirmText}
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-3 text-center text-[10px] text-white/35">
+          Mutations are authority-only • No side effects
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------- types -------------------------------- */
+
+type ProvisionRow = {
+  id: string;
+  status: string | null;
+  applicant_email: string | null;
+  organization_legal_name: string | null;
+  organization_trade_name: string | null;
+  created_at: string | null;
+  updated_at?: string | null;
+  entity_slug: string | null;
+  metadata?: any | null;
+  lane_is_test?: boolean | null;
+};
+
+/* =============================== PAGE ===================================== */
+
 export default function CiProvisioningPage() {
-  // ---- entity (defensive, like CI-Evidence) ----
+  /* -------- entity + lane -------- */
   const ec = useEntity() as any;
-  const entityKey: string =
-    (ec?.entityKey as string) ||
-    (ec?.activeEntity as string) ||
-    (ec?.entity_slug as string) ||
-    "";
+  const entityKey =
+    ec?.entityKey || ec?.activeEntity || ec?.entity_slug || "";
+  const entityName =
+    ec?.entityName || ec?.activeEntityName || entityKey;
 
-  const entityName: string =
-    (ec?.entityName as string) ||
-    (ec?.activeEntityName as string) ||
-    (ec?.entities?.find?.((x: any) => x?.slug === entityKey || x?.key === entityKey)?.name as string) ||
-    entityKey;
-
-  // ---- env lane (defensive, like CI-Evidence) ----
   const env = useOsEnv() as any;
-  const isTest: boolean = Boolean(
-    env?.is_test ?? env?.isTest ?? env?.lane_is_test ?? env?.sandbox ?? env?.isSandbox
+  const isTest = Boolean(
+    env?.is_test ?? env?.isTest ?? env?.lane_is_test ?? env?.sandbox
   );
 
-  const [apps, setApps] = useState<InboxRow[]>([]);
+  /* -------- state -------- */
+  const [rows, setRows] = useState<ProvisionRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
-
-  const [tab, setTab] = useState<AppTab>("READY");
-  const [q, setQ] = useState("");
-
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
+  /* -------- modals -------- */
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [completeOpen, setCompleteOpen] = useState(false);
+
   const selected = useMemo(
-    () => apps.find((a) => a.id === selectedId) || null,
-    [apps, selectedId]
+    () => rows.find((r) => r.id === selectedId) || null,
+    [rows, selectedId]
   );
 
-  // ---- load provisioning candidates (lane-safe if view supports lane, else fallback) ----
-  useEffect(() => {
-    let alive = true;
-
-    (async () => {
-      setLoading(true);
-      setErr(null);
-
-      try {
-        const cols = [
-          "id",
-          "status",
-          "applicant_email",
-          "organization_email",
-          "organization_legal_name",
-          "organization_trade_name",
-          "primary_contact_user_id",
-          "entity_slug",
-          "created_at",
-          // ✅ Oasis needs this everywhere
-          "requested_services",
-          "metadata",
-        ];
-
-        const tryWithLane = async () => {
-          const { data, error } = await supabase
-            .from("v_onboarding_admissions_inbox")
-            .select([...cols, "lane_is_test"].join(","))
-            .eq("entity_slug", entityKey)
-            .eq("lane_is_test", isTest)
-            .order("created_at", { ascending: false });
-          return { data, error };
-        };
-
-        const tryWithoutLane = async () => {
-          const { data, error } = await supabase
-            .from("v_onboarding_admissions_inbox")
-            .select(cols.join(","))
-            .eq("entity_slug", entityKey)
-            .order("created_at", { ascending: false });
-          return { data, error };
-        };
-
-        let res = await tryWithLane();
-        if (res.error && /lane_is_test|42703|undefined column/i.test(res.error.message)) {
-          res = await tryWithoutLane();
-        }
-
-        if (res.error) throw res.error;
-        if (!alive) return;
-
-        const list = (res.data || []) as InboxRow[];
-        setApps(list);
-
-        if (!selectedId && list.length) setSelectedId(list[0].id);
-        else if (selectedId && !list.some((r) => r.id === selectedId)) setSelectedId(list[0]?.id ?? null);
-      } catch (e: any) {
-        if (!alive) return;
-        setErr(e?.message || "Failed to load provisioning queue.");
-      } finally {
-        if (!alive) return;
-        setLoading(false);
-      }
-    })();
-
-    return () => {
-      alive = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entityKey, isTest, refreshKey]);
-
-  const filtered = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    let list = apps;
-
-    if (tab === "READY") {
-      // ✅ Conservative readiness gate: has contact email
-      // (Do NOT assume backend enum casing here; just require a contact + not archived/declined/withdrawn.)
-      list = list.filter((a) => {
-        const st = normStatus(a.status);
-        const hasEmail = !!(a.applicant_email || a.organization_email);
-        if (!hasEmail) return false;
-        if (["ARCHIVED", "DECLINED", "WITHDRAWN"].includes(st)) return false;
-        return true;
-      });
-    }
-
-    if (!needle) return list;
-
-    return list.filter((a) => {
-      const blob = [
-        a.organization_trade_name,
-        a.organization_legal_name,
-        a.applicant_email,
-        a.organization_email,
-        a.status,
-        a.id,
-      ]
-        .filter(Boolean)
-        .join(" • ")
-        .toLowerCase();
-      return blob.includes(needle);
-    });
-  }, [apps, tab, q]);
-
-  const appTitle = useMemo(() => {
-    if (!selected) return "Select an application";
+  const title = useMemo(() => {
+    if (!selected) return "Select application";
     return (
       selected.organization_trade_name ||
       selected.organization_legal_name ||
@@ -209,44 +172,65 @@ export default function CiProvisioningPage() {
     );
   }, [selected]);
 
-  const looksReady = useMemo(() => {
-    if (!selected) return false;
-    const hasEmail = !!(selected.applicant_email || selected.organization_email);
-    return hasEmail;
-  }, [selected]);
+  /* -------- load queue -------- */
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      setLoading(true);
+      setErr(null);
+      try {
+        const baseCols = [
+          "id",
+          "status",
+          "applicant_email",
+          "organization_legal_name",
+          "organization_trade_name",
+          "created_at",
+          "updated_at",
+          "entity_slug",
+          "metadata",
+        ];
 
-  const meta = useMemo(() => {
-    const m = selected?.metadata;
-    return (m && typeof m === "object" ? (m as any) : {}) as any;
-  }, [selected?.metadata]);
+        let q = supabase
+          .from("v_onboarding_provisioning_queue")
+          .select([...baseCols, "lane_is_test"].join(","))
+          .eq("entity_slug", entityKey)
+          .eq("lane_is_test", isTest)
+          .order("created_at", { ascending: false });
 
-  async function ensureSessionOrThrow() {
-    const { data, error } = await supabase.auth.getSession();
-    if (error) throw error;
-    if (!data.session) throw new Error("Not authenticated. Please sign in again.");
-    return data.session;
-  }
+        const { data, error } = await q;
+        if (error) throw error;
+        if (!alive) return;
 
-  async function runInvite() {
+        setRows((data || []) as ProvisionRow[]);
+        if (!selectedId && data?.length) setSelectedId(data[0].id);
+      } catch (e: any) {
+        setErr(e?.message || "Failed to load provisioning queue.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [entityKey, isTest, refreshKey]);
+
+  /* ========================== ACTIONS ==================================== */
+
+  async function sendInvite() {
     if (!selected) return;
     setBusy(true);
     setNote(null);
-
     try {
-      // ✅ these endpoints are auth-gated by design
-      await ensureSessionOrThrow();
-
-      // Edge Function: admissions-provision-portal-access
-      const { data, error } = await supabase.functions.invoke("admissions-provision-portal-access", {
-        body: { application_id: selected.id },
-      });
-
+      const { error } = await supabase.functions.invoke(
+        "admissions-provision-portal-access",
+        { body: { application_id: selected.id } }
+      );
       if (error) throw error;
-
-      setNote(data?.message || "Invite issued.");
-      setRefreshKey((n) => n + 1);
+      setNote("Portal access invite sent.");
+      setInviteOpen(false);
     } catch (e: any) {
-      alert(e?.message || "Run Invite failed.");
+      alert(e?.message || "Invite failed.");
     } finally {
       setBusy(false);
     }
@@ -254,280 +238,180 @@ export default function CiProvisioningPage() {
 
   async function completeProvisioning() {
     if (!selected) return;
-
-    const userId = selected.primary_contact_user_id;
-    if (!userId) {
-      alert("Missing primary_contact_user_id. This is normally set after Invite → Set Password.");
-      return;
-    }
-
     setBusy(true);
     setNote(null);
-
     try {
-      await ensureSessionOrThrow();
-
-      // RPC-only:
-      // admissions_complete_provisioning(p_application_id, p_user_id)
-      const { error } = await supabase.rpc("admissions_complete_provisioning", {
-        p_application_id: selected.id,
-        p_user_id: userId,
-      });
-
+      const { error } = await supabase.rpc(
+        "admissions_complete_provisioning",
+        { p_application_id: selected.id }
+      );
       if (error) throw error;
-
-      setNote("Provisioning completed.");
+      setNote("Provisioning complete. Entity created.");
+      setCompleteOpen(false);
       setRefreshKey((n) => n + 1);
     } catch (e: any) {
-      alert(e?.message || "Complete Provisioning failed.");
+      alert(e?.message || "Complete provisioning failed.");
     } finally {
       setBusy(false);
     }
   }
 
+  /* ============================= UI ===================================== */
+
   return (
     <div className="h-full w-full">
       <div className="mx-auto w-full max-w-[1400px] px-4 pb-10 pt-6">
-        <div className="mb-5 flex items-end justify-between gap-4">
-          <div>
-            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">CI • Provisioning</div>
-            <div className="mt-1 text-2xl font-semibold text-white/90">Provision & Activate</div>
-            <div className="mt-1 text-sm text-white/50">
-              Entity-scoped: <span className="text-white/70">{entityName || entityKey}</span> • Lane:{" "}
-              <span className="text-white/70">{isTest ? "SANDBOX" : "RoT"}</span>
-            </div>
+        {/* Header */}
+        <div className="mb-5">
+          <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
+            CI • Provisioning
           </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setRefreshKey((n) => n + 1)}
-              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-medium text-white/80 hover:border-amber-300/20 hover:bg-white/7"
-            >
-              Refresh
-            </button>
+          <div className="mt-1 text-2xl font-semibold text-white/90">
+            Provisioning Console
+          </div>
+          <div className="mt-1 text-sm text-white/50">
+            Entity: <span className="text-white/70">{entityName}</span> • Lane:{" "}
+            <span className="text-white/70">{isTest ? "SANDBOX" : "RoT"}</span>
           </div>
         </div>
 
         <div className="grid grid-cols-12 gap-4">
-          {/* Left: applications */}
+          {/* Queue */}
           <div className="col-span-12 lg:col-span-4">
-            <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
-              <div className="border-b border-white/10 p-4">
-                <div className="flex items-center justify-between">
-                  <div className="text-xs font-semibold tracking-wide text-white/80">Applications</div>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => setTab("READY")}
-                      className={cx(
-                        "rounded-full px-3 py-1 text-[11px] font-medium",
-                        tab === "READY"
-                          ? "bg-emerald-400/10 text-emerald-200 ring-1 ring-emerald-300/20"
-                          : "text-white/55 hover:text-white/75"
-                      )}
-                    >
-                      Ready
-                    </button>
-                    <button
-                      onClick={() => setTab("ALL")}
-                      className={cx(
-                        "rounded-full px-3 py-1 text-[11px] font-medium",
-                        tab === "ALL"
-                          ? "bg-white/8 text-white/85 ring-1 ring-white/12"
-                          : "text-white/55 hover:text-white/75"
-                      )}
-                    >
-                      All
-                    </button>
-                  </div>
-                </div>
-
-                <div className="mt-3">
-                  <input
-                    value={q}
-                    onChange={(e) => setQ(e.target.value)}
-                    placeholder="Search org / email / status"
-                    className="w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-2 text-sm text-white/85 placeholder:text-white/35 outline-none focus:border-amber-300/25"
-                  />
-                </div>
+            <div className="rounded-3xl border border-white/10 bg-black/20">
+              <div className="border-b border-white/10 p-4 text-xs font-semibold text-white/80">
+                Queue
               </div>
-
               <div className="max-h-[560px] overflow-auto p-2">
                 {loading ? (
                   <div className="p-4 text-sm text-white/50">Loading…</div>
                 ) : err ? (
                   <div className="p-4 text-sm text-rose-200">{err}</div>
-                ) : filtered.length === 0 ? (
-                  <div className="p-4 text-sm text-white/50">No applications found.</div>
                 ) : (
-                  <div className="space-y-2 p-2">
-                    {filtered.map((a) => {
-                      const active = a.id === selectedId;
-                      const name = a.organization_trade_name || a.organization_legal_name || a.applicant_email || a.id;
-                      const status = a.status || "—";
-                      return (
-                        <button
-                          key={a.id}
-                          onClick={() => setSelectedId(a.id)}
-                          className={cx(
-                            "w-full rounded-2xl border p-4 text-left transition",
-                            active
-                              ? "border-amber-300/25 bg-black/35 shadow-[0_0_0_1px_rgba(250,204,21,0.10)]"
-                              : "border-white/10 bg-black/15 hover:border-white/16 hover:bg-black/22"
-                          )}
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <div className="truncate text-sm font-semibold text-white/88">{name}</div>
-                              <div className="mt-1 truncate text-xs text-white/45">
-                                {a.applicant_email || a.organization_email || "—"}
-                              </div>
-                            </div>
-                            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/70">
-                              {status}
-                            </span>
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
+                  rows.map((r) => (
+                    <button
+                      key={r.id}
+                      onClick={() => setSelectedId(r.id)}
+                      className={cx(
+                        "w-full rounded-2xl border p-4 text-left transition mb-2",
+                        r.id === selectedId
+                          ? "border-amber-300/25 bg-black/35"
+                          : "border-white/10 bg-black/15 hover:bg-black/22"
+                      )}
+                    >
+                      <div className="text-sm font-semibold text-white/85">
+                        {r.organization_trade_name ||
+                          r.organization_legal_name ||
+                          r.applicant_email}
+                      </div>
+                      <div className="mt-1 text-xs text-white/45">
+                        {r.applicant_email}
+                      </div>
+                    </button>
+                  ))
                 )}
               </div>
             </div>
           </div>
 
-          {/* Middle: readiness + metadata */}
+          {/* Details */}
           <div className="col-span-12 lg:col-span-4">
-            <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
-              <div className="border-b border-white/10 p-4">
-                <div className="text-xs font-semibold tracking-wide text-white/80">Readiness</div>
-                <div className="mt-1 truncate text-sm text-white/60">
-                  {selectedId ? appTitle : "Select an application"}
+            <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
+              {!selected ? (
+                <div className="text-sm text-white/50">
+                  Select an application.
                 </div>
-              </div>
-
-              <div className="p-4">
-                {!selected ? (
-                  <div className="text-sm text-white/50">Select an application.</div>
-                ) : (
-                  <div className="space-y-4">
-                    <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
-                      <Row k="Looks ready" v={looksReady ? "YES" : "NO"} />
-                      <Row k="Has user id" v={selected.primary_contact_user_id ? "YES" : "NO"} />
-                      <Row k="Provisioned" v={normStatus(selected.status) === "PROVISIONED" ? "YES" : "NO"} />
-                      <Row k="App ID" v={selected.id} />
-                    </div>
-
-                    <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                      <div className="text-xs font-semibold tracking-wide text-white/80">Requested services</div>
-                      <div className="mt-2 text-sm text-white/75 whitespace-pre-wrap">
-                        {selected.requested_services ? JSON.stringify(selected.requested_services) : "—"}
-                      </div>
-                    </div>
-
-                    {/* ✅ Metadata panel (same contract as Admissions) */}
-                    <div className="rounded-2xl border border-white/10 bg-black/18 p-4">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="text-xs font-semibold tracking-wide text-white/80">Metadata</div>
-                        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/60">
-                          jsonb
-                        </span>
-                      </div>
-
-                      <div className="mt-3 space-y-3">
-                        <Row k="source" v={meta?.source ? String(meta.source) : "—"} />
-                        <Row
-                          k="request_brief"
-                          v={meta?.request_brief ? String(meta.request_brief) : "—"}
-                        />
-                        <Row k="notes" v={meta?.notes ? String(meta.notes) : "—"} />
-
-                        <div className="mt-3 rounded-2xl border border-white/10 bg-black/25 p-3">
-                          <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">raw</div>
-                          <pre className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-5 text-white/70">
-                            {safePrettyJSON(selected.metadata)}
-                          </pre>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="rounded-2xl border border-white/10 bg-black/18 p-4 text-sm text-white/60">
-                      <div className="font-semibold text-white/80">Authority-only</div>
-                      <div className="mt-1">
-                        Invite is auth-gated. If you’re signed out, the backend will reject with{" "}
-                        <span className="font-mono text-white/70">Not authenticated</span>.
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Right: authority */}
-          <div className="col-span-12 lg:col-span-4">
-            <div className="rounded-3xl border border-white/10 bg-black/20 shadow-[0_30px_140px_rgba(0,0,0,0.55)]">
-              <div className="border-b border-white/10 p-4">
-                <div className="text-xs font-semibold tracking-wide text-white/80">Authority</div>
-                <div className="mt-1 truncate text-sm text-white/60">
-                  {selected ? appTitle : "Select an application"}
-                </div>
-              </div>
-
-              <div className="p-4">
-                <div className="flex flex-col gap-2">
-                  <button
-                    onClick={runInvite}
-                    disabled={!selected || !looksReady || busy}
-                    className={cx(
-                      "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
-                      selected && looksReady && !busy
-                        ? "border-white/10 bg-white/5 text-white/85 hover:border-amber-300/20 hover:bg-white/7"
-                        : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
-                    )}
-                  >
-                    Run Invite
-                  </button>
-
-                  <button
-                    onClick={completeProvisioning}
-                    disabled={!selected || !selected?.primary_contact_user_id || busy}
-                    className={cx(
-                      "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
-                      selected?.primary_contact_user_id && !busy
-                        ? "border-emerald-300/20 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/14"
-                        : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
-                    )}
-                  >
-                    Complete Provisioning
-                  </button>
-
-                  <div className="pt-2 text-xs text-white/40">
-                    RPC-only controls. Invite grants portal access (Set Password). Ledger activation happens only after
-                    provisioning.
-                  </div>
-
-                  {selected && !selected.primary_contact_user_id && (
-                    <div className="mt-2 rounded-2xl border border-amber-300/18 bg-amber-400/10 p-3 text-xs text-amber-100/90">
-                      Missing <span className="font-mono">primary_contact_user_id</span>. This is normally set after
-                      Invite → Set Password.
-                    </div>
-                  )}
-
+              ) : (
+                <div className="space-y-3">
+                  <Row k="Org" v={title} />
+                  <Row k="Email" v={selected.applicant_email || "—"} />
+                  <Row k="Status" v={selected.status || "—"} />
+                  <Row k="App ID" v={selected.id} />
                   {note && (
                     <div className="mt-2 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-white/70">
                       {note}
                     </div>
                   )}
                 </div>
+              )}
+            </div>
+          </div>
+
+          {/* Authority */}
+          <div className="col-span-12 lg:col-span-4">
+            <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
+              <div className="text-xs font-semibold tracking-wide text-white/80 mb-3">
+                Authority
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <button
+                  disabled={!selected || busy}
+                  onClick={() => setInviteOpen(true)}
+                  className={cx(
+                    "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
+                    selected && !busy
+                      ? "border-amber-300/20 bg-amber-400/10 text-amber-100"
+                      : "border-white/10 bg-white/3 text-white/35"
+                  )}
+                >
+                  Send Portal Access Invite
+                </button>
+
+                <button
+                  disabled={!selected || busy}
+                  onClick={() => setCompleteOpen(true)}
+                  className={cx(
+                    "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
+                    selected && !busy
+                      ? "border-emerald-300/20 bg-emerald-400/10 text-emerald-100"
+                      : "border-white/10 bg-white/3 text-white/35"
+                  )}
+                >
+                  Complete Provisioning
+                </button>
+
+                <div className="mt-2 text-xs text-white/50">
+                  Invite = access only. Provisioning = creation.
+                </div>
               </div>
             </div>
           </div>
         </div>
-
-        <div className="mt-5 text-[10px] text-white/35">
-          Source: public.v_onboarding_admissions_inbox • entity_slug={entityKey} • lane={isTest ? "SANDBOX" : "RoT"}
-        </div>
       </div>
+
+      {/* Invite modal */}
+      <OsModal
+        open={inviteOpen}
+        title="Send portal access invite"
+        subtitle={title}
+        confirmText={busy ? "Sending…" : "Send Invite"}
+        busy={busy}
+        onClose={() => (!busy ? setInviteOpen(false) : null)}
+        onConfirm={sendInvite}
+      >
+        <div className="text-sm text-white/75">
+          This grants authentication access only so the applicant can upload
+          evidence. No entities are created.
+        </div>
+      </OsModal>
+
+      {/* Complete provisioning modal */}
+      <OsModal
+        open={completeOpen}
+        title="Complete provisioning"
+        subtitle={title}
+        confirmText={busy ? "Working…" : "Create Entity"}
+        danger
+        busy={busy}
+        onClose={() => (!busy ? setCompleteOpen(false) : null)}
+        onConfirm={completeProvisioning}
+      >
+        <div className="text-sm text-rose-100/90">
+          This will create the entity, memberships, and mark the application
+          PROVISIONED. This action is irreversible.
+        </div>
+      </OsModal>
     </div>
   );
 }
