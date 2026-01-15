@@ -12,6 +12,9 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
  * ✅ If Supabase throttles recovery email, returns OK + cooldown + action_link
  * ✅ NEVER completes provisioning here (that happens in Set-Password flow once)
  *
+ * NEW (NO-REGRESSION ADD):
+ * ✅ Sets onboarding_applications.primary_contact_user_id (idempotent; only when NULL)
+ *
  * CONTRACT:
  * - Accepts: application_id/app_id/applicationId/p_application_id/...
  * - Accepts: applicant_email/email/applicantEmail/p_applicant_email/...
@@ -71,6 +74,44 @@ function parseRetryAfterSeconds(message: string): number {
   if (!m) return 60;
   const n = Number(m[1]);
   return Number.isFinite(n) && n > 0 ? n : 60;
+}
+
+/**
+ * ✅ Idempotent bind:
+ * Only sets primary_contact_user_id if it's currently NULL.
+ * Never overwrites an existing binding (no regressions / no surprises).
+ */
+async function bindPrimaryContact(
+  supabase: ReturnType<typeof createClient>,
+  applicationId: string,
+  userId: string
+): Promise<{ bound: boolean; error?: string }> {
+  try {
+    // Gate by current state to avoid overwriting anything
+    const { data: cur, error: curErr } = await supabase
+      .from("onboarding_applications")
+      .select("primary_contact_user_id")
+      .eq("id", applicationId)
+      .maybeSingle();
+
+    if (curErr) return { bound: false, error: curErr.message };
+
+    if (cur?.primary_contact_user_id) {
+      return { bound: false }; // already bound; do nothing
+    }
+
+    const { error: upErr } = await supabase
+      .from("onboarding_applications")
+      .update({ primary_contact_user_id: userId })
+      .eq("id", applicationId)
+      .is("primary_contact_user_id", null);
+
+    if (upErr) return { bound: false, error: upErr.message };
+
+    return { bound: true };
+  } catch (e) {
+    return { bound: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 Deno.serve(async (req) => {
@@ -179,6 +220,16 @@ Deno.serve(async (req) => {
         });
       }
 
+      // ✅ Bind primary_contact_user_id (idempotent)
+      let invitedUserId = inviteData?.user?.id ?? null;
+      if (!invitedUserId) {
+        // fallback (rare): resolve again by email
+        invitedUserId = await resolveUserIdByEmail(supabase, email);
+      }
+
+      const bind =
+        invitedUserId ? await bindPrimaryContact(supabase, applicationId, invitedUserId) : { bound: false, error: "USER_ID_NOT_RESOLVED" };
+
       return json(200, {
         ok: true,
         mode: "invite",
@@ -188,9 +239,13 @@ Deno.serve(async (req) => {
         application_id: applicationId,
         application_status: applicationStatus,
         applicant_email: email,
-        user_id: inviteData?.user?.id ?? null,
+        user_id: invitedUserId,
         redirectTo,
         action_link: linkData?.properties?.action_link ?? null,
+
+        // NEW (non-breaking add)
+        primary_contact_bound: Boolean(bind.bound),
+        primary_contact_bind_error: bind.error ?? null,
       });
     }
 
@@ -206,6 +261,9 @@ Deno.serve(async (req) => {
 
     // ✅ Correct v2 API (NOT auth.admin)
     const { error: resetErr } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
+
+    // ✅ Bind primary_contact_user_id (idempotent) even if recovery email is rate-limited
+    const bind = await bindPrimaryContact(supabase, applicationId, existingUserId);
 
     if (resetErr) {
       const msg = resetErr.message || "RECOVERY_SEND_FAILED";
@@ -231,6 +289,10 @@ Deno.serve(async (req) => {
           action_link: linkData?.properties?.action_link ?? null,
           note:
             "Recovery email throttled by Supabase. Wait for cooldown then retry, or use action_link as an operator fallback.",
+
+          // NEW (non-breaking add)
+          primary_contact_bound: Boolean(bind.bound),
+          primary_contact_bind_error: bind.error ?? null,
         });
       }
 
@@ -241,6 +303,10 @@ Deno.serve(async (req) => {
         application_id: applicationId,
         applicant_email: email,
         user_id: existingUserId,
+
+        // NEW (non-breaking add)
+        primary_contact_bound: Boolean(bind.bound),
+        primary_contact_bind_error: bind.error ?? null,
       });
     }
 
@@ -257,6 +323,10 @@ Deno.serve(async (req) => {
       user_id: existingUserId,
       redirectTo,
       action_link: linkData?.properties?.action_link ?? null,
+
+      // NEW (non-breaking add)
+      primary_contact_bound: Boolean(bind.bound),
+      primary_contact_bind_error: bind.error ?? null,
     });
   } catch (e) {
     return json(500, {
