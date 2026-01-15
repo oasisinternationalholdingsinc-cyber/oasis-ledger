@@ -9,6 +9,7 @@ export const dynamic = "force-dynamic";
  * ✅ Invite = authentication only (Edge Function) → enables portal evidence upload
  * ✅ Complete Provisioning = creation (RPC) → entity + memberships
  * ✅ Complete Provisioning FIX: admissions_complete_provisioning requires (p_application_id, p_user_id)
+ * ✅ Archive (ENTITY RETAINED): archives the application ONLY (RPC), never deletes identity
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -216,6 +217,10 @@ export default function CiProvisioningPage() {
   const [inviteOpen, setInviteOpen] = useState(false);
   const [completeOpen, setCompleteOpen] = useState(false);
 
+  // ✅ NEW: archive (entity retained) modal
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archiveNote, setArchiveNote] = useState("Archived from CI-Provisioning (entity retained).");
+
   const selected = useMemo(
     () => apps.find((a) => a.id === selectedId) || null,
     [apps, selectedId]
@@ -235,6 +240,8 @@ export default function CiProvisioningPage() {
     const m = selected?.metadata;
     return (m && typeof m === "object" ? (m as any) : {}) as any;
   }, [selected?.metadata]);
+
+  const isArchived = useMemo(() => normStatus(selected?.status) === "ARCHIVED", [selected?.status]);
 
   // ---- load queue (same source as Admissions) ----
   useEffect(() => {
@@ -401,6 +408,33 @@ export default function CiProvisioningPage() {
       setRefreshKey((n) => n + 1);
     } catch (e: any) {
       alert(e?.message || "Complete Provisioning failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
+   * Archive application (ENTITY RETAINED)
+   * ✅ Archives the application only (parks workflow)
+   * ✅ Never deletes entity or memberships (identity remains reusable)
+   */
+  async function rpcArchiveApplication() {
+    if (!selected) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      const { error } = await supabase.rpc("admissions_set_status", {
+        p_application_id: selected.id,
+        p_next_status: "archived",
+        p_note: (archiveNote || "").trim() || "Archived from CI-Provisioning (entity retained).",
+      });
+      if (error) throw error;
+
+      setNote("Application archived (entity retained).");
+      setArchiveOpen(false);
+      setRefreshKey((n) => n + 1);
+    } catch (e: any) {
+      alert(e?.message || "Archive failed.");
     } finally {
       setBusy(false);
     }
@@ -639,11 +673,36 @@ export default function CiProvisioningPage() {
                     Complete Provisioning
                   </button>
 
+                  {/* ✅ NEW: Archive (entity retained) — modal-driven */}
+                  <div className="mt-2 h-px w-full bg-white/10" />
+
+                  <button
+                    onClick={() => {
+                      setArchiveNote("Archived from CI-Provisioning (entity retained).");
+                      setArchiveOpen(true);
+                    }}
+                    disabled={!selected || busy || isArchived}
+                    className={cx(
+                      "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
+                      !selected || busy
+                        ? "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
+                        : isArchived
+                        ? "cursor-not-allowed border-white/10 bg-white/5 text-white/45"
+                        : "border-white/10 bg-white/5 text-white/85 hover:border-amber-300/18 hover:bg-white/7"
+                    )}
+                  >
+                    {isArchived ? "Archived (no action required)" : "Archive Application"}
+                  </button>
+
                   <div className="mt-2 rounded-2xl border border-white/10 bg-black/18 p-4 text-sm text-white/60">
                     <div className="font-semibold text-white/80">Locked contract</div>
                     <div className="mt-1">
                       Invite = authentication only (enables portal evidence upload). Complete
                       Provisioning = creation (entity + memberships).
+                    </div>
+                    <div className="mt-2 text-xs text-white/45">
+                      Archive closes the application only.{" "}
+                      <span className="text-white/70 font-semibold">Entity remains</span> (reusable identity).
                     </div>
                   </div>
                 </div>
@@ -699,6 +758,43 @@ export default function CiProvisioningPage() {
           </div>
           <div className="text-xs text-rose-100/70">
             Use only after evidence has been reviewed/approved. (Creation action)
+          </div>
+        </div>
+      </OsModal>
+
+      {/* ✅ Archive modal (entity retained) */}
+      <OsModal
+        open={archiveOpen}
+        title="Archive application"
+        subtitle={selected ? appTitle : undefined}
+        confirmText={busy ? "Working…" : "Archive"}
+        cancelText="Cancel"
+        busy={busy}
+        onClose={() => (!busy ? setArchiveOpen(false) : null)}
+        onConfirm={rpcArchiveApplication}
+      >
+        <div className="space-y-3">
+          <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+            <div className="text-sm text-white/80">
+              This will archive the <span className="font-semibold">application only</span>.
+            </div>
+            <div className="mt-2 text-xs text-white/45">
+              Entity + memberships remain intact (reusable identity). No delete occurs here.
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+            <div className="text-xs uppercase tracking-[0.22em] text-white/35">note</div>
+            <textarea
+              value={archiveNote}
+              onChange={(e) => setArchiveNote(e.target.value)}
+              className="mt-2 w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white/85 outline-none focus:border-amber-300/25"
+              rows={3}
+              placeholder="Archived from CI-Provisioning (entity retained)."
+            />
+            <div className="mt-2 text-xs text-white/45">
+              Stored with the status change for audit clarity.
+            </div>
           </div>
         </div>
       </OsModal>

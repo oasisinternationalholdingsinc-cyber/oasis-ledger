@@ -13,6 +13,11 @@ export const dynamic = "force-dynamic";
  *    - Set Status (RPC: admissions_set_status)
  *    - Approve = Record Decision + Set Status approved (two calls; no blur)
  *
+ * ✅ Adds (NO wiring changes):
+ *    - Archive Application (calls admissions_set_status → archived)
+ *    - Hard Delete Application (RPC: admissions_delete_application) + reason required
+ *    - Create Tasks supports custom tasks in addition to preloaded chips (still text[] payload)
+ *
  * ❌ Removes any selection of non-existent columns (e.g. request_brief)
  */
 
@@ -69,7 +74,15 @@ type InboxRow = {
 type MainTab = "INBOX" | "INTAKE" | "ALL" | "ARCHIVED";
 type IntakePill = "BOTH" | "INTAKE" | "PROVISIONED";
 
-type ModalKind = "NONE" | "REQUEST_INFO" | "CREATE_TASKS" | "RECORD_DECISION" | "SET_STATUS" | "APPROVE";
+type ModalKind =
+  | "NONE"
+  | "REQUEST_INFO"
+  | "CREATE_TASKS"
+  | "RECORD_DECISION"
+  | "SET_STATUS"
+  | "APPROVE"
+  | "ARCHIVE_APP"
+  | "HARD_DELETE_APP";
 
 function OsModal({
   open,
@@ -235,6 +248,11 @@ export default function CiAdmissionsPage() {
 
   // Tasks inputs
   const [taskList, setTaskList] = useState<string[]>([]);
+  const [customTask, setCustomTask] = useState<string>("");
+
+  // Archive / delete inputs
+  const [archiveNote, setArchiveNote] = useState<string>("Archived by authority.");
+  const [deleteReason, setDeleteReason] = useState<string>("");
 
   // Decision inputs
   const [decision, setDecision] = useState<"approved" | "declined">("approved");
@@ -275,6 +293,42 @@ export default function CiAdmissionsPage() {
     { label: "Schedule verification", value: "SCHEDULE_VERIFICATION", hint: "Queue hash/verify + registry followup" },
   ];
 
+  function uniqTasks(xs: string[]) {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of xs) {
+      const v = (raw || "").trim();
+      if (!v) continue;
+      const k = v.toUpperCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(v);
+    }
+    return out;
+  }
+
+  function toggleTask(v: string) {
+    const key = (v || "").trim();
+    if (!key) return;
+    setTaskList((prev) => {
+      const has = prev.some((x) => (x || "").trim().toUpperCase() === key.toUpperCase());
+      if (has) return prev.filter((x) => (x || "").trim().toUpperCase() !== key.toUpperCase());
+      return uniqTasks([...prev, key]);
+    });
+  }
+
+  function addCustomTask() {
+    const v = (customTask || "").trim();
+    if (!v) return;
+    setTaskList((prev) => uniqTasks([...prev, v]));
+    setCustomTask("");
+  }
+
+  function removeTask(v: string) {
+    const key = (v || "").trim().toUpperCase();
+    setTaskList((prev) => prev.filter((x) => (x || "").trim().toUpperCase() !== key));
+  }
+
   function resetModalPayload(kind: ModalKind) {
     // keep defaults calm + deterministic; preload from selected when possible
     setNote(null);
@@ -289,6 +343,7 @@ export default function CiAdmissionsPage() {
     if (kind === "CREATE_TASKS") {
       // default preloaded suggestions (restored)
       setTaskList(["SEND_PORTAL_INVITE", "EVIDENCE_CHECKLIST"]);
+      setCustomTask("");
     }
 
     if (kind === "RECORD_DECISION") {
@@ -313,6 +368,14 @@ export default function CiAdmissionsPage() {
       // small smart default: if submitted -> in_review, otherwise leave in_review
       setStatusNext(st === "SUBMITTED" ? "in_review" : "in_review");
       setStatusNote("");
+    }
+
+    if (kind === "ARCHIVE_APP") {
+      setArchiveNote("Archived by authority.");
+    }
+
+    if (kind === "HARD_DELETE_APP") {
+      setDeleteReason("");
     }
   }
 
@@ -539,6 +602,57 @@ export default function CiAdmissionsPage() {
     }
   }
 
+  async function rpcArchiveApplication() {
+    if (!selected) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      const { error } = await supabase.rpc("admissions_set_status", {
+        p_application_id: selected.id,
+        p_next_status: "archived",
+        p_note: (archiveNote || "").trim() || "Archived by authority.",
+      });
+      if (error) throw error;
+
+      setNote("Application archived.");
+      setModal("NONE");
+      setRefreshKey((n) => n + 1);
+    } catch (e: any) {
+      alert(e?.message || "Archive failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rpcHardDeleteApplication() {
+    if (!selected) return;
+
+    const reason = (deleteReason || "").trim();
+    if (!reason) {
+      alert("Reason is required for hard delete.");
+      return;
+    }
+
+    setBusy(true);
+    setNote(null);
+    try {
+      const { error } = await supabase.rpc("admissions_delete_application", {
+        p_application_id: selected.id,
+        p_reason: reason,
+      });
+      if (error) throw error;
+
+      setNote("Application deleted.");
+      setModal("NONE");
+      setSelectedId(null);
+      setRefreshKey((n) => n + 1);
+    } catch (e: any) {
+      alert(e?.message || "Hard delete failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function rpcApproveComposed() {
     // ✅ APPROVE = record_decision + set_status(approved)
     if (!selected) return;
@@ -593,6 +707,8 @@ export default function CiAdmissionsPage() {
     if (modal === "RECORD_DECISION") return "Record authority decision";
     if (modal === "SET_STATUS") return "Set application status";
     if (modal === "APPROVE") return "Approve application";
+    if (modal === "ARCHIVE_APP") return "Archive application";
+    if (modal === "HARD_DELETE_APP") return "Hard delete application";
     return "Authority action";
   }, [modal]);
 
@@ -603,10 +719,12 @@ export default function CiAdmissionsPage() {
     if (modal === "RECORD_DECISION") return "Record decision";
     if (modal === "SET_STATUS") return "Set status";
     if (modal === "APPROVE") return "Approve";
+    if (modal === "ARCHIVE_APP") return "Archive";
+    if (modal === "HARD_DELETE_APP") return "Delete";
     return "Confirm";
   }, [modal, busy]);
 
-  const modalDanger = modal === "SET_STATUS" || modal === "APPROVE";
+  const modalDanger = modal === "HARD_DELETE_APP";
 
   async function onModalConfirm() {
     if (modal === "REQUEST_INFO") return rpcRequestInfo();
@@ -614,6 +732,8 @@ export default function CiAdmissionsPage() {
     if (modal === "RECORD_DECISION") return rpcRecordDecisionOnly();
     if (modal === "SET_STATUS") return rpcSetStatusOnly();
     if (modal === "APPROVE") return rpcApproveComposed();
+    if (modal === "ARCHIVE_APP") return rpcArchiveApplication();
+    if (modal === "HARD_DELETE_APP") return rpcHardDeleteApplication();
   }
 
   // ---------------------------
@@ -651,17 +771,31 @@ export default function CiAdmissionsPage() {
                 <div className="text-xs font-semibold tracking-wide text-white/80">Inbox</div>
 
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <Pill active={tab === "INBOX"} onClick={() => setTab("INBOX")}>Inbox</Pill>
-                  <Pill active={tab === "INTAKE"} onClick={() => setTab("INTAKE")}>Intake</Pill>
-                  <Pill active={tab === "ALL"} onClick={() => setTab("ALL")}>All</Pill>
-                  <Pill active={tab === "ARCHIVED"} onClick={() => setTab("ARCHIVED")}>Archived</Pill>
+                  <Pill active={tab === "INBOX"} onClick={() => setTab("INBOX")}>
+                    Inbox
+                  </Pill>
+                  <Pill active={tab === "INTAKE"} onClick={() => setTab("INTAKE")}>
+                    Intake
+                  </Pill>
+                  <Pill active={tab === "ALL"} onClick={() => setTab("ALL")}>
+                    All
+                  </Pill>
+                  <Pill active={tab === "ARCHIVED"} onClick={() => setTab("ARCHIVED")}>
+                    Archived
+                  </Pill>
                 </div>
 
                 {tab === "INTAKE" ? (
                   <div className="mt-3 flex flex-wrap gap-2">
-                    <Pill active={intakePill === "BOTH"} onClick={() => setIntakePill("BOTH")}>BOTH</Pill>
-                    <Pill active={intakePill === "INTAKE"} onClick={() => setIntakePill("INTAKE")}>INTAKE</Pill>
-                    <Pill active={intakePill === "PROVISIONED"} onClick={() => setIntakePill("PROVISIONED")}>PROVISIONED</Pill>
+                    <Pill active={intakePill === "BOTH"} onClick={() => setIntakePill("BOTH")}>
+                      BOTH
+                    </Pill>
+                    <Pill active={intakePill === "INTAKE"} onClick={() => setIntakePill("INTAKE")}>
+                      INTAKE
+                    </Pill>
+                    <Pill active={intakePill === "PROVISIONED"} onClick={() => setIntakePill("PROVISIONED")}>
+                      PROVISIONED
+                    </Pill>
                   </div>
                 ) : null}
 
@@ -860,10 +994,59 @@ export default function CiAdmissionsPage() {
                       Approve (Decision + Status)
                     </button>
 
+                    {/* ✅ Lifecycle section (Archive + Hard Delete) */}
+                    <div className="mt-3 rounded-2xl border border-white/10 bg-black/18 p-4">
+                      <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">Lifecycle</div>
+                      <div className="mt-3 flex flex-col gap-2">
+                        <button
+                          onClick={() => openModal("ARCHIVE_APP")}
+                          disabled={busy}
+                          className={cx(
+                            "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
+                            busy
+                              ? "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
+                              : "border-white/10 bg-white/5 text-white/85 hover:border-amber-300/18 hover:bg-white/7"
+                          )}
+                        >
+                          Archive Application
+                        </button>
+
+                        {(() => {
+                          const st = normStatusUpper(selected.status);
+                          const disabled = busy || ["PROVISIONED", "PROVISIONING"].includes(st);
+
+                          return (
+                            <div>
+                              <button
+                                onClick={() => openModal("HARD_DELETE_APP")}
+                                disabled={disabled}
+                                className={cx(
+                                  "w-full rounded-2xl border px-4 py-3 text-sm font-semibold transition",
+                                  disabled
+                                    ? "cursor-not-allowed border-rose-300/10 bg-rose-500/5 text-rose-200/30"
+                                    : "border-rose-300/20 bg-rose-500/12 text-rose-100 hover:bg-rose-500/16"
+                                )}
+                              >
+                                Hard Delete (Application Only)
+                              </button>
+
+                              {["PROVISIONED", "PROVISIONING"].includes(st) ? (
+                                <div className="mt-2 text-xs text-white/45">
+                                  Disabled: identity may already exist. Use{" "}
+                                  <span className="text-white/70 font-semibold">Archive</span>.
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    </div>
+
                     <div className="mt-2 rounded-2xl border border-white/10 bg-black/18 p-4 text-sm text-white/60">
                       <div className="font-semibold text-white/80">No regressions</div>
                       <div className="mt-1">
-                        Approve logs a decision <span className="text-white/85 font-semibold">and</span> sets status to approved.
+                        Approve logs a decision{" "}
+                        <span className="text-white/85 font-semibold">and</span> sets status to approved.
                         “Set Status” remains a separate operational control.
                       </div>
                     </div>
@@ -972,11 +1155,7 @@ export default function CiAdmissionsPage() {
                   return (
                     <button
                       key={t.value}
-                      onClick={() =>
-                        setTaskList((prev) =>
-                          active ? prev.filter((x) => x !== t.value) : [...prev, t.value]
-                        )
-                      }
+                      onClick={() => toggleTask(t.value)}
                       className={cx(
                         "rounded-full border px-3 py-1 text-[11px] font-medium transition",
                         active
@@ -992,14 +1171,58 @@ export default function CiAdmissionsPage() {
               </div>
             </div>
 
+            {/* ✅ Custom task input (still text[] payload; no wiring change) */}
             <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-              <div className="text-xs uppercase tracking-[0.22em] text-white/35">selected</div>
-              <div className="mt-2 text-sm text-white/75">
-                {taskList.length ? taskList.join(" • ") : "—"}
+              <div className="text-xs uppercase tracking-[0.22em] text-white/35">custom task</div>
+              <div className="mt-2 flex items-center gap-2">
+                <input
+                  value={customTask}
+                  onChange={(e) => setCustomTask(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      addCustomTask();
+                    }
+                  }}
+                  placeholder="e.g. VERIFY INCORPORATION, COLLECT DIRECTOR LIST…"
+                  className="w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-2 text-sm text-white/85 placeholder:text-white/35 outline-none focus:border-amber-300/25"
+                />
+                <button
+                  type="button"
+                  onClick={addCustomTask}
+                  className="shrink-0 rounded-full border border-amber-300/20 bg-amber-400/12 px-4 py-2 text-xs font-semibold text-amber-100 hover:bg-amber-400/16"
+                >
+                  Add
+                </button>
               </div>
               <div className="mt-2 text-xs text-white/45">
-                RPC receives a text[] exactly as selected.
+                Adds to the same task list (text[]) — preloaded and custom tasks are equivalent.
               </div>
+            </div>
+
+            {/* ✅ Selected tasks as removable chips */}
+            <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+              <div className="text-xs uppercase tracking-[0.22em] text-white/35">selected</div>
+
+              {taskList.length ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {taskList.map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => removeTask(t)}
+                      className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/75 hover:border-white/16 hover:bg-white/7"
+                      title="Remove"
+                    >
+                      {t} <span className="ml-1 text-white/35">×</span>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-2 text-sm text-white/60">—</div>
+              )}
+
+              <div className="mt-3 text-xs text-white/45">RPC receives a text[] exactly as selected.</div>
             </div>
           </div>
         ) : null}
@@ -1092,6 +1315,47 @@ export default function CiAdmissionsPage() {
                 className="mt-2 w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white/85 outline-none focus:border-amber-300/25"
                 rows={4}
               />
+            </div>
+          </div>
+        ) : null}
+
+        {modal === "ARCHIVE_APP" ? (
+          <div className="space-y-3">
+            <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+              <div className="text-xs uppercase tracking-[0.22em] text-white/35">archive note</div>
+              <textarea
+                value={archiveNote}
+                onChange={(e) => setArchiveNote(e.target.value)}
+                className="mt-2 w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white/85 outline-none focus:border-amber-300/25"
+                rows={4}
+              />
+              <div className="mt-2 text-xs text-white/45">
+                Archives the application (status → <span className="text-white/70">archived</span>). No entity data is deleted.
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {modal === "HARD_DELETE_APP" ? (
+          <div className="space-y-3">
+            <div className="rounded-2xl border border-rose-300/15 bg-rose-500/10 p-4">
+              <div className="text-xs uppercase tracking-[0.22em] text-rose-100/70">warning</div>
+              <div className="mt-2 text-sm text-rose-100/90">
+                This permanently deletes the application record. Use only for spam, duplicates, or mistakes{" "}
+                <span className="font-semibold">before</span> identity/entity creation.
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+              <div className="text-xs uppercase tracking-[0.22em] text-white/35">reason (required)</div>
+              <textarea
+                value={deleteReason}
+                onChange={(e) => setDeleteReason(e.target.value)}
+                className="mt-2 w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white/85 outline-none focus:border-rose-300/25"
+                rows={4}
+                placeholder="e.g. sandbox smoke test / duplicate submission / spam"
+              />
+              <div className="mt-2 text-xs text-white/45">Confirm is blocked until a reason is provided.</div>
             </div>
           </div>
         ) : null}
