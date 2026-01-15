@@ -67,6 +67,19 @@ function Row({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
   );
 }
 
+/** ---- SHA-256 (client-side) ---- */
+function bufToHex(buf: ArrayBuffer) {
+  const bytes = new Uint8Array(buf);
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, "0");
+  return out;
+}
+
+async function sha256Hex(data: ArrayBuffer) {
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return bufToHex(digest);
+}
+
 export default function CiEvidencePage() {
   // ✅ FIX #1: EntityContextValue doesn't expose `entity` in your repo
   const ec = useEntity() as any;
@@ -105,6 +118,10 @@ export default function CiEvidencePage() {
   const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(null);
 
   const [refreshKey, setRefreshKey] = useState(0);
+
+  // local-only hashes (NO DB writes)
+  const [hashByEvidenceId, setHashByEvidenceId] = useState<Record<string, string>>({});
+  const [hashingId, setHashingId] = useState<string | null>(null);
 
   const selectedApp = useMemo(
     () => apps.find((a) => a.id === selectedAppId) || null,
@@ -289,6 +306,41 @@ export default function CiEvidencePage() {
     window.open(data.signedUrl, "_blank", "noopener,noreferrer");
   }
 
+  async function computeEvidenceHash(e: EvidenceRow) {
+    if (!e.storage_bucket || !e.storage_path) {
+      alert("No storage pointer for this evidence item.");
+      return;
+    }
+
+    setHashingId(e.id);
+    try {
+      const { data, error } = await supabase.storage
+        .from(e.storage_bucket)
+        .createSignedUrl(e.storage_path, 60);
+
+      if (error || !data?.signedUrl) {
+        alert(error?.message || "Could not create signed URL.");
+        return;
+      }
+
+      const resp = await fetch(data.signedUrl);
+      if (!resp.ok) {
+        alert(`Failed to fetch file for hashing (${resp.status}).`);
+        return;
+      }
+
+      const buf = await resp.arrayBuffer();
+      const hash = await sha256Hex(buf);
+
+      setHashByEvidenceId((prev) => ({ ...prev, [e.id]: hash }));
+    } catch (err: any) {
+      console.error(err);
+      alert(err?.message || "Hash compute failed.");
+    } finally {
+      setHashingId(null);
+    }
+  }
+
   async function setVerified(e: EvidenceRow, next: boolean) {
     const note = next ? "Evidence verified." : "Evidence unverified.";
     const { error } = await supabase.rpc("admissions_verify_evidence", {
@@ -320,6 +372,11 @@ export default function CiEvidencePage() {
       selectedApp.id
     );
   }, [selectedApp]);
+
+  const displayedHash = useMemo(() => {
+    if (!selectedEvidence) return "—";
+    return selectedEvidence.file_hash || hashByEvidenceId[selectedEvidence.id] || "—";
+  }, [selectedEvidence, hashByEvidenceId]);
 
   return (
     <div className="h-full w-full">
@@ -525,7 +582,7 @@ export default function CiEvidencePage() {
                             : "—"
                         }
                       />
-                      <Row k="Hash" v={selectedEvidence.file_hash || "—"} mono />
+                      <Row k="Hash" v={displayedHash} mono />
                       <Row
                         k="Stored"
                         v={
@@ -560,6 +617,24 @@ export default function CiEvidencePage() {
                         Open Document
                       </button>
 
+                      {/* Hash (local-only) — no regressions */}
+                      <button
+                        onClick={() => computeEvidenceHash(selectedEvidence)}
+                        disabled={
+                          !selectedEvidence.storage_bucket ||
+                          !selectedEvidence.storage_path ||
+                          hashingId === selectedEvidence.id
+                        }
+                        className={cx(
+                          "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
+                          selectedEvidence.storage_bucket && selectedEvidence.storage_path
+                            ? "border-amber-300/15 bg-amber-300/10 text-amber-100 hover:bg-amber-300/14"
+                            : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
+                        )}
+                      >
+                        {hashingId === selectedEvidence.id ? "Hashing…" : "Compute Hash (SHA-256)"}
+                      </button>
+
                       <div className="grid grid-cols-2 gap-2">
                         <button
                           onClick={() => setVerified(selectedEvidence, true)}
@@ -590,6 +665,7 @@ export default function CiEvidencePage() {
 
                       <div className="pt-2 text-xs text-white/40">
                         Read-only console. Evidence submission happens in the public portal. Verification is RPC-only.
+                        Hash compute is local-only (no DB writes).
                       </div>
                     </div>
                   </>
