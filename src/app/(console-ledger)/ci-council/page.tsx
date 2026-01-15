@@ -871,7 +871,7 @@ export default function CICouncilPage() {
         <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI • Council</div>
         <div className="mt-1 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div className="min-w-0">
-            <h1 className="text-xl font-semibold text-slate-50">Council Review · Authority Console</h1>
+            <h1 className="text-xl font-semibold text-slate-50"> Council Review - Authority Console</h1>
             <p className="mt-1 text-xs text-slate-400 max-w-3xl">
               Council is the authority gate.{" "}
               <span className="text-emerald-300 font-semibold">Approve</span> or{" "}
