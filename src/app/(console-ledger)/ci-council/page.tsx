@@ -54,12 +54,6 @@ type AxiomMemo = {
 const AXIOM_COUNCIL_MEMO_FN = "axiom-council-memo";
 const AXIOM_COUNCIL_REVIEW_FN = "axiom-council-review"; // writes ai_notes for governance_ledger.id
 
-const ENTITY_LABELS: Record<string, string> = {
-  holdings: "Oasis International Holdings Inc.",
-  lounge: "Oasis International Lounge Inc.",
-  "real-estate": "Oasis International Real Estate Inc.",
-};
-
 function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
@@ -154,16 +148,116 @@ function bytesPretty(n?: number | null) {
   return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+type ConfirmKind = "APPROVE" | "REJECT" | "SENDBACK";
+type ConfirmState =
+  | { open: false }
+  | { open: true; kind: ConfirmKind; title: string; subtitle?: string };
+
+function ConfirmModal({
+  state,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  state: ConfirmState;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  if (!state.open) return null;
+
+  const tone =
+    state.kind === "APPROVE"
+      ? "border-emerald-400/50 bg-emerald-500/10"
+      : state.kind === "REJECT"
+      ? "border-rose-400/50 bg-rose-500/10"
+      : "border-amber-400/50 bg-amber-500/10";
+
+  const cta =
+    state.kind === "APPROVE"
+      ? "Confirm Approve"
+      : state.kind === "REJECT"
+      ? "Confirm Reject"
+      : "Confirm Send Back";
+
+  const ctaStyle =
+    state.kind === "APPROVE"
+      ? "border border-emerald-400/60 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/20"
+      : state.kind === "REJECT"
+      ? "border border-rose-400/60 bg-rose-500/15 text-rose-200 hover:bg-rose-500/20"
+      : "border border-amber-400/60 bg-amber-500/15 text-amber-200 hover:bg-amber-500/20";
+
+  return (
+    <div className="fixed inset-0 z-[100] bg-black/70 px-4 sm:px-6 py-6 flex items-center justify-center">
+      <div className="w-full max-w-[560px] rounded-3xl border border-slate-800 bg-slate-950/95 shadow-2xl shadow-black/70 overflow-hidden">
+        <div className="px-6 py-5 border-b border-slate-800">
+          <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">
+            Authority Confirmation
+          </div>
+          <div className="mt-2 text-[15px] font-semibold text-slate-100">
+            {state.title}
+          </div>
+          {state.subtitle && (
+            <div className="mt-2 text-[12px] text-slate-400">{state.subtitle}</div>
+          )}
+        </div>
+
+        <div className="px-6 py-5">
+          <div className={cx("rounded-2xl border px-4 py-4 text-[12px] text-slate-200", tone)}>
+            <div className="text-slate-200">
+              This will apply an <b>authority decision</b> to the selected record.
+            </div>
+            <div className="mt-2 text-slate-400">
+              No archive/seal happens here. Execution discipline stays in Forge / seal pipeline.
+            </div>
+          </div>
+
+          <div className="mt-5 flex items-center justify-end gap-2">
+            <button
+              onClick={onCancel}
+              disabled={busy}
+              className="rounded-full border border-slate-700 bg-slate-950/40 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={onConfirm}
+              disabled={busy}
+              className={cx(
+                "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition disabled:opacity-50 disabled:cursor-not-allowed",
+                ctaStyle
+              )}
+            >
+              {busy ? "Working…" : cta}
+            </button>
+          </div>
+        </div>
+
+        <div className="px-6 py-4 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
+          <span>CI-Council · Authority gate</span>
+          <span>Scoped by entity_id + is_test</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function CICouncilPage() {
   const entityCtx = useEntity() as any;
   const envCtx = useOsEnv() as any;
 
-  // ✅ De-hardwired entity resolution (defensive, OS-consistent)
+  // ✅ OS-consistent entity resolution (NO hardcoded corporate names; flows from OS context)
   const activeEntitySlug: string =
     (entityCtx?.entityKey as string) ||
     (entityCtx?.activeEntity as string) ||
     (entityCtx?.entity_slug as string) ||
     (entityCtx?.activeEntityKey as string) ||
+    "";
+
+  const activeEntityNameFromCtx: string =
+    (entityCtx?.entityName as string) ||
+    (entityCtx?.activeEntityName as string) ||
+    (entityCtx?.entity_name as string) ||
     "";
 
   const activeEntityIdFromCtx: string | null =
@@ -183,9 +277,10 @@ export default function CICouncilPage() {
   const env: "SANDBOX" | "ROT" = isSandbox ? "SANDBOX" : "ROT";
 
   const activeEntityLabel = useMemo(() => {
+    if (activeEntityNameFromCtx?.trim()) return activeEntityNameFromCtx.trim();
     if (!activeEntitySlug) return "—";
-    return ENTITY_LABELS[activeEntitySlug] ?? activeEntitySlug;
-  }, [activeEntitySlug]);
+    return activeEntitySlug;
+  }, [activeEntitySlug, activeEntityNameFromCtx]);
 
   const [entityId, setEntityId] = useState<string | null>(activeEntityIdFromCtx);
 
@@ -195,7 +290,7 @@ export default function CICouncilPage() {
   const [tab, setTab] = useState<StatusTab>("PENDING");
   const [detailTab, setDetailTab] = useState<DetailTab>("AXIOM");
   const [query, setQuery] = useState("");
-  const [drawerOpen, setDrawerOpen] = useState(true);
+  const [queueOpen, setQueueOpen] = useState(true);
 
   const [records, setRecords] = useState<LedgerRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -203,6 +298,9 @@ export default function CICouncilPage() {
   const [readerOpen, setReaderOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+
+  // Authority confirm modals (Admissions-style)
+  const [confirm, setConfirm] = useState<ConfirmState>({ open: false });
 
   // AXIOM (Council)
   const [axiomBusy, setAxiomBusy] = useState<null | "load" | "run" | "memo" | "url">(null);
@@ -452,9 +550,7 @@ export default function CICouncilPage() {
     );
   }
 
-  // ✅ Send Back is “best effort”:
-  // - try existing RPC names + common parameter shapes
-  // - if any real error occurs, we still fall back to opening Alchemy so you’re never blocked
+  // ✅ Send Back is “best effort” (NO new wiring): tries existing RPC names; always falls back to opening Alchemy.
   async function sendBackToAlchemy() {
     if (!selected?.id) return flashError("Select a record first.");
     setBusy("sendback");
@@ -499,7 +595,6 @@ export default function CICouncilPage() {
               // try next function name
               break;
             }
-            // other errors: keep and continue trying shapes
             lastErr = error;
           } catch (e: any) {
             lastErr = e;
@@ -515,7 +610,6 @@ export default function CICouncilPage() {
         return;
       }
 
-      // If no RPC found/usable, fallback open
       if (lastErr) {
         flashError(`Send-back RPC failed; opening Alchemy fallback. (${String(lastErr?.message ?? lastErr)})`);
         openFallback();
@@ -726,8 +820,49 @@ export default function CICouncilPage() {
 
   // UI polish: close queue automatically in AXIOM focus (pure UI)
   useEffect(() => {
-    if (axiomFocus) setDrawerOpen(false);
+    if (axiomFocus) setQueueOpen(false);
   }, [axiomFocus]);
+
+  function openConfirm(kind: ConfirmKind) {
+    if (!selected) return flashError("Select a record first.");
+
+    const recordTitle = selected.title || "(untitled)";
+    if (kind === "APPROVE") {
+      setConfirm({
+        open: true,
+        kind,
+        title: "Approve this record?",
+        subtitle: `Record: ${recordTitle}`,
+      });
+      return;
+    }
+    if (kind === "REJECT") {
+      setConfirm({
+        open: true,
+        kind,
+        title: "Reject this record?",
+        subtitle: `Record: ${recordTitle}`,
+      });
+      return;
+    }
+    setConfirm({
+      open: true,
+      kind,
+      title: "Send back to Alchemy?",
+      subtitle: `Record: ${recordTitle}`,
+    });
+  }
+
+  async function confirmAction() {
+    if (!confirm.open) return;
+    if (!selected?.id) return;
+
+    if (confirm.kind === "APPROVE") return updateStatus("APPROVED");
+    if (confirm.kind === "REJECT") return updateStatus("REJECTED");
+    return sendBackToAlchemy();
+  }
+
+  const showToast = Boolean(error || info);
 
   return (
     <div className="h-full flex flex-col px-4 sm:px-8 pt-6 pb-6">
@@ -783,7 +918,7 @@ export default function CICouncilPage() {
       <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
         <div className="w-full max-w-[1500px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-4 sm:px-6 py-5 flex flex-col overflow-hidden">
           {/* Top strip */}
-          <div className="shrink-0 mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div className="shrink-0 mb-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
             <div className="inline-flex rounded-full bg-slate-950/70 border border-slate-800 p-1 overflow-x-auto">
               <StatusTabButton label="Pending" value="PENDING" active={tab === "PENDING"} onClick={() => setTab("PENDING")} />
               <StatusTabButton label="Approved" value="APPROVED" active={tab === "APPROVED"} onClick={() => setTab("APPROVED")} />
@@ -795,10 +930,10 @@ export default function CICouncilPage() {
             <div className="flex items-center gap-2">
               {!axiomFocus && (
                 <button
-                  onClick={() => setDrawerOpen((v) => !v)}
+                  onClick={() => setQueueOpen((v) => !v)}
                   className="rounded-full border border-slate-800 bg-slate-950/60 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
                 >
-                  {drawerOpen ? "Hide Queue" : "Show Queue"}
+                  {queueOpen ? "Hide Queue" : "Show Queue"}
                 </button>
               )}
 
@@ -821,16 +956,19 @@ export default function CICouncilPage() {
             </div>
           </div>
 
-          {/* Workspace (mobile stacks; desktop columns) */}
-          <div className="flex-1 min-h-0 flex flex-col lg:flex-row gap-4 overflow-hidden">
-            {/* Left queue drawer */}
-            {!axiomFocus && drawerOpen && (
-              <aside className="w-full lg:w-[360px] shrink-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
-                <div className="shrink-0 p-4 border-b border-slate-800">
-                  <div className="flex items-center justify-between gap-2">
+          {/* ✅ Vertical OS layout (Admissions/Evidence aligned) */}
+          <div className="flex-1 min-h-0 overflow-y-auto space-y-4 pb-2">
+            {/* Queue (collapsible) */}
+            {!axiomFocus && queueOpen && (
+              <section className="rounded-2xl border border-slate-800 bg-slate-950/40 overflow-hidden">
+                <div className="px-5 py-4 border-b border-slate-800">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                       Queue · {filtered.length}/{envFiltered.length} <span className="mx-2 text-slate-700">•</span>
                       <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
+                    </div>
+                    <div className="text-[11px] text-slate-500">
+                      Scope: <span className="font-mono">governance_ledger</span> · entity_id + is_test
                     </div>
                   </div>
 
@@ -842,7 +980,7 @@ export default function CICouncilPage() {
                   />
                 </div>
 
-                <div className="flex-1 min-h-0 overflow-y-auto">
+                <div className="max-h-[360px] overflow-y-auto">
                   {loading ? (
                     <div className="p-4 text-[13px] text-slate-400">Loading…</div>
                   ) : filtered.length === 0 ? (
@@ -856,17 +994,21 @@ export default function CICouncilPage() {
                             key={r.id}
                             onClick={() => handleSelect(r)}
                             className={cx(
-                              "cursor-pointer px-4 py-3 transition hover:bg-slate-800/60",
+                              "cursor-pointer px-5 py-4 transition hover:bg-slate-800/60",
                               r.id === selectedId && "bg-slate-800/80"
                             )}
                           >
-                            <div className="flex items-start justify-between gap-2">
+                            <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0 flex-1">
-                                <div className="truncate text-[13px] font-semibold text-slate-100">{r.title || "(untitled)"}</div>
+                                <div className="truncate text-[13px] font-semibold text-slate-100">
+                                  {r.title || "(untitled)"}
+                                </div>
                                 <div className="mt-1 text-[11px] text-slate-500">
                                   {fmtShort(r.created_at)} · {r.record_type || "resolution"}
                                 </div>
-                                <div className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-slate-400">{r.body || "—"}</div>
+                                <div className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-slate-400">
+                                  {r.body || "—"}
+                                </div>
                               </div>
 
                               <span
@@ -890,19 +1032,20 @@ export default function CICouncilPage() {
                     </ul>
                   )}
                 </div>
-              </aside>
+              </section>
             )}
 
-            {/* Center review surface */}
+            {/* Review (vertical, calm) */}
             {!axiomFocus && (
-              <section className="flex-1 min-w-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
-                <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+              <section className="rounded-2xl border border-slate-800 bg-slate-950/40 overflow-hidden">
+                <div className="px-5 py-4 border-b border-slate-800 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
                   <div className="min-w-0">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Review</div>
                     <div className="mt-1 text-[13px] text-slate-400">
                       Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
                       <span className="mx-2 text-slate-700">•</span>
-                      Lane: <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
+                      Lane:{" "}
+                      <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
                       {selected && (
                         <>
                           <span className="mx-2 text-slate-700">•</span>
@@ -947,23 +1090,25 @@ export default function CICouncilPage() {
                   )}
                 </div>
 
-                <div className="flex-1 min-h-0 overflow-hidden p-5">
+                <div className="p-5">
                   {!selected ? (
-                    <div className="h-full w-full rounded-2xl border border-slate-800 bg-black/20 flex items-center justify-center text-slate-500">
+                    <div className="rounded-2xl border border-slate-800 bg-black/20 px-5 py-6 text-slate-500 text-[13px]">
                       Select a record for review.
                     </div>
                   ) : (
-                    <div className="h-full w-full rounded-2xl border border-slate-800 bg-black/30 overflow-hidden flex flex-col">
-                      <div className="shrink-0 px-5 py-4 border-b border-slate-800">
+                    <div className="rounded-2xl border border-slate-800 bg-black/30 overflow-hidden">
+                      <div className="px-5 py-4 border-b border-slate-800">
                         <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Record</div>
-                        <div className="mt-1 text-[15px] font-semibold text-slate-100 truncate">{selected.title || "(untitled)"}</div>
+                        <div className="mt-1 text-[15px] font-semibold text-slate-100 truncate">
+                          {selected.title || "(untitled)"}
+                        </div>
                         <div className="mt-1 text-[11px] text-slate-500">
                           {fmtShort(selected.created_at)} · {selected.record_type || "resolution"} ·{" "}
                           {(selected.status ?? "").toUpperCase()}
                         </div>
                       </div>
 
-                      <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5">
+                      <div className="px-6 py-5">
                         <div className="rounded-2xl border border-slate-800 bg-black/35 px-5 py-5">
                           <pre className="whitespace-pre-wrap font-sans text-[13px] leading-[1.8] text-slate-100">
                             {selected.body || "—"}
@@ -971,36 +1116,20 @@ export default function CICouncilPage() {
                         </div>
                       </div>
 
-                      <div className="shrink-0 px-5 py-4 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
-                        <span>Review is non-mutating. Authority actions happen in Council.</span>
+                      <div className="px-5 py-4 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
+                        <span>Review is non-mutating. Authority actions happen below.</span>
                         <span>Oasis OS · Council Authority Gate</span>
                       </div>
-                    </div>
-                  )}
-
-                  {(error || info) && (
-                    <div className="mt-4 text-[13px]">
-                      {error && (
-                        <div className="rounded-2xl border border-red-500/60 bg-red-500/10 px-4 py-3 text-red-200">
-                          {error}
-                        </div>
-                      )}
-                      {info && !error && (
-                        <div className="rounded-2xl border border-emerald-500/60 bg-emerald-500/10 px-4 py-3 text-emerald-200">
-                          {info}
-                        </div>
-                      )}
                     </div>
                   )}
                 </div>
               </section>
             )}
 
-            {/* Right detail panel OR AXIOM Focus Surface */}
+            {/* AXIOM Focus Surface (vertical full-width) */}
             {axiomFocus ? (
-              <section className="flex-1 min-w-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 overflow-hidden flex flex-col">
-                {/* Focus header */}
-                <div className="shrink-0 px-6 py-5 border-b border-slate-800 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+              <section className="rounded-2xl border border-slate-800 bg-slate-950/40 overflow-hidden">
+                <div className="px-6 py-5 border-b border-slate-800 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
                   <div className="min-w-0">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-indigo-200">
                       AXIOM Focus · Council Advisory
@@ -1064,163 +1193,128 @@ export default function CICouncilPage() {
                   </div>
                 </div>
 
-                {/* Focus body */}
-                <div className="flex-1 min-h-0 overflow-hidden p-5">
-                  {!selected ? (
-                    <div className="h-full w-full rounded-2xl border border-slate-800 bg-black/20 flex items-center justify-center text-slate-500">
-                      Select a record first.
+                <div className="p-5 grid grid-cols-1 lg:grid-cols-12 gap-4">
+                  {/* History */}
+                  <div className="lg:col-span-4 rounded-2xl border border-slate-800 bg-black/25 overflow-hidden flex flex-col min-h-[420px]">
+                    <div className="px-4 py-4 border-b border-slate-800">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Advisory History</div>
+                        <button
+                          onClick={() => loadAxiomNotesForSelected()}
+                          disabled={axiomBusy !== null}
+                          className="rounded-full border border-slate-700 bg-slate-950/40 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {axiomBusy === "load" ? "…" : "Reload"}
+                        </button>
+                      </div>
+                      <div className="mt-2 text-[11px] text-slate-500">
+                        Showing {axiomNotes.length} note(s) · <span className="font-mono">ai_notes</span>
+                      </div>
                     </div>
-                  ) : (
-                    <div className="h-full w-full grid grid-cols-12 gap-4 overflow-hidden">
-                      {/* History rail */}
-                      <div className="col-span-12 lg:col-span-4 min-h-0 rounded-2xl border border-slate-800 bg-black/25 overflow-hidden flex flex-col">
-                        <div className="shrink-0 px-4 py-4 border-b border-slate-800">
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Advisory History</div>
-                            <button
-                              onClick={() => loadAxiomNotesForSelected()}
-                              disabled={axiomBusy !== null}
-                              className="rounded-full border border-slate-700 bg-slate-950/40 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50 disabled:cursor-not-allowed"
-                            >
-                              {axiomBusy === "load" ? "…" : "Reload"}
-                            </button>
-                          </div>
-                          <div className="mt-2 text-[11px] text-slate-500">
-                            Showing {axiomNotes.length} note(s) · scope: <span className="font-mono">ai_notes</span>
-                          </div>
-                        </div>
 
-                        <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
-                          {axiomNotes.length === 0 ? (
-                            <div className="rounded-2xl border border-slate-800 bg-black/20 px-4 py-4 text-[12px] text-slate-500">
-                              No advisory yet. Click <b>Run AXIOM</b> to generate.
-                            </div>
-                          ) : (
-                            axiomNotes.map((n) => {
-                              const active = (axiomSelected?.id ?? axiomNotes[0]?.id) === n.id;
-                              const sev = n.severity ?? inferSeverity(n.title, n.content);
-                              return (
-                                <button
-                                  key={n.id}
-                                  onClick={() => setAxiomSelectedNoteId(n.id)}
-                                  className={cx(
-                                    "w-full text-left rounded-2xl border px-3 py-3 transition",
-                                    active
-                                      ? "border-emerald-400/50 bg-emerald-500/10"
-                                      : "border-slate-800 bg-black/20 hover:bg-slate-900/40"
-                                  )}
-                                >
-                                  <div className="flex items-start justify-between gap-2">
-                                    <div className="min-w-0 flex-1">
-                                      <div className="text-[12px] font-semibold text-slate-100 truncate">
-                                        {n.title || "AXIOM Advisory"}
-                                      </div>
-                                      <div className="mt-1 text-[10px] text-slate-500">
-                                        {fmtShort(n.created_at)} {n.model ? `• ${n.model}` : ""}{" "}
-                                        {typeof n.tokens_used === "number" ? ` • ${n.tokens_used} tok` : ""}
-                                      </div>
-                                    </div>
-                                    {sev && (
-                                      <span
-                                        className={cx(
-                                          "shrink-0 rounded-full border px-2 py-1 text-[9px] uppercase tracking-[0.18em]",
-                                          severityPill(sev)
-                                        )}
-                                        title="Inferred severity"
-                                      >
-                                        {sev}
-                                      </span>
-                                    )}
+                    <div className="flex-1 overflow-y-auto p-3 space-y-2">
+                      {axiomNotes.length === 0 ? (
+                        <div className="rounded-2xl border border-slate-800 bg-black/20 px-4 py-4 text-[12px] text-slate-500">
+                          No advisory yet. Click <b>Run AXIOM</b> to generate.
+                        </div>
+                      ) : (
+                        axiomNotes.map((n) => {
+                          const active = (axiomSelected?.id ?? axiomNotes[0]?.id) === n.id;
+                          const sev = n.severity ?? inferSeverity(n.title, n.content);
+                          return (
+                            <button
+                              key={n.id}
+                              onClick={() => setAxiomSelectedNoteId(n.id)}
+                              className={cx(
+                                "w-full text-left rounded-2xl border px-3 py-3 transition",
+                                active
+                                  ? "border-emerald-400/50 bg-emerald-500/10"
+                                  : "border-slate-800 bg-black/20 hover:bg-slate-900/40"
+                              )}
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-[12px] font-semibold text-slate-100 truncate">
+                                    {n.title || "AXIOM Advisory"}
                                   </div>
-                                </button>
-                              );
-                            })
-                          )}
-                        </div>
+                                  <div className="mt-1 text-[10px] text-slate-500">
+                                    {fmtShort(n.created_at)} {n.model ? `• ${n.model}` : ""}{" "}
+                                    {typeof n.tokens_used === "number" ? ` • ${n.tokens_used} tok` : ""}
+                                  </div>
+                                </div>
+                                {sev && (
+                                  <span
+                                    className={cx(
+                                      "shrink-0 rounded-full border px-2 py-1 text-[9px] uppercase tracking-[0.18em]",
+                                      severityPill(sev)
+                                    )}
+                                    title="Inferred severity"
+                                  >
+                                    {sev}
+                                  </span>
+                                )}
+                              </div>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
 
-                        <div className="shrink-0 px-4 py-4 border-t border-slate-800">
-                          <div className="grid grid-cols-2 gap-2">
-                            <button
-                              onClick={async () => {
-                                if (!selected?.id) return;
-                                try {
-                                  await navigator.clipboard.writeText(selected.id);
-                                  flashInfo("Copied record id.");
-                                } catch {
-                                  flashError("Copy failed.");
-                                }
-                              }}
-                              className="rounded-2xl border border-slate-700 bg-slate-950/40 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
-                            >
-                              Copy ID
-                            </button>
-                            <button
-                              onClick={() => {
-                                resetAxiomState();
-                                flashInfo("Cleared local advisory state.");
-                              }}
-                              className="rounded-2xl border border-slate-700 bg-slate-950/40 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
-                            >
-                              Clear
-                            </button>
-                          </div>
+                  {/* Preview */}
+                  <div className="lg:col-span-8 rounded-2xl border border-slate-800 bg-black/25 overflow-hidden flex flex-col min-h-[420px]">
+                    <div className="px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
+                      <div className="min-w-0">
+                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Advisory Preview</div>
+                        <div className="mt-1 text-[12px] text-slate-500">
+                          {axiomSelected?.created_at ? `Latest: ${fmtShort(axiomSelected.created_at)}` : "—"}
                         </div>
                       </div>
 
-                      {/* Big preview */}
-                      <div className="col-span-12 lg:col-span-8 min-h-0 rounded-2xl border border-slate-800 bg-black/25 overflow-hidden flex flex-col">
-                        <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
-                          <div className="min-w-0">
-                            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Advisory Preview</div>
-                            <div className="mt-1 text-[12px] text-slate-500">
-                              {axiomSelected?.created_at ? `Latest: ${fmtShort(axiomSelected.created_at)}` : "—"}
-                            </div>
-                          </div>
-
-                          <div className="shrink-0 flex items-center gap-2">
-                            <Link
-                              href="/ci-forge"
-                              className="rounded-full border border-emerald-500/60 bg-black/40 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/10"
-                              title="Execution happens in Forge"
-                            >
-                              Open Forge
-                            </Link>
-                            <Link
-                              href="/ci-archive/ledger"
-                              className="rounded-full border border-slate-700 bg-slate-950/40 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
-                              title="Lifecycle registry in Archive"
-                            >
-                              Registry
-                            </Link>
-                          </div>
-                        </div>
-
-                        <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5">
-                          <div className="rounded-2xl border border-slate-800 bg-black/30 px-5 py-5">
-                            <pre className="whitespace-pre-wrap font-sans text-[13px] leading-[1.85] text-slate-100">
-                              {axiomSelected?.content?.trim()
-                                ? axiomSelected.content
-                                : "— (No advisory loaded yet. Click Load or Run AXIOM.) —"}
-                            </pre>
-                          </div>
-                        </div>
-
-                        <div className="shrink-0 px-5 py-4 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
-                          <span>AXIOM focus is non-mutating. Authority remains in Council.</span>
-                          <span>Scoped by entity_id + is_test</span>
-                        </div>
+                      <div className="shrink-0 flex items-center gap-2">
+                        <Link
+                          href="/ci-forge"
+                          className="rounded-full border border-emerald-500/60 bg-black/40 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/10"
+                          title="Execution happens in Forge"
+                        >
+                          Open Forge
+                        </Link>
+                        <Link
+                          href="/ci-archive/ledger"
+                          className="rounded-full border border-slate-700 bg-slate-950/40 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
+                          title="Lifecycle registry in Archive"
+                        >
+                          Registry
+                        </Link>
                       </div>
                     </div>
-                  )}
+
+                    <div className="flex-1 overflow-y-auto px-6 py-5">
+                      <div className="rounded-2xl border border-slate-800 bg-black/30 px-5 py-5">
+                        <pre className="whitespace-pre-wrap font-sans text-[13px] leading-[1.85] text-slate-100">
+                          {axiomSelected?.content?.trim()
+                            ? axiomSelected.content
+                            : "— (No advisory loaded yet. Click Load or Run AXIOM.) —"}
+                        </pre>
+                      </div>
+                    </div>
+
+                    <div className="px-5 py-4 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
+                      <span>AXIOM focus is non-mutating. Authority remains in Council.</span>
+                      <span>Scoped by entity_id + is_test</span>
+                    </div>
+                  </div>
                 </div>
               </section>
             ) : (
-              <aside className="w-full lg:w-[410px] shrink-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
-                {/* Panel header */}
-                <div className="shrink-0 px-5 py-4 border-b border-slate-800">
+              /* Authority Panel (vertical, Admissions-aligned) */
+              <section className="rounded-2xl border border-slate-800 bg-slate-950/40 overflow-hidden">
+                <div className="px-5 py-4 border-b border-slate-800">
                   <div className="flex items-center justify-between gap-2">
                     <div>
-                      <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Authority Panel</div>
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
+                        Authority Panel
+                      </div>
                       <div className="mt-1 text-[12px] text-slate-500">
                         Authority · AXIOM · Artifacts <span className="mx-2 text-slate-700">•</span>
                         <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
@@ -1255,14 +1349,14 @@ export default function CICouncilPage() {
                   </div>
                 </div>
 
-                <div className="flex-1 min-h-0 overflow-y-auto px-5 py-5 space-y-4">
+                <div className="p-5 space-y-4">
                   {!selected ? (
                     <div className="rounded-2xl border border-slate-800 bg-black/25 px-4 py-4 text-[12px] text-slate-500">
                       Select a record to see authority + AXIOM tools.
                     </div>
                   ) : (
                     <>
-                      {/* ✅ Authority block (phone-safe: big taps, no hover dependence) */}
+                      {/* Authority block (modals for actions) */}
                       <div className="rounded-2xl border border-slate-800 bg-black/30 px-4 py-4">
                         <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Authority</div>
                         <div className="mt-2 text-[12px] text-slate-400">
@@ -1281,7 +1375,7 @@ export default function CICouncilPage() {
 
                         <div className="mt-4 space-y-2">
                           <button
-                            onClick={() => updateStatus("APPROVED")}
+                            onClick={() => openConfirm("APPROVE")}
                             disabled={!canApprove || !!busy}
                             className="w-full rounded-full bg-emerald-600 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-black hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
@@ -1289,7 +1383,7 @@ export default function CICouncilPage() {
                           </button>
 
                           <button
-                            onClick={() => updateStatus("REJECTED")}
+                            onClick={() => openConfirm("REJECT")}
                             disabled={!canReject || !!busy}
                             className="w-full rounded-full bg-rose-600 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-black hover:bg-rose-500 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
@@ -1297,7 +1391,7 @@ export default function CICouncilPage() {
                           </button>
 
                           <button
-                            onClick={() => sendBackToAlchemy()}
+                            onClick={() => openConfirm("SENDBACK")}
                             disabled={!canSendBack || !!busy}
                             className="w-full rounded-full bg-amber-500 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-black hover:bg-amber-400 disabled:opacity-50 disabled:cursor-not-allowed"
                             title="Returns to Alchemy correction flow (RPC if present; otherwise opens Alchemy with record_id)."
@@ -1381,7 +1475,7 @@ export default function CICouncilPage() {
                               <div className="mt-1 text-[11px] text-slate-500">Showing {axiomNotes.length} note(s)</div>
                             </div>
 
-                            <div className="max-h-[220px] overflow-y-auto divide-y divide-slate-800">
+                            <div className="max-h-[260px] overflow-y-auto divide-y divide-slate-800">
                               {axiomNotes.length === 0 ? (
                                 <div className="p-4 text-[12px] text-slate-500">
                                   No advisory yet. Click <b>Run</b> to generate.
@@ -1428,10 +1522,8 @@ export default function CICouncilPage() {
 
                             <div className="px-4 py-4 border-t border-slate-800">
                               <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Preview</div>
-                              <pre className="mt-2 whitespace-pre-wrap font-sans text-[12px] leading-[1.7] text-slate-200 max-h-[200px] overflow-y-auto rounded-2xl border border-slate-800 bg-black/30 px-4 py-4">
-                                {axiomSelected?.content?.trim()
-                                  ? axiomSelected.content
-                                  : "— (No advisory loaded yet.) —"}
+                              <pre className="mt-2 whitespace-pre-wrap font-sans text-[12px] leading-[1.7] text-slate-200 max-h-[220px] overflow-y-auto rounded-2xl border border-slate-800 bg-black/30 px-4 py-4">
+                                {axiomSelected?.content?.trim() ? axiomSelected.content : "— (No advisory loaded yet.) —"}
                               </pre>
                             </div>
                           </div>
@@ -1473,7 +1565,7 @@ export default function CICouncilPage() {
                               <div className="flex items-center justify-between gap-2">
                                 <span className="text-slate-500">Path</span>
                                 <span
-                                  className="text-slate-200 font-mono text-[11px] truncate max-w-[220px]"
+                                  className="text-slate-200 font-mono text-[11px] truncate max-w-[520px]"
                                   title={axiomLastMemo?.storage_path ?? ""}
                                 >
                                   {axiomLastMemo?.storage_path ?? "—"}
@@ -1559,17 +1651,46 @@ export default function CICouncilPage() {
                       )}
                     </>
                   )}
+
+                  {showToast && (
+                    <div className="text-[13px]">
+                      {error && (
+                        <div className="rounded-2xl border border-red-500/60 bg-red-500/10 px-4 py-3 text-red-200">
+                          {error}
+                        </div>
+                      )}
+                      {info && !error && (
+                        <div className="rounded-2xl border border-emerald-500/60 bg-emerald-500/10 px-4 py-3 text-emerald-200">
+                          {info}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
-                <div className="shrink-0 px-5 py-3 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
+                <div className="px-5 py-3 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
                   <span>CI-Council · Authority gate (governance_ledger)</span>
                   <span>Scoped by entity_id + is_test</span>
                 </div>
-              </aside>
+              </section>
             )}
           </div>
         </div>
       </div>
+
+      {/* Confirm Modal (Admissions-style) */}
+      <ConfirmModal
+        state={confirm}
+        busy={!!busy}
+        onCancel={() => setConfirm({ open: false })}
+        onConfirm={async () => {
+          try {
+            await confirmAction();
+          } finally {
+            setConfirm({ open: false });
+          }
+        }}
+      />
 
       {/* Reader Modal (kept; no wiring changes) */}
       {readerOpen && (
