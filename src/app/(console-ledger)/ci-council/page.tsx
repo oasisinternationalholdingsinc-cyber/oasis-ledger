@@ -156,23 +156,38 @@ function bytesPretty(n?: number | null) {
 
 export default function CICouncilPage() {
   const entityCtx = useEntity() as any;
-  const osEnv = useOsEnv();
+  const envCtx = useOsEnv() as any;
 
-  // CRITICAL: entity is ALWAYS corp entity (never "sandbox")
-  const activeEntitySlug = (entityCtx?.activeEntity as string) || "holdings";
+  // ✅ De-hardwired entity resolution (defensive, OS-consistent)
+  const activeEntitySlug: string =
+    (entityCtx?.entityKey as string) ||
+    (entityCtx?.activeEntity as string) ||
+    (entityCtx?.entity_slug as string) ||
+    (entityCtx?.activeEntityKey as string) ||
+    "";
 
-  // env toggle ONLY controls is_test
-  const isSandbox = !!osEnv?.isSandbox;
+  const activeEntityIdFromCtx: string | null =
+    (entityCtx?.activeEntityId as string) ||
+    (entityCtx?.entityId as string) ||
+    (entityCtx?.entity_id as string) ||
+    null;
+
+  // ✅ env toggle ONLY controls is_test (defensive)
+  const isSandbox: boolean = Boolean(
+    envCtx?.is_test ??
+      envCtx?.isTest ??
+      envCtx?.lane_is_test ??
+      envCtx?.sandbox ??
+      envCtx?.isSandbox
+  );
   const env: "SANDBOX" | "ROT" = isSandbox ? "SANDBOX" : "ROT";
 
-  const activeEntityLabel = useMemo(
-    () => ENTITY_LABELS[activeEntitySlug] ?? activeEntitySlug,
-    [activeEntitySlug]
-  );
+  const activeEntityLabel = useMemo(() => {
+    if (!activeEntitySlug) return "—";
+    return ENTITY_LABELS[activeEntitySlug] ?? activeEntitySlug;
+  }, [activeEntitySlug]);
 
-  const [entityId, setEntityId] = useState<string | null>(
-    (entityCtx?.activeEntityId as string) || null
-  );
+  const [entityId, setEntityId] = useState<string | null>(activeEntityIdFromCtx);
 
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<null | "approve" | "reject" | "archive" | "sendback">(null);
@@ -246,13 +261,18 @@ export default function CICouncilPage() {
   async function ensureEntityId(slug: string) {
     if (entityId) return entityId;
 
-    const ctxId = (entityCtx?.activeEntityId as string) || null;
-    if (ctxId) {
-      setEntityId(ctxId);
-      return ctxId;
+    if (activeEntityIdFromCtx) {
+      setEntityId(activeEntityIdFromCtx);
+      return activeEntityIdFromCtx;
     }
 
-    const { data, error } = await supabase.from("entities").select("id, slug").eq("slug", slug).single();
+    if (!slug) throw new Error("OS Context missing entity slug.");
+
+    const { data, error } = await supabase
+      .from("entities")
+      .select("id, slug")
+      .eq("slug", slug)
+      .single();
 
     if (error || !data?.id) throw error ?? new Error("Entity lookup failed.");
     setEntityId(data.id);
@@ -264,6 +284,12 @@ export default function CICouncilPage() {
     setError(null);
 
     try {
+      if (!activeEntitySlug && !entityId) {
+        setRecords([]);
+        setSelectedId(null);
+        return;
+      }
+
       const eid = await ensureEntityId(activeEntitySlug);
 
       const tryWithIsTest = async () => {
@@ -324,6 +350,12 @@ export default function CICouncilPage() {
     }
   }
 
+  // keep entityId in sync if ctx becomes available
+  useEffect(() => {
+    if (activeEntityIdFromCtx && activeEntityIdFromCtx !== entityId) setEntityId(activeEntityIdFromCtx);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeEntityIdFromCtx]);
+
   useEffect(() => {
     setTab("PENDING");
     setQuery("");
@@ -375,7 +407,11 @@ export default function CICouncilPage() {
     }
 
     // 2) fallback update
-    const { error: upErr } = await supabase.from("governance_ledger").update({ status: next }).eq("id", recordId);
+    const { error: upErr } = await supabase
+      .from("governance_ledger")
+      .update({ status: next })
+      .eq("id", recordId);
+
     if (upErr) throw upErr;
   }
 
@@ -500,11 +536,10 @@ export default function CICouncilPage() {
     }
   }
 
-  const lanePill = cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300");
   const canApprove = !!selected && (selected.status ?? "").toUpperCase() === "PENDING";
   const canReject = !!selected && (selected.status ?? "").toUpperCase() === "PENDING";
   const canSendBack = !!selected;
-  const showNoEntityWarning = !entityId;
+  const showNoEntityWarning = !activeEntitySlug;
 
   // AXIOM helpers (Council)
   const axiomSelected = useMemo(() => {
@@ -588,7 +623,9 @@ export default function CICouncilPage() {
 
     setAxiomBusy("url");
     try {
-      const { data: urlData, error: urlErr } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 15);
+      const { data: urlData, error: urlErr } = await supabase.storage
+        .from(bucket)
+        .createSignedUrl(path, 60 * 15);
       if (!urlErr && urlData?.signedUrl) setAxiomMemoUrl(urlData.signedUrl);
     } finally {
       setAxiomBusy(null);
@@ -683,7 +720,9 @@ export default function CICouncilPage() {
   }, [detailTab, selectedId, axiomLastMemo?.storage_bucket, axiomLastMemo?.storage_path]);
 
   const axiomSeverityLabel =
-    (axiomLastMemo?.severity as string | undefined) ?? (axiomSelected?.severity as string | undefined) ?? null;
+    (axiomLastMemo?.severity as string | undefined) ??
+    (axiomSelected?.severity as string | undefined) ??
+    null;
 
   // UI polish: close queue automatically in AXIOM focus (pure UI)
   useEffect(() => {
@@ -691,11 +730,11 @@ export default function CICouncilPage() {
   }, [axiomFocus]);
 
   return (
-    <div className="h-full flex flex-col px-8 pt-6 pb-6">
+    <div className="h-full flex flex-col px-4 sm:px-8 pt-6 pb-6">
       {/* Header under OS bar */}
       <div className="mb-4 shrink-0">
         <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI • Council</div>
-        <div className="mt-1 flex items-center justify-between gap-4">
+        <div className="mt-1 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div className="min-w-0">
             <h1 className="text-xl font-semibold text-slate-50">Council Review · Authority Console</h1>
             <p className="mt-1 text-xs text-slate-400 max-w-3xl">
@@ -735,18 +774,17 @@ export default function CICouncilPage() {
 
         {showNoEntityWarning && (
           <div className="mt-3 rounded-2xl border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-[12px] text-amber-200">
-            OS Context: <b>activeEntityId</b> missing; Council resolved <code>entities.id</code> by slug. Env toggle flips{" "}
-            <code>is_test</code> only.
+            OS Context: missing entity selection. Council will activate once an entity is selected in the OS control plane.
           </div>
         )}
       </div>
 
       {/* Main OS window frame */}
       <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
-        <div className="w-full max-w-[1500px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-6 py-5 flex flex-col overflow-hidden">
+        <div className="w-full max-w-[1500px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-4 sm:px-6 py-5 flex flex-col overflow-hidden">
           {/* Top strip */}
-          <div className="shrink-0 mb-4 flex items-center justify-between gap-4">
-            <div className="inline-flex rounded-full bg-slate-950/70 border border-slate-800 p-1 overflow-hidden">
+          <div className="shrink-0 mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="inline-flex rounded-full bg-slate-950/70 border border-slate-800 p-1 overflow-x-auto">
               <StatusTabButton label="Pending" value="PENDING" active={tab === "PENDING"} onClick={() => setTab("PENDING")} />
               <StatusTabButton label="Approved" value="APPROVED" active={tab === "APPROVED"} onClick={() => setTab("APPROVED")} />
               <StatusTabButton label="Rejected" value="REJECTED" active={tab === "REJECTED"} onClick={() => setTab("REJECTED")} />
@@ -783,11 +821,11 @@ export default function CICouncilPage() {
             </div>
           </div>
 
-          {/* Workspace */}
-          <div className="flex-1 min-h-0 flex gap-4 overflow-hidden">
+          {/* Workspace (mobile stacks; desktop columns) */}
+          <div className="flex-1 min-h-0 flex flex-col lg:flex-row gap-4 overflow-hidden">
             {/* Left queue drawer */}
             {!axiomFocus && drawerOpen && (
-              <aside className="w-[360px] shrink-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
+              <aside className="w-full lg:w-[360px] shrink-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
                 <div className="shrink-0 p-4 border-b border-slate-800">
                   <div className="flex items-center justify-between gap-2">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
@@ -858,7 +896,7 @@ export default function CICouncilPage() {
             {/* Center review surface */}
             {!axiomFocus && (
               <section className="flex-1 min-w-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
-                <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
+                <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
                   <div className="min-w-0">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Review</div>
                     <div className="mt-1 text-[13px] text-slate-400">
@@ -875,7 +913,7 @@ export default function CICouncilPage() {
                   </div>
 
                   {selected && (
-                    <div className="shrink-0 flex items-center gap-2">
+                    <div className="shrink-0 flex flex-wrap items-center gap-2">
                       <button
                         onClick={async () => {
                           try {
@@ -943,10 +981,14 @@ export default function CICouncilPage() {
                   {(error || info) && (
                     <div className="mt-4 text-[13px]">
                       {error && (
-                        <div className="rounded-2xl border border-red-500/60 bg-red-500/10 px-4 py-3 text-red-200">{error}</div>
+                        <div className="rounded-2xl border border-red-500/60 bg-red-500/10 px-4 py-3 text-red-200">
+                          {error}
+                        </div>
                       )}
                       {info && !error && (
-                        <div className="rounded-2xl border border-emerald-500/60 bg-emerald-500/10 px-4 py-3 text-emerald-200">{info}</div>
+                        <div className="rounded-2xl border border-emerald-500/60 bg-emerald-500/10 px-4 py-3 text-emerald-200">
+                          {info}
+                        </div>
                       )}
                     </div>
                   )}
@@ -958,7 +1000,7 @@ export default function CICouncilPage() {
             {axiomFocus ? (
               <section className="flex-1 min-w-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 overflow-hidden flex flex-col">
                 {/* Focus header */}
-                <div className="shrink-0 px-6 py-5 border-b border-slate-800 flex items-start justify-between gap-4">
+                <div className="shrink-0 px-6 py-5 border-b border-slate-800 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
                   <div className="min-w-0">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-indigo-200">
                       AXIOM Focus · Council Advisory
@@ -987,7 +1029,7 @@ export default function CICouncilPage() {
                     </div>
                   </div>
 
-                  <div className="shrink-0 flex items-center gap-2">
+                  <div className="shrink-0 flex flex-wrap items-center gap-2">
                     <button
                       onClick={() => loadAxiomNotesForSelected()}
                       disabled={!selected || axiomBusy !== null}
@@ -1031,7 +1073,7 @@ export default function CICouncilPage() {
                   ) : (
                     <div className="h-full w-full grid grid-cols-12 gap-4 overflow-hidden">
                       {/* History rail */}
-                      <div className="col-span-4 min-h-0 rounded-2xl border border-slate-800 bg-black/25 overflow-hidden flex flex-col">
+                      <div className="col-span-12 lg:col-span-4 min-h-0 rounded-2xl border border-slate-800 bg-black/25 overflow-hidden flex flex-col">
                         <div className="shrink-0 px-4 py-4 border-b border-slate-800">
                           <div className="flex items-center justify-between gap-2">
                             <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Advisory History</div>
@@ -1063,12 +1105,16 @@ export default function CICouncilPage() {
                                   onClick={() => setAxiomSelectedNoteId(n.id)}
                                   className={cx(
                                     "w-full text-left rounded-2xl border px-3 py-3 transition",
-                                    active ? "border-emerald-400/50 bg-emerald-500/10" : "border-slate-800 bg-black/20 hover:bg-slate-900/40"
+                                    active
+                                      ? "border-emerald-400/50 bg-emerald-500/10"
+                                      : "border-slate-800 bg-black/20 hover:bg-slate-900/40"
                                   )}
                                 >
                                   <div className="flex items-start justify-between gap-2">
                                     <div className="min-w-0 flex-1">
-                                      <div className="text-[12px] font-semibold text-slate-100 truncate">{n.title || "AXIOM Advisory"}</div>
+                                      <div className="text-[12px] font-semibold text-slate-100 truncate">
+                                        {n.title || "AXIOM Advisory"}
+                                      </div>
                                       <div className="mt-1 text-[10px] text-slate-500">
                                         {fmtShort(n.created_at)} {n.model ? `• ${n.model}` : ""}{" "}
                                         {typeof n.tokens_used === "number" ? ` • ${n.tokens_used} tok` : ""}
@@ -1122,7 +1168,7 @@ export default function CICouncilPage() {
                       </div>
 
                       {/* Big preview */}
-                      <div className="col-span-8 min-h-0 rounded-2xl border border-slate-800 bg-black/25 overflow-hidden flex flex-col">
+                      <div className="col-span-12 lg:col-span-8 min-h-0 rounded-2xl border border-slate-800 bg-black/25 overflow-hidden flex flex-col">
                         <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
                           <div className="min-w-0">
                             <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Advisory Preview</div>
@@ -1169,7 +1215,7 @@ export default function CICouncilPage() {
                 </div>
               </section>
             ) : (
-              <aside className="w-[410px] shrink-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
+              <aside className="w-full lg:w-[410px] shrink-0 min-h-0 rounded-2xl border border-slate-800 bg-slate-950/40 flex flex-col overflow-hidden">
                 {/* Panel header */}
                 <div className="shrink-0 px-5 py-4 border-b border-slate-800">
                   <div className="flex items-center justify-between gap-2">
@@ -1183,7 +1229,10 @@ export default function CICouncilPage() {
 
                     {axiomSeverityLabel && (
                       <span
-                        className={cx("rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.18em]", severityPill(axiomSeverityLabel))}
+                        className={cx(
+                          "rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.18em]",
+                          severityPill(axiomSeverityLabel)
+                        )}
                         title="Inferred severity (no metadata dependency)"
                       >
                         {axiomSeverityLabel}
@@ -1194,7 +1243,11 @@ export default function CICouncilPage() {
                   {/* ✅ Tabs: AXIOM + ARTIFACTS only */}
                   <div className="mt-3 inline-flex rounded-full bg-slate-950/70 border border-slate-800 p-1 overflow-hidden">
                     <DetailTabButton label="AXIOM" active={detailTab === "AXIOM"} onClick={() => setDetailTab("AXIOM")} />
-                    <DetailTabButton label="Artifacts" active={detailTab === "ARTIFACTS"} onClick={() => setDetailTab("ARTIFACTS")} />
+                    <DetailTabButton
+                      label="Artifacts"
+                      active={detailTab === "ARTIFACTS"}
+                      onClick={() => setDetailTab("ARTIFACTS")}
+                    />
                   </div>
 
                   <div className="mt-3 text-[10px] text-slate-600">
@@ -1209,7 +1262,7 @@ export default function CICouncilPage() {
                     </div>
                   ) : (
                     <>
-                      {/* ✅ Authority block moved UP and condensed */}
+                      {/* ✅ Authority block (phone-safe: big taps, no hover dependence) */}
                       <div className="rounded-2xl border border-slate-800 bg-black/30 px-4 py-4">
                         <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Authority</div>
                         <div className="mt-2 text-[12px] text-slate-400">
@@ -1217,7 +1270,9 @@ export default function CICouncilPage() {
                           <span className="mx-2 text-slate-700">•</span>
                           <span className="text-slate-300">{(selected.status ?? "").toUpperCase()}</span>
                         </div>
-                        <div className="mt-2 text-[11px] text-slate-500">{fmtShort(selected.created_at)} · {selected.record_type || "resolution"}</div>
+                        <div className="mt-2 text-[11px] text-slate-500">
+                          {fmtShort(selected.created_at)} · {selected.record_type || "resolution"}
+                        </div>
 
                         <div className="mt-3 text-[12px] text-slate-500 leading-relaxed">
                           Council is the authority. AXIOM is advisory-only and never blocks. Use <b>Send Back</b> to return
@@ -1346,14 +1401,21 @@ export default function CICouncilPage() {
                                     >
                                       <div className="flex items-start justify-between gap-2">
                                         <div className="min-w-0 flex-1">
-                                          <div className="truncate text-[12px] font-semibold text-slate-100">{n.title || "AXIOM Advisory"}</div>
+                                          <div className="truncate text-[12px] font-semibold text-slate-100">
+                                            {n.title || "AXIOM Advisory"}
+                                          </div>
                                           <div className="mt-1 text-[10px] text-slate-500">
                                             {fmtShort(n.created_at)} {n.model ? `• ${n.model}` : ""}{" "}
                                             {typeof n.tokens_used === "number" ? ` • ${n.tokens_used} tok` : ""}
                                           </div>
                                         </div>
                                         {sev && (
-                                          <span className={cx("shrink-0 rounded-full border px-2 py-1 text-[9px] uppercase tracking-[0.18em]", severityPill(sev))}>
+                                          <span
+                                            className={cx(
+                                              "shrink-0 rounded-full border px-2 py-1 text-[9px] uppercase tracking-[0.18em]",
+                                              severityPill(sev)
+                                            )}
+                                          >
                                             {sev}
                                           </span>
                                         )}
@@ -1404,17 +1466,24 @@ export default function CICouncilPage() {
                               </div>
                               <div className="flex items-center justify-between gap-2">
                                 <span className="text-slate-500">Bucket</span>
-                                <span className="text-slate-200 font-mono text-[11px]">{axiomLastMemo?.storage_bucket ?? "—"}</span>
+                                <span className="text-slate-200 font-mono text-[11px]">
+                                  {axiomLastMemo?.storage_bucket ?? "—"}
+                                </span>
                               </div>
                               <div className="flex items-center justify-between gap-2">
                                 <span className="text-slate-500">Path</span>
-                                <span className="text-slate-200 font-mono text-[11px] truncate max-w-[220px]" title={axiomLastMemo?.storage_path ?? ""}>
+                                <span
+                                  className="text-slate-200 font-mono text-[11px] truncate max-w-[220px]"
+                                  title={axiomLastMemo?.storage_path ?? ""}
+                                >
                                   {axiomLastMemo?.storage_path ?? "—"}
                                 </span>
                               </div>
                               <div className="flex items-center justify-between gap-2">
                                 <span className="text-slate-500">Hash</span>
-                                <span className="text-slate-200 font-mono text-[11px]">{hashShort(axiomLastMemo?.file_hash ?? null)}</span>
+                                <span className="text-slate-200 font-mono text-[11px]">
+                                  {hashShort(axiomLastMemo?.file_hash ?? null)}
+                                </span>
                               </div>
                               <div className="flex items-center justify-between gap-2">
                                 <span className="text-slate-500">Size</span>
@@ -1504,12 +1573,14 @@ export default function CICouncilPage() {
 
       {/* Reader Modal (kept; no wiring changes) */}
       {readerOpen && (
-        <div className="fixed inset-0 z-[90] bg-black/70 px-6 py-6 flex items-center justify-center">
+        <div className="fixed inset-0 z-[90] bg-black/70 px-4 sm:px-6 py-6 flex items-center justify-center">
           <div className="w-full max-w-[980px] h-[85vh] rounded-3xl border border-slate-800 bg-slate-950/95 shadow-2xl shadow-black/70 overflow-hidden flex flex-col">
             <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
               <div className="min-w-0">
                 <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Reader</div>
-                <div className="mt-1 text-[15px] font-semibold text-slate-100 truncate">{(selected?.title || "(untitled)") as string}</div>
+                <div className="mt-1 text-[15px] font-semibold text-slate-100 truncate">
+                  {(selected?.title || "(untitled)") as string}
+                </div>
                 <div className="mt-1 text-[11px] text-slate-500">
                   {selected ? `${(selected.status ?? "").toUpperCase()} • ${fmtShort(selected.created_at)}` : "—"}
                   <span className="mx-2 text-slate-700">•</span>
@@ -1528,7 +1599,9 @@ export default function CICouncilPage() {
             <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 space-y-4">
               <div className="rounded-2xl border border-slate-800 bg-black/40 px-5 py-5">
                 <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Resolution</div>
-                <pre className="mt-2 whitespace-pre-wrap font-sans text-[13px] leading-[1.8] text-slate-100">{selected?.body ?? "—"}</pre>
+                <pre className="mt-2 whitespace-pre-wrap font-sans text-[13px] leading-[1.8] text-slate-100">
+                  {selected?.body ?? "—"}
+                </pre>
               </div>
 
               <div className="rounded-2xl border border-slate-800 bg-black/30 px-5 py-5">
@@ -1589,8 +1662,10 @@ function StatusTabButton({
       type="button"
       onClick={onClick}
       className={cx(
-        "px-4 py-2 rounded-full text-left transition min-w-[110px]",
-        active ? "bg-emerald-500/15 border border-emerald-400/70 text-slate-50" : "bg-transparent border border-transparent hover:bg-slate-900/60 text-slate-300"
+        "px-4 py-2 rounded-full text-left transition min-w-[110px] shrink-0",
+        active
+          ? "bg-emerald-500/15 border border-emerald-400/70 text-slate-50"
+          : "bg-transparent border border-transparent hover:bg-slate-900/60 text-slate-300"
       )}
     >
       <div className="text-xs font-semibold">{label}</div>
@@ -1614,7 +1689,9 @@ function DetailTabButton({
       onClick={onClick}
       className={cx(
         "px-4 py-2 rounded-full text-left transition min-w-[150px]",
-        active ? "bg-slate-50/10 border border-slate-200/25 text-slate-50" : "bg-transparent border border-transparent hover:bg-slate-900/60 text-slate-300"
+        active
+          ? "bg-slate-50/10 border border-slate-200/25 text-slate-50"
+          : "bg-transparent border border-transparent hover:bg-slate-900/60 text-slate-300"
       )}
     >
       <div className="text-xs font-semibold">{label}</div>
