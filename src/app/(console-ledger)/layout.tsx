@@ -2,7 +2,6 @@ import type { ReactNode } from "react";
 
 import { OsHeader } from "@/components/OsHeader";
 import { OsDock } from "@/components/OsDock";
-import { OsFooter } from "@/components/OsFooter";
 
 import { OsEntityProvider } from "@/components/OsEntityContext";
 import { OsEnvProvider } from "@/components/OsEnvContext";
@@ -14,19 +13,18 @@ export default function OsLayout({ children }: { children: ReactNode }) {
     <OsEntityProvider>
       <OsEnvProvider>
         <div className="os-root">
+          {/* Global OS command / control bar */}
           <OsHeader />
 
+          {/* Main workspace shell (ONLY scroll surface) */}
           <div className="os-shell">
-            <OsDock />
             <OsAuthGate>
               <div className="os-workspace">{children}</div>
             </OsAuthGate>
           </div>
 
-          {/* Footer owns SANDBOX / ROT ribbon */}
-          <OsFooter />
-
-          <div className="os-orb-slot">ORB</div>
+          {/* OS Dock (will be bottom overlay via CSS) */}
+          <OsDock />
         </div>
       </OsEnvProvider>
     </OsEntityProvider>

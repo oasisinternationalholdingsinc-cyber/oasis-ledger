@@ -10,6 +10,15 @@
 :root {
   --background: #020617;
   --foreground: #e5e7eb;
+
+  /* Dock sizing */
+  --dock-h: 92px;         /* approx: icon bubble + label hover space */
+  --dock-peek: 6px;       /* handle edge height */
+  --dock-gap: 14px;       /* air between dock and screen edge */
+
+  /* Lane tints (subtle; ONLY affects dock glow/handle) */
+  --lane-rot: rgba(146, 247, 198, 0.22);
+  --lane-sandbox: rgba(245, 212, 122, 0.22);
 }
 
 @theme inline {
@@ -42,7 +51,7 @@ body {
 }
 
 /* =========================================================
-   OASIS OS SHELL – STABLE, NO ANIMATIONS
+   OASIS OS SHELL – STABLE, NO ANIMATIONS (yet)
    ========================================================= */
 
 /* ===== OS ROOT ===== */
@@ -53,6 +62,10 @@ body {
   color: #e5e7eb;
   display: flex;
   flex-direction: column;
+
+  /* env can optionally be expressed as data attribute:
+     <div class="os-root" data-env="rot|sandbox"> ...
+     If not present, default tint below is used. */
 }
 
 /* ===== GLOBAL BAR ===== */
@@ -159,31 +172,94 @@ body {
 }
 
 /* ===== SHELL ===== */
+/* shell is now single-column; dock is overlay (fixed) */
 .os-shell {
   flex: 1;
-  display: flex;
+  display: block;
   min-height: 0; /* important so workspace can scroll */
+  position: relative;
 }
 
-/* ===== DOCK ===== */
-.os-dock {
-  width: 80px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding-top: 14px;
-  gap: 10px;
-  border-right: 1px solid rgba(255, 255, 255, 0.06);
-
-  /* ✅ dock scrolls on its own when zoomed */
-  height: 100%;
-  max-height: 100%;
+/* ===== WORKSPACE (ONLY AREA THAT SCROLLS) ===== */
+.os-workspace {
+  flex: 1;
+  min-height: 0;
+  padding: 24px;
   overflow-y: auto;
-  scrollbar-width: none;
+
+  /* Option B overlay: always leave a tiny safety pad + room for peek handle.
+     Full dock clearance will come later when we add hide/show state. */
+  padding-bottom: calc(var(--dock-gap) + var(--dock-peek) + 18px);
 }
 
-.os-dock::-webkit-scrollbar {
-  display: none;
+/* ===== DOCK (BOTTOM OVERLAY) ===== */
+.os-dock {
+  position: fixed;
+  left: 50%;
+  bottom: var(--dock-gap);
+  transform: translateX(-50%);
+  z-index: 50;
+
+  /* bottom dock shape */
+  display: flex;
+  flex-direction: row;
+  align-items: flex-end;
+  gap: 14px;
+
+  /* glass shell (keeps your current vibe; not a redesign) */
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(2, 6, 23, 0.55);
+  backdrop-filter: blur(18px);
+
+  /* keep it calm */
+  box-shadow:
+    0 22px 70px rgba(0, 0, 0, 0.60),
+    0 0 0 1px rgba(250, 204, 21, 0.10);
+
+  /* no internal scrolling in bottom dock */
+  width: auto;
+  height: auto;
+  max-height: none;
+  overflow: visible;
+}
+
+/* ===== DOCK HANDLE (4–6px peek edge) =====
+   Uses ::before so no markup changes.
+   When we later implement hide/show, the dock can slide down,
+   leaving only this edge visible. */
+.os-dock::before {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  top: -6px;
+  height: var(--dock-peek);
+  border-radius: 999px;
+
+  /* default: subtle gold-ish */
+  background: rgba(250, 204, 21, 0.18);
+  box-shadow:
+    0 0 18px rgba(250, 204, 21, 0.35),
+    0 0 40px rgba(56, 189, 248, 0.10);
+  opacity: 0.85;
+}
+
+/* Optional env tint via data attribute on .os-root (no logic changes needed)
+   .os-root[data-env="sandbox"]  ...  .os-root[data-env="rot"] ... */
+.os-root[data-env="sandbox"] .os-dock::before {
+  background: var(--lane-sandbox);
+  box-shadow:
+    0 0 18px rgba(245, 212, 122, 0.42),
+    0 0 44px rgba(250, 204, 21, 0.18);
+}
+
+.os-root[data-env="rot"] .os-dock::before {
+  background: var(--lane-rot);
+  box-shadow:
+    0 0 18px rgba(146, 247, 198, 0.42),
+    0 0 44px rgba(34, 197, 148, 0.14);
 }
 
 /* wrapper for icon + label */
@@ -191,10 +267,10 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
 }
 
-/* icon bubble */
+/* icon bubble (unchanged) */
 .dock-icon {
   width: 52px;
   height: 52px;
@@ -211,11 +287,6 @@ body {
     box-shadow 0.18s ease,
     background 0.18s ease,
     transform 0.18s ease;
-}
-
-/* keep icon size same, just slightly emphasize glyph */
-.dock-icon span {
-  transform: scale(1.25);
 }
 
 /* HOVER: glow + slightly brighter bg, NO size change */
@@ -257,40 +328,16 @@ body {
 
 /* divider between core + future */
 .dock-divider {
-  width: 36px;
-  height: 1px;
+  width: 1px;
+  height: 34px;
   background: rgba(255, 255, 255, 0.18);
-  margin: 6px 0;
-}
-
-/* ===== WORKSPACE (ONLY AREA THAT SCROLLS) ===== */
-.os-workspace {
-  flex: 1;
-  min-height: 0;
-  padding: 24px;
-  overflow-y: auto; /* ChatGPT-style scroll */
-}
-
-/* ===== FOOTER ===== */
-.os-footer {
-  height: 28px;
-  font-size: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
-  opacity: 0.75;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-}
-
-.os-footer span {
-  color: #22c7b8;
+  margin: 0 6px;
+  align-self: center;
 }
 
 /* =========================================================
    MODULE IDENTITY AURAS – PER-MODULE ACTIVE GLOW
-   (optional; uses data-module from OsDock.tsx)
+   (kept exactly as you had it)
    ========================================================= */
 
 .dock-item[data-module="orbit"] .dock-icon.active {
@@ -347,24 +394,24 @@ body {
     0 0 46px rgba(163, 230, 53, 0.9);
 }
 
-/* ===== ORB SLOT (STATIC) ===== */
-.os-orb-slot {
-  position: fixed;
-  bottom: 20px;
-  right: 20px;
-  width: 80px;
-  height: 80px;
-  border-radius: 999px;
-  background: radial-gradient(circle at 30% 20%, #fef9c3 0, #facc15 40%, #b45309 85%);
-  box-shadow:
-    0 0 50px rgba(250, 204, 21, 0.8),
-    0 0 120px rgba(56, 189, 248, 0.4);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 600;
-  font-size: 11px;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: #111827;
+/* ===== REMOVED: .os-footer (footer is gone) ===== */
+/* ===== REMOVED: .os-orb-slot (orb is gone) ===== */
+
+/* Small-screen ergonomics: keep dock compact.
+   Labels remain hover-only; on touch devices hover isn’t a thing anyway. */
+@media (max-width: 520px) {
+  .os-workspace {
+    padding: 18px;
+    padding-bottom: calc(var(--dock-gap) + var(--dock-peek) + 20px);
+  }
+
+  .os-dock {
+    gap: 10px;
+    padding: 10px 12px;
+  }
+
+  .dock-icon {
+    width: 48px;
+    height: 48px;
+  }
 }
