@@ -1,3 +1,4 @@
+```tsx
 // src/app/(os)/ci-alchemy/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
@@ -83,7 +84,7 @@ export default function CIAlchemyPage() {
   }, [entityCtx, activeEntity]);
 
   const isSandbox = !!osEnv.isSandbox;
-  const env = isSandbox ? "SANDBOX" : "ROT";
+  const env = isSandbox ? "SANDBOX" : "RoT";
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -394,12 +395,10 @@ export default function CIAlchemyPage() {
       const accessToken = sessionData?.session?.access_token;
       if (!accessToken) return flashError("Not authenticated. Please log in (OS auth gate).");
 
-      // ✅ IMPORTANT: Ensure we have a REAL governance_drafts row to write into.
-      // This prevents reloadDrafts() from wiping the editor after the flash.
+      // ✅ Ensure we have a REAL governance_drafts row to write into.
       const ensureDraftRow = async (): Promise<string> => {
         if (selectedId) return selectedId;
 
-        // Create a minimal draft row so Alchemy output has a stable DB home.
         const { data: entityRow, error: entityErr } = await supabase
           .from("entities")
           .select("id, name, slug")
@@ -482,8 +481,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
         tone: "formal",
         language: "English",
         is_test: isSandbox,
-        lane: isSandbox ? "SANDBOX" : "ROT",
-        // ✅ Pass the target draft id so backend can correlate (even if it doesn't write).
+        lane: isSandbox ? "SANDBOX" : "RoT",
         draft_id: targetDraftId,
       };
 
@@ -511,8 +509,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
 
       const producedTitle = (data.title || title.trim() || "(untitled)") as string;
 
-      // ✅ CRITICAL: Persist Alchemy output into the REAL governance_drafts row
-      // BEFORE we reloadDrafts, so the editor cannot be wiped.
+      // ✅ Persist Alchemy output into governance_drafts BEFORE reloadDrafts
       const updatePayload: any = {
         title: producedTitle,
         draft_text: draftText,
@@ -910,11 +907,10 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
   }
 
   async function softDeleteDraft(draftId: string, reason: string) {
+    // ✅ NO schema assumptions: do NOT write discard_reason / discarded_at unless you know they exist.
     const baseUpdate: any = {
       status: "discarded" as DraftStatus,
       updated_at: new Date().toISOString(),
-      discard_reason: reason || null,
-      discarded_at: new Date().toISOString(),
       is_test: isSandbox,
     };
 
@@ -1055,9 +1051,9 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       : selectedDraft?.title || title || "(untitled)";
   const readerMetaLine =
     readerMode === "axiom"
-      ? `${fmtShort(selectedAxiomSummary?.created_at ?? null)} • model: ${
-          selectedAxiomSummary?.model || "—"
-        } • tokens: ${selectedAxiomSummary?.tokens_used ?? "—"}`
+      ? `${fmtShort(selectedAxiomSummary?.created_at ?? null)} • model: ${selectedAxiomSummary?.model || "—"} • tokens: ${
+          selectedAxiomSummary?.tokens_used ?? "—"
+        }`
       : `${selectedDraft ? `${selectedDraft.status.toUpperCase()} • ${fmtShort(selectedDraft.created_at)}` : "—"}`;
   const readerBody =
     readerMode === "axiom"
@@ -1070,20 +1066,21 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
   const cardShell =
     "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden flex flex-col";
   const cardHeader = "shrink-0 border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent";
-  const cardBody = "flex-1 min-h-0 overflow-hidden"; // inner sections decide scroll
+  // ⬇️ IMPORTANT: let the section decide scroll; avoid trapping the whole page
+  const cardBody = "flex-1 min-h-0 overflow-hidden";
 
   return (
-    <div className="h-full min-h-0 flex flex-col">
+    // ✅ Page should NOT be height-locked; OS shell handles its own layout.
+    <div className="w-full">
       {/* Page container (Provisioning-style, no inner “window frame”) */}
-      <div className="flex-1 min-h-0 mx-auto w-full max-w-[1400px] px-4 pb-8 pt-4 sm:pt-6 flex flex-col">
+      <div className="mx-auto w-full max-w-[1400px] px-4 pb-8 pt-4 sm:pt-6">
         {/* Header under OS bar */}
-        <div className="mb-4 shrink-0">
+        <div className="mb-4">
           <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">CI • Alchemy</div>
           <h1 className="mt-1 text-lg sm:text-xl font-semibold text-slate-50">Drafting Console · AI Scribe</h1>
           <p className="mt-1 text-[11px] sm:text-xs text-slate-400 max-w-3xl leading-relaxed">
-            Draft safely inside Alchemy.{" "}
-            <span className="text-emerald-300 font-semibold">Finalize</span> promotes into Council
-            (governance_ledger status=PENDING).
+            Draft safely inside Alchemy. <span className="text-emerald-300 font-semibold">Finalize</span> promotes into
+            Council (governance_ledger status=PENDING).
           </p>
 
           <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
@@ -1110,16 +1107,28 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           </div>
         </div>
 
-        {/* Top controls (match Provisioning/Council: shallow bar, no “window frame”) */}
-        <div className={cx(cardShell, "mb-4 shrink-0")}>
+        {/* Top controls */}
+        <div className={cx(cardShell, "mb-4")}>
           <div className={cx(cardHeader, "px-4 sm:px-6 pt-4 sm:pt-5 pb-3")}>
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
               <div className="inline-flex w-full lg:w-auto rounded-full bg-slate-950/70 border border-slate-800 p-1 overflow-x-auto no-scrollbar">
-                <StatusTabButton label="Drafts" value="draft" active={statusTab === "draft"} onClick={() => setStatusTab("draft")} />
-                <StatusTabButton label="Reviewed" value="reviewed" active={statusTab === "reviewed"} onClick={() => setStatusTab("reviewed")} />
-                <StatusTabButton label="Finalized" value="finalized" active={statusTab === "finalized"} onClick={() => setStatusTab("finalized")} />
-                <StatusTabButton label="Discarded" value="discarded" active={statusTab === "discarded"} onClick={() => setStatusTab("discarded")} />
-                <StatusTabButton label="All" value="all" active={statusTab === "all"} onClick={() => setStatusTab("all")} />
+                <StatusTabButton label="Drafts" active={statusTab === "draft"} onClick={() => setStatusTab("draft")} />
+                <StatusTabButton
+                  label="Reviewed"
+                  active={statusTab === "reviewed"}
+                  onClick={() => setStatusTab("reviewed")}
+                />
+                <StatusTabButton
+                  label="Finalized"
+                  active={statusTab === "finalized"}
+                  onClick={() => setStatusTab("finalized")}
+                />
+                <StatusTabButton
+                  label="Discarded"
+                  active={statusTab === "discarded"}
+                  onClick={() => setStatusTab("discarded")}
+                />
+                <StatusTabButton label="All" active={statusTab === "all"} onClick={() => setStatusTab("all")} />
               </div>
 
               <div className="flex flex-wrap items-center gap-2 justify-between lg:justify-end">
@@ -1171,8 +1180,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
           </div>
         </div>
 
-        {/* Workspace grid (Provisioning/Council mechanics: cards scroll internally) */}
-        <div className="flex-1 min-h-0 grid grid-cols-12 gap-4">
+        {/* Workspace grid */}
+        <div className="grid grid-cols-12 gap-4">
           {/* LEFT: Drafts */}
           {drawerOpen ? (
             <aside className={cx(cardShell, "col-span-12 lg:col-span-4")}>
@@ -1200,7 +1209,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
               </div>
 
               <div className={cx(cardBody, "flex flex-col")}>
-                <div className="flex-1 min-h-0 overflow-y-auto">
+                <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
                   {loading ? (
                     <div className="p-4 text-[13px] text-slate-400">Loading…</div>
                   ) : filteredDrafts.length === 0 ? (
@@ -1269,586 +1278,505 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
             </aside>
           ) : null}
 
-          {/* MIDDLE: Editor / AXIOM workspace */}
-          <section className={cx(cardShell, drawerOpen ? "col-span-12 lg:col-span-5" : "col-span-12 lg:col-span-8")}>
-            <div className={cx(cardHeader, "px-4 sm:px-5 py-4")}>
-              <div className="flex items-start justify-between gap-4">
-                <div className="min-w-0">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Workspace</div>
-                  <div className="mt-1 text-[12px] sm:text-[13px] text-slate-400">
-                    Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
-                    <span className="mx-2 text-slate-700">•</span>
-                    Lane:{" "}
-                    <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
-                    {selectedDraft?.finalized_record_id && (
-                      <>
-                        <span className="mx-2 text-slate-700">•</span>
-                        <span className="text-emerald-200">Ledger-linked</span>
-                      </>
-                    )}
-                    {dirty && (
-                      <>
-                        <span className="mx-2 text-slate-700">•</span>
-                        <span className="text-amber-200">Unsaved</span>
-                      </>
-                    )}
+          {/* MAIN */}
+          <main className={cx(cardShell, drawerOpen ? "col-span-12 lg:col-span-8" : "col-span-12")}>
+            <div className={cx(cardHeader, "p-4 sm:p-5")}>
+              <div className="flex flex-col gap-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                      Workspace
+                      {selectedDraft?.status ? (
+                        <>
+                          <span className="mx-2 text-slate-700">•</span>
+                          <span className="text-slate-200">{selectedDraft.status.toUpperCase()}</span>
+                        </>
+                      ) : null}
+                    </div>
+                    <div className="mt-1 text-[12px] text-slate-500">
+                      {selectedDraft ? fmtShort(selectedDraft.updated_at || selectedDraft.created_at) : "New draft"}
+                      <span className="mx-2 text-slate-700">•</span>
+                      <span className={cx(isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="inline-flex rounded-full border border-slate-800 bg-slate-950/55 p-1 text-[10px] uppercase tracking-[0.18em]">
+                      <button
+                        onClick={() => setWorkspaceTab("editor")}
+                        className={cx(
+                          "rounded-full px-3 py-1.5 transition",
+                          workspaceTab === "editor"
+                            ? "bg-white/10 text-slate-100 border border-white/10"
+                            : "text-slate-400 hover:bg-slate-900/60"
+                        )}
+                      >
+                        Draft
+                      </button>
+                      <button
+                        onClick={() => setWorkspaceTab("axiom")}
+                        className={cx(
+                          "rounded-full px-3 py-1.5 transition",
+                          workspaceTab === "axiom"
+                            ? "bg-emerald-500/15 text-emerald-200 border border-emerald-400/20"
+                            : "text-slate-400 hover:bg-slate-900/60"
+                        )}
+                      >
+                        AXIOM
+                      </button>
+                    </div>
+
+                    <button
+                      onClick={handleSaveDraft}
+                      disabled={saving || finalizing || alchemyRunning || axiomRunning || !title.trim() || !body.trim()}
+                      className={cx(
+                        "rounded-full px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase border",
+                        saving || finalizing || alchemyRunning || axiomRunning || !title.trim() || !body.trim()
+                          ? "border-white/10 bg-white/5 text-slate-500 cursor-not-allowed"
+                          : "border-white/15 bg-white/7 text-slate-100 hover:bg-white/10"
+                      )}
+                    >
+                      {saving ? "Saving…" : selectedId ? "Save" : "Create"}
+                    </button>
+
+                    <button
+                      onClick={handleMarkReviewed}
+                      disabled={saving || finalizing || alchemyRunning || axiomRunning || !selectedId || !canMutateSelected}
+                      className={cx(
+                        "rounded-full px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase border",
+                        saving || finalizing || alchemyRunning || axiomRunning || !selectedId || !canMutateSelected
+                          ? "border-white/10 bg-white/5 text-slate-500 cursor-not-allowed"
+                          : "border-amber-400/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/15"
+                      )}
+                    >
+                      Mark Reviewed
+                    </button>
+
+                    <button
+                      onClick={handleFinalize}
+                      disabled={finalizing || saving || alchemyRunning || axiomRunning || !selectedId || !canMutateSelected}
+                      className={cx(
+                        "rounded-full px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase border",
+                        finalizing || saving || alchemyRunning || axiomRunning || !selectedId || !canMutateSelected
+                          ? "border-white/10 bg-white/5 text-slate-500 cursor-not-allowed"
+                          : "border-emerald-400/50 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/15"
+                      )}
+                      title="Finalize promotes this draft into governance_ledger (PENDING) via alchemy-finalize Edge Function"
+                    >
+                      {finalizing ? "Finalizing…" : "Finalize"}
+                    </button>
+
+                    <button
+                      onClick={openDelete}
+                      disabled={!selectedId || !selectedDraft || !canMutateSelected}
+                      className={cx(
+                        "rounded-full px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase border",
+                        !selectedId || !selectedDraft || !canMutateSelected
+                          ? "border-white/10 bg-white/5 text-slate-500 cursor-not-allowed"
+                          : "border-rose-400/40 bg-rose-500/10 text-rose-200 hover:bg-rose-500/15"
+                      )}
+                    >
+                      Delete
+                    </button>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 shrink-0">
-                  {selectedDraft && (
-                    <span
-                      className={cx(
-                        "hidden sm:inline-flex rounded-full px-3 py-2 text-[10px] uppercase tracking-[0.18em] border",
-                        selectedDraft.status === "finalized"
-                          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
-                          : selectedDraft.status === "reviewed"
-                          ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
-                          : selectedDraft.status === "discarded"
-                          ? "border-slate-600/50 bg-slate-800/40 text-slate-300"
-                          : "border-sky-500/40 bg-sky-500/10 text-sky-200"
-                      )}
-                    >
-                      {selectedDraft.status}
-                    </span>
-                  )}
-
-                  {!canMutateSelected && selectedDraft && (
-                    <span className="hidden sm:inline-flex rounded-full border border-white/10 bg-black/20 px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-slate-300">
-                      Locked
-                    </span>
-                  )}
-                </div>
+                {error ? (
+                  <div className="rounded-2xl border border-rose-400/25 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-100">
+                    {error}
+                  </div>
+                ) : null}
+                {info ? (
+                  <div className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-[12px] text-emerald-100">
+                    {info}
+                  </div>
+                ) : null}
               </div>
             </div>
 
-            {/* Tabs + actions */}
-            <div className="shrink-0 px-4 sm:px-5 py-3 sm:py-4 border-b border-white/10 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 bg-black/10">
-              <div className="inline-flex rounded-full border border-white/10 bg-black/20 p-1">
-                <button
-                  onClick={() => setWorkspaceTab("editor")}
-                  className={cx(
-                    "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
-                    workspaceTab === "editor"
-                      ? "bg-emerald-500/15 border-emerald-400/70 text-slate-50"
-                      : "bg-transparent border-transparent text-slate-300 hover:bg-white/5"
-                  )}
-                >
-                  Editor
-                </button>
-                <button
-                  onClick={() => setWorkspaceTab("axiom")}
-                  className={cx(
-                    "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
-                    workspaceTab === "axiom"
-                      ? "bg-sky-500/15 border-sky-400/70 text-slate-50"
-                      : "bg-transparent border-transparent text-slate-300 hover:bg-white/5"
-                  )}
-                >
-                  AXIOM
-                </button>
-              </div>
+            <div className={cx(cardBody, "p-4 sm:p-5")}>
+              {workspaceTab === "editor" ? (
+                <div className="grid grid-cols-1 gap-4">
+                  <div className={cx("rounded-3xl border p-4 sm:p-5", editorCard)}>
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
+                          Draft Editor
+                          {dirty ? <span className="ml-2 text-amber-500 font-semibold">• UNSAVED</span> : null}
+                        </div>
+                        <div className="mt-1 text-[12px] text-slate-500">Save often. Finalize only when ready.</div>
+                      </div>
 
-              {workspaceTab === "axiom" ? (
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    onClick={() => loadAxiomNotes()}
-                    disabled={!selectedId || axiomLoading}
-                    className="rounded-full border border-white/10 bg-black/20 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-black/30 disabled:opacity-50"
-                  >
-                    {axiomLoading ? "Refreshing…" : "Refresh AXIOM"}
-                  </button>
-                  <button
-                    onClick={handleAxiomReview}
-                    disabled={!selectedDraft || saving || finalizing || !canMutateSelected || alchemyRunning || axiomRunning}
-                    className="rounded-full border border-sky-400/50 bg-sky-500/10 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-sky-200 hover:bg-sky-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
-                    title="Runs AXIOM draft review (writes ai_notes scoped to this draft)"
-                  >
-                    {axiomRunning ? "Running…" : "Run AXIOM"}
-                  </button>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          onClick={handleRunAlchemy}
+                          disabled={alchemyRunning || saving || finalizing || axiomRunning}
+                          className={cx(
+                            "rounded-full px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase border",
+                            alchemyRunning || saving || finalizing || axiomRunning
+                              ? "border-slate-300/30 bg-slate-200/10 text-slate-400 cursor-not-allowed"
+                              : "border-sky-300/35 bg-sky-500/10 text-sky-700 hover:bg-sky-500/15",
+                            editorTheme === "dark" && "text-sky-200"
+                          )}
+                          title="Calls Edge Function scribe and applies output into this draft"
+                        >
+                          {alchemyRunning ? "Running…" : "Run CI-Alchemy"}
+                        </button>
+
+                        <button
+                          onClick={handleAxiomReview}
+                          disabled={axiomRunning || saving || finalizing || alchemyRunning || !selectedId}
+                          className={cx(
+                            "rounded-full px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase border",
+                            axiomRunning || saving || finalizing || alchemyRunning || !selectedId
+                              ? "border-slate-300/30 bg-slate-200/10 text-slate-400 cursor-not-allowed"
+                              : "border-emerald-400/40 bg-emerald-500/10 text-emerald-700 hover:bg-emerald-500/15",
+                            editorTheme === "dark" && "text-emerald-200"
+                          )}
+                          title="Calls axiom-pre-draft-review (draft-stage, sidecar only)"
+                        >
+                          {axiomRunning ? "Running…" : "Run AXIOM"}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-1 gap-3">
+                      <input
+                        value={title}
+                        onChange={(e) => onTitleChange(e.target.value)}
+                        placeholder="Resolution title"
+                        className={cx("w-full rounded-2xl border px-4 py-3 text-[14px] outline-none transition", inputBase)}
+                        disabled={!canMutateSelected}
+                      />
+
+                      <textarea
+                        value={body}
+                        onChange={(e) => onBodyChange(e.target.value)}
+                        placeholder="Draft body…"
+                        className={cx(
+                          "w-full rounded-2xl border px-4 py-3 text-[14px] leading-relaxed outline-none transition",
+                          textareaBase,
+                          "min-h-[340px] max-h-[60vh] overflow-y-auto"
+                        )}
+                        disabled={!canMutateSelected}
+                      />
+                    </div>
+
+                    {!canMutateSelected ? (
+                      <div className="mt-4 rounded-2xl border border-white/10 bg-black/10 px-4 py-3 text-[12px] text-slate-500">
+                        This draft is locked (finalized or ledger-linked). Create a new draft to continue drafting.
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
               ) : (
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    onClick={handleRunAlchemy}
-                    disabled={alchemyRunning || saving || finalizing || axiomRunning}
-                    className="rounded-full border border-emerald-400/70 bg-emerald-500/10 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {alchemyRunning ? "Running…" : "Run Alchemy"}
-                  </button>
+                <div className="grid grid-cols-1 gap-4">
+                  <div className={cx(cardShell)}>
+                    <div className={cx(cardHeader, "p-4")}>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                          AXIOM Advisory
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            onClick={() => loadAxiomNotes()}
+                            disabled={axiomLoading || !selectedId}
+                            className={cx(
+                              "rounded-full border border-slate-800 bg-slate-950/60 px-3 py-1.5 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60",
+                              (axiomLoading || !selectedId) && "cursor-not-allowed opacity-60"
+                            )}
+                          >
+                            {axiomLoading ? "Loading…" : "Refresh"}
+                          </button>
 
-                  <button
-                    onClick={handleSaveDraft}
-                    disabled={saving || finalizing || !canMutateSelected || axiomRunning}
-                    className="rounded-full bg-emerald-500 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-black hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {saving ? "Saving…" : "Save"}
-                  </button>
+                          <button
+                            onClick={() => setReaderOpen(true)}
+                            className="rounded-full border border-emerald-400/60 bg-emerald-500/10 px-3 py-1.5 text-[10px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/15"
+                            disabled={!selectedId}
+                          >
+                            Open Reader
+                          </button>
+                        </div>
+                      </div>
 
-                  <button
-                    onClick={handleMarkReviewed}
-                    disabled={!selectedDraft || saving || finalizing || !canMutateSelected || axiomRunning}
-                    className="rounded-full border border-amber-400/60 bg-black/20 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    Mark reviewed
-                  </button>
+                      {axiomErr ? (
+                        <div className="mt-3 rounded-2xl border border-rose-400/25 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-100">
+                          {axiomErr}
+                        </div>
+                      ) : null}
 
-                  <button
-                    onClick={handleFinalize}
-                    disabled={!selectedDraft || saving || finalizing || !canMutateSelected || axiomRunning}
-                    className="rounded-full border border-emerald-500/60 bg-black/30 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {finalizing ? "Finalizing…" : "Finalize → Council"}
-                  </button>
+                      <div className="mt-2 text-[11px] text-slate-500">
+                        {axiomLastRefresh ? `Last refresh: ${fmtShort(axiomLastRefresh)}` : "—"}
+                      </div>
+                    </div>
 
-                  <button
-                    onClick={openDelete}
-                    disabled={!selectedDraft || !canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning}
-                    className="rounded-full border border-rose-500/50 bg-rose-500/10 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-rose-200 hover:bg-rose-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    Delete
-                  </button>
+                    <div className={cx(cardBody, "flex flex-col")}>
+                      <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar p-4">
+                        {axiomLoading ? (
+                          <div className="text-[13px] text-slate-400">Loading AXIOM…</div>
+                        ) : axiomNotes.length === 0 ? (
+                          <div className="text-[13px] text-slate-500">
+                            No AXIOM notes for this draft yet. Run AXIOM from the Draft tab.
+                          </div>
+                        ) : (
+                          <div className="space-y-3">
+                            {axiomNotes.map((n) => (
+                              <button
+                                key={n.id}
+                                onClick={() => setReaderOpen(true)}
+                                className="w-full text-left rounded-3xl border border-white/10 bg-black/20 hover:bg-black/25 px-4 py-4 transition"
+                                title="Open Reader"
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="min-w-0">
+                                    <div className="truncate text-[13px] font-semibold text-slate-100">
+                                      {n.title || "AXIOM Note"}
+                                    </div>
+                                    <div className="mt-1 text-[11px] text-slate-500">
+                                      {fmtShort(n.created_at)} • {n.model || "—"} • tokens: {n.tokens_used ?? "—"}
+                                    </div>
+                                  </div>
+                                  <span className="shrink-0 rounded-full px-2 py-1 text-[9px] uppercase tracking-[0.18em] bg-emerald-500/12 text-emerald-200 border border-emerald-400/15">
+                                    {(n.note_type || "note").toString()}
+                                  </span>
+                                </div>
+
+                                <div className="mt-3 line-clamp-3 text-[12px] leading-relaxed text-slate-400">
+                                  {(n.content || "").replace(/\n+/g, " ").trim()}
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="shrink-0 border-t border-white/10 p-3 text-[10px] text-slate-500 flex items-center justify-between">
+                        <span>public.ai_notes</span>
+                        <span className="text-slate-600">scope_type=document</span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
+          </main>
+        </div>
 
-            {/* CONTENT (scroll inside, not the page) */}
-            <div className={cx(cardBody, "p-3 sm:p-5")}>
-              <div className="h-full min-h-0 flex flex-col">
-                <div className="flex-1 min-h-0 overflow-hidden">
-                  {workspaceTab === "editor" ? (
-                    <div className={cx("h-full w-full rounded-2xl border overflow-hidden", editorCard)}>
-                      <div className="h-full flex flex-col">
-                        <div
+        {/* Reader Modal */}
+        {readerOpen ? (
+          <div
+            className="fixed inset-0 z-[80] bg-black/60 backdrop-blur-sm"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) setReaderOpen(false);
+            }}
+          >
+            <div className="absolute inset-x-0 top-6 mx-auto w-[94vw] max-w-[980px]">
+              <div className="rounded-[28px] border border-white/10 bg-black/40 shadow-[0_35px_140px_rgba(0,0,0,0.75)] overflow-hidden">
+                <div className="border-b border-white/10 bg-gradient-to-b from-white/[0.08] to-transparent px-5 py-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-[10px] uppercase tracking-[0.3em] text-slate-500">
+                        Reader · {readerMode === "axiom" ? "AXIOM" : "Draft"}
+                      </div>
+                      <div className="mt-1 truncate text-[15px] font-semibold text-slate-100">{readerTitle}</div>
+                      <div className="mt-1 text-[11px] text-slate-500">{readerMetaLine}</div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="inline-flex rounded-full border border-slate-800 bg-slate-950/60 p-1 text-[10px] uppercase tracking-[0.18em]">
+                        <button
+                          onClick={() => setWorkspaceTab("editor")}
                           className={cx(
-                            "shrink-0 px-4 sm:px-5 py-4 border-b",
-                            editorTheme === "light" ? "border-slate-200" : "border-slate-800"
+                            "rounded-full px-3 py-1.5 transition",
+                            workspaceTab === "editor"
+                              ? "bg-white/10 text-slate-100 border border-white/10"
+                              : "text-slate-400 hover:bg-slate-900/60"
                           )}
                         >
-                          <input
-                            className={cx(
-                              "w-full rounded-2xl border px-4 py-3 text-[14px] sm:text-[15px] outline-none transition",
-                              inputBase,
-                              (!canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning) &&
-                                "opacity-70 cursor-not-allowed"
-                            )}
-                            placeholder="Resolution title"
-                            value={title}
-                            onChange={(e) => onTitleChange(e.target.value)}
-                            disabled={!canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning}
-                          />
-                        </div>
-
-                        <div className="flex-1 min-h-0 overflow-hidden px-4 sm:px-5 py-4">
-                          <textarea
-                            className={cx(
-                              "h-full w-full resize-none rounded-2xl border px-4 py-4 text-[13px] leading-[1.8] outline-none transition",
-                              textareaBase,
-                              (!canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning) &&
-                                "opacity-70 cursor-not-allowed"
-                            )}
-                            placeholder="Draft body… (or Run Alchemy)"
-                            value={body}
-                            onChange={(e) => onBodyChange(e.target.value)}
-                            disabled={!canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning}
-                          />
-                        </div>
+                          Draft
+                        </button>
+                        <button
+                          onClick={() => setWorkspaceTab("axiom")}
+                          className={cx(
+                            "rounded-full px-3 py-1.5 transition",
+                            workspaceTab === "axiom"
+                              ? "bg-emerald-500/15 text-emerald-200 border border-emerald-400/20"
+                              : "text-slate-400 hover:bg-slate-900/60"
+                          )}
+                        >
+                          AXIOM
+                        </button>
                       </div>
+
+                      <button
+                        onClick={() => setReaderOpen(false)}
+                        className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/10"
+                      >
+                        Close
+                      </button>
                     </div>
-                  ) : (
-                    // AXIOM panel (unchanged logic, just consistent shell + internal scroll)
-                    <div className="h-full w-full rounded-2xl border border-white/10 bg-black/20 overflow-hidden flex flex-col">
-                      <div className="shrink-0 px-5 py-4 border-b border-white/10">
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
-                          AXIOM · Draft Review
-                        </div>
-                        <div className="mt-2 text-[12px] text-slate-400 max-w-3xl">
-                          Advisory-only intelligence sidecar. Draft stage writes to{" "}
-                          <span className="text-sky-200 font-semibold">ai_notes</span> only (
-                          <span className="text-slate-200">scope_type=document</span>,{" "}
-                          <span className="text-slate-200">note_type=summary</span>). Archive embeds AXIOM snapshot later.
-                        </div>
-                        <div className="mt-2 text-[11px] text-slate-500">
-                          Draft: <span className="text-slate-200">{selectedDraft?.title || title || "—"}</span>
-                          <span className="mx-2 text-slate-700">•</span>
-                          Lane: <span className={cx(isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
-                          <span className="mx-2 text-slate-700">•</span>
-                          Last refresh:{" "}
-                          <span className="text-slate-300">{axiomLastRefresh ? fmtShort(axiomLastRefresh) : "—"}</span>
-                        </div>
-                      </div>
-
-                      <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
-                        {axiomErr && (
-                          <div className="rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-200">
-                            {axiomErr}
-                          </div>
-                        )}
-
-                        {!selectedId ? (
-                          <div className="rounded-2xl border border-white/10 bg-black/20 px-5 py-4 text-[13px] text-slate-400">
-                            Select a draft to view AXIOM notes.
-                          </div>
-                        ) : axiomLoading ? (
-                          <div className="rounded-2xl border border-white/10 bg-black/20 px-5 py-4 text-[13px] text-slate-400">
-                            Loading AXIOM notes…
-                          </div>
-                        ) : !selectedAxiomSummary ? (
-                          <div className="rounded-2xl border border-white/10 bg-black/20 px-5 py-4 text-[13px] text-slate-400">
-                            No AXIOM summary found for this draft yet. Click{" "}
-                            <span className="text-sky-200 font-semibold">Run AXIOM</span>.
-                          </div>
-                        ) : (
-                          <div className="rounded-2xl border border-white/10 bg-black/20 overflow-hidden">
-                            <div className="px-5 py-4 border-b border-white/10 flex items-start justify-between gap-4">
-                              <div className="min-w-0">
-                                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Latest Summary</div>
-                                <div className="mt-1 text-[13px] font-semibold text-slate-100 truncate">
-                                  {selectedAxiomSummary.title || "AXIOM Draft Summary"}
-                                </div>
-                                <div className="mt-1 text-[11px] text-slate-500">
-                                  {fmtShort(selectedAxiomSummary.created_at)}
-                                  <span className="mx-2 text-slate-700">•</span>
-                                  model: <span className="text-slate-300">{selectedAxiomSummary.model || "—"}</span>
-                                  <span className="mx-2 text-slate-700">•</span>
-                                  tokens:{" "}
-                                  <span className="text-slate-300">{selectedAxiomSummary.tokens_used ?? "—"}</span>
-                                </div>
-                              </div>
-
-                              <span className="shrink-0 rounded-full border border-sky-400/40 bg-sky-500/10 px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-sky-200">
-                                {selectedAxiomSummary.note_type || "summary"}
-                              </span>
-                            </div>
-
-                            <div className="px-5 py-5">
-                              <pre className="whitespace-pre-wrap font-sans text-[13px] leading-[1.85] text-slate-100">
-                                {selectedAxiomSummary.content || "—"}
-                              </pre>
-                            </div>
-                          </div>
-                        )}
-
-                        {axiomNotes.length > 1 && (
-                          <div className="rounded-2xl border border-white/10 bg-black/15 overflow-hidden">
-                            <div className="px-5 py-3 border-b border-white/10 text-[11px] uppercase tracking-[0.22em] text-slate-400">
-                              AXIOM History ({axiomNotes.length})
-                            </div>
-                            <ul className="divide-y divide-white/10">
-                              {axiomNotes.map((n) => (
-                                <li key={n.id} className="px-5 py-4">
-                                  <div className="flex items-start justify-between gap-3">
-                                    <div className="min-w-0">
-                                      <div className="text-[12px] font-semibold text-slate-100 truncate">
-                                        {n.title || "AXIOM Note"}
-                                      </div>
-                                      <div className="mt-1 text-[11px] text-slate-500">
-                                        {fmtShort(n.created_at)}
-                                        <span className="mx-2 text-slate-700">•</span>
-                                        {n.note_type || "note"}
-                                        <span className="mx-2 text-slate-700">•</span>
-                                        {n.model || "—"}
-                                      </div>
-                                    </div>
-                                    <span className="rounded-full border border-white/10 bg-black/20 px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-slate-300">
-                                      {n.id.slice(0, 8)}
-                                    </span>
-                                  </div>
-                                  {n.content && (
-                                    <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-[12px] leading-[1.7] text-slate-200">
-                                      {n.content.length > 320 ? `${n.content.slice(0, 320)}…` : n.content}
-                                    </div>
-                                  )}
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="shrink-0 px-5 py-3 border-t border-white/10 text-[10px] text-slate-500 flex items-center justify-between">
-                        <span>AXIOM · ai_notes (draft-stage) · advisory-only</span>
-                        <span>Archive embeds AXIOM snapshot later (not during draft)</span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {(error || info) && (
-                  <div className="mt-4 text-[13px]">
-                    {error && (
-                      <div className="rounded-2xl border border-red-500/60 bg-red-500/10 px-4 py-3 text-red-200">
-                        {error}
-                      </div>
-                    )}
-                    {info && !error && (
-                      <div className="rounded-2xl border border-emerald-500/60 bg-emerald-500/10 px-4 py-3 text-emerald-200">
-                        {info}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="shrink-0 px-5 py-3 border-t border-white/10 text-[10px] text-slate-500 flex items-center justify-between">
-              <span>CI-Alchemy · Draft factory (governance_drafts)</span>
-              <span>Lane-aware · AXIOM → ai_notes · Finalize → governance_ledger (PENDING)</span>
-            </div>
-          </section>
-
-          {/* RIGHT: Inspector (Council/Provisioning-style third pane) */}
-          <aside className={cx(cardShell, drawerOpen ? "col-span-12 lg:col-span-3" : "col-span-12 lg:col-span-4")}>
-            <div className={cx(cardHeader, "p-4")}>
-              <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Inspector</div>
-              <div className="mt-2 text-[12px] text-slate-400">
-                Stable OS panel (no wiring). Quick status, actions, and AXIOM peek.
-              </div>
-            </div>
-
-            <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
-              <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Selection</div>
-                <div className="mt-1 text-[13px] font-semibold text-slate-100 truncate">
-                  {selectedDraft?.title || title || "—"}
-                </div>
-                <div className="mt-1 text-[11px] text-slate-500">
-                  {selectedDraft ? fmtShort(selectedDraft.created_at) : "—"}
-                  <span className="mx-2 text-slate-700">•</span>
-                  {selectedDraft?.status ? selectedDraft.status.toUpperCase() : "—"}
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-white/10 bg-black/15 px-4 py-3">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Lane</div>
-                <div className="mt-1 text-[12px] text-slate-300">
-                  <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
-                  <span className="mx-2 text-slate-700">•</span>
-                  Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
-                </div>
-                {selectedDraft?.finalized_record_id && (
-                  <div className="mt-2 text-[11px] text-emerald-200">Ledger-linked · locked</div>
-                )}
-                {!canMutateSelected && selectedDraft && (
-                  <div className="mt-2 text-[11px] text-slate-300">Mutations disabled in this state.</div>
-                )}
-              </div>
-
-              {/* AXIOM peek (non-mutating, no new fetch beyond existing state) */}
-              <div className="rounded-2xl border border-white/10 bg-black/20 overflow-hidden">
-                <div className="px-4 py-3 border-b border-white/10">
-                  <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">AXIOM peek</div>
-                  <div className="mt-1 text-[12px] text-slate-400">
-                    Latest draft summary (if present). Switch to AXIOM tab for full history.
                   </div>
                 </div>
-                <div className="px-4 py-3">
-                  {selectedAxiomSummary?.content ? (
-                    <div className="text-[12px] leading-[1.7] text-slate-200 line-clamp-6">
-                      {selectedAxiomSummary.content}
-                    </div>
-                  ) : (
-                    <div className="text-[12px] text-slate-500">No summary loaded yet.</div>
-                  )}
-                </div>
-              </div>
 
-              <div className="rounded-2xl border border-white/10 bg-black/15 px-4 py-3">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Quick actions</div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button
-                    onClick={handleNewDraft}
-                    className="rounded-full border border-white/10 bg-black/20 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-black/30"
-                  >
-                    New
-                  </button>
-                  <button
-                    onClick={() => reloadDrafts(true)}
-                    className="rounded-full border border-white/10 bg-black/20 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-black/30"
-                  >
-                    Refresh
-                  </button>
-                  <button
-                    onClick={() => setReaderOpen(true)}
-                    className="rounded-full border border-emerald-400/50 bg-emerald-500/10 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/15"
-                  >
-                    Reader
-                  </button>
+                <div className="max-h-[76vh] overflow-y-auto no-scrollbar px-5 py-4">
+                  <pre className="whitespace-pre-wrap break-words font-sans text-[13px] leading-relaxed text-slate-200">
+                    {readerBody}
+                  </pre>
                 </div>
-              </div>
-            </div>
 
-            <div className="shrink-0 px-5 py-3 border-t border-white/10 text-[10px] text-slate-500 flex items-center justify-between">
-              <span>OS-consistent scroll</span>
-              <span>Inspector is non-mutating</span>
-            </div>
-          </aside>
-        </div>
-      </div>
-
-      {/* Reader Modal */}
-      {readerOpen && (
-        <div className="fixed inset-0 z-[90] bg-black/70 px-4 sm:px-6 py-6 flex items-center justify-center">
-          <div className="w-full max-w-[980px] h-[85vh] rounded-3xl border border-slate-800 bg-slate-950/95 shadow-2xl shadow-black/70 overflow-hidden flex flex-col">
-            <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
-              <div className="min-w-0">
-                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">
-                  Reader · {readerMode === "axiom" ? "AXIOM Snapshot" : "Draft"}
-                </div>
-                <div className="mt-1 text-[15px] font-semibold text-slate-100 truncate">{readerTitle}</div>
-                <div className="mt-1 text-[11px] text-slate-500">
-                  {readerMetaLine}
-                  <span className="mx-2 text-slate-700">•</span>
+                <div className="border-t border-white/10 px-5 py-3 text-[10px] text-slate-500 flex items-center justify-between">
+                  <span>
+                    {readerMode === "axiom"
+                      ? "AXIOM is side-car intelligence (read-only) until archive."
+                      : "Draft stays mutable until Finalize."}
+                  </span>
                   <span className={cx(isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
                 </div>
               </div>
-
-              <button
-                onClick={() => setReaderOpen(false)}
-                className="rounded-full border border-slate-700 bg-slate-900/60 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-800/60"
-              >
-                Close
-              </button>
-            </div>
-
-            <div className="flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 py-5">
-              <div className="rounded-2xl border border-slate-800 bg-black/40 px-4 sm:px-5 py-5">
-                <pre className="whitespace-pre-wrap font-sans text-[13px] leading-[1.85] text-slate-100">
-                  {readerBody}
-                </pre>
-              </div>
-            </div>
-
-            <div className="shrink-0 px-5 py-4 border-t border-slate-800 flex items-center justify-between text-[10px] text-slate-500">
-              <span>Reader is non-mutating. Edit in the Paper/Noir editor.</span>
-              <span>Oasis OS · Evidence-Bound Drafting</span>
             </div>
           </div>
-        </div>
-      )}
+        ) : null}
 
-      {/* Delete Modal */}
-      {deleteOpen && selectedDraft && (
-        <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/70 px-4">
-          <div className="w-full max-w-[620px] rounded-3xl border border-slate-800 bg-slate-950 shadow-2xl shadow-black/60 overflow-hidden">
-            <div className="px-6 py-5 border-b border-slate-800">
-              <div className="text-[11px] uppercase tracking-[0.22em] text-rose-300">Delete draft</div>
-              <div className="mt-1 text-[16px] font-semibold text-slate-100">Discard vs Permanent Delete</div>
-              <div className="mt-2 text-[12px] text-slate-400">Allowed only before finalize. Ledger-linked drafts are locked.</div>
-            </div>
+        {/* Delete Modal */}
+        {deleteOpen ? (
+          <div
+            className="fixed inset-0 z-[90] bg-black/60 backdrop-blur-sm"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) setDeleteOpen(false);
+            }}
+          >
+            <div className="absolute inset-x-0 top-10 mx-auto w-[94vw] max-w-[720px]">
+              <div className="rounded-[28px] border border-white/10 bg-black/45 shadow-[0_35px_140px_rgba(0,0,0,0.78)] overflow-hidden">
+                <div className="border-b border-white/10 bg-gradient-to-b from-white/[0.08] to-transparent px-5 py-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-[0.3em] text-slate-500">Draft Removal</div>
+                      <div className="mt-1 text-[15px] font-semibold text-slate-100">
+                        {selectedDraft?.title || "(untitled)"}
+                      </div>
+                      <div className="mt-1 text-[11px] text-slate-500">
+                        Soft = discard (keeps record). Hard = permanent delete via RPC.
+                      </div>
+                    </div>
 
-            <div className="px-6 py-5 space-y-4">
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => setDeleteMode("soft")}
-                  className={cx(
-                    "rounded-2xl border px-4 py-3 text-left transition",
-                    deleteMode === "soft"
-                      ? "border-emerald-500/60 bg-emerald-500/10"
-                      : "border-slate-800 bg-slate-950 hover:bg-slate-900/60"
-                  )}
-                  disabled={deleteBusy}
-                >
-                  <div className="text-[11px] uppercase tracking-[0.2em] text-emerald-300">Soft</div>
-                  <div className="mt-1 text-sm font-semibold text-slate-100">Discard</div>
-                  <div className="mt-1 text-[11px] text-slate-400">Marks status = discarded.</div>
-                </button>
-
-                <button
-                  onClick={() => setDeleteMode("hard")}
-                  className={cx(
-                    "rounded-2xl border px-4 py-3 text-left transition",
-                    deleteMode === "hard"
-                      ? "border-rose-500/60 bg-rose-500/10"
-                      : "border-slate-800 bg-slate-950 hover:bg-slate-900/60"
-                  )}
-                  disabled={deleteBusy}
-                >
-                  <div className="text-[11px] uppercase tracking-[0.2em] text-rose-300">Hard</div>
-                  <div className="mt-1 text-sm font-semibold text-slate-100">Permanent</div>
-                  <div className="mt-1 text-[11px] text-slate-400">Calls owner_delete_governance_draft.</div>
-                </button>
-              </div>
-
-              <div>
-                <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 mb-2">Reason (optional)</div>
-                <textarea
-                  className="w-full min-h-[96px] rounded-2xl border border-slate-800 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 resize-none outline-none focus:border-slate-600"
-                  value={deleteReason}
-                  onChange={(e) => setDeleteReason(e.target.value)}
-                  placeholder="e.g., test run / duplicate / wrong entity…"
-                  disabled={deleteBusy}
-                />
-              </div>
-
-              {deleteMode === "hard" && (
-                <div className="rounded-2xl border border-rose-500/30 bg-rose-500/5 px-4 py-3">
-                  <div className="text-[11px] uppercase tracking-[0.2em] text-rose-300">Confirm hard delete</div>
-                  <div className="mt-1 text-[11px] text-slate-400">
-                    Type <span className="text-slate-200 font-semibold">DELETE</span> to confirm.
+                    <button
+                      onClick={() => setDeleteOpen(false)}
+                      className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/10"
+                    >
+                      Close
+                    </button>
                   </div>
-                  <input
-                    className="mt-3 w-full rounded-2xl border border-slate-800 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none focus:border-rose-500/50"
-                    value={deleteConfirmText}
-                    onChange={(e) => setDeleteConfirmText(e.target.value)}
-                    placeholder='Type "DELETE"'
-                    disabled={deleteBusy}
-                  />
                 </div>
-              )}
-            </div>
 
-            <div className="px-6 py-5 border-t border-slate-800 flex items-center justify-between gap-2">
-              <button
-                onClick={() => (deleteBusy ? null : setDeleteOpen(false))}
-                disabled={deleteBusy}
-                className="rounded-full border border-slate-800 bg-slate-950 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50"
-              >
-                Cancel
-              </button>
+                <div className="px-5 py-4 space-y-4">
+                  <div className="inline-flex rounded-full border border-slate-800 bg-slate-950/60 p-1 text-[10px] uppercase tracking-[0.18em]">
+                    <button
+                      onClick={() => setDeleteMode("soft")}
+                      className={cx(
+                        "rounded-full px-3 py-1.5 transition",
+                        deleteMode === "soft"
+                          ? "bg-white/10 text-slate-100 border border-white/10"
+                          : "text-slate-400 hover:bg-slate-900/60"
+                      )}
+                    >
+                      Soft
+                    </button>
+                    <button
+                      onClick={() => setDeleteMode("hard")}
+                      className={cx(
+                        "rounded-full px-3 py-1.5 transition",
+                        deleteMode === "hard"
+                          ? "bg-rose-500/15 text-rose-200 border border-rose-400/20"
+                          : "text-slate-400 hover:bg-slate-900/60"
+                      )}
+                    >
+                      Hard
+                    </button>
+                  </div>
 
-              <button
-                onClick={confirmDelete}
-                disabled={deleteBusy || !canMutateSelected}
-                className={cx(
-                  "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition disabled:opacity-50 disabled:cursor-not-allowed",
-                  deleteMode === "soft" ? "bg-emerald-500 text-black hover:bg-emerald-400" : "bg-rose-500 text-black hover:bg-rose-400"
-                )}
-              >
-                {deleteBusy ? "Deleting…" : deleteMode === "soft" ? "Discard" : "Hard Delete"}
-              </button>
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Reason</div>
+                    <textarea
+                      value={deleteReason}
+                      onChange={(e) => setDeleteReason(e.target.value)}
+                      placeholder="Optional: why is this being removed?"
+                      className="mt-2 w-full rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-rose-400 min-h-[88px]"
+                    />
+                  </div>
+
+                  {deleteMode === "hard" ? (
+                    <div className="rounded-2xl border border-rose-400/25 bg-rose-500/10 px-4 py-3">
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-rose-200">
+                        Permanent delete confirmation
+                      </div>
+                      <div className="mt-1 text-[12px] text-rose-100">
+                        Type <span className="font-semibold">DELETE</span> to confirm.
+                      </div>
+                      <input
+                        value={deleteConfirmText}
+                        onChange={(e) => setDeleteConfirmText(e.target.value)}
+                        className="mt-3 w-full rounded-2xl border border-rose-400/30 bg-black/30 px-4 py-3 text-[13px] text-rose-100 outline-none focus:border-rose-300"
+                        placeholder="DELETE"
+                      />
+                    </div>
+                  ) : (
+                    <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-[12px] text-slate-300">
+                      Soft removal sets status=discarded. Draft remains for audit/history.
+                    </div>
+                  )}
+                </div>
+
+                <div className="border-t border-white/10 px-5 py-4 flex items-center justify-between gap-3">
+                  <span className="text-[10px] text-slate-500">{env} · governance_drafts</span>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setDeleteOpen(false)}
+                      className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/10"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={confirmDelete}
+                      disabled={deleteBusy}
+                      className={cx(
+                        "rounded-full px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase border",
+                        deleteBusy
+                          ? "border-white/10 bg-white/5 text-slate-500 cursor-not-allowed"
+                          : deleteMode === "hard"
+                          ? "border-rose-400/40 bg-rose-500/10 text-rose-200 hover:bg-rose-500/15"
+                          : "border-amber-400/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/15"
+                      )}
+                    >
+                      {deleteBusy ? "Working…" : deleteMode === "hard" ? "Delete Permanently" : "Discard Draft"}
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        ) : null}
+      </div>
     </div>
   );
 }
 
-function StatusTabButton({
-  label,
-  value,
-  active,
-  onClick,
-}: {
-  label: string;
-  value: StatusTab;
-  active: boolean;
-  onClick: () => void;
-}) {
+/* -------------------- */
+/* Small UI primitives  */
+/* -------------------- */
+
+function StatusTabButton(props: { label: string; active: boolean; onClick: () => void }) {
   return (
     <button
-      type="button"
-      onClick={onClick}
+      onClick={props.onClick}
       className={cx(
-        "px-4 py-2 rounded-full text-left transition min-w-[96px] sm:min-w-[110px]",
-        active
-          ? "bg-emerald-500/15 border border-emerald-400/70 text-slate-50"
-          : "bg-transparent border border-transparent hover:bg-slate-900/60 text-slate-300"
+        "whitespace-nowrap rounded-full px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase transition",
+        props.active ? "bg-white/10 text-slate-100 border border-white/10" : "text-slate-400 hover:bg-slate-900/60"
       )}
+      type="button"
     >
-      <div className="text-xs font-semibold">{label}</div>
-      <div className="text-[10px] text-slate-400 uppercase tracking-[0.18em]">{value}</div>
+      {props.label}
     </button>
   );
 }
+```
