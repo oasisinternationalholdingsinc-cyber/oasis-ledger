@@ -1,4 +1,3 @@
-```tsx
 // src/app/(os)/ci-alchemy/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
@@ -462,15 +461,19 @@ export default function CIAlchemyPage() {
         return created.id;
       };
 
+      // ✅ FIX: define targetDraftId BEFORE building payload
       const targetDraftId = await ensureDraftRow();
 
+      // ✅ FIX: Turbopack-safe instructions (no template literals)
       const hasBody = body.trim().length > 0;
+      const defaultTopic = title.trim() || "a governance matter";
       const instructions = hasBody
         ? body.trim()
-        : `Draft a formal corporate resolution for ${activeEntityLabel} about: "${
-            title.trim() || "a governance matter"
-          }".
-Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for directors.`;
+        : "Draft a formal corporate resolution for " +
+          String(activeEntityLabel) +
+          ' about: "' +
+          String(defaultTopic) +
+          '".\nInclude WHEREAS recitals, clear RESOLVED clauses, and a signing block for directors.';
 
       const payload = {
         type: "board_resolution",
@@ -950,19 +953,25 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
   }
 
   async function hardDeleteDraft(draftId: string, reason: string) {
-    const tryTwo = await supabase.rpc("owner_delete_governance_draft", {
-      p_draft_id: draftId,
-      p_reason: reason || null,
-    } as any);
+    const tryTwo = await supabase.rpc(
+      "owner_delete_governance_draft",
+      {
+        p_draft_id: draftId,
+        p_reason: reason || null,
+      } as any
+    );
     if (!tryTwo.error) return;
 
     const tryOne = await supabase.rpc("owner_delete_governance_draft", { p_draft_id: draftId } as any);
     if (!tryOne.error) return;
 
-    const tryAlt = await supabase.rpc("owner_delete_governance_draft", {
-      draft_id: draftId,
-      reason: reason || null,
-    } as any);
+    const tryAlt = await supabase.rpc(
+      "owner_delete_governance_draft",
+      {
+        draft_id: draftId,
+        reason: reason || null,
+      } as any
+    );
     if (tryAlt.error) throw tryAlt.error;
   }
 
@@ -1779,4 +1788,3 @@ function StatusTabButton(props: { label: string; active: boolean; onClick: () =>
     </button>
   );
 }
-```
