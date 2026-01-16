@@ -2,6 +2,7 @@
 export const dynamic = "force-dynamic";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
@@ -188,7 +189,7 @@ function Modal({
   open: boolean;
   title: string;
   description?: string;
-  children?: React.ReactNode;
+  children?: ReactNode;
   confirmLabel?: string;
   cancelLabel?: string;
   confirmTone?: "amber" | "emerald" | "cyan" | "slate";
@@ -245,9 +246,7 @@ function Modal({
               disabled={confirmDisabled}
               className={cx(
                 "rounded-xl px-4 py-2 text-[12px] font-semibold tracking-[0.18em] uppercase transition",
-                confirmTone === "emerald"
-                  ? confirmCls
-                  : cx("border", confirmCls),
+                confirmTone === "emerald" ? confirmCls : cx("border", confirmCls),
                 confirmDisabled ? "opacity-60 cursor-not-allowed" : ""
               )}
             >
@@ -286,6 +285,10 @@ export default function ForgeClient() {
 
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+
+  // ✅ UI-only filter: Hide envelopes (like Hide Drafts — no deletes)
+  // When ON: Active queue shows only records with NO envelope (start-needed).
+  const [hideEnvelopes, setHideEnvelopes] = useState(false);
 
   // AXIOM (sidecar-only)
   const [axiomLoading, setAxiomLoading] = useState(false);
@@ -382,17 +385,24 @@ export default function ForgeClient() {
   }, [activeEntity, isTest]);
 
   // --------------------------
-  // Tabs
+  // Tabs + queue slices
   // --------------------------
   const isCompleted = (item: ForgeQueueItem) => item.envelope_status === "completed";
-  const activeQueue = useMemo(() => queue.filter((q) => !isCompleted(q)), [queue]);
+  const activeQueueRaw = useMemo(() => queue.filter((q) => !isCompleted(q)), [queue]);
   const completedQueue = useMemo(() => queue.filter((q) => isCompleted(q)), [queue]);
+
+  // ✅ Hide Envelopes (UI-only): filter active queue to start-needed only
+  const activeQueue = useMemo(() => {
+    if (!hideEnvelopes) return activeQueueRaw;
+    return activeQueueRaw.filter((q) => !q.envelope_id);
+  }, [activeQueueRaw, hideEnvelopes]);
+
   const visibleQueue = tab === "active" ? activeQueue : completedQueue;
 
   useEffect(() => {
     setSelectedId(visibleQueue[0]?.ledger_id ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, activeEntity, isTest]);
+  }, [tab, activeEntity, isTest, hideEnvelopes]);
 
   const selected = visibleQueue.find((q) => q.ledger_id === selectedId) ?? visibleQueue[0] ?? null;
 
@@ -409,7 +419,7 @@ export default function ForgeClient() {
     selected.envelope_status !== "expired";
 
   // --------------------------
-  // Risk (UI only) — improved semantics for OS
+  // Risk (UI only)
   // --------------------------
   const computeRiskLevel = (item: ForgeQueueItem): RiskLevel => {
     const days = item.days_since_last_signature ?? null;
@@ -423,14 +433,12 @@ export default function ForgeClient() {
     }
 
     if (status === "completed") {
-      // completed but slow to archive isn't "red"
       if (days != null && days >= 7) return "AMBER";
       return "GREEN";
     }
 
     if (status === "cancelled" || status === "expired") return "IDLE";
 
-    // active signing
     if (days == null) return "GREEN";
     if (days >= 7) return "RED";
     if (days >= 3) return "AMBER";
@@ -524,16 +532,14 @@ export default function ForgeClient() {
       const rows = ((data ?? []) as unknown as ForgeQueueItem[]) ?? [];
       setQueue(rows);
 
+      const nextVisibleBase =
+        tab === "active" ? rows.filter((r) => !isCompleted(r)) : rows.filter((r) => isCompleted(r));
+
       const nextVisible =
-        tab === "active"
-          ? rows.filter((r) => !isCompleted(r))
-          : rows.filter((r) => isCompleted(r));
+        tab === "active" && hideEnvelopes ? nextVisibleBase.filter((r) => !r.envelope_id) : nextVisibleBase;
 
       const fallback = nextVisible[0]?.ledger_id ?? null;
-      const desired =
-        keepLedgerId && nextVisible.some((x) => x.ledger_id === keepLedgerId)
-          ? keepLedgerId
-          : fallback;
+      const desired = keepLedgerId && nextVisible.some((x) => x.ledger_id === keepLedgerId) ? keepLedgerId : fallback;
 
       setSelectedId(desired);
     } catch (e) {
@@ -737,12 +743,10 @@ export default function ForgeClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.ledger_id, isTest]);
 
-  // ✅ Existing behavior (kept)
   const alreadyArchived = !!evidence.minute_book_entry_id || !!evidence.verified_document?.id;
 
   // ✅ UI-only: treat ledger_status=ARCHIVED as locked too
-  const archiveLocked =
-    (selected?.ledger_status || "").toUpperCase() === "ARCHIVED" || alreadyArchived;
+  const archiveLocked = (selected?.ledger_status || "").toUpperCase() === "ARCHIVED" || alreadyArchived;
 
   // --------------------------
   // ✅ View Archive PDF (prefers Verified registry; falls back to Minute Book primary)
@@ -765,10 +769,7 @@ export default function ForgeClient() {
     try {
       // 1) Verified registry artifact (authoritative when present)
       if (evidence.verified_document?.storage_bucket && evidence.verified_document?.storage_path) {
-        await openStorageObject(
-          evidence.verified_document.storage_bucket,
-          evidence.verified_document.storage_path
-        );
+        await openStorageObject(evidence.verified_document.storage_bucket, evidence.verified_document.storage_path);
         flashInfo("Opened Verified archive PDF.");
         return;
       }
@@ -1106,14 +1107,23 @@ export default function ForgeClient() {
     </button>
   );
 
+  // ✅ Portal buttons: signal light + glow (no wiring change)
   const portalBtn = (href: string, label: string) => (
     <a
       href={href}
       target="_blank"
       rel="noreferrer"
-      className="flex-1 text-center rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-2 text-[11px] font-semibold text-slate-200 hover:border-amber-500/40 hover:text-slate-100 transition"
+      className="group flex-1 rounded-2xl border border-slate-800/80 bg-slate-950/40 px-3 py-2
+                 text-[11px] font-semibold text-slate-200 transition
+                 hover:border-amber-500/55 hover:bg-slate-950/55 hover:text-slate-50
+                 hover:shadow-[0_0_0_1px_rgba(251,191,36,0.14),0_0_18px_rgba(251,191,36,0.18)]
+                 focus:outline-none focus:ring-2 focus:ring-amber-400/30"
     >
-      {label}
+      <span className="flex items-center justify-center gap-2">
+        <span className="h-1.5 w-1.5 rounded-full bg-amber-300/90 shadow-[0_0_10px_rgba(251,191,36,0.85)]" />
+        <span className="text-center">{label}</span>
+        <span className="opacity-0 transition group-hover:opacity-100 text-[10px] text-amber-200">↗</span>
+      </span>
     </a>
   );
 
@@ -1165,7 +1175,6 @@ export default function ForgeClient() {
     if (selected.envelope_status !== "completed") {
       return { key: "invite" as const, label: "Send invite", disabled: false };
     }
-    // completed
     if (archiveLocked) return { key: "view" as const, label: "View archive PDF", disabled: false };
     return { key: "archive" as const, label: "Archive now", disabled: false };
   }, [selected, archiveLocked]);
@@ -1193,11 +1202,10 @@ export default function ForgeClient() {
   return (
     <div className="w-full px-4 sm:px-6 lg:px-8 pt-6 pb-10">
       <div className="mx-auto w-full max-w-[1400px]">
-        {/* Header (free scroll, no locks) */}
+        {/* Header (free scroll; ✅ removed random top-right env pill) */}
         <div className="mb-4">
           <div className="flex items-center justify-between gap-3">
             <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI-FORGE</div>
-            {envPill()}
           </div>
           <h1 className="mt-1 text-lg font-semibold text-amber-300">Execution — Signature-required</h1>
           <p className="mt-1 text-[11px] text-slate-400">
@@ -1206,10 +1214,10 @@ export default function ForgeClient() {
           </p>
         </div>
 
-        {/* OS Shell Card */}
-        <div className="rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)]">
+        {/* ✅ OS Surface Shell (Alchemy-style; black box gone) */}
+        <div className="rounded-3xl border border-white/10 bg-black/20 backdrop-blur-xl shadow-[0_0_60px_rgba(2,6,23,0.65)]">
           {/* Control plane */}
-          <div className="px-4 sm:px-6 py-4 border-b border-slate-900 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+          <div className="px-4 sm:px-6 py-4 border-b border-white/10 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
             <div className="flex flex-col gap-1">
               <div className="text-[11px] text-slate-400">
                 Active Entity: <span className="font-semibold text-slate-100">{activeEntity}</span>{" "}
@@ -1223,6 +1231,25 @@ export default function ForgeClient() {
             <div className="flex flex-wrap items-center gap-2">
               {tabBtn("active", "Active", activeQueue.length)}
               {tabBtn("completed", "Completed", completedQueue.length)}
+
+              {/* ✅ Hide Envelopes (UI-only) */}
+              <button
+                type="button"
+                onClick={() => setHideEnvelopes((v) => !v)}
+                className={cx(
+                  "rounded-full px-3 py-1.5 text-[11px] font-semibold transition border",
+                  tab !== "active"
+                    ? "border-slate-800 bg-slate-950/25 text-slate-500 cursor-not-allowed"
+                    : hideEnvelopes
+                    ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+                    : "border-slate-800 bg-slate-950/40 text-slate-300 hover:border-slate-700 hover:text-slate-100"
+                )}
+                disabled={tab !== "active"}
+                title="UI-only filter: Active queue shows only records that still need an envelope (no deletes)."
+              >
+                Hide envelopes
+              </button>
+
               <button
                 type="button"
                 onClick={() => refreshQueueKeepSelection(selected?.ledger_id ?? null)}
@@ -1233,18 +1260,23 @@ export default function ForgeClient() {
             </div>
           </div>
 
-          {/* Content grid (free-scroll, mobile stacks) */}
+          {/* Content grid (free-scroll; mobile stacks) */}
           <div className="p-4 sm:p-6">
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
               {/* Queue */}
-              <section className="lg:col-span-4 rounded-2xl border border-slate-900 bg-slate-950/40">
-                <div className="border-b border-slate-900 px-4 py-3">
+              <section className="lg:col-span-4 rounded-2xl border border-white/10 bg-black/20">
+                <div className="border-b border-white/10 px-4 py-3">
                   <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">
                     {tab === "active" ? "Active Execution Queue" : "Completed Envelopes"}
                   </div>
                   <div className="mt-1 text-[11px] text-slate-400">
                     {loadingQueue ? "Loading…" : `${visibleQueue.length} record(s)`}
                   </div>
+                  {tab === "active" && hideEnvelopes ? (
+                    <div className="mt-1 text-[10px] text-amber-200">
+                      Filter: showing only records that still need an envelope.
+                    </div>
+                  ) : null}
                 </div>
 
                 {/* only this list may scroll; page still free-scroll */}
@@ -1268,7 +1300,7 @@ export default function ForgeClient() {
                           "w-full text-left rounded-xl border px-3 py-2 mb-2 transition",
                           selectedRow
                             ? "border-amber-500/50 bg-amber-500/10 shadow-[0_0_25px_rgba(251,191,36,0.10)]"
-                            : "border-slate-900 bg-black/30 hover:border-slate-800 hover:bg-black/40"
+                            : "border-white/10 bg-black/20 hover:border-white/15 hover:bg-black/25"
                         )}
                       >
                         <div className="flex items-start justify-between gap-2">
@@ -1300,8 +1332,8 @@ export default function ForgeClient() {
               </section>
 
               {/* Execution */}
-              <section className="lg:col-span-5 rounded-2xl border border-slate-900 bg-slate-950/30">
-                <div className="border-b border-slate-900 px-5 py-4">
+              <section className="lg:col-span-5 rounded-2xl border border-white/10 bg-black/15">
+                <div className="border-b border-white/10 px-5 py-4">
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Execution</div>
@@ -1321,14 +1353,16 @@ export default function ForgeClient() {
                   </div>
 
                   {/* Execution rail */}
-                  <div className="mt-4 rounded-2xl border border-slate-900 bg-black/25 px-4 py-3">
+                  <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 px-4 py-3">
                     <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.22em] text-slate-500">
                       <span>Execution Timeline</span>
-                      <span className="text-slate-400 normal-case tracking-normal uppercase">{isTest ? "SANDBOX" : "RoT"}</span>
+                      <span className="text-slate-400 normal-case tracking-normal uppercase">
+                        {isTest ? "SANDBOX" : "RoT"}
+                      </span>
                     </div>
 
                     <div className="mt-3 grid grid-cols-4 gap-2">
-                      <div className="rounded-xl border border-slate-900 bg-black/30 px-3 py-2">
+                      <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
                         <div className="flex items-center gap-2">
                           {stepDot(0)}
                           <div className="text-[11px] font-semibold text-slate-100">Envelope</div>
@@ -1338,17 +1372,15 @@ export default function ForgeClient() {
                         </div>
                       </div>
 
-                      <div className="rounded-xl border border-slate-900 bg-black/30 px-3 py-2">
+                      <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
                         <div className="flex items-center gap-2">
                           {stepDot(1)}
                           <div className="text-[11px] font-semibold text-slate-100">Invite</div>
                         </div>
-                        <div className="mt-1 text-[10px] text-slate-500">
-                          {selected?.envelope_id ? "Ready" : "—"}
-                        </div>
+                        <div className="mt-1 text-[10px] text-slate-500">{selected?.envelope_id ? "Ready" : "—"}</div>
                       </div>
 
-                      <div className="rounded-xl border border-slate-900 bg-black/30 px-3 py-2">
+                      <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
                         <div className="flex items-center gap-2">
                           {stepDot(2)}
                           <div className="text-[11px] font-semibold text-slate-100">Signature</div>
@@ -1362,14 +1394,12 @@ export default function ForgeClient() {
                         </div>
                       </div>
 
-                      <div className="rounded-xl border border-slate-900 bg-black/30 px-3 py-2">
+                      <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
                         <div className="flex items-center gap-2">
                           {stepDot(3)}
                           <div className="text-[11px] font-semibold text-slate-100">Archive</div>
                         </div>
-                        <div className="mt-1 text-[10px] text-slate-500">
-                          {archiveLocked ? "Archived" : "Pending"}
-                        </div>
+                        <div className="mt-1 text-[10px] text-slate-500">{archiveLocked ? "Archived" : "Pending"}</div>
                       </div>
                     </div>
                   </div>
@@ -1393,7 +1423,7 @@ export default function ForgeClient() {
                   ) : (
                     <>
                       {/* Primary CTA card */}
-                      <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
+                      <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
                         <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Primary Action</div>
                         <div className="mt-2 flex flex-col sm:flex-row gap-2">
                           <button
@@ -1405,7 +1435,13 @@ export default function ForgeClient() {
                               else if (primaryAction.key === "archive") setArchiveModalOpen(true);
                               else if (primaryAction.key === "view") onViewArchivePdf();
                             }}
-                            disabled={primaryAction.disabled || (primaryAction.key === "invite" && !selected.envelope_id) || isStarting || isSendingInvite || isArchiving}
+                            disabled={
+                              primaryAction.disabled ||
+                              (primaryAction.key === "invite" && !selected.envelope_id) ||
+                              isStarting ||
+                              isSendingInvite ||
+                              isArchiving
+                            }
                             className={cx(
                               "flex-1 rounded-xl px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
                               primaryAction.key === "start"
@@ -1419,7 +1455,9 @@ export default function ForgeClient() {
                             {primaryAction.key === "start" && isStarting ? "Starting…" : null}
                             {primaryAction.key === "invite" && isSendingInvite ? "Sending…" : null}
                             {primaryAction.key === "archive" && isArchiving ? "Archiving…" : null}
-                            {primaryAction.key !== "start" && primaryAction.key !== "invite" && primaryAction.key !== "archive"
+                            {primaryAction.key !== "start" &&
+                            primaryAction.key !== "invite" &&
+                            primaryAction.key !== "archive"
                               ? primaryAction.label
                               : primaryAction.key === "start"
                               ? isStarting
@@ -1486,7 +1524,7 @@ export default function ForgeClient() {
 
                       {/* Signer details (only relevant if no envelope yet) */}
                       {!selected.envelope_id ? (
-                        <div className="mt-4 rounded-2xl border border-slate-900 bg-black/30 p-4">
+                        <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-4">
                           <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500 mb-2">
                             Signer (Envelope Creation)
                           </div>
@@ -1528,15 +1566,15 @@ export default function ForgeClient() {
                   )}
                 </div>
 
-                <div className="border-t border-slate-900 px-5 py-3 text-[10px] text-slate-500 flex items-center justify-between">
+                <div className="border-t border-white/10 px-5 py-3 text-[10px] text-slate-500 flex items-center justify-between">
                   <span>CI-Forge · Oasis Digital Parliament Ledger</span>
                   <span>{tab === "active" ? "Active tab" : "Completed tab"}</span>
                 </div>
               </section>
 
-              {/* Right side: OS drawer tabs (free-scroll, optional internal max height) */}
-              <section className="lg:col-span-3 rounded-2xl border border-slate-900 bg-slate-950/35">
-                <div className="border-b border-slate-900 px-4 py-3">
+              {/* Right side: OS drawer tabs */}
+              <section className="lg:col-span-3 rounded-2xl border border-white/10 bg-black/20">
+                <div className="border-b border-white/10 px-4 py-3">
                   <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Sidecar</div>
                   <div className="mt-1 text-[11px] text-slate-400">Advisory-only. Humans execute.</div>
 
@@ -1551,7 +1589,7 @@ export default function ForgeClient() {
                 <div className="px-4 py-4 space-y-3 max-h-[820px] overflow-y-auto">
                   {/* Evidence */}
                   {rightTab === "evidence" ? (
-                    <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
                       <div className="flex items-center justify-between">
                         <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Archive Evidence</div>
                         <button
@@ -1575,7 +1613,7 @@ export default function ForgeClient() {
                         </div>
                       ) : null}
 
-                      <div className="mt-3 rounded-xl border border-slate-900 bg-black/25 p-3">
+                      <div className="mt-3 rounded-xl border border-white/10 bg-black/20 p-3">
                         <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Minute Book</div>
                         <div className="mt-1 text-[11px] text-slate-300">
                           Entry:{" "}
@@ -1593,7 +1631,7 @@ export default function ForgeClient() {
                         {evidence.supporting_docs.length ? (
                           <div className="mt-2 space-y-2">
                             {evidence.supporting_docs.slice(0, 5).map((d) => (
-                              <div key={d.id} className="rounded-lg border border-slate-900 bg-black/30 p-2">
+                              <div key={d.id} className="rounded-lg border border-white/10 bg-black/20 p-2">
                                 <div className="flex items-center justify-between gap-2">
                                   <div className="text-[11px] text-slate-200">{d.doc_type ?? "document"}</div>
                                   <div className="text-[10px] text-slate-500">{fmt(d.uploaded_at)}</div>
@@ -1609,13 +1647,14 @@ export default function ForgeClient() {
                           </div>
                         ) : (
                           <div className="mt-2 text-[10px] text-slate-500">
-                            No supporting_documents found for this entry (yet). That usually means the archive function created the entry but didn’t register pointers.
+                            No supporting_documents found for this entry (yet). That usually means the archive function
+                            created the entry but didn’t register pointers.
                           </div>
                         )}
 
                         <div className="mt-3 text-[10px] uppercase tracking-[0.22em] text-slate-500">Verified Registry</div>
                         {evidence.verified_document ? (
-                          <div className="mt-2 rounded-lg border border-slate-900 bg-black/30 p-2">
+                          <div className="mt-2 rounded-lg border border-white/10 bg-black/20 p-2">
                             <div className="text-[11px] text-slate-200">
                               {evidence.verified_document.verification_level ?? "verified"}
                             </div>
@@ -1638,14 +1677,15 @@ export default function ForgeClient() {
                       </div>
 
                       <div className="mt-2 text-[10px] text-slate-500">
-                        This panel surfaces the <span className="text-slate-300">actual pointers</span> (bucket/path). If anything is missing, Re-seal/Repair is the canonical repair tool.
+                        This panel surfaces the <span className="text-slate-300">actual pointers</span> (bucket/path). If
+                        anything is missing, Re-seal/Repair is the canonical repair tool.
                       </div>
                     </div>
                   ) : null}
 
                   {/* AXIOM */}
                   {rightTab === "axiom" ? (
-                    <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
                       <div className="flex items-center justify-between">
                         <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">AXIOM</div>
                         <div className="flex items-center gap-2">
@@ -1703,7 +1743,7 @@ export default function ForgeClient() {
                         </div>
                       )}
 
-                      <div className="mt-3 rounded-xl border border-slate-900 bg-black/25 p-3">
+                      <div className="mt-3 rounded-xl border border-white/10 bg-black/20 p-3">
                         {axiomTab === "advisory" ? (
                           <>
                             <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Advisory</div>
@@ -1767,7 +1807,7 @@ export default function ForgeClient() {
 
                   {/* Portal */}
                   {rightTab === "portal" ? (
-                    <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
                       <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Portal</div>
 
                       <div className="mt-2 grid grid-cols-1 gap-2 text-[11px] text-slate-300">
@@ -1799,14 +1839,14 @@ export default function ForgeClient() {
                         <div className="mt-2 flex gap-2">
                           <a
                             href="/ci-archive/minute-book"
-                            className="flex-1 text-center rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-2 text-[11px] font-semibold text-slate-200 hover:border-amber-500/40 hover:text-slate-100 transition"
+                            className="flex-1 text-center rounded-2xl border border-slate-800/80 bg-slate-950/40 px-3 py-2 text-[11px] font-semibold text-slate-200 hover:border-amber-500/55 hover:bg-slate-950/55 hover:text-slate-50 transition"
                           >
                             CI-Archive
                           </a>
 
                           <a
                             href="/ci-sign"
-                            className="flex-1 text-center rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-2 text-[11px] font-semibold text-slate-200 hover:border-amber-500/40 hover:text-slate-100 transition"
+                            className="flex-1 text-center rounded-2xl border border-slate-800/80 bg-slate-950/40 px-3 py-2 text-[11px] font-semibold text-slate-200 hover:border-amber-500/55 hover:bg-slate-950/55 hover:text-slate-50 transition"
                           >
                             CI-Sign
                           </a>
@@ -1822,7 +1862,7 @@ export default function ForgeClient() {
 
                   {/* Notes */}
                   {rightTab === "notes" ? (
-                    <div className="rounded-2xl border border-slate-900 bg-black/30 p-4">
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
                       <div className="flex items-center justify-between">
                         <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Forge Notes</div>
                         <div className="text-[10px] text-slate-500">(Local-only)</div>
@@ -1846,7 +1886,9 @@ export default function ForgeClient() {
           description="Creates a signature envelope for this record. Requires signer name + email."
           confirmLabel={isStarting ? "Starting…" : "Start envelope"}
           confirmTone="emerald"
-          confirmDisabled={isStarting || !selected || envelopeLocked || !primarySignerName.trim() || !primarySignerEmail.trim()}
+          confirmDisabled={
+            isStarting || !selected || envelopeLocked || !primarySignerName.trim() || !primarySignerEmail.trim()
+          }
           onConfirm={doStartEnvelope}
           onClose={() => setStartModalOpen(false)}
         >
@@ -1899,12 +1941,11 @@ export default function ForgeClient() {
         >
           <div className="text-[12px] text-slate-300">
             Envelope ID:{" "}
-            <span className="font-mono text-[11px] text-slate-200">
-              {selected?.envelope_id ? selected.envelope_id : "—"}
-            </span>
+            <span className="font-mono text-[11px] text-slate-200">{selected?.envelope_id ? selected.envelope_id : "—"}</span>
           </div>
           <div className="mt-2 text-[11px] text-slate-500">
-            Tip: Portal links will populate in the <span className="text-slate-300">Portal</span> tab after the invite is sent.
+            Tip: Portal links will populate in the <span className="text-slate-300">Portal</span> tab after the invite is
+            sent.
           </div>
         </Modal>
 
