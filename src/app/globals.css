@@ -16,6 +16,10 @@
   --dock-peek: 6px;       /* handle edge height */
   --dock-gap: 14px;       /* air between dock and screen edge */
 
+  /* Auto-hide motion */
+  --dock-hide-shift: 76px; /* how far the dock slides down when hidden */
+  --dock-ease: 220ms;
+
   /* Lane tints (subtle; ONLY affects dock glow/handle) */
   --lane-rot: rgba(146, 247, 198, 0.22);
   --lane-sandbox: rgba(245, 212, 122, 0.22);
@@ -51,7 +55,7 @@ body {
 }
 
 /* =========================================================
-   OASIS OS SHELL – STABLE, NO ANIMATIONS (yet)
+   OASIS OS SHELL – STABLE
    ========================================================= */
 
 /* ===== OS ROOT ===== */
@@ -168,7 +172,6 @@ body {
 }
 
 /* ===== SHELL ===== */
-/* ✅ FIX: must be a sizing context so workspace overflow works */
 .os-shell {
   flex: 1;
   min-height: 0;           /* critical for nested scroll */
@@ -179,23 +182,25 @@ body {
 
 /* ===== WORKSPACE (ONLY AREA THAT SCROLLS) ===== */
 .os-workspace {
-  flex: 1;                 /* ✅ FIX: gives it height inside os-shell */
-  min-height: 0;           /* critical for overflow */
+  flex: 1;
+  min-height: 0;
   padding: 24px;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
 
-  /* Option B overlay: leave safety pad + room for peek handle.
-     Full dock clearance can be tuned later with auto-hide. */
+  /* keep content clear of the dock handle */
   padding-bottom: calc(var(--dock-gap) + var(--dock-peek) + 18px);
 }
 
-/* ===== DOCK (BOTTOM OVERLAY) ===== */
+/* =========================================================
+   OS DOCK (BOTTOM OVERLAY + AUTOHIDE)
+   ========================================================= */
+
 .os-dock {
   position: fixed;
   left: 50%;
   bottom: var(--dock-gap);
-  transform: translateX(-50%);
+  transform: translateX(-50%) translateY(0);
   z-index: 50;
 
   display: flex;
@@ -214,12 +219,29 @@ body {
     0 0 0 1px rgba(250, 204, 21, 0.10);
 
   width: auto;
-  height: auto;
-  max-height: none;
-  overflow: visible;
+  max-width: calc(100vw - 24px);
+
+  /* if screen is tight, dock can scroll horizontally */
+  overflow-x: auto;
+  overflow-y: visible;
+  scrollbar-width: none;
+
+  transition:
+    transform var(--dock-ease) ease,
+    opacity var(--dock-ease) ease;
 }
 
-/* ===== DOCK HANDLE (4–6px peek edge) ===== */
+.os-dock::-webkit-scrollbar {
+  display: none;
+}
+
+/* Auto-hide state controlled by JS: .os-root[data-dock="hidden"] */
+.os-root[data-dock="hidden"] .os-dock {
+  transform: translateX(-50%) translateY(var(--dock-hide-shift));
+  opacity: 0.92;
+}
+
+/* ===== DOCK HANDLE (peek edge always visible) ===== */
 .os-dock::before {
   content: "";
   position: absolute;
@@ -257,6 +279,7 @@ body {
   flex-direction: column;
   align-items: center;
   gap: 6px;
+  flex: 0 0 auto;
 }
 
 /* icon bubble */
@@ -321,6 +344,7 @@ body {
   background: rgba(255, 255, 255, 0.18);
   margin: 0 6px;
   align-self: center;
+  flex: 0 0 auto;
 }
 
 /* =========================================================
@@ -396,5 +420,24 @@ body {
   .dock-icon {
     width: 48px;
     height: 48px;
+  }
+}
+
+@media (max-width: 420px) {
+  .os-dock {
+    gap: 8px;
+    padding: 9px 10px;
+  }
+
+  .dock-icon {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+/* Respect reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .os-dock {
+    transition: none;
   }
 }
