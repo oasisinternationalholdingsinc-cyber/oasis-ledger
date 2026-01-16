@@ -4,23 +4,10 @@ export const dynamic = "force-dynamic";
 
 /**
  * CI-Archive → Minute Book (PRODUCTION — LOCKED CONTRACT)
- * ✅ STRICT 3-column surface: Domains | Entries | Evidence (PDF + Metadata Zone)
- * ✅ Domains source of truth: governance_domains (same as Upload)
- * ✅ Entries source of truth: minute_book_entries + supporting_documents (primary doc)
- * ✅ Entity scope: minute_book_entries.entity_key = useEntity().entityKey
- * ✅ Domain scope: minute_book_entries.domain_key = selected domain.key
- * ✅ Evidence: signed URL from storage buckets using supporting_documents.file_path
- * ✅ Metadata Zone preserved (Storage / Hash / Audit)
- * ✅ Delete UX (right panel): calls public.delete_minute_book_entry_and_files(p_entry_id, p_reason)
- * ❌ NO wiring changes beyond calling the existing delete function
- *
- * ENTERPRISE FIX (lane-safe, read-only, no schema drift):
- * - Reader must ALWAYS try to bring up a PDF.
- * - Official-first: prefer Verified Registry artifact by minute_book_entries.source_record_id (governance_ledger.id).
- * - If verified artifact exists, sign from verified_documents.storage_bucket/storage_path.
- * - Otherwise fall back to supporting_documents primary evidence (bucket candidates + smart repair).
- * - Buckets and storage paths are case-sensitive; if "Object not found", auto-resolve by listing directory.
- * - No writes. No new tables. No contract drift.
+ * ✅ SAME data sources + logic (NO wiring changes)
+ * ✅ OS-native surface (no black-box window fighting OS shell)
+ * ✅ iPhone-first: Rail → Reader Sheet (full screen), zero double-scroll
+ * ✅ Desktop: 3-column layout preserved (Domains | Entries | Evidence)
  */
 
 import Link from "next/link";
@@ -49,9 +36,7 @@ type MinuteBookEntry = {
   created_at?: string | null;
   created_by?: string | null;
   source?: string | null;
-
-  // ✅ Enterprise link to Verified Registry (governance_ledger.id)
-  source_record_id?: string | null;
+  source_record_id?: string | null; // governance_ledger.id
 };
 
 type SupportingDoc = {
@@ -93,6 +78,10 @@ type DeleteResult = {
 };
 
 /* ---------------- helpers ---------------- */
+
+function cx(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
 
 function norm(s?: string | null, fb = "—") {
   const x = (s || "").toString().trim();
@@ -154,9 +143,7 @@ function uniq<T>(arr: T[]) {
 }
 
 /**
- * Lane bucket heuristic (read-only, UI-only):
- * - Archive PDFs may live in lane buckets (e.g., governance_sandbox) with paths like "sandbox/archive/<id>.pdf".
- * - Uploaded evidence typically lives in "minute_book" with "<entity_key>/<domain>/..." paths.
+ * Lane bucket heuristic (read-only, UI-only)
  */
 function bucketCandidatesForPath(path: string) {
   const p = normalizeSlashes(path).toLowerCase();
@@ -166,13 +153,12 @@ function bucketCandidatesForPath(path: string) {
   if (p.startsWith("truth/")) candidates.push("governance_truth"); // harmless if absent
   if (p.includes("/archive/")) candidates.push("governance_sandbox");
 
-  candidates.push("minute_book"); // evidence bucket (Upload contract)
-  candidates.push("governance_sandbox"); // last fallback (lane)
+  candidates.push("minute_book");
+  candidates.push("governance_sandbox");
 
   return uniq(candidates);
 }
 
-/** Optional UI-only icon map */
 const DOMAIN_ICON: Record<string, string> = {
   incorporation: "📜",
   formation: "📜",
@@ -262,13 +248,10 @@ function pickPrimaryDocByEntry(docs: SupportingDoc[]): Map<string, SupportingDoc
 }
 
 /**
- * ✅ OFFICIAL resolver (read-only, enterprise safe):
- * Prefer Verified Registry artifact by minute_book_entries.source_record_id (governance_ledger.id).
- * This avoids brittle .or() queries across evolving verified_documents schemas.
+ * ✅ OFFICIAL resolver (read-only)
  */
 async function resolveOfficialArtifact(_entityKey: string, entry: EntryWithDoc): Promise<OfficialArtifact | null> {
   const sb = supabaseBrowser;
-
   const ledgerId = (entry.source_record_id || "").toString().trim();
   if (!ledgerId) return null;
 
@@ -299,13 +282,7 @@ async function resolveOfficialArtifact(_entityKey: string, entry: EntryWithDoc):
 }
 
 /**
- * Create signed URL with auto-repair:
- * - Try exact (bucket, path)
- * - If "Object not found", list directory and pick the real object
- * - Handles:
- *   - Case differences (resolutions vs Resolutions)
- *   - Hash-suffixed filenames (<uuid>-<hash>.pdf)
- *   - Signed variants (<uuid>-signed.pdf)
+ * Signed URL with auto-repair (read-only)
  */
 async function signedUrlFor(
   bucketId: string,
@@ -405,10 +382,6 @@ function titleCaseSegment(s: string) {
     .join("");
 }
 
-/**
- * Extra directory candidates (UI-only, read-only repair).
- * Keep it minimal to avoid broad scans.
- */
 function extraDirsForEntry(entityKey: string, e: EntryWithDoc) {
   const ek = (entityKey || "").trim();
   if (!ek) return [];
@@ -424,23 +397,16 @@ function extraDirsForEntry(entityKey: string, e: EntryWithDoc) {
   );
 }
 
-/**
- * ✅ Enterprise evidence resolver:
- * - Official-first (Verified Registry via source_record_id) if available
- * - Else: primary evidence path via bucket candidates + smart repair
- */
 async function bestSignedUrlForMinuteBookEvidence(
   entityKey: string,
   selected: EntryWithDoc,
   official: OfficialArtifact | null,
   downloadName?: string | null
 ) {
-  // 1) official-first (Verified Registry)
   if (official?.bucket_id && official?.storage_path) {
     return signedUrlFor(official.bucket_id, official.storage_path, downloadName);
   }
 
-  // 2) fallback: supporting_documents primary pointer
   if (!selected.storage_path) {
     throw new Error("No storage_path on the primary document.");
   }
@@ -490,8 +456,11 @@ export default function MinuteBookClient() {
   const [resolvedBucket, setResolvedBucket] = useState<string | null>(null);
   const [resolvedPath, setResolvedPath] = useState<string | null>(null);
 
-  // reader overlay
-  const [readerOpen, setReaderOpen] = useState<boolean>(false);
+  // mobile rails / sheets
+  const [mobileDomainsOpen, setMobileDomainsOpen] = useState(false);
+  const [mobileReaderOpen, setMobileReaderOpen] = useState(false);
+
+  // reader overlay (desktop + mobile)
   const [readerTone, setReaderTone] = useState<"glass" | "solid">("glass");
   const [showHashInReader, setShowHashInReader] = useState<boolean>(true);
 
@@ -537,6 +506,7 @@ export default function MinuteBookClient() {
       setPdfErr(null);
       setResolvedBucket(null);
       setResolvedPath(null);
+      setMobileReaderOpen(false);
 
       if (!entityKey) {
         setLoading(false);
@@ -556,7 +526,7 @@ export default function MinuteBookClient() {
         const merged: EntryWithDoc[] = base.map((e: MinuteBookEntry) => {
           const doc = primary.get(e.id);
           return {
-            ...e, // includes source_record_id ✅
+            ...e,
             document_id: doc?.id ?? null,
             storage_path: doc?.file_path ?? null,
             file_name: doc?.file_name ?? null,
@@ -625,7 +595,6 @@ export default function MinuteBookClient() {
     return entries.find((e) => e.id === selectedId) || null;
   }, [entries, selectedId]);
 
-  // Domain counts
   const domainCounts = useMemo(() => {
     const m = new Map<string, number>();
     for (const d of domains) m.set(d.key, 0);
@@ -635,7 +604,18 @@ export default function MinuteBookClient() {
     return m;
   }, [domains, entries]);
 
-  // Resolve OFFICIAL artifact when selection changes (Verified Registry by source_record_id)
+  const activeDomainLabel = useMemo(() => {
+    if (activeDomainKey === "all") return "All";
+    return domains.find((d) => d.key === activeDomainKey)?.label || "Domain";
+  }, [activeDomainKey, domains]);
+
+  const authorityBadge = useMemo(() => {
+    if (!selected) return null;
+    if (official) return { label: "OFFICIAL", tone: "gold" as const };
+    return { label: "UPLOADED", tone: "neutral" as const };
+  }, [selected?.id, !!official]);
+
+  // Resolve official artifact on selection
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -644,7 +624,6 @@ export default function MinuteBookClient() {
       setPreviewUrl(null);
       setResolvedBucket(null);
       setResolvedPath(null);
-      setReaderOpen(false);
 
       if (!entityKey || !selected) return;
 
@@ -681,7 +660,7 @@ export default function MinuteBookClient() {
       setResolvedBucket(b);
       setResolvedPath(p);
 
-      if (openReader) setReaderOpen(true);
+      if (openReader) setMobileReaderOpen(true);
     } catch (e: unknown) {
       setPdfErr(e instanceof Error ? e.message : "Failed to generate PDF preview.");
     } finally {
@@ -764,7 +743,7 @@ export default function MinuteBookClient() {
 
       setDeleteOpen(false);
       setDeleteReason("");
-      setReaderOpen(false);
+      setMobileReaderOpen(false);
       setPreviewUrl(null);
       setResolvedBucket(null);
       setResolvedPath(null);
@@ -799,89 +778,143 @@ export default function MinuteBookClient() {
     }
   }
 
-  const activeDomainLabel = useMemo(() => {
-    if (activeDomainKey === "all") return "All";
-    return domains.find((d) => d.key === activeDomainKey)?.label || "Domain";
-  }, [activeDomainKey, domains]);
+  /* ---------------- UI atoms ---------------- */
 
-  const authorityBadge = useMemo(() => {
-    if (!selected) return null;
-    if (official) return { label: "OFFICIAL", tone: "gold" as const };
-    return { label: "UPLOADED", tone: "neutral" as const };
-  }, [selected?.id, !!official]);
+  const Shell = ({ children }: { children: React.ReactNode }) => (
+    <div className="w-full">
+      {/* OS-native spacing (no module-owned viewport/blackbox) */}
+      <div className="mx-auto w-full max-w-[1400px] px-3 sm:px-4 pb-10 pt-4 sm:pt-6">{children}</div>
+    </div>
+  );
+
+  const GlassCard = ({
+    className,
+    children,
+  }: {
+    className?: string;
+    children: React.ReactNode;
+  }) => (
+    <div
+      className={cx(
+        "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden",
+        className
+      )}
+    >
+      {children}
+    </div>
+  );
+
+  const CardHeader = ({ children }: { children: React.ReactNode }) => (
+    <div className="border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent px-4 sm:px-5 py-4">
+      {children}
+    </div>
+  );
+
+  const CardBody = ({ className, children }: { className?: string; children: React.ReactNode }) => (
+    <div className={cx("px-4 sm:px-5 py-4", className)}>{children}</div>
+  );
 
   /* ---------------- render ---------------- */
 
   return (
-    <div className="h-full flex flex-col px-8 pt-6 pb-6">
-      {/* Header under OS bar */}
-      <div className="mb-4 shrink-0">
-        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI-ARCHIVE</div>
-        <p className="mt-1 text-[11px] text-slate-400">
-          Minute Book Registry • <span className="font-semibold text-slate-200">Evidence-first</span>
-        </p>
+    <Shell>
+      {/* OS page header */}
+      <div className="mb-3 sm:mb-4 flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">CI • Archive</div>
+          <h1 className="mt-1 text-lg sm:text-xl font-semibold text-slate-50 truncate">Minute Book</h1>
+          <p className="mt-1 text-[11px] sm:text-xs text-slate-400">
+            Evidence-first registry indexed by governance domain. Official artifacts are preferred when linked.
+          </p>
+        </div>
+        <div className="shrink-0 flex items-center gap-2">
+          <Link
+            href="/ci-archive"
+            className="hidden sm:inline-flex rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+          >
+            Launchpad
+          </Link>
+          <Link
+            href="/ci-archive/upload"
+            className="rounded-full border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/15"
+          >
+            Upload →
+          </Link>
+        </div>
       </div>
 
-      {/* Main Window */}
-      <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
-        <div className="w-full max-w-[1600px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-6 py-5 flex flex-col overflow-hidden">
-          <div className="flex items-start justify-between mb-4 shrink-0">
-            <div className="min-w-0">
-              <h1 className="text-lg font-semibold text-slate-50 truncate">Minute Book Registry</h1>
-              <p className="mt-1 text-xs text-slate-400">
-                Canonical archive indexed by governance domain.{" "}
-                <span className="text-slate-500">Domains sourced from governance_domains (Upload contract).</span>
-              </p>
-            </div>
-
-            <div className="flex items-center gap-2 shrink-0">
-              <div className="hidden md:flex items-center text-[10px] uppercase tracking-[0.3em] text-slate-500">
-                CI-ARCHIVE • LIVE
-              </div>
-              <Link
-                href="/ci-archive/upload"
-                className="rounded-full border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/15"
-              >
-                Go to Upload →
-              </Link>
-            </div>
-          </div>
-
-          {!entityKey ? (
-            <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4 text-sm text-slate-300">
+      {!entityKey ? (
+        <GlassCard>
+          <CardBody>
+            <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-slate-200">
               Select an entity in the OS bar to view Minute Book records.
             </div>
-          ) : (
-            <div className="grid grid-cols-12 gap-6 flex-1 min-h-0">
-              {/* LEFT: Domains */}
-              <section className="col-span-12 lg:col-span-3 min-h-0 flex flex-col">
-                <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex flex-col min-h-0">
-                  <div className="flex items-center justify-between mb-3 shrink-0">
+          </CardBody>
+        </GlassCard>
+      ) : (
+        <>
+          {/* MOBILE TOOLBAR (domains + reader) */}
+          <div className="sm:hidden mb-3 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setMobileDomainsOpen(true)}
+              className="flex-1 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left"
+            >
+              <div className="text-[10px] uppercase tracking-[0.25em] text-slate-500">Domain</div>
+              <div className="mt-1 text-sm font-semibold text-slate-100 truncate">{activeDomainLabel}</div>
+            </button>
+
+            <button
+              type="button"
+              onClick={async () => {
+                await ensurePreviewUrl(true);
+              }}
+              disabled={!selected || pdfBusy}
+              className={cx(
+                "rounded-2xl px-4 py-3 border text-sm font-semibold",
+                !selected || pdfBusy
+                  ? "border-white/10 bg-white/5 text-slate-500"
+                  : "border-amber-500/40 bg-amber-500/10 text-amber-200"
+              )}
+            >
+              Reader
+            </button>
+          </div>
+
+          {/* DESKTOP: 3-column | MOBILE: 1-column rail */}
+          <div className="grid grid-cols-12 gap-3 sm:gap-4">
+            {/* DOMAINS (desktop) */}
+            <div className="hidden sm:block col-span-12 lg:col-span-3">
+              <GlassCard>
+                <CardHeader>
+                  <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-sm font-semibold text-slate-200">Domains</div>
                       <div className="text-[11px] text-slate-500">Source: governance_domains</div>
                     </div>
                     <div className="text-[10px] uppercase tracking-[0.25em] text-slate-500">{domains.length || "—"}</div>
                   </div>
+                </CardHeader>
 
-                  <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-slate-800/80 bg-slate-950/60 p-2">
+                <CardBody className="pt-3">
+                  <div className="rounded-2xl border border-white/10 bg-black/20 p-2 max-h-[60vh] overflow-y-auto">
                     <button
                       type="button"
                       onClick={() => setActiveDomainKey("all")}
-                      className={[
-                        "group w-full flex items-center justify-between gap-3 px-3 py-2 rounded-xl transition border",
+                      className={cx(
+                        "group w-full flex items-center justify-between gap-3 px-3 py-2 rounded-2xl transition border",
                         activeDomainKey === "all"
-                          ? "bg-amber-500/10 border-amber-500/40 shadow-[0_0_0_1px_rgba(245,158,11,0.25)]"
-                          : "bg-transparent border-transparent hover:bg-slate-900/60 hover:border-amber-500/25 hover:shadow-[0_0_22px_rgba(245,158,11,0.10)]",
-                      ].join(" ")}
+                          ? "bg-amber-500/10 border-amber-500/40"
+                          : "bg-transparent border-transparent hover:bg-white/5 hover:border-amber-500/25"
+                      )}
                     >
                       <span className="flex items-center gap-2 min-w-0">
-                        <span className="w-7 h-7 grid place-items-center rounded-lg border border-slate-800 bg-slate-950/70 text-[12px] group-hover:border-amber-500/30">
+                        <span className="w-7 h-7 grid place-items-center rounded-xl border border-white/10 bg-black/20 text-[12px]">
                           ◆
                         </span>
                         <span className="text-sm text-slate-100 truncate">All</span>
                       </span>
-                      <span className="text-[11px] text-slate-500">{entries.length}</span>
+                      <span className="text-[11px] text-slate-400">{entries.length}</span>
                     </button>
 
                     <div className="mt-2 space-y-1">
@@ -895,20 +928,20 @@ export default function MinuteBookClient() {
                             key={d.key}
                             type="button"
                             onClick={() => setActiveDomainKey(d.key)}
-                            className={[
-                              "group w-full flex items-center justify-between gap-3 px-3 py-2 rounded-xl transition border",
+                            className={cx(
+                              "group w-full flex items-center justify-between gap-3 px-3 py-2 rounded-2xl transition border",
                               active
-                                ? "bg-amber-500/10 border-amber-500/40 shadow-[0_0_0_1px_rgba(245,158,11,0.25)]"
-                                : "bg-transparent border-transparent hover:bg-slate-900/60 hover:border-amber-500/25 hover:shadow-[0_0_22px_rgba(245,158,11,0.10)]",
-                            ].join(" ")}
+                                ? "bg-amber-500/10 border-amber-500/40"
+                                : "bg-transparent border-transparent hover:bg-white/5 hover:border-amber-500/25"
+                            )}
                           >
                             <span className="flex items-center gap-2 min-w-0">
-                              <span className="w-7 h-7 grid place-items-center rounded-lg border border-slate-800 bg-slate-950/70 text-[12px] group-hover:border-amber-500/30">
+                              <span className="w-7 h-7 grid place-items-center rounded-xl border border-white/10 bg-black/20 text-[12px]">
                                 {icon}
                               </span>
                               <span className="text-sm text-slate-100 truncate">{d.label}</span>
                             </span>
-                            <span className={["text-[11px]", count ? "text-amber-200/80" : "text-slate-600"].join(" ")}>
+                            <span className={cx("text-[11px]", count ? "text-amber-200/80" : "text-slate-500")}>
                               {count}
                             </span>
                           </button>
@@ -917,7 +950,7 @@ export default function MinuteBookClient() {
                     </div>
 
                     {err ? (
-                      <div className="mt-3 rounded-xl border border-red-800/60 bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
+                      <div className="mt-3 rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
                         {err}
                       </div>
                     ) : null}
@@ -931,13 +964,15 @@ export default function MinuteBookClient() {
                       Launchpad
                     </Link>
                   </div>
-                </div>
-              </section>
+                </CardBody>
+              </GlassCard>
+            </div>
 
-              {/* MIDDLE: Entries */}
-              <section className="col-span-12 lg:col-span-5 min-h-0 flex flex-col">
-                <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex flex-col min-h-0">
-                  <div className="flex items-start justify-between mb-3 shrink-0">
+            {/* ENTRIES rail */}
+            <div className="col-span-12 lg:col-span-5">
+              <GlassCard>
+                <CardHeader>
+                  <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-sm font-semibold text-slate-200">Registry Entries</div>
                       <div className="text-[11px] text-slate-500">
@@ -945,25 +980,27 @@ export default function MinuteBookClient() {
                         <span className="text-slate-300">{activeDomainLabel}</span>
                       </div>
                     </div>
-                    <span className="px-2 py-0.5 rounded-full bg-sky-500/10 border border-sky-500/30 text-[10px] uppercase tracking-[0.18em] text-sky-200">
+                    <span className="hidden sm:inline-flex px-2 py-0.5 rounded-full bg-sky-500/10 border border-sky-500/30 text-[10px] uppercase tracking-[0.18em] text-sky-200">
                       Evidence Index
                     </span>
                   </div>
+                </CardHeader>
 
-                  <div className="mb-3 shrink-0">
+                <CardBody className="pt-3">
+                  <div className="mb-3">
                     <input
                       value={query}
                       onChange={(e) => setQuery(e.target.value)}
                       placeholder="Search title, hash, path…"
-                      className="w-full rounded-xl bg-slate-950/70 border border-slate-800 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 outline-none focus:border-amber-500/40"
+                      className="w-full rounded-2xl bg-black/20 border border-white/10 px-3 py-3 text-sm text-slate-100 placeholder:text-slate-600 outline-none focus:border-amber-500/40"
                     />
                   </div>
 
-                  <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-slate-800/80 bg-slate-950/60">
+                  <div className="rounded-2xl border border-white/10 bg-black/20 overflow-hidden max-h-[60vh] sm:max-h-[70vh] overflow-y-auto">
                     {loading ? (
-                      <div className="p-3 text-[11px] text-slate-400">Loading entries…</div>
+                      <div className="p-4 text-[11px] text-slate-400">Loading entries…</div>
                     ) : filteredEntries.length === 0 ? (
-                      <div className="p-3 text-[11px] text-slate-400">
+                      <div className="p-4 text-[11px] text-slate-400">
                         No records filed under <span className="text-slate-200">{activeDomainLabel}</span> yet.
                         <div className="mt-2 text-[10px] text-slate-500">Upload later — it will appear here automatically.</div>
                       </div>
@@ -976,34 +1013,56 @@ export default function MinuteBookClient() {
                           <button
                             key={e.id}
                             type="button"
-                            onClick={() => setSelectedId(e.id)}
-                            className={[
-                              "w-full text-left px-3 py-3 border-b border-slate-800 last:border-b-0 transition",
-                              active ? "bg-slate-900/90 shadow-[0_0_0_1px_rgba(245,158,11,0.35)]" : "hover:bg-slate-900/60",
-                            ].join(" ")}
+                            onClick={() => {
+                              setSelectedId(e.id);
+                              // iPhone: tap record → open reader quickly (but don’t force-load yet)
+                              // keep behavior calm; user can hit Reader button
+                            }}
+                            className={cx(
+                              "w-full text-left px-4 py-4 border-b border-white/10 last:border-b-0 transition",
+                              active ? "bg-white/5" : "hover:bg-white/5"
+                            )}
                           >
-                            <div className="text-xs font-semibold text-slate-100 line-clamp-2">
-                              {e.title || e.file_name || "Untitled filing"}
-                            </div>
-                            <div className="mt-1 text-[11px] text-slate-400 flex items-center gap-2 flex-wrap">
-                              <span className="capitalize">{e.entry_type || "document"}</span>
-                              <span className="w-1 h-1 rounded-full bg-slate-600" />
-                              <span className="text-slate-500">{createdAt}</span>
-                              <span className="w-1 h-1 rounded-full bg-slate-700" />
-                              <span className="text-slate-500">{fmtBytes(e.file_size)}</span>
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold text-slate-100 line-clamp-2">
+                                  {e.title || e.file_name || "Untitled filing"}
+                                </div>
+                                <div className="mt-1 text-[11px] text-slate-400 flex items-center gap-2 flex-wrap">
+                                  <span className="capitalize">{e.entry_type || "document"}</span>
+                                  <span className="w-1 h-1 rounded-full bg-slate-600" />
+                                  <span className="text-slate-500">{createdAt}</span>
+                                  <span className="w-1 h-1 rounded-full bg-slate-700" />
+                                  <span className="text-slate-500">{fmtBytes(e.file_size)}</span>
+                                </div>
+                              </div>
+
+                              {official && selectedId === e.id ? (
+                                <span className="shrink-0 px-2 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-[10px] uppercase tracking-[0.18em] text-amber-200">
+                                  OFFICIAL
+                                </span>
+                              ) : null}
                             </div>
                           </button>
                         );
                       })
                     )}
                   </div>
-                </div>
-              </section>
 
-              {/* RIGHT: Evidence */}
-              <section className="col-span-12 lg:col-span-4 min-h-0 flex flex-col">
-                <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-4 flex flex-col min-h-0">
-                  <div className="flex items-start justify-between mb-3 shrink-0">
+                  {err ? (
+                    <div className="mt-3 rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
+                      {err}
+                    </div>
+                  ) : null}
+                </CardBody>
+              </GlassCard>
+            </div>
+
+            {/* EVIDENCE (desktop only; mobile uses Reader Sheet) */}
+            <div className="hidden lg:block col-span-12 lg:col-span-4">
+              <GlassCard>
+                <CardHeader>
+                  <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-sm font-semibold text-slate-200">Evidence</div>
                       <div className="text-[11px] text-slate-500">Reader-first • Metadata secondary</div>
@@ -1011,31 +1070,33 @@ export default function MinuteBookClient() {
 
                     {authorityBadge ? (
                       <span
-                        className={[
+                        className={cx(
                           "px-2 py-0.5 rounded-full border text-[10px] uppercase tracking-[0.18em] font-semibold",
                           authorityBadge.tone === "gold"
                             ? "bg-amber-500/10 border-amber-500/40 text-amber-200"
-                            : "bg-slate-900/40 border-slate-700 text-slate-300",
-                        ].join(" ")}
+                            : "bg-white/5 border-white/10 text-slate-200"
+                        )}
                       >
                         {authorityBadge.label}
                       </span>
                     ) : null}
                   </div>
+                </CardHeader>
 
+                <CardBody className="pt-3">
                   {!selected ? (
-                    <div className="flex-1 min-h-0 rounded-xl border border-slate-800/80 bg-slate-950/60 p-3 text-[11px] text-slate-400">
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-[11px] text-slate-400">
                       Select a record to inspect evidence.
                     </div>
                   ) : (
                     <>
-                      <div className="rounded-xl border border-slate-800/80 bg-slate-950/60 p-3 shrink-0">
+                      <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
                         <div className="text-sm font-semibold text-slate-100">
                           {selected.title || selected.file_name || "Untitled filing"}
                         </div>
 
                         <div className="mt-2 flex flex-wrap items-center gap-2">
-                          <span className="px-2 py-1 rounded-full bg-slate-900/60 border border-slate-800 text-[11px] text-slate-200 capitalize">
+                          <span className="px-2 py-1 rounded-full bg-white/5 border border-white/10 text-[11px] text-slate-200 capitalize">
                             {selected.entry_type || "document"}
                           </span>
                           <span className="px-2 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200">
@@ -1044,7 +1105,7 @@ export default function MinuteBookClient() {
                         </div>
 
                         {pdfErr ? (
-                          <div className="mt-3 rounded-xl border border-red-800/60 bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
+                          <div className="mt-3 rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
                             {pdfErr}
                           </div>
                         ) : null}
@@ -1054,13 +1115,11 @@ export default function MinuteBookClient() {
                             type="button"
                             onClick={() => ensurePreviewUrl(true)}
                             disabled={pdfBusy}
-                            className={[
-                              "rounded-full px-4 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
-                              pdfBusy
-                                ? "bg-amber-500/20 text-amber-200/60 cursor-not-allowed"
-                                : "bg-amber-500 text-black hover:bg-amber-400",
-                            ].join(" ")}
-                            title="Open PDF in Reader Mode (full overlay)"
+                            className={cx(
+                              "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
+                              pdfBusy ? "bg-amber-500/20 text-amber-200/60" : "bg-amber-500 text-black hover:bg-amber-400"
+                            )}
+                            title="Open PDF in Reader Mode"
                           >
                             Reader
                           </button>
@@ -1069,12 +1128,10 @@ export default function MinuteBookClient() {
                             type="button"
                             onClick={downloadPdf}
                             disabled={pdfBusy}
-                            className={[
-                              "rounded-full px-4 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
-                              pdfBusy
-                                ? "bg-slate-800/40 text-slate-300/60 cursor-not-allowed"
-                                : "bg-slate-200 text-black hover:bg-white",
-                            ].join(" ")}
+                            className={cx(
+                              "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
+                              pdfBusy ? "bg-white/10 text-slate-200/60" : "bg-slate-200 text-black hover:bg-white"
+                            )}
                             title="Download PDF"
                           >
                             Download
@@ -1084,12 +1141,12 @@ export default function MinuteBookClient() {
                             type="button"
                             onClick={openNewTab}
                             disabled={pdfBusy}
-                            className={[
-                              "rounded-full px-4 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
+                            className={cx(
+                              "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
                               pdfBusy
-                                ? "bg-slate-800/40 text-slate-300/60 cursor-not-allowed border-slate-800"
-                                : "bg-slate-900/60 border-slate-700 text-slate-200 hover:bg-slate-900 hover:border-amber-500/25 hover:shadow-[0_0_18px_rgba(245,158,11,0.10)]",
-                            ].join(" ")}
+                                ? "bg-white/5 text-slate-200/60 border-white/10"
+                                : "bg-white/5 border-white/10 text-slate-200 hover:bg-white/7 hover:border-amber-500/25"
+                            )}
                             title="Open in new tab"
                           >
                             Open
@@ -1102,8 +1159,8 @@ export default function MinuteBookClient() {
                               setDeleteReason("");
                               setDeleteOpen(true);
                             }}
-                            className="rounded-full px-4 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase transition border border-red-500/30 bg-red-500/10 text-red-200 hover:bg-red-500/15"
-                            title="Hard delete entry + files (owner/admin only)"
+                            className="rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border border-red-500/30 bg-red-500/10 text-red-200 hover:bg-red-500/15"
+                            title="Hard delete entry + files"
                           >
                             Delete
                           </button>
@@ -1117,12 +1174,12 @@ export default function MinuteBookClient() {
                             className="text-slate-400 hover:text-slate-200"
                             title="Refresh preview URL (no overlay)"
                           >
-                            Refresh preview
+                            Refresh
                           </button>
                         </div>
                       </div>
 
-                      <div className="mt-3 flex-1 min-h-0 rounded-xl border border-slate-800/80 bg-slate-950/60 overflow-hidden">
+                      <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 overflow-hidden h-[46vh]">
                         {previewUrl ? (
                           <iframe title="PDF Preview" src={previewUrl} className="h-full w-full" />
                         ) : (
@@ -1132,28 +1189,26 @@ export default function MinuteBookClient() {
                         )}
                       </div>
 
-                      <div className="mt-3 rounded-xl border border-slate-800/80 bg-slate-950/60 p-3 shrink-0">
+                      <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-4">
                         <div className="flex items-center justify-between mb-2">
-                          <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Metadata Zone</div>
-                          <span className="px-2 py-0.5 rounded-full bg-slate-900/60 border border-slate-800 text-[10px] tracking-[0.18em] uppercase text-slate-300">
+                          <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Metadata</div>
+                          <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] tracking-[0.18em] uppercase text-slate-300">
                             secondary
                           </span>
                         </div>
 
                         <div className="space-y-2">
-                          <details className="rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2">
+                          <details className="rounded-2xl border border-white/10 bg-black/20 px-3 py-2">
                             <summary className="cursor-pointer text-[11px] text-slate-200">Storage</summary>
                             <div className="mt-2 space-y-1 text-[11px] text-slate-300">
                               <div className="flex items-start justify-between gap-3">
                                 <span className="text-slate-500">Primary Path</span>
                                 <span className="text-right font-mono break-all">{norm(selected.storage_path, "—")}</span>
                               </div>
-
                               <div className="flex items-start justify-between gap-3">
                                 <span className="text-slate-500">Source Record</span>
                                 <span className="text-right font-mono break-all">{norm(selected.source_record_id, "—")}</span>
                               </div>
-
                               <div className="flex items-start justify-between gap-3">
                                 <span className="text-slate-500">Resolved Bucket</span>
                                 <span className="text-right font-mono break-all">{norm(resolvedBucket, "—")}</span>
@@ -1162,7 +1217,6 @@ export default function MinuteBookClient() {
                                 <span className="text-slate-500">Resolved Path</span>
                                 <span className="text-right font-mono break-all">{norm(resolvedPath, "—")}</span>
                               </div>
-
                               <div className="flex items-start justify-between gap-3">
                                 <span className="text-slate-500">File</span>
                                 <span className="text-right break-all">{norm(selected.file_name, "—")}</span>
@@ -1178,7 +1232,7 @@ export default function MinuteBookClient() {
                             </div>
                           </details>
 
-                          <details open className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+                          <details open className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-3 py-2">
                             <summary className="cursor-pointer text-[11px] text-amber-200">Hash</summary>
                             <div className="mt-2 text-[11px] text-amber-100/90">
                               <div className="flex items-start justify-between gap-3">
@@ -1191,7 +1245,7 @@ export default function MinuteBookClient() {
                             </div>
                           </details>
 
-                          <details className="rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2">
+                          <details className="rounded-2xl border border-white/10 bg-black/20 px-3 py-2">
                             <summary className="cursor-pointer text-[11px] text-slate-200">Audit</summary>
                             <div className="mt-2 space-y-1 text-[11px] text-slate-300">
                               <div className="flex items-start justify-between gap-3">
@@ -1221,53 +1275,125 @@ export default function MinuteBookClient() {
                       </div>
                     </>
                   )}
-                </div>
-              </section>
+                </CardBody>
+              </GlassCard>
             </div>
-          )}
+          </div>
+        </>
+      )}
 
-          <div className="mt-3 flex items-center justify-between text-[10px] text-slate-500">
-            <span>CI-Archive · Oasis Digital Parliament</span>
-            <span>ODP.AI · Governance Firmware</span>
+      {/* ---------------- MOBILE: Domains Sheet ---------------- */}
+      {mobileDomainsOpen ? (
+        <div className="fixed inset-0 z-[90] bg-black/70 backdrop-blur-xl flex items-end sm:hidden">
+          <div className="w-full rounded-t-3xl border-t border-white/10 bg-slate-950/90 max-h-[85vh] overflow-hidden">
+            <div className="px-4 py-4 border-b border-white/10 flex items-center justify-between">
+              <div>
+                <div className="text-[10px] uppercase tracking-[0.3em] text-slate-500">Domains</div>
+                <div className="mt-1 text-sm font-semibold text-slate-100">Select a domain</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMobileDomainsOpen(false)}
+                className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[11px] font-semibold text-slate-200"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="p-3 overflow-y-auto">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveDomainKey("all");
+                  setMobileDomainsOpen(false);
+                }}
+                className={cx(
+                  "w-full flex items-center justify-between gap-3 px-4 py-3 rounded-2xl border",
+                  activeDomainKey === "all" ? "border-amber-500/40 bg-amber-500/10" : "border-white/10 bg-white/5"
+                )}
+              >
+                <span className="text-sm font-semibold text-slate-100">All</span>
+                <span className="text-[11px] text-slate-400">{entries.length}</span>
+              </button>
+
+              <div className="mt-2 space-y-2">
+                {domains.map((d) => {
+                  const count = domainCounts.get(d.key) || 0;
+                  const active = d.key === activeDomainKey;
+                  const icon = DOMAIN_ICON[d.key] || "•";
+
+                  return (
+                    <button
+                      key={d.key}
+                      type="button"
+                      onClick={() => {
+                        setActiveDomainKey(d.key);
+                        setMobileDomainsOpen(false);
+                      }}
+                      className={cx(
+                        "w-full flex items-center justify-between gap-3 px-4 py-3 rounded-2xl border",
+                        active ? "border-amber-500/40 bg-amber-500/10" : "border-white/10 bg-white/5"
+                      )}
+                    >
+                      <span className="flex items-center gap-2 min-w-0">
+                        <span className="w-8 h-8 grid place-items-center rounded-2xl border border-white/10 bg-black/20">
+                          {icon}
+                        </span>
+                        <span className="text-sm font-semibold text-slate-100 truncate">{d.label}</span>
+                      </span>
+                      <span className={cx("text-[11px]", count ? "text-amber-200" : "text-slate-500")}>{count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {err ? (
+                <div className="mt-3 rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
+                  {err}
+                </div>
+              ) : null}
+            </div>
           </div>
         </div>
-      </div>
+      ) : null}
 
-      {/* ---------------- Reader Overlay ---------------- */}
-      {readerOpen ? (
+      {/* ---------------- Reader Sheet (mobile + desktop overlay) ---------------- */}
+      {mobileReaderOpen ? (
         <div
-          className={[
-            "fixed inset-0 z-[80] flex items-center justify-center p-4",
-            readerTone === "glass" ? "bg-black/70 backdrop-blur-xl" : "bg-black",
-          ].join(" ")}
+          className={cx(
+            "fixed inset-0 z-[95] flex items-end sm:items-center sm:justify-center",
+            readerTone === "glass" ? "bg-black/70 backdrop-blur-xl" : "bg-black"
+          )}
         >
-          <div className="w-full max-w-[1400px] h-[86vh] rounded-3xl border border-slate-800 bg-slate-950/70 shadow-[0_0_70px_rgba(0,0,0,0.55)] overflow-hidden flex flex-col">
-            <div className="px-5 py-4 border-b border-slate-800/80 flex items-start justify-between gap-4">
+          <div
+            className={cx(
+              "w-full sm:max-w-[1200px] sm:h-[86vh] h-[92vh] rounded-t-3xl sm:rounded-3xl border border-white/10 bg-slate-950/85 overflow-hidden flex flex-col"
+            )}
+          >
+            <div className="px-4 sm:px-5 py-4 border-b border-white/10 flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="text-xs tracking-[0.3em] uppercase text-slate-500">READER MODE</div>
+                <div className="text-[10px] uppercase tracking-[0.3em] text-slate-500">Reader</div>
                 <div className="mt-1 text-sm font-semibold text-slate-100 truncate">
                   {selected?.title || selected?.file_name || "Document"}
                 </div>
                 <div className="mt-1 text-[11px] text-slate-500">
-                  {official ? "Official artifact preferred • " : "Uploaded evidence • "}
+                  {official ? "Official preferred • " : "Uploaded evidence • "}
                   {showHashInReader ? <span className="font-mono">{shortHash(selected?.file_hash || null)}</span> : null}
                 </div>
-                <div className="mt-1 text-[10px] text-slate-600">
-                  {resolvedBucket ? (
-                    <>
-                      Resolved: <span className="font-mono text-slate-300">{resolvedBucket}</span>{" "}
-                      <span className="text-slate-700">•</span>{" "}
-                      <span className="font-mono text-slate-400">{shortHash(resolvedPath || null)}</span>
-                    </>
-                  ) : null}
-                </div>
+                {resolvedBucket ? (
+                  <div className="mt-1 text-[10px] text-slate-600">
+                    Resolved: <span className="font-mono text-slate-300">{resolvedBucket}</span>{" "}
+                    <span className="text-slate-700">•</span>{" "}
+                    <span className="font-mono text-slate-400">{shortHash(resolvedPath || null)}</span>
+                  </div>
+                ) : null}
               </div>
 
               <div className="flex items-center gap-2 shrink-0">
                 <button
                   type="button"
                   onClick={() => setReaderTone((t) => (t === "glass" ? "solid" : "glass"))}
-                  className="rounded-full border border-slate-700 bg-slate-900/60 px-3 py-1.5 text-[11px] text-slate-200 hover:border-amber-500/25 hover:shadow-[0_0_18px_rgba(245,158,11,0.10)]"
+                  className="hidden sm:inline-flex rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[11px] text-slate-200 hover:border-amber-500/25"
                   title="Toggle overlay tone"
                 >
                   {readerTone === "glass" ? "Glass" : "Solid"}
@@ -1276,7 +1402,7 @@ export default function MinuteBookClient() {
                 <button
                   type="button"
                   onClick={() => setShowHashInReader((v) => !v)}
-                  className="rounded-full border border-slate-700 bg-slate-900/60 px-3 py-1.5 text-[11px] text-slate-200 hover:border-amber-500/25 hover:shadow-[0_0_18px_rgba(245,158,11,0.10)]"
+                  className="hidden sm:inline-flex rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[11px] text-slate-200 hover:border-amber-500/25"
                   title="Toggle hash in header"
                 >
                   Hash
@@ -1284,8 +1410,8 @@ export default function MinuteBookClient() {
 
                 <button
                   type="button"
-                  onClick={() => setReaderOpen(false)}
-                  className="rounded-full border border-slate-700 bg-slate-900/60 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-slate-900 hover:border-slate-500"
+                  onClick={() => setMobileReaderOpen(false)}
+                  className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[11px] font-semibold text-slate-200 hover:bg-white/7"
                 >
                   Close
                 </button>
@@ -1296,30 +1422,33 @@ export default function MinuteBookClient() {
               {previewUrl ? (
                 <iframe title="PDF Reader" src={previewUrl} className="h-full w-full" />
               ) : (
-                <div className="h-full w-full grid place-items-center text-[11px] text-slate-400">
-                  No preview loaded. Close and click Reader again.
+                <div className="h-full w-full grid place-items-center text-[11px] text-slate-400 px-4 text-center">
+                  <div>
+                    <div className="text-slate-200 font-semibold">No preview loaded</div>
+                    <div className="mt-1 text-slate-500">Close, then tap Reader again.</div>
+                  </div>
                 </div>
               )}
             </div>
 
-            <div className="px-5 py-3 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-500">
-              <span>
+            <div className="px-4 sm:px-5 py-3 border-t border-white/10 flex items-center justify-between text-[11px] text-slate-500">
+              <span className="hidden sm:inline">
                 Record ID: <span className="font-mono text-slate-300">{selected?.id || "—"}</span>
               </span>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={downloadPdf}
-                  className="rounded-full bg-slate-200 text-black px-3 py-1.5 text-[11px] font-semibold hover:bg-white"
+                  className="rounded-full bg-slate-200 text-black px-4 py-2 text-[11px] font-semibold hover:bg-white"
                 >
                   Download
                 </button>
                 <button
                   type="button"
                   onClick={openNewTab}
-                  className="rounded-full border border-slate-700 bg-slate-900/60 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-slate-900"
+                  className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[11px] font-semibold text-slate-200 hover:bg-white/7"
                 >
-                  Open New Tab
+                  Open
                 </button>
               </div>
             </div>
@@ -1329,9 +1458,9 @@ export default function MinuteBookClient() {
 
       {/* ---------------- Delete Confirm Modal ---------------- */}
       {deleteOpen && selected ? (
-        <div className="fixed inset-0 z-[90] bg-black/70 backdrop-blur-xl flex items-center justify-center p-4">
-          <div className="w-full max-w-[720px] rounded-3xl border border-red-500/30 bg-slate-950/80 shadow-[0_0_70px_rgba(0,0,0,0.55)] overflow-hidden">
-            <div className="px-6 py-5 border-b border-slate-800/80">
+        <div className="fixed inset-0 z-[99] bg-black/70 backdrop-blur-xl flex items-center justify-center p-4">
+          <div className="w-full max-w-[720px] rounded-3xl border border-red-500/30 bg-slate-950/85 shadow-[0_0_70px_rgba(0,0,0,0.55)] overflow-hidden">
+            <div className="px-6 py-5 border-b border-white/10">
               <div className="text-xs tracking-[0.3em] uppercase text-red-300">HARD DELETE</div>
               <div className="mt-2 text-lg font-semibold text-slate-100">Delete Minute Book entry?</div>
               <p className="mt-2 text-sm text-slate-300">
@@ -1349,12 +1478,12 @@ export default function MinuteBookClient() {
               <input
                 value={deleteReason}
                 onChange={(e) => setDeleteReason(e.target.value)}
-                placeholder="e.g., Filed under wrong entity / wrong domain / duplicate / test upload"
-                className="mt-2 w-full rounded-xl bg-black/40 border border-slate-800 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 outline-none focus:border-red-500/40"
+                placeholder="e.g., Wrong entity / wrong domain / duplicate / test upload"
+                className="mt-2 w-full rounded-2xl bg-black/30 border border-white/10 px-3 py-3 text-sm text-slate-100 placeholder:text-slate-600 outline-none focus:border-red-500/40"
               />
 
               {deleteErr ? (
-                <div className="mt-3 rounded-xl border border-red-800/60 bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
+                <div className="mt-3 rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
                   {deleteErr}
                 </div>
               ) : null}
@@ -1366,7 +1495,7 @@ export default function MinuteBookClient() {
                     setDeleteOpen(false);
                     setDeleteErr(null);
                   }}
-                  className="rounded-full border border-slate-700 bg-slate-900/60 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900"
+                  className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
                 >
                   Cancel
                 </button>
@@ -1375,12 +1504,12 @@ export default function MinuteBookClient() {
                   type="button"
                   disabled={deleteBusy || deleteReason.trim().length < 3}
                   onClick={runDelete}
-                  className={[
+                  className={cx(
                     "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
                     deleteBusy || deleteReason.trim().length < 3
                       ? "bg-red-500/20 text-red-200/60 cursor-not-allowed"
-                      : "bg-red-500 text-white hover:bg-red-400",
-                  ].join(" ")}
+                      : "bg-red-500 text-white hover:bg-red-400"
+                  )}
                 >
                   {deleteBusy ? "Deleting…" : "Confirm Delete"}
                 </button>
@@ -1393,6 +1522,38 @@ export default function MinuteBookClient() {
           </div>
         </div>
       ) : null}
-    </div>
+
+      {/* iPhone sticky bottom bar (thumb-safe) */}
+      {entityKey ? (
+        <div className="lg:hidden fixed bottom-0 left-0 right-0 z-[60] pb-[env(safe-area-inset-bottom)]">
+          <div className="mx-auto max-w-[1400px] px-3">
+            <div className="mb-2 rounded-2xl border border-white/10 bg-slate-950/80 backdrop-blur-xl px-3 py-2 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setMobileDomainsOpen(true)}
+                className="flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-left"
+              >
+                <div className="text-[9px] uppercase tracking-[0.25em] text-slate-500">Domain</div>
+                <div className="mt-0.5 text-[11px] font-semibold text-slate-100 truncate">{activeDomainLabel}</div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => ensurePreviewUrl(true)}
+                disabled={!selected || pdfBusy}
+                className={cx(
+                  "rounded-xl px-4 py-3 border text-[11px] font-semibold tracking-[0.18em] uppercase",
+                  !selected || pdfBusy
+                    ? "border-white/10 bg-white/5 text-slate-500"
+                    : "border-amber-500/40 bg-amber-500/10 text-amber-200"
+                )}
+              >
+                Reader
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </Shell>
   );
 }
