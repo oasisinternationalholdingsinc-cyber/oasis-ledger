@@ -189,8 +189,8 @@ function ConfirmModal({
 
   return (
     <div className="fixed inset-0 z-[100] bg-black/70 px-4 sm:px-6 py-6 flex items-center justify-center">
-      <div className="w-full max-w-[560px] rounded-3xl border border-slate-800 bg-slate-950/95 shadow-2xl shadow-black/70 overflow-hidden">
-        <div className="px-6 py-5 border-b border-slate-800">
+      <div className="w-full max-w-[560px] rounded-3xl border border-white/12 bg-[#070A12]/90 shadow-[0_40px_160px_rgba(0,0,0,0.70)] overflow-hidden">
+        <div className="px-6 py-5 border-b border-white/10">
           <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">
             Authority Confirmation
           </div>
@@ -216,7 +216,7 @@ function ConfirmModal({
             <button
               onClick={onCancel}
               disabled={busy}
-              className="rounded-full border border-slate-700 bg-slate-950/40 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="rounded-full border border-white/12 bg-white/5 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/8 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               Cancel
             </button>
@@ -233,7 +233,7 @@ function ConfirmModal({
           </div>
         </div>
 
-        <div className="px-6 py-4 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
+        <div className="px-6 py-4 border-t border-white/10 text-[10px] text-slate-500 flex items-center justify-between">
           <span>CI-Council · Authority gate</span>
           <span>Scoped by entity_id + is_test</span>
         </div>
@@ -864,905 +864,910 @@ export default function CICouncilPage() {
 
   const showToast = Boolean(error || info);
 
+  // ✅ Admissions-style shell wrapper (NO black window frame)
   return (
-    <div className="h-full flex flex-col px-4 sm:px-8 pt-6 pb-6">
-      {/* Header under OS bar */}
-      <div className="mb-4 shrink-0">
-        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI • Council</div>
-        <div className="mt-1 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-          <div className="min-w-0">
-            <h1 className="text-xl font-semibold text-slate-50"> Council Review - Authority Console</h1>
-            <p className="mt-1 text-xs text-slate-400 max-w-3xl">
-              Council is the authority gate.{" "}
-              <span className="text-emerald-300 font-semibold">Approve</span> or{" "}
-              <span className="text-rose-300 font-semibold">Reject</span>. Execution/archival discipline occurs in Forge
-              (signature) or in a direct-archive pipeline (if explicitly wired).
-            </p>
-            <div className="mt-2 text-xs text-slate-400">
-              Entity: <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
-              <span className="mx-2 text-slate-700">•</span>
-              Lane:{" "}
-              <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
+    <div className="h-full w-full">
+      <div className="mx-auto w-full max-w-[1400px] px-4 pb-10 pt-6 h-full flex flex-col min-h-0">
+        {/* Header under OS bar */}
+        <div className="mb-4 shrink-0">
+          <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI • Council</div>
+          <div className="mt-1 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="min-w-0">
+              <h1 className="text-xl font-semibold text-slate-50">Council Review · Authority Console</h1>
+              <p className="mt-1 text-xs text-slate-400 max-w-3xl">
+                Council is the authority gate.{" "}
+                <span className="text-emerald-300 font-semibold">Approve</span> or{" "}
+                <span className="text-rose-300 font-semibold">Reject</span>. Execution/archival discipline occurs in Forge
+                (signature) or in a direct-archive pipeline (if explicitly wired).
+              </p>
+              <div className="mt-2 text-xs text-slate-400">
+                Entity: <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
+                <span className="mx-2 text-slate-700">•</span>
+                Lane:{" "}
+                <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
+              </div>
             </div>
+
+            {/* “Flip to AXIOM” (UI only) */}
+            <button
+              onClick={() => {
+                setAxiomFocus((v) => !v);
+                setDetailTab("AXIOM");
+              }}
+              disabled={!selected}
+              className={cx(
+                "shrink-0 rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
+                !selected
+                  ? "border border-white/10 bg-white/5 text-slate-500 cursor-not-allowed"
+                  : axiomFocus
+                  ? "border border-amber-400/60 bg-amber-500/10 text-amber-200 hover:bg-amber-500/15"
+                  : "border border-indigo-400/50 bg-indigo-500/10 text-indigo-200 hover:bg-indigo-500/15"
+              )}
+              title="Focus mode: flip the console to AXIOM so advisory has real space."
+            >
+              {axiomFocus ? "Back to Council" : "Focus AXIOM"}
+            </button>
           </div>
 
-          {/* “Flip to AXIOM” (UI only) */}
-          <button
-            onClick={() => {
-              setAxiomFocus((v) => !v);
-              setDetailTab("AXIOM");
-            }}
-            disabled={!selected}
-            className={cx(
-              "shrink-0 rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
-              !selected
-                ? "border border-slate-800 bg-slate-950/40 text-slate-500 cursor-not-allowed"
-                : axiomFocus
-                ? "border border-amber-400/60 bg-amber-500/10 text-amber-200 hover:bg-amber-500/15"
-                : "border border-indigo-400/50 bg-indigo-500/10 text-indigo-200 hover:bg-indigo-500/15"
-            )}
-            title="Focus mode: flip the console to AXIOM so advisory has real space."
-          >
-            {axiomFocus ? "Back to Council" : "Focus AXIOM"}
-          </button>
+          {showNoEntityWarning && (
+            <div className="mt-3 rounded-2xl border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-[12px] text-amber-200">
+              OS Context: missing entity selection. Council will activate once an entity is selected in the OS control plane.
+            </div>
+          )}
         </div>
 
-        {showNoEntityWarning && (
-          <div className="mt-3 rounded-2xl border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-[12px] text-amber-200">
-            OS Context: missing entity selection. Council will activate once an entity is selected in the OS control plane.
-          </div>
-        )}
-      </div>
-
-      {/* Main OS window frame */}
-      <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
-        <div className="w-full max-w-[1500px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-4 sm:px-6 py-5 flex flex-col overflow-hidden">
-          {/* Top strip */}
-          <div className="shrink-0 mb-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-            <div className="inline-flex rounded-full bg-slate-950/70 border border-slate-800 p-1 overflow-x-auto">
-              <StatusTabButton label="Pending" value="PENDING" active={tab === "PENDING"} onClick={() => setTab("PENDING")} />
-              <StatusTabButton label="Approved" value="APPROVED" active={tab === "APPROVED"} onClick={() => setTab("APPROVED")} />
-              <StatusTabButton label="Rejected" value="REJECTED" active={tab === "REJECTED"} onClick={() => setTab("REJECTED")} />
-              <StatusTabButton label="Archived" value="ARCHIVED" active={tab === "ARCHIVED"} onClick={() => setTab("ARCHIVED")} />
-              <StatusTabButton label="All" value="ALL" active={tab === "ALL"} onClick={() => setTab("ALL")} />
-            </div>
-
-            <div className="flex items-center gap-2">
-              {!axiomFocus && (
-                <button
-                  onClick={() => setQueueOpen((v) => !v)}
-                  className="rounded-full border border-slate-800 bg-slate-950/60 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
-                >
-                  {queueOpen ? "Hide Queue" : "Show Queue"}
-                </button>
-              )}
-
-              {!axiomFocus && (
-                <button
-                  onClick={() => setReaderOpen(true)}
-                  disabled={!selected}
-                  className="rounded-full border border-emerald-400/60 bg-emerald-500/10 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  Open Reader
-                </button>
-              )}
-
-              <button
-                onClick={() => reload(true)}
-                className="rounded-full border border-slate-800 bg-slate-950/60 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
-              >
-                Refresh
-              </button>
-            </div>
+        {/* Top strip (tabs + actions) — no window frame */}
+        <div className="shrink-0 mb-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+          <div className="inline-flex rounded-full bg-white/5 border border-white/10 p-1 overflow-x-auto">
+            <StatusTabButton label="Pending" value="PENDING" active={tab === "PENDING"} onClick={() => setTab("PENDING")} />
+            <StatusTabButton label="Approved" value="APPROVED" active={tab === "APPROVED"} onClick={() => setTab("APPROVED")} />
+            <StatusTabButton label="Rejected" value="REJECTED" active={tab === "REJECTED"} onClick={() => setTab("REJECTED")} />
+            <StatusTabButton label="Archived" value="ARCHIVED" active={tab === "ARCHIVED"} onClick={() => setTab("ARCHIVED")} />
+            <StatusTabButton label="All" value="ALL" active={tab === "ALL"} onClick={() => setTab("ALL")} />
           </div>
 
-          {/* ✅ Vertical OS layout (Admissions/Evidence aligned) */}
-          <div className="flex-1 min-h-0 overflow-y-auto space-y-4 pb-2">
-            {/* Queue (collapsible) */}
-            {!axiomFocus && queueOpen && (
-              <section className="rounded-2xl border border-slate-800 bg-slate-950/40 overflow-hidden">
-                <div className="px-5 py-4 border-b border-slate-800">
-                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-                      Queue · {filtered.length}/{envFiltered.length} <span className="mx-2 text-slate-700">•</span>
-                      <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
-                    </div>
-                    <div className="text-[11px] text-slate-500">
-                      Scope: <span className="font-mono">governance_ledger</span> · entity_id + is_test
-                    </div>
-                  </div>
-
-                  <input
-                    className="mt-3 w-full rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-emerald-400"
-                    placeholder="Search… title or body"
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                  />
-                </div>
-
-                <div className="max-h-[360px] overflow-y-auto">
-                  {loading ? (
-                    <div className="p-4 text-[13px] text-slate-400">Loading…</div>
-                  ) : filtered.length === 0 ? (
-                    <div className="p-4 text-[13px] text-slate-500">No records for this filter.</div>
-                  ) : (
-                    <ul className="divide-y divide-slate-800">
-                      {filtered.map((r) => {
-                        const st = (r.status ?? "").toUpperCase();
-                        return (
-                          <li
-                            key={r.id}
-                            onClick={() => handleSelect(r)}
-                            className={cx(
-                              "cursor-pointer px-5 py-4 transition hover:bg-slate-800/60",
-                              r.id === selectedId && "bg-slate-800/80"
-                            )}
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="min-w-0 flex-1">
-                                <div className="truncate text-[13px] font-semibold text-slate-100">
-                                  {r.title || "(untitled)"}
-                                </div>
-                                <div className="mt-1 text-[11px] text-slate-500">
-                                  {fmtShort(r.created_at)} · {r.record_type || "resolution"}
-                                </div>
-                                <div className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-slate-400">
-                                  {r.body || "—"}
-                                </div>
-                              </div>
-
-                              <span
-                                className={cx(
-                                  "shrink-0 rounded-full px-2 py-1 text-[9px] uppercase tracking-[0.18em]",
-                                  st === "APPROVED"
-                                    ? "bg-emerald-500/15 text-emerald-200"
-                                    : st === "REJECTED"
-                                    ? "bg-rose-500/15 text-rose-200"
-                                    : st === "ARCHIVED"
-                                    ? "bg-slate-700/40 text-slate-300"
-                                    : "bg-sky-500/15 text-sky-200"
-                                )}
-                              >
-                                {st || "—"}
-                              </span>
-                            </div>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  )}
-                </div>
-              </section>
-            )}
-
-            {/* Review (vertical, calm) */}
+          <div className="flex items-center gap-2">
             {!axiomFocus && (
-              <section className="rounded-2xl border border-slate-800 bg-slate-950/40 overflow-hidden">
-                <div className="px-5 py-4 border-b border-slate-800 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Review</div>
-                    <div className="mt-1 text-[13px] text-slate-400">
-                      Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
-                      <span className="mx-2 text-slate-700">•</span>
-                      Lane:{" "}
-                      <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
-                      {selected && (
-                        <>
-                          <span className="mx-2 text-slate-700">•</span>
-                          <span className="text-slate-200">{(selected.status ?? "").toUpperCase()}</span>
-                        </>
-                      )}
-                    </div>
-                  </div>
-
-                  {selected && (
-                    <div className="shrink-0 flex flex-wrap items-center gap-2">
-                      <button
-                        onClick={async () => {
-                          try {
-                            await navigator.clipboard.writeText(selected.id);
-                            flashInfo("Copied record id.");
-                          } catch {
-                            flashError("Copy failed.");
-                          }
-                        }}
-                        className="rounded-full border border-slate-800 bg-slate-950/60 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
-                      >
-                        Copy ID
-                      </button>
-
-                      <Link
-                        href="/ci-forge"
-                        className="rounded-full border border-emerald-500/60 bg-black/40 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/10"
-                        title="Signature execution happens in Forge"
-                      >
-                        Open Forge
-                      </Link>
-
-                      <Link
-                        href="/ci-archive/ledger"
-                        className="rounded-full border border-slate-700 bg-slate-950/40 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
-                        title="Lifecycle registry in Archive"
-                      >
-                        Open Ledger Registry
-                      </Link>
-                    </div>
-                  )}
-                </div>
-
-                <div className="p-5">
-                  {!selected ? (
-                    <div className="rounded-2xl border border-slate-800 bg-black/20 px-5 py-6 text-slate-500 text-[13px]">
-                      Select a record for review.
-                    </div>
-                  ) : (
-                    <div className="rounded-2xl border border-slate-800 bg-black/30 overflow-hidden">
-                      <div className="px-5 py-4 border-b border-slate-800">
-                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Record</div>
-                        <div className="mt-1 text-[15px] font-semibold text-slate-100 truncate">
-                          {selected.title || "(untitled)"}
-                        </div>
-                        <div className="mt-1 text-[11px] text-slate-500">
-                          {fmtShort(selected.created_at)} · {selected.record_type || "resolution"} ·{" "}
-                          {(selected.status ?? "").toUpperCase()}
-                        </div>
-                      </div>
-
-                      <div className="px-6 py-5">
-                        <div className="rounded-2xl border border-slate-800 bg-black/35 px-5 py-5">
-                          <pre className="whitespace-pre-wrap font-sans text-[13px] leading-[1.8] text-slate-100">
-                            {selected.body || "—"}
-                          </pre>
-                        </div>
-                      </div>
-
-                      <div className="px-5 py-4 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
-                        <span>Review is non-mutating. Authority actions happen below.</span>
-                        <span>Oasis OS · Council Authority Gate</span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </section>
+              <button
+                onClick={() => setQueueOpen((v) => !v)}
+                className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/8"
+              >
+                {queueOpen ? "Hide Queue" : "Show Queue"}
+              </button>
             )}
 
-            {/* AXIOM Focus Surface (vertical full-width) */}
-            {axiomFocus ? (
-              <section className="rounded-2xl border border-slate-800 bg-slate-950/40 overflow-hidden">
-                <div className="px-6 py-5 border-b border-slate-800 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-indigo-200">
-                      AXIOM Focus · Council Advisory
-                    </div>
-                    <div className="mt-1 text-[12px] text-slate-400">
-                      Record: <span className="text-slate-100 font-semibold">{selected?.title || "—"}</span>
-                      <span className="mx-2 text-slate-700">•</span>
-                      <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
-                      {axiomSeverityLabel && (
-                        <>
-                          <span className="mx-2 text-slate-700">•</span>
-                          <span
-                            className={cx(
-                              "inline-flex items-center rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.18em]",
-                              severityPill(axiomSeverityLabel)
-                            )}
-                          >
-                            {axiomSeverityLabel}
-                          </span>
-                        </>
-                      )}
-                    </div>
+            {!axiomFocus && (
+              <button
+                onClick={() => setReaderOpen(true)}
+                disabled={!selected}
+                className="rounded-full border border-emerald-400/60 bg-emerald-500/10 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Open Reader
+              </button>
+            )}
 
-                    <div className="mt-2 text-[11px] text-slate-500 max-w-3xl">
-                      AXIOM is advisory-only. Memo PDF is a lane-scoped sidecar attachment and never mutates the resolution.
-                    </div>
+            <button
+              onClick={() => reload(true)}
+              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/8"
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        {/* Main workspace — Admissions-style responsive 3-pane (collapses on mobile) */}
+        <div className="flex-1 min-h-0 overflow-hidden">
+          {axiomFocus ? (
+            // AXIOM Focus Surface (full-width)
+            <section className="h-full overflow-y-auto rounded-3xl border border-white/10 bg-white/5">
+              <div className="px-6 py-5 border-b border-white/10 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-indigo-200">
+                    AXIOM Focus · Council Advisory
                   </div>
-
-                  <div className="shrink-0 flex flex-wrap items-center gap-2">
-                    <button
-                      onClick={() => loadAxiomNotesForSelected()}
-                      disabled={!selected || axiomBusy !== null}
-                      className="rounded-full border border-slate-700 bg-slate-950/40 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {axiomBusy === "load" ? "Loading…" : "Load"}
-                    </button>
-
-                    <button
-                      onClick={() => runAxiomCouncilReview()}
-                      disabled={!selected || axiomBusy !== null}
-                      className="rounded-full border border-indigo-400/50 bg-indigo-500/10 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-indigo-200 hover:bg-indigo-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {axiomBusy === "run" ? "Running…" : "Run AXIOM"}
-                    </button>
-
-                    <button
-                      onClick={() => invokeAxiomMemoEdgeFunction()}
-                      disabled={!selected || axiomBusy !== null}
-                      className="rounded-full border border-amber-400/50 bg-amber-500/10 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
-                      title="Renders AXIOM Memo PDF as sidecar evidence"
-                    >
-                      {axiomBusy === "memo" ? "Generating…" : "Memo PDF"}
-                    </button>
-
-                    <button
-                      onClick={() => setAxiomFocus(false)}
-                      className="rounded-full border border-amber-400/60 bg-amber-500/10 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/15"
-                    >
-                      Back
-                    </button>
-                  </div>
-                </div>
-
-                <div className="p-5 grid grid-cols-1 lg:grid-cols-12 gap-4">
-                  {/* History */}
-                  <div className="lg:col-span-4 rounded-2xl border border-slate-800 bg-black/25 overflow-hidden flex flex-col min-h-[420px]">
-                    <div className="px-4 py-4 border-b border-slate-800">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Advisory History</div>
-                        <button
-                          onClick={() => loadAxiomNotesForSelected()}
-                          disabled={axiomBusy !== null}
-                          className="rounded-full border border-slate-700 bg-slate-950/40 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          {axiomBusy === "load" ? "…" : "Reload"}
-                        </button>
-                      </div>
-                      <div className="mt-2 text-[11px] text-slate-500">
-                        Showing {axiomNotes.length} note(s) · <span className="font-mono">ai_notes</span>
-                      </div>
-                    </div>
-
-                    <div className="flex-1 overflow-y-auto p-3 space-y-2">
-                      {axiomNotes.length === 0 ? (
-                        <div className="rounded-2xl border border-slate-800 bg-black/20 px-4 py-4 text-[12px] text-slate-500">
-                          No advisory yet. Click <b>Run AXIOM</b> to generate.
-                        </div>
-                      ) : (
-                        axiomNotes.map((n) => {
-                          const active = (axiomSelected?.id ?? axiomNotes[0]?.id) === n.id;
-                          const sev = n.severity ?? inferSeverity(n.title, n.content);
-                          return (
-                            <button
-                              key={n.id}
-                              onClick={() => setAxiomSelectedNoteId(n.id)}
-                              className={cx(
-                                "w-full text-left rounded-2xl border px-3 py-3 transition",
-                                active
-                                  ? "border-emerald-400/50 bg-emerald-500/10"
-                                  : "border-slate-800 bg-black/20 hover:bg-slate-900/40"
-                              )}
-                            >
-                              <div className="flex items-start justify-between gap-2">
-                                <div className="min-w-0 flex-1">
-                                  <div className="text-[12px] font-semibold text-slate-100 truncate">
-                                    {n.title || "AXIOM Advisory"}
-                                  </div>
-                                  <div className="mt-1 text-[10px] text-slate-500">
-                                    {fmtShort(n.created_at)} {n.model ? `• ${n.model}` : ""}{" "}
-                                    {typeof n.tokens_used === "number" ? ` • ${n.tokens_used} tok` : ""}
-                                  </div>
-                                </div>
-                                {sev && (
-                                  <span
-                                    className={cx(
-                                      "shrink-0 rounded-full border px-2 py-1 text-[9px] uppercase tracking-[0.18em]",
-                                      severityPill(sev)
-                                    )}
-                                    title="Inferred severity"
-                                  >
-                                    {sev}
-                                  </span>
-                                )}
-                              </div>
-                            </button>
-                          );
-                        })
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Preview */}
-                  <div className="lg:col-span-8 rounded-2xl border border-slate-800 bg-black/25 overflow-hidden flex flex-col min-h-[420px]">
-                    <div className="px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
-                      <div className="min-w-0">
-                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Advisory Preview</div>
-                        <div className="mt-1 text-[12px] text-slate-500">
-                          {axiomSelected?.created_at ? `Latest: ${fmtShort(axiomSelected.created_at)}` : "—"}
-                        </div>
-                      </div>
-
-                      <div className="shrink-0 flex items-center gap-2">
-                        <Link
-                          href="/ci-forge"
-                          className="rounded-full border border-emerald-500/60 bg-black/40 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/10"
-                          title="Execution happens in Forge"
-                        >
-                          Open Forge
-                        </Link>
-                        <Link
-                          href="/ci-archive/ledger"
-                          className="rounded-full border border-slate-700 bg-slate-950/40 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
-                          title="Lifecycle registry in Archive"
-                        >
-                          Registry
-                        </Link>
-                      </div>
-                    </div>
-
-                    <div className="flex-1 overflow-y-auto px-6 py-5">
-                      <div className="rounded-2xl border border-slate-800 bg-black/30 px-5 py-5">
-                        <pre className="whitespace-pre-wrap font-sans text-[13px] leading-[1.85] text-slate-100">
-                          {axiomSelected?.content?.trim()
-                            ? axiomSelected.content
-                            : "— (No advisory loaded yet. Click Load or Run AXIOM.) —"}
-                        </pre>
-                      </div>
-                    </div>
-
-                    <div className="px-5 py-4 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
-                      <span>AXIOM focus is non-mutating. Authority remains in Council.</span>
-                      <span>Scoped by entity_id + is_test</span>
-                    </div>
-                  </div>
-                </div>
-              </section>
-            ) : (
-              /* Authority Panel (vertical, Admissions-aligned) */
-              <section className="rounded-2xl border border-slate-800 bg-slate-950/40 overflow-hidden">
-                <div className="px-5 py-4 border-b border-slate-800">
-                  <div className="flex items-center justify-between gap-2">
-                    <div>
-                      <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
-                        Authority Panel
-                      </div>
-                      <div className="mt-1 text-[12px] text-slate-500">
-                        Authority · AXIOM · Artifacts <span className="mx-2 text-slate-700">•</span>
-                        <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
-                      </div>
-                    </div>
-
+                  <div className="mt-1 text-[12px] text-slate-400">
+                    Record: <span className="text-slate-100 font-semibold">{selected?.title || "—"}</span>
+                    <span className="mx-2 text-slate-700">•</span>
+                    <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
                     {axiomSeverityLabel && (
-                      <span
-                        className={cx(
-                          "rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.18em]",
-                          severityPill(axiomSeverityLabel)
-                        )}
-                        title="Inferred severity (no metadata dependency)"
-                      >
-                        {axiomSeverityLabel}
-                      </span>
+                      <>
+                        <span className="mx-2 text-slate-700">•</span>
+                        <span
+                          className={cx(
+                            "inline-flex items-center rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.18em]",
+                            severityPill(axiomSeverityLabel)
+                          )}
+                        >
+                          {axiomSeverityLabel}
+                        </span>
+                      </>
                     )}
                   </div>
 
-                  {/* ✅ Tabs: AXIOM + ARTIFACTS only */}
-                  <div className="mt-3 inline-flex rounded-full bg-slate-950/70 border border-slate-800 p-1 overflow-hidden">
-                    <DetailTabButton label="AXIOM" active={detailTab === "AXIOM"} onClick={() => setDetailTab("AXIOM")} />
-                    <DetailTabButton
-                      label="Artifacts"
-                      active={detailTab === "ARTIFACTS"}
-                      onClick={() => setDetailTab("ARTIFACTS")}
-                    />
-                  </div>
-
-                  <div className="mt-3 text-[10px] text-slate-600">
-                    Tip: Use <span className="text-indigo-200 font-semibold">Focus AXIOM</span> for full-width advisory.
+                  <div className="mt-2 text-[11px] text-slate-500 max-w-3xl">
+                    AXIOM is advisory-only. Memo PDF is a lane-scoped sidecar attachment and never mutates the resolution.
                   </div>
                 </div>
 
-                <div className="p-5 space-y-4">
-                  {!selected ? (
-                    <div className="rounded-2xl border border-slate-800 bg-black/25 px-4 py-4 text-[12px] text-slate-500">
-                      Select a record to see authority + AXIOM tools.
+                <div className="shrink-0 flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => loadAxiomNotesForSelected()}
+                    disabled={!selected || axiomBusy !== null}
+                    className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/8 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {axiomBusy === "load" ? "Loading…" : "Load"}
+                  </button>
+
+                  <button
+                    onClick={() => runAxiomCouncilReview()}
+                    disabled={!selected || axiomBusy !== null}
+                    className="rounded-full border border-indigo-400/50 bg-indigo-500/10 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-indigo-200 hover:bg-indigo-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {axiomBusy === "run" ? "Running…" : "Run AXIOM"}
+                  </button>
+
+                  <button
+                    onClick={() => invokeAxiomMemoEdgeFunction()}
+                    disabled={!selected || axiomBusy !== null}
+                    className="rounded-full border border-amber-400/50 bg-amber-500/10 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Renders AXIOM Memo PDF as sidecar evidence"
+                  >
+                    {axiomBusy === "memo" ? "Generating…" : "Memo PDF"}
+                  </button>
+
+                  <button
+                    onClick={() => setAxiomFocus(false)}
+                    className="rounded-full border border-amber-400/60 bg-amber-500/10 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/15"
+                  >
+                    Back
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-5 grid grid-cols-1 lg:grid-cols-12 gap-4">
+                {/* History */}
+                <div className="lg:col-span-4 rounded-3xl border border-white/10 bg-black/20 overflow-hidden flex flex-col min-h-[420px]">
+                  <div className="px-4 py-4 border-b border-white/10">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Advisory History</div>
+                      <button
+                        onClick={() => loadAxiomNotesForSelected()}
+                        disabled={axiomBusy !== null}
+                        className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/8 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {axiomBusy === "load" ? "…" : "Reload"}
+                      </button>
                     </div>
-                  ) : (
-                    <>
-                      {/* Authority block (modals for actions) */}
-                      <div className="rounded-2xl border border-slate-800 bg-black/30 px-4 py-4">
-                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Authority</div>
-                        <div className="mt-2 text-[12px] text-slate-400">
-                          <span className="text-slate-100 font-semibold">{selected.title || "(untitled)"}</span>
-                          <span className="mx-2 text-slate-700">•</span>
-                          <span className="text-slate-300">{(selected.status ?? "").toUpperCase()}</span>
-                        </div>
-                        <div className="mt-2 text-[11px] text-slate-500">
-                          {fmtShort(selected.created_at)} · {selected.record_type || "resolution"}
-                        </div>
+                    <div className="mt-2 text-[11px] text-slate-500">
+                      Showing {axiomNotes.length} note(s) · <span className="font-mono">ai_notes</span>
+                    </div>
+                  </div>
 
-                        <div className="mt-3 text-[12px] text-slate-500 leading-relaxed">
-                          Council is the authority. AXIOM is advisory-only and never blocks. Use <b>Send Back</b> to return
-                          to Alchemy correction flow (best effort RPC; always falls back to opening Alchemy).
-                        </div>
-
-                        <div className="mt-4 space-y-2">
+                  <div className="flex-1 overflow-y-auto p-3 space-y-2">
+                    {axiomNotes.length === 0 ? (
+                      <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-4 text-[12px] text-slate-500">
+                        No advisory yet. Click <b>Run AXIOM</b> to generate.
+                      </div>
+                    ) : (
+                      axiomNotes.map((n) => {
+                        const active = (axiomSelected?.id ?? axiomNotes[0]?.id) === n.id;
+                        const sev = n.severity ?? inferSeverity(n.title, n.content);
+                        return (
                           <button
-                            onClick={() => openConfirm("APPROVE")}
-                            disabled={!canApprove || !!busy}
-                            className="w-full rounded-full bg-emerald-600 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-black hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                            key={n.id}
+                            onClick={() => setAxiomSelectedNoteId(n.id)}
+                            className={cx(
+                              "w-full text-left rounded-2xl border px-3 py-3 transition",
+                              active
+                                ? "border-emerald-400/50 bg-emerald-500/10"
+                                : "border-white/10 bg-black/20 hover:bg-white/5"
+                            )}
                           >
-                            {busy === "approve" ? "Approving…" : "Approve"}
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0 flex-1">
+                                <div className="text-[12px] font-semibold text-slate-100 truncate">
+                                  {n.title || "AXIOM Advisory"}
+                                </div>
+                                <div className="mt-1 text-[10px] text-slate-500">
+                                  {fmtShort(n.created_at)} {n.model ? `• ${n.model}` : ""}{" "}
+                                  {typeof n.tokens_used === "number" ? ` • ${n.tokens_used} tok` : ""}
+                                </div>
+                              </div>
+                              {sev && (
+                                <span
+                                  className={cx(
+                                    "shrink-0 rounded-full border px-2 py-1 text-[9px] uppercase tracking-[0.18em]",
+                                    severityPill(sev)
+                                  )}
+                                  title="Inferred severity"
+                                >
+                                  {sev}
+                                </span>
+                              )}
+                            </div>
                           </button>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
 
-                          <button
-                            onClick={() => openConfirm("REJECT")}
-                            disabled={!canReject || !!busy}
-                            className="w-full rounded-full bg-rose-600 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-black hover:bg-rose-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            {busy === "reject" ? "Rejecting…" : "Reject"}
-                          </button>
+                {/* Preview */}
+                <div className="lg:col-span-8 rounded-3xl border border-white/10 bg-black/20 overflow-hidden flex flex-col min-h-[420px]">
+                  <div className="px-5 py-4 border-b border-white/10 flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Advisory Preview</div>
+                      <div className="mt-1 text-[12px] text-slate-500">
+                        {axiomSelected?.created_at ? `Latest: ${fmtShort(axiomSelected.created_at)}` : "—"}
+                      </div>
+                    </div>
 
-                          <button
-                            onClick={() => openConfirm("SENDBACK")}
-                            disabled={!canSendBack || !!busy}
-                            className="w-full rounded-full bg-amber-500 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-black hover:bg-amber-400 disabled:opacity-50 disabled:cursor-not-allowed"
-                            title="Returns to Alchemy correction flow (RPC if present; otherwise opens Alchemy with record_id)."
-                          >
-                            {busy === "sendback" ? "Sending Back…" : "Send Back to Alchemy"}
-                          </button>
+                    <div className="shrink-0 flex items-center gap-2">
+                      <Link
+                        href="/ci-forge"
+                        className="rounded-full border border-emerald-500/60 bg-black/40 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/10"
+                        title="Execution happens in Forge"
+                      >
+                        Open Forge
+                      </Link>
+                      <Link
+                        href="/ci-archive/ledger"
+                        className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/8"
+                        title="Lifecycle registry in Archive"
+                      >
+                        Registry
+                      </Link>
+                    </div>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto px-6 py-5">
+                    <div className="rounded-2xl border border-white/10 bg-black/30 px-5 py-5">
+                      <pre className="whitespace-pre-wrap font-sans text-[13px] leading-[1.85] text-slate-100">
+                        {axiomSelected?.content?.trim()
+                          ? axiomSelected.content
+                          : "— (No advisory loaded yet. Click Load or Run AXIOM.) —"}
+                      </pre>
+                    </div>
+                  </div>
+
+                  <div className="px-5 py-4 border-t border-white/10 text-[10px] text-slate-500 flex items-center justify-between">
+                    <span>AXIOM focus is non-mutating. Authority remains in Council.</span>
+                    <span>Scoped by entity_id + is_test</span>
+                  </div>
+                </div>
+              </div>
+            </section>
+          ) : (
+            <div className="h-full overflow-y-auto">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 min-h-0">
+                {/* Queue (Left) */}
+                {queueOpen && (
+                  <section className="lg:col-span-4 rounded-3xl border border-white/10 bg-white/5 overflow-hidden flex flex-col min-h-[440px]">
+                    <div className="px-5 py-4 border-b border-white/10">
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                          Queue · {filtered.length}/{envFiltered.length} <span className="mx-2 text-slate-700">•</span>
+                          <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
                         </div>
-
-                        <div className="mt-4 grid grid-cols-2 gap-2">
-                          <Link
-                            href="/ci-forge"
-                            className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/15"
-                          >
-                            Forge
-                          </Link>
-                          <Link
-                            href="/ci-archive/ledger"
-                            className="rounded-2xl border border-slate-700 bg-slate-950/40 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
-                          >
-                            Ledger Registry
-                          </Link>
+                        <div className="text-[11px] text-slate-500">
+                          Scope: <span className="font-mono">governance_ledger</span> · entity_id + is_test
                         </div>
                       </div>
 
-                      {detailTab === "AXIOM" ? (
-                        <>
-                          {/* AXIOM controls */}
-                          <div className="rounded-2xl border border-slate-800 bg-black/25 px-4 py-4">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="text-[11px] uppercase tracking-[0.22em] text-indigo-200">AXIOM Advisory</div>
-                              <div className="flex items-center gap-2">
+                      <input
+                        className="mt-3 w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-emerald-400/70"
+                        placeholder="Search… title or body"
+                        value={query}
+                        onChange={(e) => setQuery(e.target.value)}
+                      />
+                    </div>
+
+                    <div className="flex-1 min-h-0 overflow-y-auto">
+                      {loading ? (
+                        <div className="p-4 text-[13px] text-slate-400">Loading…</div>
+                      ) : filtered.length === 0 ? (
+                        <div className="p-4 text-[13px] text-slate-500">No records for this filter.</div>
+                      ) : (
+                        <ul className="divide-y divide-white/10">
+                          {filtered.map((r) => {
+                            const st = (r.status ?? "").toUpperCase();
+                            return (
+                              <li
+                                key={r.id}
+                                onClick={() => handleSelect(r)}
+                                className={cx(
+                                  "cursor-pointer px-5 py-4 transition hover:bg-white/5",
+                                  r.id === selectedId && "bg-white/8"
+                                )}
+                              >
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0 flex-1">
+                                    <div className="truncate text-[13px] font-semibold text-slate-100">
+                                      {r.title || "(untitled)"}
+                                    </div>
+                                    <div className="mt-1 text-[11px] text-slate-500">
+                                      {fmtShort(r.created_at)} · {r.record_type || "resolution"}
+                                    </div>
+                                    <div className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-slate-400">
+                                      {r.body || "—"}
+                                    </div>
+                                  </div>
+
+                                  <span
+                                    className={cx(
+                                      "shrink-0 rounded-full px-2 py-1 text-[9px] uppercase tracking-[0.18em]",
+                                      st === "APPROVED"
+                                        ? "bg-emerald-500/15 text-emerald-200"
+                                        : st === "REJECTED"
+                                        ? "bg-rose-500/15 text-rose-200"
+                                        : st === "ARCHIVED"
+                                        ? "bg-slate-700/40 text-slate-300"
+                                        : "bg-sky-500/15 text-sky-200"
+                                    )}
+                                  >
+                                    {st || "—"}
+                                  </span>
+                                </div>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                    </div>
+                  </section>
+                )}
+
+                {/* Review (Middle) */}
+                <section
+                  className={cx(
+                    "rounded-3xl border border-white/10 bg-white/5 overflow-hidden flex flex-col min-h-[440px]",
+                    queueOpen ? "lg:col-span-5" : "lg:col-span-7"
+                  )}
+                >
+                  <div className="px-5 py-4 border-b border-white/10 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Review</div>
+                      <div className="mt-1 text-[13px] text-slate-400">
+                        Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
+                        <span className="mx-2 text-slate-700">•</span>
+                        Lane:{" "}
+                        <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
+                        {selected && (
+                          <>
+                            <span className="mx-2 text-slate-700">•</span>
+                            <span className="text-slate-200">{(selected.status ?? "").toUpperCase()}</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    {selected && (
+                      <div className="shrink-0 flex flex-wrap items-center gap-2">
+                        <button
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(selected.id);
+                              flashInfo("Copied record id.");
+                            } catch {
+                              flashError("Copy failed.");
+                            }
+                          }}
+                          className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/8"
+                        >
+                          Copy ID
+                        </button>
+
+                        <Link
+                          href="/ci-forge"
+                          className="rounded-full border border-emerald-500/60 bg-black/40 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/10"
+                          title="Signature execution happens in Forge"
+                        >
+                          Open Forge
+                        </Link>
+
+                        <Link
+                          href="/ci-archive/ledger"
+                          className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/8"
+                          title="Lifecycle registry in Archive"
+                        >
+                          Open Ledger Registry
+                        </Link>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex-1 min-h-0 overflow-y-auto p-5">
+                    {!selected ? (
+                      <div className="rounded-2xl border border-white/10 bg-black/20 px-5 py-6 text-slate-500 text-[13px]">
+                        Select a record for review.
+                      </div>
+                    ) : (
+                      <div className="rounded-2xl border border-white/10 bg-black/20 overflow-hidden">
+                        <div className="px-5 py-4 border-b border-white/10">
+                          <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Record</div>
+                          <div className="mt-1 text-[15px] font-semibold text-slate-100 truncate">
+                            {selected.title || "(untitled)"}
+                          </div>
+                          <div className="mt-1 text-[11px] text-slate-500">
+                            {fmtShort(selected.created_at)} · {selected.record_type || "resolution"} ·{" "}
+                            {(selected.status ?? "").toUpperCase()}
+                          </div>
+                        </div>
+
+                        <div className="px-6 py-5">
+                          <div className="rounded-2xl border border-white/10 bg-black/30 px-5 py-5">
+                            <pre className="whitespace-pre-wrap font-sans text-[13px] leading-[1.8] text-slate-100">
+                              {selected.body || "—"}
+                            </pre>
+                          </div>
+                        </div>
+
+                        <div className="px-5 py-4 border-t border-white/10 text-[10px] text-slate-500 flex items-center justify-between">
+                          <span>Review is non-mutating. Authority actions happen in the right pane.</span>
+                          <span>Oasis OS · Council Authority Gate</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                {/* Authority (Right) */}
+                <section className="lg:col-span-3 rounded-3xl border border-white/10 bg-white/5 overflow-hidden flex flex-col min-h-[440px]">
+                  <div className="px-5 py-4 border-b border-white/10">
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
+                          Authority Panel
+                        </div>
+                        <div className="mt-1 text-[12px] text-slate-500">
+                          Authority · AXIOM · Artifacts <span className="mx-2 text-slate-700">•</span>
+                          <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
+                        </div>
+                      </div>
+
+                      {axiomSeverityLabel && (
+                        <span
+                          className={cx(
+                            "rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.18em]",
+                            severityPill(axiomSeverityLabel)
+                          )}
+                          title="Inferred severity (no metadata dependency)"
+                        >
+                          {axiomSeverityLabel}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* ✅ Tabs: AXIOM + ARTIFACTS only */}
+                    <div className="mt-3 inline-flex rounded-full bg-white/5 border border-white/10 p-1 overflow-hidden">
+                      <DetailTabButton label="AXIOM" active={detailTab === "AXIOM"} onClick={() => setDetailTab("AXIOM")} />
+                      <DetailTabButton
+                        label="Artifacts"
+                        active={detailTab === "ARTIFACTS"}
+                        onClick={() => setDetailTab("ARTIFACTS")}
+                      />
+                    </div>
+
+                    <div className="mt-3 text-[10px] text-slate-600">
+                      Tip: <span className="text-indigo-200 font-semibold">Focus AXIOM</span> gives advisory full space.
+                    </div>
+                  </div>
+
+                  <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
+                    {!selected ? (
+                      <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-4 text-[12px] text-slate-500">
+                        Select a record to see authority + AXIOM tools.
+                      </div>
+                    ) : (
+                      <>
+                        {/* Authority block (modals for actions) */}
+                        <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-4">
+                          <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Authority</div>
+                          <div className="mt-2 text-[12px] text-slate-400">
+                            <span className="text-slate-100 font-semibold">{selected.title || "(untitled)"}</span>
+                            <span className="mx-2 text-slate-700">•</span>
+                            <span className="text-slate-300">{(selected.status ?? "").toUpperCase()}</span>
+                          </div>
+                          <div className="mt-2 text-[11px] text-slate-500">
+                            {fmtShort(selected.created_at)} · {selected.record_type || "resolution"}
+                          </div>
+
+                          <div className="mt-3 text-[12px] text-slate-500 leading-relaxed">
+                            Council is the authority. AXIOM is advisory-only and never blocks. Use <b>Send Back</b> to return
+                            to Alchemy correction flow (best effort RPC; always falls back to opening Alchemy).
+                          </div>
+
+                          <div className="mt-4 space-y-2">
+                            <button
+                              onClick={() => openConfirm("APPROVE")}
+                              disabled={!canApprove || !!busy}
+                              className="w-full rounded-full bg-emerald-600 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-black hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {busy === "approve" ? "Approving…" : "Approve"}
+                            </button>
+
+                            <button
+                              onClick={() => openConfirm("REJECT")}
+                              disabled={!canReject || !!busy}
+                              className="w-full rounded-full bg-rose-600 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-black hover:bg-rose-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {busy === "reject" ? "Rejecting…" : "Reject"}
+                            </button>
+
+                            <button
+                              onClick={() => openConfirm("SENDBACK")}
+                              disabled={!canSendBack || !!busy}
+                              className="w-full rounded-full bg-amber-500 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-black hover:bg-amber-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                              title="Returns to Alchemy correction flow (RPC if present; otherwise opens Alchemy with record_id)."
+                            >
+                              {busy === "sendback" ? "Sending Back…" : "Send Back to Alchemy"}
+                            </button>
+                          </div>
+
+                          <div className="mt-4 grid grid-cols-2 gap-2">
+                            <Link
+                              href="/ci-forge"
+                              className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/15"
+                            >
+                              Forge
+                            </Link>
+                            <Link
+                              href="/ci-archive/ledger"
+                              className="rounded-2xl border border-white/10 bg-white/5 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/8"
+                            >
+                              Ledger Registry
+                            </Link>
+                          </div>
+                        </div>
+
+                        {detailTab === "AXIOM" ? (
+                          <>
+                            {/* AXIOM controls */}
+                            <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-4">
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="text-[11px] uppercase tracking-[0.22em] text-indigo-200">AXIOM Advisory</div>
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    onClick={() => loadAxiomNotesForSelected()}
+                                    disabled={axiomBusy !== null}
+                                    className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/8 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                    {axiomBusy === "load" ? "Loading…" : "Load"}
+                                  </button>
+                                  <button
+                                    onClick={() => runAxiomCouncilReview()}
+                                    disabled={axiomBusy !== null}
+                                    className="rounded-full border border-indigo-400/50 bg-indigo-500/10 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-indigo-200 hover:bg-indigo-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                    {axiomBusy === "run" ? "Running…" : "Run"}
+                                  </button>
+                                </div>
+                              </div>
+
+                              <div className="mt-2 text-[11px] text-slate-500">
+                                Scope: <span className="font-mono">ai_notes</span> ·{" "}
+                                <span className="font-mono">scope_type=document</span>
+                              </div>
+
+                              <div className="mt-3 grid grid-cols-2 gap-2">
                                 <button
-                                  onClick={() => loadAxiomNotesForSelected()}
-                                  disabled={axiomBusy !== null}
-                                  className="rounded-full border border-slate-700 bg-slate-950/40 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  onClick={() => setAxiomFocus(true)}
+                                  className="rounded-2xl border border-indigo-400/50 bg-indigo-500/10 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-indigo-200 hover:bg-indigo-500/15"
                                 >
-                                  {axiomBusy === "load" ? "Loading…" : "Load"}
+                                  Focus AXIOM
                                 </button>
                                 <button
-                                  onClick={() => runAxiomCouncilReview()}
-                                  disabled={axiomBusy !== null}
-                                  className="rounded-full border border-indigo-400/50 bg-indigo-500/10 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-indigo-200 hover:bg-indigo-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  onClick={async () => {
+                                    try {
+                                      await navigator.clipboard.writeText(selected.id);
+                                      flashInfo("Copied record id.");
+                                    } catch {
+                                      flashError("Copy failed.");
+                                    }
+                                  }}
+                                  className="rounded-2xl border border-white/10 bg-white/5 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/8"
                                 >
-                                  {axiomBusy === "run" ? "Running…" : "Run"}
+                                  Copy ID
                                 </button>
                               </div>
                             </div>
 
-                            <div className="mt-2 text-[11px] text-slate-500">
-                              Scope: <span className="font-mono">ai_notes</span> ·{" "}
-                              <span className="font-mono">scope_type=document</span>
-                            </div>
+                            {/* AXIOM notes list + preview (compact) */}
+                            <div className="rounded-2xl border border-white/10 bg-black/20 overflow-hidden">
+                              <div className="px-4 py-4 border-b border-white/10">
+                                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Advisory History</div>
+                                <div className="mt-1 text-[11px] text-slate-500">Showing {axiomNotes.length} note(s)</div>
+                              </div>
 
-                            <div className="mt-3 grid grid-cols-2 gap-2">
-                              <button
-                                onClick={() => setAxiomFocus(true)}
-                                className="rounded-2xl border border-indigo-400/50 bg-indigo-500/10 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-indigo-200 hover:bg-indigo-500/15"
-                              >
-                                Focus AXIOM
-                              </button>
-                              <button
-                                onClick={async () => {
-                                  try {
-                                    await navigator.clipboard.writeText(selected.id);
-                                    flashInfo("Copied record id.");
-                                  } catch {
-                                    flashError("Copy failed.");
-                                  }
-                                }}
-                                className="rounded-2xl border border-slate-700 bg-slate-950/40 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
-                              >
-                                Copy ID
-                              </button>
-                            </div>
-                          </div>
-
-                          {/* AXIOM notes list + preview (compact) */}
-                          <div className="rounded-2xl border border-slate-800 bg-black/25 overflow-hidden">
-                            <div className="px-4 py-4 border-b border-slate-800">
-                              <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Advisory History</div>
-                              <div className="mt-1 text-[11px] text-slate-500">Showing {axiomNotes.length} note(s)</div>
-                            </div>
-
-                            <div className="max-h-[260px] overflow-y-auto divide-y divide-slate-800">
-                              {axiomNotes.length === 0 ? (
-                                <div className="p-4 text-[12px] text-slate-500">
-                                  No advisory yet. Click <b>Run</b> to generate.
-                                </div>
-                              ) : (
-                                axiomNotes.map((n) => {
-                                  const active = (axiomSelected?.id ?? axiomNotes[0]?.id) === n.id;
-                                  const sev = n.severity ?? inferSeverity(n.title, n.content);
-                                  return (
-                                    <button
-                                      key={n.id}
-                                      onClick={() => setAxiomSelectedNoteId(n.id)}
-                                      className={cx(
-                                        "w-full text-left px-4 py-3 transition",
-                                        active ? "bg-emerald-500/10" : "hover:bg-slate-900/40"
-                                      )}
-                                    >
-                                      <div className="flex items-start justify-between gap-2">
-                                        <div className="min-w-0 flex-1">
-                                          <div className="truncate text-[12px] font-semibold text-slate-100">
-                                            {n.title || "AXIOM Advisory"}
-                                          </div>
-                                          <div className="mt-1 text-[10px] text-slate-500">
-                                            {fmtShort(n.created_at)} {n.model ? `• ${n.model}` : ""}{" "}
-                                            {typeof n.tokens_used === "number" ? ` • ${n.tokens_used} tok` : ""}
-                                          </div>
-                                        </div>
-                                        {sev && (
-                                          <span
-                                            className={cx(
-                                              "shrink-0 rounded-full border px-2 py-1 text-[9px] uppercase tracking-[0.18em]",
-                                              severityPill(sev)
-                                            )}
-                                          >
-                                            {sev}
-                                          </span>
+                              <div className="max-h-[260px] overflow-y-auto divide-y divide-white/10">
+                                {axiomNotes.length === 0 ? (
+                                  <div className="p-4 text-[12px] text-slate-500">
+                                    No advisory yet. Click <b>Run</b> to generate.
+                                  </div>
+                                ) : (
+                                  axiomNotes.map((n) => {
+                                    const active = (axiomSelected?.id ?? axiomNotes[0]?.id) === n.id;
+                                    const sev = n.severity ?? inferSeverity(n.title, n.content);
+                                    return (
+                                      <button
+                                        key={n.id}
+                                        onClick={() => setAxiomSelectedNoteId(n.id)}
+                                        className={cx(
+                                          "w-full text-left px-4 py-3 transition",
+                                          active ? "bg-emerald-500/10" : "hover:bg-white/5"
                                         )}
-                                      </div>
-                                    </button>
-                                  );
-                                })
+                                      >
+                                        <div className="flex items-start justify-between gap-2">
+                                          <div className="min-w-0 flex-1">
+                                            <div className="truncate text-[12px] font-semibold text-slate-100">
+                                              {n.title || "AXIOM Advisory"}
+                                            </div>
+                                            <div className="mt-1 text-[10px] text-slate-500">
+                                              {fmtShort(n.created_at)} {n.model ? `• ${n.model}` : ""}{" "}
+                                              {typeof n.tokens_used === "number" ? ` • ${n.tokens_used} tok` : ""}
+                                            </div>
+                                          </div>
+                                          {sev && (
+                                            <span
+                                              className={cx(
+                                                "shrink-0 rounded-full border px-2 py-1 text-[9px] uppercase tracking-[0.18em]",
+                                                severityPill(sev)
+                                              )}
+                                            >
+                                              {sev}
+                                            </span>
+                                          )}
+                                        </div>
+                                      </button>
+                                    );
+                                  })
+                                )}
+                              </div>
+
+                              <div className="px-4 py-4 border-t border-white/10">
+                                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Preview</div>
+                                <pre className="mt-2 whitespace-pre-wrap font-sans text-[12px] leading-[1.7] text-slate-200 max-h-[220px] overflow-y-auto rounded-2xl border border-white/10 bg-black/30 px-4 py-4">
+                                  {axiomSelected?.content?.trim() ? axiomSelected.content : "— (No advisory loaded yet.) —"}
+                                </pre>
+                              </div>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            {/* ARTIFACTS */}
+                            <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-4">
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="text-[11px] uppercase tracking-[0.22em] text-amber-200">Artifacts</div>
+                                <button
+                                  onClick={() => invokeAxiomMemoEdgeFunction()}
+                                  disabled={axiomBusy !== null}
+                                  className="rounded-full border border-amber-400/50 bg-amber-500/10 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  {axiomBusy === "memo" ? "Generating…" : "Generate Memo PDF"}
+                                </button>
+                              </div>
+
+                              <div className="mt-2 text-[12px] text-slate-500">
+                                Memo PDF is a <b>sidecar evidence</b> artifact (lane-scoped). It does not change the resolution.
+                              </div>
+                            </div>
+
+                            <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-4">
+                              <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">AXIOM Memo (Latest)</div>
+
+                              <div className="mt-3 space-y-2 text-[12px] text-slate-400">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-slate-500">Status</span>
+                                  <span className="text-slate-200 font-semibold">{axiomLastMemo ? "AVAILABLE" : "—"}</span>
+                                </div>
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-slate-500">Bucket</span>
+                                  <span className="text-slate-200 font-mono text-[11px]">
+                                    {axiomLastMemo?.storage_bucket ?? "—"}
+                                  </span>
+                                </div>
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-slate-500">Path</span>
+                                  <span
+                                    className="text-slate-200 font-mono text-[11px] truncate max-w-[520px]"
+                                    title={axiomLastMemo?.storage_path ?? ""}
+                                  >
+                                    {axiomLastMemo?.storage_path ?? "—"}
+                                  </span>
+                                </div>
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-slate-500">Hash</span>
+                                  <span className="text-slate-200 font-mono text-[11px]">
+                                    {hashShort(axiomLastMemo?.file_hash ?? null)}
+                                  </span>
+                                </div>
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-slate-500">Size</span>
+                                  <span className="text-slate-200">{bytesPretty(axiomLastMemo?.file_size ?? null)}</span>
+                                </div>
+                              </div>
+
+                              <div className="mt-4 grid grid-cols-2 gap-2">
+                                <button
+                                  onClick={async () => {
+                                    if (!axiomLastMemo?.storage_bucket || !axiomLastMemo?.storage_path) {
+                                      flashError("No memo artifact yet. Generate Memo PDF first.");
+                                      return;
+                                    }
+                                    await ensureSignedUrlForMemo(axiomLastMemo.storage_bucket, axiomLastMemo.storage_path);
+                                    flashInfo("Signed URL prepared.");
+                                  }}
+                                  disabled={axiomBusy !== null}
+                                  className="rounded-2xl border border-white/10 bg-white/5 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/8 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  {axiomBusy === "url" ? "Preparing…" : "Prepare Link"}
+                                </button>
+
+                                <button
+                                  onClick={() => {
+                                    if (!axiomMemoUrl) return flashError("No signed URL yet. Click Prepare Link.");
+                                    window.open(axiomMemoUrl, "_blank", "noopener,noreferrer");
+                                  }}
+                                  disabled={!axiomMemoUrl}
+                                  className={cx(
+                                    "rounded-2xl px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase",
+                                    axiomMemoUrl
+                                      ? "border border-emerald-500/40 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/15"
+                                      : "border border-white/10 bg-white/5 text-slate-500 opacity-60 cursor-not-allowed"
+                                  )}
+                                >
+                                  Open PDF
+                                </button>
+                              </div>
+
+                              {axiomLastMemo?.warning && (
+                                <div className="mt-3 rounded-2xl border border-amber-500/40 bg-amber-500/10 px-3 py-3 text-[12px] text-amber-200">
+                                  Memo warning: {axiomLastMemo.warning}
+                                </div>
                               )}
                             </div>
 
-                            <div className="px-4 py-4 border-t border-slate-800">
-                              <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Preview</div>
-                              <pre className="mt-2 whitespace-pre-wrap font-sans text-[12px] leading-[1.7] text-slate-200 max-h-[220px] overflow-y-auto rounded-2xl border border-slate-800 bg-black/30 px-4 py-4">
-                                {axiomSelected?.content?.trim() ? axiomSelected.content : "— (No advisory loaded yet.) —"}
-                              </pre>
-                            </div>
-                          </div>
-                        </>
-                      ) : (
-                        <>
-                          {/* ARTIFACTS */}
-                          <div className="rounded-2xl border border-slate-800 bg-black/25 px-4 py-4">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="text-[11px] uppercase tracking-[0.22em] text-amber-200">Artifacts</div>
-                              <button
-                                onClick={() => invokeAxiomMemoEdgeFunction()}
-                                disabled={axiomBusy !== null}
-                                className="rounded-full border border-amber-400/50 bg-amber-500/10 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
-                              >
-                                {axiomBusy === "memo" ? "Generating…" : "Generate Memo PDF"}
-                              </button>
-                            </div>
-
-                            <div className="mt-2 text-[12px] text-slate-500">
-                              Memo PDF is a <b>sidecar evidence</b> artifact (lane-scoped). It does not change the resolution.
-                            </div>
-                          </div>
-
-                          <div className="rounded-2xl border border-slate-800 bg-black/30 px-4 py-4">
-                            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">AXIOM Memo (Latest)</div>
-
-                            <div className="mt-3 space-y-2 text-[12px] text-slate-400">
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-slate-500">Status</span>
-                                <span className="text-slate-200 font-semibold">{axiomLastMemo ? "AVAILABLE" : "—"}</span>
+                            {/* Execution & archive discipline (kept) */}
+                            <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-4">
+                              <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Execution & Archive</div>
+                              <div className="mt-2 text-[12px] text-slate-500 leading-relaxed">
+                                Signature path executes in Forge. Direct-archive requires deterministic seal (PDF→hash→verify).
                               </div>
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-slate-500">Bucket</span>
-                                <span className="text-slate-200 font-mono text-[11px]">
-                                  {axiomLastMemo?.storage_bucket ?? "—"}
-                                </span>
-                              </div>
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-slate-500">Path</span>
-                                <span
-                                  className="text-slate-200 font-mono text-[11px] truncate max-w-[520px]"
-                                  title={axiomLastMemo?.storage_path ?? ""}
+
+                              <div className="mt-3 grid grid-cols-2 gap-2">
+                                <Link
+                                  href="/ci-forge"
+                                  className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/15"
                                 >
-                                  {axiomLastMemo?.storage_path ?? "—"}
-                                </span>
-                              </div>
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-slate-500">Hash</span>
-                                <span className="text-slate-200 font-mono text-[11px]">
-                                  {hashShort(axiomLastMemo?.file_hash ?? null)}
-                                </span>
-                              </div>
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-slate-500">Size</span>
-                                <span className="text-slate-200">{bytesPretty(axiomLastMemo?.file_size ?? null)}</span>
+                                  Forge
+                                </Link>
+                                <button
+                                  onClick={handleArchiveDiscipline}
+                                  disabled
+                                  className="rounded-2xl border border-white/10 bg-white/5 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-400 opacity-60 cursor-not-allowed"
+                                  title="Direct archive must be wired to the deterministic seal/archive function"
+                                >
+                                  Archive
+                                </button>
                               </div>
                             </div>
+                          </>
+                        )}
 
-                            <div className="mt-4 grid grid-cols-2 gap-2">
-                              <button
-                                onClick={async () => {
-                                  if (!axiomLastMemo?.storage_bucket || !axiomLastMemo?.storage_path) {
-                                    flashError("No memo artifact yet. Generate Memo PDF first.");
-                                    return;
-                                  }
-                                  await ensureSignedUrlForMemo(axiomLastMemo.storage_bucket, axiomLastMemo.storage_path);
-                                  flashInfo("Signed URL prepared.");
-                                }}
-                                disabled={axiomBusy !== null}
-                                className="rounded-2xl border border-slate-700 bg-slate-950/40 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50 disabled:cursor-not-allowed"
-                              >
-                                {axiomBusy === "url" ? "Preparing…" : "Prepare Link"}
-                              </button>
-
-                              <button
-                                onClick={() => {
-                                  if (!axiomMemoUrl) return flashError("No signed URL yet. Click Prepare Link.");
-                                  window.open(axiomMemoUrl, "_blank", "noopener,noreferrer");
-                                }}
-                                disabled={!axiomMemoUrl}
-                                className={cx(
-                                  "rounded-2xl px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase",
-                                  axiomMemoUrl
-                                    ? "border border-emerald-500/40 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/15"
-                                    : "border border-slate-700 bg-slate-950/40 text-slate-500 opacity-60 cursor-not-allowed"
-                                )}
-                              >
-                                Open PDF
-                              </button>
-                            </div>
-
-                            {axiomLastMemo?.warning && (
-                              <div className="mt-3 rounded-2xl border border-amber-500/40 bg-amber-500/10 px-3 py-3 text-[12px] text-amber-200">
-                                Memo warning: {axiomLastMemo.warning}
+                        {showToast && (
+                          <div className="text-[13px]">
+                            {error && (
+                              <div className="rounded-2xl border border-red-500/60 bg-red-500/10 px-4 py-3 text-red-200">
+                                {error}
+                              </div>
+                            )}
+                            {info && !error && (
+                              <div className="rounded-2xl border border-emerald-500/60 bg-emerald-500/10 px-4 py-3 text-emerald-200">
+                                {info}
                               </div>
                             )}
                           </div>
+                        )}
+                      </>
+                    )}
+                  </div>
 
-                          {/* Execution & archive discipline (kept) */}
-                          <div className="rounded-2xl border border-slate-800 bg-black/25 px-4 py-4">
-                            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Execution & Archive</div>
-                            <div className="mt-2 text-[12px] text-slate-500 leading-relaxed">
-                              Signature path executes in Forge. Direct-archive requires deterministic seal (PDF→hash→verify).
-                            </div>
-
-                            <div className="mt-3 grid grid-cols-2 gap-2">
-                              <Link
-                                href="/ci-forge"
-                                className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/15"
-                              >
-                                Forge
-                              </Link>
-                              <button
-                                onClick={handleArchiveDiscipline}
-                                disabled
-                                className="rounded-2xl border border-slate-700 bg-slate-950/40 px-3 py-3 text-center text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-400 opacity-60 cursor-not-allowed"
-                                title="Direct archive must be wired to the deterministic seal/archive function"
-                              >
-                                Archive
-                              </button>
-                            </div>
-                          </div>
-                        </>
-                      )}
-                    </>
-                  )}
-
-                  {showToast && (
-                    <div className="text-[13px]">
-                      {error && (
-                        <div className="rounded-2xl border border-red-500/60 bg-red-500/10 px-4 py-3 text-red-200">
-                          {error}
-                        </div>
-                      )}
-                      {info && !error && (
-                        <div className="rounded-2xl border border-emerald-500/60 bg-emerald-500/10 px-4 py-3 text-emerald-200">
-                          {info}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-
-                <div className="px-5 py-3 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
-                  <span>CI-Council · Authority gate (governance_ledger)</span>
-                  <span>Scoped by entity_id + is_test</span>
-                </div>
-              </section>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Confirm Modal (Admissions-style) */}
-      <ConfirmModal
-        state={confirm}
-        busy={!!busy}
-        onCancel={() => setConfirm({ open: false })}
-        onConfirm={async () => {
-          try {
-            await confirmAction();
-          } finally {
-            setConfirm({ open: false });
-          }
-        }}
-      />
-
-      {/* Reader Modal (kept; no wiring changes) */}
-      {readerOpen && (
-        <div className="fixed inset-0 z-[90] bg-black/70 px-4 sm:px-6 py-6 flex items-center justify-center">
-          <div className="w-full max-w-[980px] h-[85vh] rounded-3xl border border-slate-800 bg-slate-950/95 shadow-2xl shadow-black/70 overflow-hidden flex flex-col">
-            <div className="shrink-0 px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
-              <div className="min-w-0">
-                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Reader</div>
-                <div className="mt-1 text-[15px] font-semibold text-slate-100 truncate">
-                  {(selected?.title || "(untitled)") as string}
-                </div>
-                <div className="mt-1 text-[11px] text-slate-500">
-                  {selected ? `${(selected.status ?? "").toUpperCase()} • ${fmtShort(selected.created_at)}` : "—"}
-                  <span className="mx-2 text-slate-700">•</span>
-                  <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
-                </div>
+                  <div className="px-5 py-3 border-t border-white/10 text-[10px] text-slate-500 flex items-center justify-between">
+                    <span>CI-Council · Authority gate (governance_ledger)</span>
+                    <span>Scoped by entity_id + is_test</span>
+                  </div>
+                </section>
               </div>
-
-              <button
-                onClick={() => setReaderOpen(false)}
-                className="rounded-full border border-slate-700 bg-slate-900/60 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-800/60"
-              >
-                Close
-              </button>
             </div>
+          )}
+        </div>
 
-            <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 space-y-4">
-              <div className="rounded-2xl border border-slate-800 bg-black/40 px-5 py-5">
-                <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Resolution</div>
-                <pre className="mt-2 whitespace-pre-wrap font-sans text-[13px] leading-[1.8] text-slate-100">
-                  {selected?.body ?? "—"}
-                </pre>
-              </div>
+        {/* Confirm Modal (Admissions-style) */}
+        <ConfirmModal
+          state={confirm}
+          busy={!!busy}
+          onCancel={() => setConfirm({ open: false })}
+          onConfirm={async () => {
+            try {
+              await confirmAction();
+            } finally {
+              setConfirm({ open: false });
+            }
+          }}
+        />
 
-              <div className="rounded-2xl border border-slate-800 bg-black/30 px-5 py-5">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="text-[10px] uppercase tracking-[0.22em] text-indigo-200">AXIOM Advisory</div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => loadAxiomNotesForSelected()}
-                      disabled={!selected || axiomBusy !== null}
-                      className="rounded-full border border-slate-700 bg-slate-950/40 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {axiomBusy === "load" ? "Loading…" : "Load"}
-                    </button>
-                    <button
-                      onClick={() => runAxiomCouncilReview()}
-                      disabled={!selected || axiomBusy !== null}
-                      className="rounded-full border border-indigo-400/50 bg-indigo-500/10 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-indigo-200 hover:bg-indigo-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {axiomBusy === "run" ? "Running…" : "Run AXIOM"}
-                    </button>
+        {/* Reader Modal (kept; no wiring changes) */}
+        {readerOpen && (
+          <div className="fixed inset-0 z-[90] bg-black/70 px-4 sm:px-6 py-6 flex items-center justify-center">
+            <div className="w-full max-w-[980px] h-[85vh] rounded-3xl border border-white/12 bg-[#070A12]/90 shadow-[0_40px_160px_rgba(0,0,0,0.70)] overflow-hidden flex flex-col">
+              <div className="shrink-0 px-5 py-4 border-b border-white/10 flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Reader</div>
+                  <div className="mt-1 text-[15px] font-semibold text-slate-100 truncate">
+                    {(selected?.title || "(untitled)") as string}
+                  </div>
+                  <div className="mt-1 text-[11px] text-slate-500">
+                    {selected ? `${(selected.status ?? "").toUpperCase()} • ${fmtShort(selected.created_at)}` : "—"}
+                    <span className="mx-2 text-slate-700">•</span>
+                    <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
                   </div>
                 </div>
 
-                <div className="mt-2 text-[11px] text-slate-500">
-                  {axiomSelected?.created_at ? `Latest: ${fmtShort(axiomSelected.created_at)}` : "No advisory loaded."}
+                <button
+                  onClick={() => setReaderOpen(false)}
+                  className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/8"
+                >
+                  Close
+                </button>
+              </div>
+
+              <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 space-y-4">
+                <div className="rounded-2xl border border-white/10 bg-black/30 px-5 py-5">
+                  <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Resolution</div>
+                  <pre className="mt-2 whitespace-pre-wrap font-sans text-[13px] leading-[1.8] text-slate-100">
+                    {selected?.body ?? "—"}
+                  </pre>
                 </div>
 
-                <pre className="mt-3 whitespace-pre-wrap font-sans text-[12px] leading-[1.7] text-slate-200">
-                  {axiomSelected?.content?.trim() ? axiomSelected.content : "— (No advisory loaded yet.) —"}
-                </pre>
+                <div className="rounded-2xl border border-white/10 bg-black/20 px-5 py-5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-[10px] uppercase tracking-[0.22em] text-indigo-200">AXIOM Advisory</div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => loadAxiomNotesForSelected()}
+                        disabled={!selected || axiomBusy !== null}
+                        className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/8 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {axiomBusy === "load" ? "Loading…" : "Load"}
+                      </button>
+                      <button
+                        onClick={() => runAxiomCouncilReview()}
+                        disabled={!selected || axiomBusy !== null}
+                        className="rounded-full border border-indigo-400/50 bg-indigo-500/10 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-indigo-200 hover:bg-indigo-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {axiomBusy === "run" ? "Running…" : "Run AXIOM"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mt-2 text-[11px] text-slate-500">
+                    {axiomSelected?.created_at ? `Latest: ${fmtShort(axiomSelected.created_at)}` : "No advisory loaded."}
+                  </div>
+
+                  <pre className="mt-3 whitespace-pre-wrap font-sans text-[12px] leading-[1.7] text-slate-200">
+                    {axiomSelected?.content?.trim() ? axiomSelected.content : "— (No advisory loaded yet.) —"}
+                  </pre>
+                </div>
+              </div>
+
+              <div className="shrink-0 px-5 py-4 border-t border-white/10 flex items-center justify-between text-[10px] text-slate-500">
+                <span>Reader is non-mutating. Authority actions remain in Council.</span>
+                <span>Oasis OS · Evidence-Bound Governance</span>
               </div>
             </div>
-
-            <div className="shrink-0 px-5 py-4 border-t border-slate-800 flex items-center justify-between text-[10px] text-slate-500">
-              <span>Reader is non-mutating. Authority actions remain in Council.</span>
-              <span>Oasis OS · Evidence-Bound Governance</span>
-            </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
@@ -1786,7 +1791,7 @@ function StatusTabButton({
         "px-4 py-2 rounded-full text-left transition min-w-[110px] shrink-0",
         active
           ? "bg-emerald-500/15 border border-emerald-400/70 text-slate-50"
-          : "bg-transparent border border-transparent hover:bg-slate-900/60 text-slate-300"
+          : "bg-transparent border border-transparent hover:bg-white/8 text-slate-300"
       )}
     >
       <div className="text-xs font-semibold">{label}</div>
@@ -1811,8 +1816,8 @@ function DetailTabButton({
       className={cx(
         "px-4 py-2 rounded-full text-left transition min-w-[150px]",
         active
-          ? "bg-slate-50/10 border border-slate-200/25 text-slate-50"
-          : "bg-transparent border border-transparent hover:bg-slate-900/60 text-slate-300"
+          ? "bg-white/10 border border-white/20 text-slate-50"
+          : "bg-transparent border border-transparent hover:bg-white/8 text-slate-300"
       )}
     >
       <div className="text-xs font-semibold">{label}</div>
