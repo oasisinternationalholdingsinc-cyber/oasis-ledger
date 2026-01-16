@@ -23,7 +23,7 @@ export default function OsLayout({ children }: { children: ReactNode }) {
             </OsAuthGate>
           </div>
 
-          {/* OS Dock (will be bottom overlay via CSS) */}
+          {/* OS Dock (bottom overlay via CSS) */}
           <OsDock />
         </div>
       </OsEnvProvider>
