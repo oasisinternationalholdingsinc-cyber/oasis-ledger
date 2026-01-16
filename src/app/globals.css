@@ -62,10 +62,6 @@ body {
   color: #e5e7eb;
   display: flex;
   flex-direction: column;
-
-  /* env can optionally be expressed as data attribute:
-     <div class="os-root" data-env="rot|sandbox"> ...
-     If not present, default tint below is used. */
 }
 
 /* ===== GLOBAL BAR ===== */
@@ -172,23 +168,25 @@ body {
 }
 
 /* ===== SHELL ===== */
-/* shell is now single-column; dock is overlay (fixed) */
+/* ✅ FIX: must be a sizing context so workspace overflow works */
 .os-shell {
   flex: 1;
-  display: block;
-  min-height: 0; /* important so workspace can scroll */
+  min-height: 0;           /* critical for nested scroll */
+  display: flex;
+  flex-direction: column;  /* single column; dock is overlay */
   position: relative;
 }
 
 /* ===== WORKSPACE (ONLY AREA THAT SCROLLS) ===== */
 .os-workspace {
-  flex: 1;
-  min-height: 0;
+  flex: 1;                 /* ✅ FIX: gives it height inside os-shell */
+  min-height: 0;           /* critical for overflow */
   padding: 24px;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 
-  /* Option B overlay: always leave a tiny safety pad + room for peek handle.
-     Full dock clearance will come later when we add hide/show state. */
+  /* Option B overlay: leave safety pad + room for peek handle.
+     Full dock clearance can be tuned later with auto-hide. */
   padding-bottom: calc(var(--dock-gap) + var(--dock-peek) + 18px);
 }
 
@@ -200,35 +198,28 @@ body {
   transform: translateX(-50%);
   z-index: 50;
 
-  /* bottom dock shape */
   display: flex;
   flex-direction: row;
   align-items: flex-end;
   gap: 14px;
 
-  /* glass shell (keeps your current vibe; not a redesign) */
   padding: 10px 14px;
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.10);
   background: rgba(2, 6, 23, 0.55);
   backdrop-filter: blur(18px);
 
-  /* keep it calm */
   box-shadow:
     0 22px 70px rgba(0, 0, 0, 0.60),
     0 0 0 1px rgba(250, 204, 21, 0.10);
 
-  /* no internal scrolling in bottom dock */
   width: auto;
   height: auto;
   max-height: none;
   overflow: visible;
 }
 
-/* ===== DOCK HANDLE (4–6px peek edge) =====
-   Uses ::before so no markup changes.
-   When we later implement hide/show, the dock can slide down,
-   leaving only this edge visible. */
+/* ===== DOCK HANDLE (4–6px peek edge) ===== */
 .os-dock::before {
   content: "";
   position: absolute;
@@ -238,7 +229,6 @@ body {
   height: var(--dock-peek);
   border-radius: 999px;
 
-  /* default: subtle gold-ish */
   background: rgba(250, 204, 21, 0.18);
   box-shadow:
     0 0 18px rgba(250, 204, 21, 0.35),
@@ -246,8 +236,7 @@ body {
   opacity: 0.85;
 }
 
-/* Optional env tint via data attribute on .os-root (no logic changes needed)
-   .os-root[data-env="sandbox"]  ...  .os-root[data-env="rot"] ... */
+/* Optional env tint via data attribute on .os-root */
 .os-root[data-env="sandbox"] .os-dock::before {
   background: var(--lane-sandbox);
   box-shadow:
@@ -270,7 +259,7 @@ body {
   gap: 6px;
 }
 
-/* icon bubble (unchanged) */
+/* icon bubble */
 .dock-icon {
   width: 52px;
   height: 52px;
@@ -298,7 +287,7 @@ body {
   background: radial-gradient(circle, #1e293b, #020617);
 }
 
-/* active route glow (even without hover) */
+/* active route glow */
 .dock-icon.active {
   box-shadow:
     0 0 0 2px #facc15,
@@ -320,7 +309,6 @@ body {
   pointer-events: none;
 }
 
-/* show label on hover */
 .dock-item:hover .dock-label {
   opacity: 1;
   transform: translateY(0);
@@ -337,7 +325,6 @@ body {
 
 /* =========================================================
    MODULE IDENTITY AURAS – PER-MODULE ACTIVE GLOW
-   (kept exactly as you had it)
    ========================================================= */
 
 .dock-item[data-module="orbit"] .dock-icon.active {
@@ -394,11 +381,7 @@ body {
     0 0 46px rgba(163, 230, 53, 0.9);
 }
 
-/* ===== REMOVED: .os-footer (footer is gone) ===== */
-/* ===== REMOVED: .os-orb-slot (orb is gone) ===== */
-
-/* Small-screen ergonomics: keep dock compact.
-   Labels remain hover-only; on touch devices hover isn’t a thing anyway. */
+/* Small-screen ergonomics */
 @media (max-width: 520px) {
   .os-workspace {
     padding: 18px;
