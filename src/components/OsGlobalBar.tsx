@@ -134,7 +134,6 @@ export function OsGlobalBar() {
     let mounted = true;
 
     async function loadEntities() {
-      // memberships is canonical in your schema
       const memRes: any = await (supabase as any)
         .from("memberships")
         .select("entity_id, role, is_admin");
@@ -145,7 +144,6 @@ export function OsGlobalBar() {
       const mems = (memRes?.data ?? []) as MembershipRow[];
 
       if (memErr || !Array.isArray(mems) || mems.length === 0) {
-        // safe fallback
         setEntityOptions([{ key: "workspace" as EntityKey, label: "Workspace" }]);
         return;
       }
@@ -192,7 +190,6 @@ export function OsGlobalBar() {
         opts.length ? opts : [{ key: "workspace" as EntityKey, label: "Workspace" }]
       );
 
-      // ensure activeEntity is valid
       if (!opts.some((o) => o.key === activeEntity) && opts[0]) {
         setActiveEntity(opts[0].key);
       }
@@ -238,34 +235,36 @@ export function OsGlobalBar() {
   return (
     <div className="sticky top-0 z-[50]">
       <div className="relative h-[64px] w-full border-b border-white/5 bg-black/55 backdrop-blur-xl">
-        <div className="mx-auto flex h-full max-w-[1500px] items-center px-6">
-          {/* LEFT */}
-          <div className="flex w-1/3 items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-full border border-[#c9a227]/45 bg-black/30 shadow-[0_0_24px_rgba(201,162,39,0.16)]">
+        {/* ✅ single flex row; NO forced thirds; no overlap possible */}
+        <div className="mx-auto flex h-full max-w-[1500px] items-center px-4 sm:px-6">
+          {/* LEFT (shrink-safe) */}
+          <div className="flex min-w-0 flex-1 items-center gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#c9a227]/45 bg-black/30 shadow-[0_0_24px_rgba(201,162,39,0.16)]">
               <Shield className="h-4.5 w-4.5 text-[#d6b24a]" />
             </div>
 
-            <div className="leading-tight">
-              <div className="text-[10px] tracking-[0.22em] text-white/55">
+            <div className="min-w-0 leading-tight">
+              <div className="truncate text-[10px] tracking-[0.22em] text-white/55">
                 OASIS DIGITAL PARLIAMENT
               </div>
-              <div className="text-[13px] font-medium text-white/90">
-                Authority Console <span className="text-[#c9a227]/85">OS Dock</span>
+              <div className="truncate text-[13px] font-medium text-white/90">
+                Authority Console{" "}
+                <span className="text-[#c9a227]/85">OS</span>
               </div>
             </div>
 
-            {/* Operator pill */}
-            <div className="ml-3 hidden items-center gap-2 rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[12px] text-white/75 shadow-[0_0_18px_rgba(0,0,0,0.22)] lg:flex">
-              <span className="text-white/50">Operator</span>
-              <span className="h-1 w-1 rounded-full bg-white/25" />
-              <span className="max-w-[220px] truncate text-white/90">
+            {/* Operator pill (already collapses on small widths) */}
+            <div className="ml-3 hidden min-w-0 items-center gap-2 rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[12px] text-white/75 shadow-[0_0_18px_rgba(0,0,0,0.22)] lg:flex">
+              <span className="shrink-0 text-white/50">Operator</span>
+              <span className="h-1 w-1 shrink-0 rounded-full bg-white/25" />
+              <span className="min-w-0 max-w-[220px] truncate text-white/90">
                 {operatorEmail}
               </span>
             </div>
           </div>
 
-          {/* CENTER clock */}
-          <div className="flex w-1/3 items-center justify-center">
+          {/* CENTER clock (absolute center on desktop; hides on narrow widths) */}
+          <div className="pointer-events-none absolute left-1/2 hidden -translate-x-1/2 items-center justify-center sm:flex">
             <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-4 py-2 text-[12px] text-white/90 shadow-[0_0_26px_rgba(201,162,39,0.08)]">
               <Clock3 className="h-4 w-4 text-[#c9a227]/85" />
               <span className="min-w-[72px] text-center tracking-[0.16em]">
@@ -275,8 +274,8 @@ export function OsGlobalBar() {
             </div>
           </div>
 
-          {/* RIGHT */}
-          <div className="flex w-1/3 items-center justify-end gap-3">
+          {/* RIGHT (never overlaps; buttons collapse by breakpoint) */}
+          <div className="flex shrink-0 items-center justify-end gap-2 sm:gap-3">
             {/* Entity dropdown */}
             <div className="relative" onClick={(e) => e.stopPropagation()}>
               <button
@@ -284,18 +283,21 @@ export function OsGlobalBar() {
                   setEntityMenuOpen((v) => !v);
                   setEnvMenuOpen(false);
                 }}
-                className="flex items-center gap-2 rounded-full border border-white/10 bg-black/25 px-4 py-2 text-[12px] text-white/90 shadow-[0_0_18px_rgba(0,0,0,0.22)] hover:bg-white/5"
+                className="flex min-w-0 items-center gap-2 rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[12px] text-white/90 shadow-[0_0_18px_rgba(0,0,0,0.22)] hover:bg-white/5 sm:px-4"
               >
-                <span className="text-white/55">Entity</span>
-                <span className="h-1 w-1 rounded-full bg-white/25" />
-                <span className="max-w-[260px] truncate text-white/95">
+                {/* Hide the word 'Entity' on small screens to prevent crowding */}
+                <span className="hidden shrink-0 text-white/55 sm:inline">
+                  Entity
+                </span>
+                <span className="hidden h-1 w-1 shrink-0 rounded-full bg-white/25 sm:inline" />
+                <span className="min-w-0 max-w-[140px] truncate text-white/95 sm:max-w-[220px] md:max-w-[260px]">
                   {activeEntityLabel}
                 </span>
-                <ChevronDown className="h-4 w-4 text-white/55" />
+                <ChevronDown className="h-4 w-4 shrink-0 text-white/55" />
               </button>
 
               {entityMenuOpen && (
-                <div className="absolute right-0 mt-2 w-[360px] rounded-2xl border border-white/10 bg-black/85 p-2 shadow-[0_14px_50px_rgba(0,0,0,0.62)] backdrop-blur-xl z-[80]">
+                <div className="absolute right-0 mt-2 w-[320px] rounded-2xl border border-white/10 bg-black/85 p-2 shadow-[0_14px_50px_rgba(0,0,0,0.62)] backdrop-blur-xl z-[80] sm:w-[360px]">
                   <div className="px-3 py-2 text-[11px] text-white/55">
                     Switch entity
                   </div>
@@ -343,13 +345,15 @@ export function OsGlobalBar() {
                   setEntityMenuOpen(false);
                 }}
                 className={cx(
-                  "flex items-center gap-2 rounded-full border px-4 py-2 text-[12px] transition",
+                  "flex items-center gap-2 rounded-full border px-3 py-2 text-[12px] transition sm:px-4",
                   envMeta.pillClass
                 )}
+                title={envMeta.subtitle}
               >
-                <span className={cx("h-2 w-2 rounded-full", envMeta.dotClass)} />
+                <span className={cx("h-2 w-2 shrink-0 rounded-full", envMeta.dotClass)} />
+                {/* On very small widths, keep label but let it be tighter */}
                 <span className="font-semibold tracking-wide">{envMeta.label}</span>
-                <ChevronDown className="h-4 w-4 text-white/60" />
+                <ChevronDown className="h-4 w-4 shrink-0 text-white/60" />
               </button>
 
               {envMenuOpen && (
@@ -426,13 +430,14 @@ export function OsGlobalBar() {
               )}
             </div>
 
-            {/* Sign out */}
+            {/* Sign out (text collapses on small widths; icon remains) */}
             <button
               onClick={onSignOut}
-              className="flex items-center gap-2 rounded-full border border-white/10 bg-black/25 px-4 py-2 text-[12px] text-white/90 shadow-[0_0_18px_rgba(0,0,0,0.22)] hover:bg-white/5 hover:shadow-[0_0_24px_rgba(201,162,39,0.10)]"
+              className="flex items-center gap-2 rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[12px] text-white/90 shadow-[0_0_18px_rgba(0,0,0,0.22)] hover:bg-white/5 hover:shadow-[0_0_24px_rgba(201,162,39,0.10)] sm:px-4"
+              title="Sign out"
             >
               <LogOut className="h-4 w-4 text-white/65" />
-              <span>Sign out</span>
+              <span className="hidden sm:inline">Sign out</span>
             </button>
           </div>
         </div>
