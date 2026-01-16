@@ -954,19 +954,19 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
   }
 
   async function hardDeleteDraft(draftId: string, reason: string) {
-    const tryTwo = await supabase.rpc(
-      "owner_delete_governance_draft",
-      { p_draft_id: draftId, p_reason: reason || null } as any
-    );
+    const tryTwo = await supabase.rpc("owner_delete_governance_draft", {
+      p_draft_id: draftId,
+      p_reason: reason || null,
+    } as any);
     if (!tryTwo.error) return;
 
     const tryOne = await supabase.rpc("owner_delete_governance_draft", { p_draft_id: draftId } as any);
     if (!tryOne.error) return;
 
-    const tryAlt = await supabase.rpc(
-      "owner_delete_governance_draft",
-      { draft_id: draftId, reason: reason || null } as any
-    );
+    const tryAlt = await supabase.rpc("owner_delete_governance_draft", {
+      draft_id: draftId,
+      reason: reason || null,
+    } as any);
     if (tryAlt.error) throw tryAlt.error;
   }
 
@@ -1065,86 +1065,61 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
       : selectedDraft
       ? selectedDraft.draft_text ?? ""
       : body ?? "";
+
+  // ✅ Provisioning/Council-consistent card shell
+  const cardShell =
+    "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden flex flex-col";
+  const cardHeader = "shrink-0 border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent";
+  const cardBody = "flex-1 min-h-0 overflow-hidden"; // inner sections decide scroll
+
   return (
-    <div className="h-full min-h-0 flex flex-col px-4 sm:px-8 pt-4 sm:pt-6 pb-5 sm:pb-6">
-      {/* Header under OS bar */}
-      <div className="mb-3 sm:mb-4 shrink-0">
-        <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">
-          CI • Alchemy
-        </div>
-        <h1 className="mt-1 text-lg sm:text-xl font-semibold text-slate-50">
-          Drafting Console · AI Scribe
-        </h1>
-        <p className="mt-1 text-[11px] sm:text-xs text-slate-400 max-w-3xl leading-relaxed">
-          Draft safely inside Alchemy.{" "}
-          <span className="text-emerald-300 font-semibold">Finalize</span> promotes into Council
-          (governance_ledger status=PENDING).
-        </p>
+    <div className="h-full min-h-0 flex flex-col">
+      {/* Page container (Provisioning-style, no inner “window frame”) */}
+      <div className="flex-1 min-h-0 mx-auto w-full max-w-[1400px] px-4 pb-8 pt-4 sm:pt-6 flex flex-col">
+        {/* Header under OS bar */}
+        <div className="mb-4 shrink-0">
+          <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">CI • Alchemy</div>
+          <h1 className="mt-1 text-lg sm:text-xl font-semibold text-slate-50">Drafting Console · AI Scribe</h1>
+          <p className="mt-1 text-[11px] sm:text-xs text-slate-400 max-w-3xl leading-relaxed">
+            Draft safely inside Alchemy.{" "}
+            <span className="text-emerald-300 font-semibold">Finalize</span> promotes into Council
+            (governance_ledger status=PENDING).
+          </p>
 
-        <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
-          <span>
-            Entity: <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
-          </span>
-          <span className="text-slate-700">•</span>
-          <span>
-            Lane:{" "}
-            <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>
-              {env}
+          <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
+            <span>
+              Entity: <span className="text-emerald-300 font-medium">{activeEntityLabel}</span>
             </span>
-          </span>
-          {selectedDraft?.finalized_record_id && (
-            <>
-              <span className="text-slate-700">•</span>
-              <span className="text-emerald-200">Ledger-linked</span>
-            </>
-          )}
-          {dirty && (
-            <>
-              <span className="text-slate-700">•</span>
-              <span className="text-amber-200">Unsaved edits</span>
-            </>
-          )}
+            <span className="text-slate-700">•</span>
+            <span>
+              Lane:{" "}
+              <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
+            </span>
+            {selectedDraft?.finalized_record_id && (
+              <>
+                <span className="text-slate-700">•</span>
+                <span className="text-emerald-200">Ledger-linked</span>
+              </>
+            )}
+            {dirty && (
+              <>
+                <span className="text-slate-700">•</span>
+                <span className="text-amber-200">Unsaved edits</span>
+              </>
+            )}
+          </div>
         </div>
-      </div>
 
-      {/* Main OS window frame */}
-      <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
-        <div className="w-full max-w-[1500px] h-full rounded-3xl border border-slate-900 bg-black/55 shadow-[0_0_90px_rgba(15,23,42,0.92)] overflow-hidden flex flex-col">
-          {/* subtle glass top edge */}
-          <div className="shrink-0 px-4 sm:px-6 pt-4 sm:pt-5 pb-3 border-b border-white/5 bg-gradient-to-b from-white/[0.06] to-transparent">
-            {/* Top strip: tabs + controls */}
+        {/* Top controls (match Provisioning/Council: shallow bar, no “window frame”) */}
+        <div className={cx(cardShell, "mb-4 shrink-0")}>
+          <div className={cx(cardHeader, "px-4 sm:px-6 pt-4 sm:pt-5 pb-3")}>
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
               <div className="inline-flex w-full lg:w-auto rounded-full bg-slate-950/70 border border-slate-800 p-1 overflow-x-auto no-scrollbar">
-                <StatusTabButton
-                  label="Drafts"
-                  value="draft"
-                  active={statusTab === "draft"}
-                  onClick={() => setStatusTab("draft")}
-                />
-                <StatusTabButton
-                  label="Reviewed"
-                  value="reviewed"
-                  active={statusTab === "reviewed"}
-                  onClick={() => setStatusTab("reviewed")}
-                />
-                <StatusTabButton
-                  label="Finalized"
-                  value="finalized"
-                  active={statusTab === "finalized"}
-                  onClick={() => setStatusTab("finalized")}
-                />
-                <StatusTabButton
-                  label="Discarded"
-                  value="discarded"
-                  active={statusTab === "discarded"}
-                  onClick={() => setStatusTab("discarded")}
-                />
-                <StatusTabButton
-                  label="All"
-                  value="all"
-                  active={statusTab === "all"}
-                  onClick={() => setStatusTab("all")}
-                />
+                <StatusTabButton label="Drafts" value="draft" active={statusTab === "draft"} onClick={() => setStatusTab("draft")} />
+                <StatusTabButton label="Reviewed" value="reviewed" active={statusTab === "reviewed"} onClick={() => setStatusTab("reviewed")} />
+                <StatusTabButton label="Finalized" value="finalized" active={statusTab === "finalized"} onClick={() => setStatusTab("finalized")} />
+                <StatusTabButton label="Discarded" value="discarded" active={statusTab === "discarded"} onClick={() => setStatusTab("discarded")} />
+                <StatusTabButton label="All" value="all" active={statusTab === "all"} onClick={() => setStatusTab("all")} />
               </div>
 
               <div className="flex flex-wrap items-center gap-2 justify-between lg:justify-end">
@@ -1161,9 +1136,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                     onClick={() => setEditorTheme("light")}
                     className={cx(
                       "rounded-full px-3 py-1.5 transition",
-                      editorTheme === "light"
-                        ? "bg-white text-black"
-                        : "text-slate-400 hover:bg-slate-900/60"
+                      editorTheme === "light" ? "bg-white text-black" : "text-slate-400 hover:bg-slate-900/60"
                     )}
                   >
                     Paper
@@ -1172,9 +1145,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                     onClick={() => setEditorTheme("dark")}
                     className={cx(
                       "rounded-full px-3 py-1.5 transition",
-                      editorTheme === "dark"
-                        ? "bg-emerald-500 text-black"
-                        : "text-slate-400 hover:bg-slate-900/60"
+                      editorTheme === "dark" ? "bg-emerald-500 text-black" : "text-slate-400 hover:bg-slate-900/60"
                     )}
                   >
                     Noir
@@ -1188,8 +1159,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                       setReaderOpen(true);
                       return;
                     }
-                    if (!selectedDraft && !body.trim())
-                      return flashError("Select a draft (or write) first.");
+                    if (!selectedDraft && !body.trim()) return flashError("Select a draft (or write) first.");
                     setReaderOpen(true);
                   }}
                   className="rounded-full border border-emerald-400/60 bg-emerald-500/10 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/15"
@@ -1199,268 +1169,253 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
               </div>
             </div>
           </div>
+        </div>
 
-          {/* Workspace body */}
-          <div className="flex-1 min-h-0 overflow-hidden px-3 sm:px-6 py-3 sm:py-5">
-            {/* phone-first: stack | desktop: three-pane */}
-            <div
-              className={cx(
-                "h-full min-h-0 grid gap-3 sm:gap-4 overflow-hidden",
-                drawerOpen ? "grid-cols-1 lg:grid-cols-[360px_1fr]" : "grid-cols-1"
-              )}
-            >
-              {drawerOpen && (
-                <aside className="min-h-0 rounded-2xl border border-slate-800 bg-slate-950/35 overflow-hidden flex flex-col">
-                  <div className="shrink-0 p-4 border-b border-slate-800 bg-gradient-to-b from-black/30 to-transparent">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-                        Drafts · {filteredDrafts.length}/{drafts.length}
-                        <span className="mx-2 text-slate-700">•</span>
-                        <span className={cx(isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
-                      </div>
-                      <button
-                        onClick={() => reloadDrafts(true)}
-                        className="rounded-full border border-slate-800 bg-slate-950/60 px-3 py-1.5 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
-                      >
-                        Refresh
-                      </button>
-                    </div>
-
-                    <input
-                      className="mt-3 w-full rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-emerald-400"
-                      placeholder="Search… title or body"
-                      value={query}
-                      onChange={(e) => setQuery(e.target.value)}
-                    />
+        {/* Workspace grid (Provisioning/Council mechanics: cards scroll internally) */}
+        <div className="flex-1 min-h-0 grid grid-cols-12 gap-4">
+          {/* LEFT: Drafts */}
+          {drawerOpen ? (
+            <aside className={cx(cardShell, "col-span-12 lg:col-span-4")}>
+              <div className={cx(cardHeader, "p-4")}>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                    Drafts · {filteredDrafts.length}/{drafts.length}
+                    <span className="mx-2 text-slate-700">•</span>
+                    <span className={cx(isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
                   </div>
-
-                  <div className="flex-1 min-h-0 overflow-y-auto">
-                    {loading ? (
-                      <div className="p-4 text-[13px] text-slate-400">Loading…</div>
-                    ) : filteredDrafts.length === 0 ? (
-                      <div className="p-4 text-[13px] text-slate-500">No drafts for this filter.</div>
-                    ) : (
-                      <ul className="divide-y divide-slate-800">
-                        {filteredDrafts.map((d) => (
-                          <li
-                            key={d.id}
-                            onClick={() => handleSelectDraft(d)}
-                            className={cx(
-                              "cursor-pointer px-4 py-3 transition",
-                              "hover:bg-slate-800/55",
-                              d.id === selectedId && "bg-slate-800/80"
-                            )}
-                          >
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="min-w-0 flex-1">
-                                <div className="truncate text-[13px] font-semibold text-slate-100">
-                                  {d.title || "(untitled)"}
-                                </div>
-                                <div className="mt-1 text-[11px] text-slate-500">
-                                  {fmtShort(d.created_at)} · {d.record_type || "resolution"}
-                                </div>
-                                <div className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-slate-400">
-                                  {d.draft_text}
-                                </div>
-                              </div>
-                              <span
-                                className={cx(
-                                  "shrink-0 rounded-full px-2 py-1 text-[9px] uppercase tracking-[0.18em]",
-                                  d.status === "finalized"
-                                    ? "bg-emerald-500/15 text-emerald-200"
-                                    : d.status === "reviewed"
-                                    ? "bg-amber-500/15 text-amber-200"
-                                    : d.status === "discarded"
-                                    ? "bg-slate-700/40 text-slate-300"
-                                    : "bg-sky-500/15 text-sky-200"
-                                )}
-                              >
-                                {d.status}
-                              </span>
-                            </div>
-
-                            {d.finalized_record_id && (
-                              <div className="mt-2 rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-[11px] text-slate-400">
-                                Ledger-linked (locked)
-                              </div>
-                            )}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                </aside>
-              )}
-
-              {/* Main editor surface */}
-              <section className="min-h-0 rounded-2xl border border-slate-800 bg-slate-950/35 overflow-hidden flex flex-col">
-                <div className="shrink-0 px-4 sm:px-5 py-4 border-b border-slate-800 bg-gradient-to-b from-black/30 to-transparent">
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="min-w-0">
-                      <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
-                        Workspace
-                      </div>
-                      <div className="mt-1 text-[12px] sm:text-[13px] text-slate-400">
-                        Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
-                        <span className="mx-2 text-slate-700">•</span>
-                        Lane:{" "}
-                        <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>
-                          {env}
-                        </span>
-                        {selectedDraft?.finalized_record_id && (
-                          <>
-                            <span className="mx-2 text-slate-700">•</span>
-                            <span className="text-emerald-200">Ledger-linked</span>
-                          </>
-                        )}
-                        {dirty && (
-                          <>
-                            <span className="mx-2 text-slate-700">•</span>
-                            <span className="text-amber-200">Unsaved</span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        onClick={handleNewDraft}
-                        className="rounded-full border border-slate-800 bg-slate-950/60 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
-                      >
-                        New
-                      </button>
-
-                      {selectedDraft && (
-                        <span
-                          className={cx(
-                            "hidden sm:inline-flex rounded-full px-3 py-2 text-[10px] uppercase tracking-[0.18em] border",
-                            selectedDraft.status === "finalized"
-                              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
-                              : selectedDraft.status === "reviewed"
-                              ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
-                              : selectedDraft.status === "discarded"
-                              ? "border-slate-600/50 bg-slate-800/40 text-slate-300"
-                              : "border-sky-500/40 bg-sky-500/10 text-sky-200"
-                          )}
-                        >
-                          {selectedDraft.status}
-                        </span>
-                      )}
-
-                      {!canMutateSelected && selectedDraft && (
-                        <span className="hidden sm:inline-flex rounded-full border border-slate-700 bg-slate-900/60 px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-slate-300">
-                          Locked
-                        </span>
-                      )}
-                    </div>
-                  </div>
+                  <button
+                    onClick={() => reloadDrafts(true)}
+                    className="rounded-full border border-slate-800 bg-slate-950/60 px-3 py-1.5 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60"
+                  >
+                    Refresh
+                  </button>
                 </div>
 
-                {/* Workspace tabs */}
-                <div className="shrink-0 px-4 sm:px-5 py-3 sm:py-4 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                  <div className="inline-flex rounded-full border border-slate-800 bg-slate-950/60 p-1">
-                    <button
-                      onClick={() => setWorkspaceTab("editor")}
-                      className={cx(
-                        "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
-                        workspaceTab === "editor"
-                          ? "bg-emerald-500/15 border border-emerald-400/70 text-slate-50"
-                          : "text-slate-300 hover:bg-slate-900/60 border border-transparent"
-                      )}
-                    >
-                      Editor
-                    </button>
-                    <button
-                      onClick={() => setWorkspaceTab("axiom")}
-                      className={cx(
-                        "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
-                        workspaceTab === "axiom"
-                          ? "bg-sky-500/15 border border-sky-400/70 text-slate-50"
-                          : "text-slate-300 hover:bg-slate-900/60 border border-transparent"
-                      )}
-                    >
-                      AXIOM
-                    </button>
-                  </div>
+                <input
+                  className="mt-3 w-full rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-emerald-400"
+                  placeholder="Search… title or body"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                />
+              </div>
 
-                  {workspaceTab === "axiom" ? (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <button
-                        onClick={() => loadAxiomNotes()}
-                        disabled={!selectedId || axiomLoading}
-                        className="rounded-full border border-slate-800 bg-slate-950/60 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-slate-900/60 disabled:opacity-50"
-                      >
-                        {axiomLoading ? "Refreshing…" : "Refresh AXIOM"}
-                      </button>
-                      <button
-                        onClick={handleAxiomReview}
-                        disabled={
-                          !selectedDraft ||
-                          saving ||
-                          finalizing ||
-                          !canMutateSelected ||
-                          alchemyRunning ||
-                          axiomRunning
-                        }
-                        className="rounded-full border border-sky-400/50 bg-sky-500/10 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-sky-200 hover:bg-sky-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
-                        title="Runs AXIOM draft review (writes ai_notes scoped to this draft)"
-                      >
-                        {axiomRunning ? "Running…" : "Run AXIOM"}
-                      </button>
-                    </div>
+              <div className={cx(cardBody, "flex flex-col")}>
+                <div className="flex-1 min-h-0 overflow-y-auto">
+                  {loading ? (
+                    <div className="p-4 text-[13px] text-slate-400">Loading…</div>
+                  ) : filteredDrafts.length === 0 ? (
+                    <div className="p-4 text-[13px] text-slate-500">No drafts for this filter.</div>
                   ) : (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <button
-                        onClick={handleRunAlchemy}
-                        disabled={alchemyRunning || saving || finalizing || axiomRunning}
-                        className="rounded-full border border-emerald-400/70 bg-emerald-500/10 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {alchemyRunning ? "Running…" : "Run Alchemy"}
-                      </button>
+                    <ul className="divide-y divide-white/10">
+                      {filteredDrafts.map((d) => (
+                        <li
+                          key={d.id}
+                          onClick={() => handleSelectDraft(d)}
+                          className={cx(
+                            "cursor-pointer px-4 py-3 transition",
+                            "hover:bg-white/5",
+                            d.id === selectedId && "bg-white/7"
+                          )}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-[13px] font-semibold text-slate-100">
+                                {d.title || "(untitled)"}
+                              </div>
+                              <div className="mt-1 text-[11px] text-slate-500">
+                                {fmtShort(d.created_at)} · {d.record_type || "resolution"}
+                              </div>
+                              <div className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-slate-400">
+                                {d.draft_text}
+                              </div>
+                            </div>
+                            <span
+                              className={cx(
+                                "shrink-0 rounded-full px-2 py-1 text-[9px] uppercase tracking-[0.18em]",
+                                d.status === "finalized"
+                                  ? "bg-emerald-500/15 text-emerald-200"
+                                  : d.status === "reviewed"
+                                  ? "bg-amber-500/15 text-amber-200"
+                                  : d.status === "discarded"
+                                  ? "bg-slate-700/40 text-slate-300"
+                                  : "bg-sky-500/15 text-sky-200"
+                              )}
+                            >
+                              {d.status}
+                            </span>
+                          </div>
 
-                      <button
-                        onClick={handleSaveDraft}
-                        disabled={saving || finalizing || !canMutateSelected || axiomRunning}
-                        className="rounded-full bg-emerald-500 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-black hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {saving ? "Saving…" : "Save"}
-                      </button>
-
-                      <button
-                        onClick={handleMarkReviewed}
-                        disabled={!selectedDraft || saving || finalizing || !canMutateSelected || axiomRunning}
-                        className="rounded-full border border-amber-400/60 bg-slate-950/60 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        Mark reviewed
-                      </button>
-
-                      <button
-                        onClick={handleFinalize}
-                        disabled={!selectedDraft || saving || finalizing || !canMutateSelected || axiomRunning}
-                        className="rounded-full border border-emerald-500/60 bg-black/40 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {finalizing ? "Finalizing…" : "Finalize → Council"}
-                      </button>
-
-                      <button
-                        onClick={openDelete}
-                        disabled={
-                          !selectedDraft ||
-                          !canMutateSelected ||
-                          saving ||
-                          finalizing ||
-                          alchemyRunning ||
-                          axiomRunning
-                        }
-                        className="rounded-full border border-rose-500/50 bg-rose-500/10 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-rose-200 hover:bg-rose-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        Delete
-                      </button>
-                    </div>
+                          {d.finalized_record_id && (
+                            <div className="mt-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] text-slate-400">
+                              Ledger-linked (locked)
+                            </div>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
                   )}
                 </div>
 
-                <div className="flex-1 min-h-0 overflow-hidden p-3 sm:p-5">
+                <div className="shrink-0 p-3 border-t border-white/10 flex items-center justify-between text-[10px] text-slate-500">
+                  <span>governance_drafts</span>
+                  <button
+                    onClick={handleNewDraft}
+                    className="rounded-full border border-white/10 bg-black/20 px-3 py-1.5 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-black/30"
+                  >
+                    New
+                  </button>
+                </div>
+              </div>
+            </aside>
+          ) : null}
+
+          {/* MIDDLE: Editor / AXIOM workspace */}
+          <section className={cx(cardShell, drawerOpen ? "col-span-12 lg:col-span-5" : "col-span-12 lg:col-span-8")}>
+            <div className={cx(cardHeader, "px-4 sm:px-5 py-4")}>
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Workspace</div>
+                  <div className="mt-1 text-[12px] sm:text-[13px] text-slate-400">
+                    Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
+                    <span className="mx-2 text-slate-700">•</span>
+                    Lane:{" "}
+                    <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
+                    {selectedDraft?.finalized_record_id && (
+                      <>
+                        <span className="mx-2 text-slate-700">•</span>
+                        <span className="text-emerald-200">Ledger-linked</span>
+                      </>
+                    )}
+                    {dirty && (
+                      <>
+                        <span className="mx-2 text-slate-700">•</span>
+                        <span className="text-amber-200">Unsaved</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  {selectedDraft && (
+                    <span
+                      className={cx(
+                        "hidden sm:inline-flex rounded-full px-3 py-2 text-[10px] uppercase tracking-[0.18em] border",
+                        selectedDraft.status === "finalized"
+                          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+                          : selectedDraft.status === "reviewed"
+                          ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+                          : selectedDraft.status === "discarded"
+                          ? "border-slate-600/50 bg-slate-800/40 text-slate-300"
+                          : "border-sky-500/40 bg-sky-500/10 text-sky-200"
+                      )}
+                    >
+                      {selectedDraft.status}
+                    </span>
+                  )}
+
+                  {!canMutateSelected && selectedDraft && (
+                    <span className="hidden sm:inline-flex rounded-full border border-white/10 bg-black/20 px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-slate-300">
+                      Locked
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Tabs + actions */}
+            <div className="shrink-0 px-4 sm:px-5 py-3 sm:py-4 border-b border-white/10 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 bg-black/10">
+              <div className="inline-flex rounded-full border border-white/10 bg-black/20 p-1">
+                <button
+                  onClick={() => setWorkspaceTab("editor")}
+                  className={cx(
+                    "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
+                    workspaceTab === "editor"
+                      ? "bg-emerald-500/15 border-emerald-400/70 text-slate-50"
+                      : "bg-transparent border-transparent text-slate-300 hover:bg-white/5"
+                  )}
+                >
+                  Editor
+                </button>
+                <button
+                  onClick={() => setWorkspaceTab("axiom")}
+                  className={cx(
+                    "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
+                    workspaceTab === "axiom"
+                      ? "bg-sky-500/15 border-sky-400/70 text-slate-50"
+                      : "bg-transparent border-transparent text-slate-300 hover:bg-white/5"
+                  )}
+                >
+                  AXIOM
+                </button>
+              </div>
+
+              {workspaceTab === "axiom" ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => loadAxiomNotes()}
+                    disabled={!selectedId || axiomLoading}
+                    className="rounded-full border border-white/10 bg-black/20 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-black/30 disabled:opacity-50"
+                  >
+                    {axiomLoading ? "Refreshing…" : "Refresh AXIOM"}
+                  </button>
+                  <button
+                    onClick={handleAxiomReview}
+                    disabled={!selectedDraft || saving || finalizing || !canMutateSelected || alchemyRunning || axiomRunning}
+                    className="rounded-full border border-sky-400/50 bg-sky-500/10 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-sky-200 hover:bg-sky-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Runs AXIOM draft review (writes ai_notes scoped to this draft)"
+                  >
+                    {axiomRunning ? "Running…" : "Run AXIOM"}
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={handleRunAlchemy}
+                    disabled={alchemyRunning || saving || finalizing || axiomRunning}
+                    className="rounded-full border border-emerald-400/70 bg-emerald-500/10 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {alchemyRunning ? "Running…" : "Run Alchemy"}
+                  </button>
+
+                  <button
+                    onClick={handleSaveDraft}
+                    disabled={saving || finalizing || !canMutateSelected || axiomRunning}
+                    className="rounded-full bg-emerald-500 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-black hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {saving ? "Saving…" : "Save"}
+                  </button>
+
+                  <button
+                    onClick={handleMarkReviewed}
+                    disabled={!selectedDraft || saving || finalizing || !canMutateSelected || axiomRunning}
+                    className="rounded-full border border-amber-400/60 bg-black/20 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Mark reviewed
+                  </button>
+
+                  <button
+                    onClick={handleFinalize}
+                    disabled={!selectedDraft || saving || finalizing || !canMutateSelected || axiomRunning}
+                    className="rounded-full border border-emerald-500/60 bg-black/30 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {finalizing ? "Finalizing…" : "Finalize → Council"}
+                  </button>
+
+                  <button
+                    onClick={openDelete}
+                    disabled={!selectedDraft || !canMutateSelected || saving || finalizing || alchemyRunning || axiomRunning}
+                    className="rounded-full border border-rose-500/50 bg-rose-500/10 px-4 py-2 text-[10px] sm:text-[11px] font-semibold tracking-[0.18em] uppercase text-rose-200 hover:bg-rose-500/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Delete
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* CONTENT (scroll inside, not the page) */}
+            <div className={cx(cardBody, "p-3 sm:p-5")}>
+              <div className="h-full min-h-0 flex flex-col">
+                <div className="flex-1 min-h-0 overflow-hidden">
                   {workspaceTab === "editor" ? (
                     <div className={cx("h-full w-full rounded-2xl border overflow-hidden", editorCard)}>
                       <div className="h-full flex flex-col">
@@ -1501,9 +1456,9 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                       </div>
                     </div>
                   ) : (
-                    /* AXIOM panel unchanged */
-                    <div className="h-full w-full rounded-2xl border border-slate-800 bg-slate-950/40 overflow-hidden flex flex-col">
-                      <div className="shrink-0 px-5 py-4 border-b border-slate-800">
+                    // AXIOM panel (unchanged logic, just consistent shell + internal scroll)
+                    <div className="h-full w-full rounded-2xl border border-white/10 bg-black/20 overflow-hidden flex flex-col">
+                      <div className="shrink-0 px-5 py-4 border-b border-white/10">
                         <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
                           AXIOM · Draft Review
                         </div>
@@ -1531,21 +1486,21 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                         )}
 
                         {!selectedId ? (
-                          <div className="rounded-2xl border border-slate-800 bg-black/30 px-5 py-4 text-[13px] text-slate-400">
+                          <div className="rounded-2xl border border-white/10 bg-black/20 px-5 py-4 text-[13px] text-slate-400">
                             Select a draft to view AXIOM notes.
                           </div>
                         ) : axiomLoading ? (
-                          <div className="rounded-2xl border border-slate-800 bg-black/30 px-5 py-4 text-[13px] text-slate-400">
+                          <div className="rounded-2xl border border-white/10 bg-black/20 px-5 py-4 text-[13px] text-slate-400">
                             Loading AXIOM notes…
                           </div>
                         ) : !selectedAxiomSummary ? (
-                          <div className="rounded-2xl border border-slate-800 bg-black/30 px-5 py-4 text-[13px] text-slate-400">
+                          <div className="rounded-2xl border border-white/10 bg-black/20 px-5 py-4 text-[13px] text-slate-400">
                             No AXIOM summary found for this draft yet. Click{" "}
                             <span className="text-sky-200 font-semibold">Run AXIOM</span>.
                           </div>
                         ) : (
-                          <div className="rounded-2xl border border-slate-800 bg-black/30 overflow-hidden">
-                            <div className="px-5 py-4 border-b border-slate-800 flex items-start justify-between gap-4">
+                          <div className="rounded-2xl border border-white/10 bg-black/20 overflow-hidden">
+                            <div className="px-5 py-4 border-b border-white/10 flex items-start justify-between gap-4">
                               <div className="min-w-0">
                                 <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Latest Summary</div>
                                 <div className="mt-1 text-[13px] font-semibold text-slate-100 truncate">
@@ -1556,7 +1511,8 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                                   <span className="mx-2 text-slate-700">•</span>
                                   model: <span className="text-slate-300">{selectedAxiomSummary.model || "—"}</span>
                                   <span className="mx-2 text-slate-700">•</span>
-                                  tokens: <span className="text-slate-300">{selectedAxiomSummary.tokens_used ?? "—"}</span>
+                                  tokens:{" "}
+                                  <span className="text-slate-300">{selectedAxiomSummary.tokens_used ?? "—"}</span>
                                 </div>
                               </div>
 
@@ -1574,11 +1530,11 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                         )}
 
                         {axiomNotes.length > 1 && (
-                          <div className="rounded-2xl border border-slate-800 bg-black/20 overflow-hidden">
-                            <div className="px-5 py-3 border-b border-slate-800 text-[11px] uppercase tracking-[0.22em] text-slate-400">
+                          <div className="rounded-2xl border border-white/10 bg-black/15 overflow-hidden">
+                            <div className="px-5 py-3 border-b border-white/10 text-[11px] uppercase tracking-[0.22em] text-slate-400">
                               AXIOM History ({axiomNotes.length})
                             </div>
-                            <ul className="divide-y divide-slate-800">
+                            <ul className="divide-y divide-white/10">
                               {axiomNotes.map((n) => (
                                 <li key={n.id} className="px-5 py-4">
                                   <div className="flex items-start justify-between gap-3">
@@ -1594,12 +1550,12 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                                         {n.model || "—"}
                                       </div>
                                     </div>
-                                    <span className="rounded-full border border-slate-700 bg-slate-900/60 px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-slate-300">
+                                    <span className="rounded-full border border-white/10 bg-black/20 px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-slate-300">
                                       {n.id.slice(0, 8)}
                                     </span>
                                   </div>
                                   {n.content && (
-                                    <div className="mt-3 rounded-2xl border border-slate-800 bg-black/30 px-4 py-3 text-[12px] leading-[1.7] text-slate-200">
+                                    <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-[12px] leading-[1.7] text-slate-200">
                                       {n.content.length > 320 ? `${n.content.slice(0, 320)}…` : n.content}
                                     </div>
                                   )}
@@ -1610,36 +1566,123 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                         )}
                       </div>
 
-                      <div className="shrink-0 px-5 py-3 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
+                      <div className="shrink-0 px-5 py-3 border-t border-white/10 text-[10px] text-slate-500 flex items-center justify-between">
                         <span>AXIOM · ai_notes (draft-stage) · advisory-only</span>
                         <span>Archive embeds AXIOM snapshot later (not during draft)</span>
                       </div>
                     </div>
                   )}
+                </div>
 
-                  {(error || info) && (
-                    <div className="mt-4 text-[13px]">
-                      {error && (
-                        <div className="rounded-2xl border border-red-500/60 bg-red-500/10 px-4 py-3 text-red-200">
-                          {error}
-                        </div>
-                      )}
-                      {info && !error && (
-                        <div className="rounded-2xl border border-emerald-500/60 bg-emerald-500/10 px-4 py-3 text-emerald-200">
-                          {info}
-                        </div>
-                      )}
+                {(error || info) && (
+                  <div className="mt-4 text-[13px]">
+                    {error && (
+                      <div className="rounded-2xl border border-red-500/60 bg-red-500/10 px-4 py-3 text-red-200">
+                        {error}
+                      </div>
+                    )}
+                    {info && !error && (
+                      <div className="rounded-2xl border border-emerald-500/60 bg-emerald-500/10 px-4 py-3 text-emerald-200">
+                        {info}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="shrink-0 px-5 py-3 border-t border-white/10 text-[10px] text-slate-500 flex items-center justify-between">
+              <span>CI-Alchemy · Draft factory (governance_drafts)</span>
+              <span>Lane-aware · AXIOM → ai_notes · Finalize → governance_ledger (PENDING)</span>
+            </div>
+          </section>
+
+          {/* RIGHT: Inspector (Council/Provisioning-style third pane) */}
+          <aside className={cx(cardShell, drawerOpen ? "col-span-12 lg:col-span-3" : "col-span-12 lg:col-span-4")}>
+            <div className={cx(cardHeader, "p-4")}>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Inspector</div>
+              <div className="mt-2 text-[12px] text-slate-400">
+                Stable OS panel (no wiring). Quick status, actions, and AXIOM peek.
+              </div>
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
+              <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Selection</div>
+                <div className="mt-1 text-[13px] font-semibold text-slate-100 truncate">
+                  {selectedDraft?.title || title || "—"}
+                </div>
+                <div className="mt-1 text-[11px] text-slate-500">
+                  {selectedDraft ? fmtShort(selectedDraft.created_at) : "—"}
+                  <span className="mx-2 text-slate-700">•</span>
+                  {selectedDraft?.status ? selectedDraft.status.toUpperCase() : "—"}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-black/15 px-4 py-3">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Lane</div>
+                <div className="mt-1 text-[12px] text-slate-300">
+                  <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
+                  <span className="mx-2 text-slate-700">•</span>
+                  Entity: <span className="text-emerald-300 font-semibold">{activeEntityLabel}</span>
+                </div>
+                {selectedDraft?.finalized_record_id && (
+                  <div className="mt-2 text-[11px] text-emerald-200">Ledger-linked · locked</div>
+                )}
+                {!canMutateSelected && selectedDraft && (
+                  <div className="mt-2 text-[11px] text-slate-300">Mutations disabled in this state.</div>
+                )}
+              </div>
+
+              {/* AXIOM peek (non-mutating, no new fetch beyond existing state) */}
+              <div className="rounded-2xl border border-white/10 bg-black/20 overflow-hidden">
+                <div className="px-4 py-3 border-b border-white/10">
+                  <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">AXIOM peek</div>
+                  <div className="mt-1 text-[12px] text-slate-400">
+                    Latest draft summary (if present). Switch to AXIOM tab for full history.
+                  </div>
+                </div>
+                <div className="px-4 py-3">
+                  {selectedAxiomSummary?.content ? (
+                    <div className="text-[12px] leading-[1.7] text-slate-200 line-clamp-6">
+                      {selectedAxiomSummary.content}
                     </div>
+                  ) : (
+                    <div className="text-[12px] text-slate-500">No summary loaded yet.</div>
                   )}
                 </div>
+              </div>
 
-                <div className="shrink-0 px-5 py-3 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
-                  <span>CI-Alchemy · Draft factory (governance_drafts)</span>
-                  <span>Lane-aware · AXIOM → ai_notes · Finalize → governance_ledger (PENDING)</span>
+              <div className="rounded-2xl border border-white/10 bg-black/15 px-4 py-3">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Quick actions</div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    onClick={handleNewDraft}
+                    className="rounded-full border border-white/10 bg-black/20 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-black/30"
+                  >
+                    New
+                  </button>
+                  <button
+                    onClick={() => reloadDrafts(true)}
+                    className="rounded-full border border-white/10 bg-black/20 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-black/30"
+                  >
+                    Refresh
+                  </button>
+                  <button
+                    onClick={() => setReaderOpen(true)}
+                    className="rounded-full border border-emerald-400/50 bg-emerald-500/10 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-emerald-200 hover:bg-emerald-500/15"
+                  >
+                    Reader
+                  </button>
                 </div>
-              </section>
+              </div>
             </div>
-          </div>
+
+            <div className="shrink-0 px-5 py-3 border-t border-white/10 text-[10px] text-slate-500 flex items-center justify-between">
+              <span>OS-consistent scroll</span>
+              <span>Inspector is non-mutating</span>
+            </div>
+          </aside>
         </div>
       </div>
 
@@ -1691,9 +1734,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
             <div className="px-6 py-5 border-b border-slate-800">
               <div className="text-[11px] uppercase tracking-[0.22em] text-rose-300">Delete draft</div>
               <div className="mt-1 text-[16px] font-semibold text-slate-100">Discard vs Permanent Delete</div>
-              <div className="mt-2 text-[12px] text-slate-400">
-                Allowed only before finalize. Ledger-linked drafts are locked.
-              </div>
+              <div className="mt-2 text-[12px] text-slate-400">Allowed only before finalize. Ledger-linked drafts are locked.</div>
             </div>
 
             <div className="px-6 py-5 space-y-4">
@@ -1771,9 +1812,7 @@ Include WHEREAS recitals, clear RESOLVED clauses, and a signing block for direct
                 disabled={deleteBusy || !canMutateSelected}
                 className={cx(
                   "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition disabled:opacity-50 disabled:cursor-not-allowed",
-                  deleteMode === "soft"
-                    ? "bg-emerald-500 text-black hover:bg-emerald-400"
-                    : "bg-rose-500 text-black hover:bg-rose-400"
+                  deleteMode === "soft" ? "bg-emerald-500 text-black hover:bg-emerald-400" : "bg-rose-500 text-black hover:bg-rose-400"
                 )}
               >
                 {deleteBusy ? "Deleting…" : deleteMode === "soft" ? "Discard" : "Hard Delete"}
