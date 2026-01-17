@@ -12,53 +12,39 @@ export default function OsLayout({ children }: { children: ReactNode }) {
   return (
     <OsEntityProvider>
       <OsEnvProvider>
-        <div className="os-root relative overflow-hidden">
-
+        <div className="os-root relative overflow-x-hidden">
           {/* === OS ENVIRONMENT (DOES NOT SCROLL) === */}
           <div
             aria-hidden
-            className="
-              pointer-events-none
-              fixed inset-0 z-0
-              flex items-center justify-center
-            "
+            className="pointer-events-none fixed inset-0 z-0 flex items-center justify-center"
           >
-            {/* Ledger shield watermark */}
+            {/* Ledger shield watermark (DEBUG VISIBLE) */}
             <div
-              className="
-                absolute
-                w-[140vw] max-w-none
-                aspect-[3/4]
-                opacity-[0.035]
-                blur-[72px]
-                bg-center bg-no-repeat bg-contain
-              "
+              className="absolute w-[140vw] max-w-none aspect-[3/4] bg-center bg-no-repeat bg-contain"
               style={{
                 backgroundImage: "url(/os/ledger-shield-gold.svg)",
+                opacity: 0.12,      // <- DEBUG (later drop to ~0.035–0.05)
+                filter: "blur(18px)",// <- DEBUG (later raise to ~50–80px)
                 transform: "translateY(-8%)",
               }}
             />
 
-            {/* Dark vignette above shield */}
-            <div className="absolute inset-0 bg-gradient-radial from-transparent via-black/20 to-black/70" />
+            {/* Vignette */}
+            <div className="absolute inset-0 bg-black/60 [mask-image:radial-gradient(circle,transparent_0%,black_60%,black_100%)]" />
           </div>
 
           {/* === OS UI LAYER === */}
           <div className="relative z-10">
-            {/* Global OS command / control bar */}
             <OsHeader />
 
-            {/* Main workspace shell (ONLY scroll surface) */}
             <div className="os-shell">
               <OsAuthGate>
                 <div className="os-workspace">{children}</div>
               </OsAuthGate>
             </div>
 
-            {/* OS Dock (bottom overlay via CSS) */}
             <OsDock />
           </div>
-
         </div>
       </OsEnvProvider>
     </OsEntityProvider>
