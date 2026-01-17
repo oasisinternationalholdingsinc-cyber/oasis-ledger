@@ -1,3 +1,4 @@
+// src/components/OsGlobalBar.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -71,6 +72,9 @@ export function OsGlobalBar() {
   const [envMenuOpen, setEnvMenuOpen] = useState(false);
   const [entityMenuOpen, setEntityMenuOpen] = useState(false);
 
+  // ✅ condensed mode on scroll (Apple-style). UI-only.
+  const [condensed, setCondensed] = useState(false);
+
   const [entityOptions, setEntityOptions] = useState<
     Array<{ key: EntityKey; label: string }>
   >([{ key: "workspace" as EntityKey, label: "Workspace" }]);
@@ -107,6 +111,17 @@ export function OsGlobalBar() {
     return () => {
       mounted = false;
     };
+  }, []);
+
+  // condensed mode on scroll (threshold 24px)
+  useEffect(() => {
+    const onScroll = () => {
+      const y = window.scrollY || 0;
+      setCondensed(y > 24);
+    };
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll as any);
   }, []);
 
   // close menus on outside click / ESC
@@ -203,26 +218,23 @@ export function OsGlobalBar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ✅ env styling (single indicator only — the env pill; no duplicates)
   const envMeta = useMemo(() => {
     if (env === "SANDBOX") {
       return {
         label: "SANDBOX",
         subtitle: "Test artifacts only • Not the system of record",
         pillClass:
-          "bg-[#2a1e0b]/60 border-[#7a5a1a]/55 text-[#f5d47a] shadow-[0_0_28px_rgba(245,212,122,0.12)] hover:shadow-[0_0_34px_rgba(245,212,122,0.16)]",
+          "bg-[#2a1e0b]/55 border-[#7a5a1a]/50 text-[#f5d47a] shadow-[0_0_26px_rgba(245,212,122,0.10)] hover:shadow-[0_0_32px_rgba(245,212,122,0.14)]",
         dotClass: "bg-[#f5d47a]",
-        badge:
-          "border-amber-400/30 bg-amber-400/10 text-amber-100",
       };
     }
     return {
       label: "RoT",
       subtitle: "System of Record",
       pillClass:
-        "bg-[#0b1f14]/60 border-[#1f6f48]/45 text-[#92f7c6] shadow-[0_0_24px_rgba(146,247,198,0.12)] hover:shadow-[0_0_30px_rgba(146,247,198,0.16)]",
+        "bg-[#0b1f14]/55 border-[#1f6f48]/42 text-[#92f7c6] shadow-[0_0_22px_rgba(146,247,198,0.10)] hover:shadow-[0_0_28px_rgba(146,247,198,0.14)]",
       dotClass: "bg-[#92f7c6]",
-      badge:
-        "border-emerald-400/30 bg-emerald-400/10 text-emerald-100",
     };
   }, [env]);
 
@@ -236,10 +248,20 @@ export function OsGlobalBar() {
     window.location.href = "/login";
   };
 
-  // OS shell/header/body pattern alignment
-  const shell =
-    "border-b border-white/10 bg-black/55 backdrop-blur-xl shadow-[0_18px_80px_rgba(0,0,0,0.55)]";
-  const inner = "mx-auto flex h-full max-w-[1500px] items-center px-4 sm:px-6";
+  // Gold-glass OS shell (lighter than black slab)
+  const shell = cx(
+    "border-b border-white/10 backdrop-blur-xl",
+    "bg-gradient-to-b from-amber-200/[0.07] via-black/40 to-black/20",
+    "shadow-[0_18px_80px_rgba(0,0,0,0.45)]"
+  );
+
+  const barH = condensed ? "h-[56px]" : "h-[64px]";
+  const innerPad = condensed ? "px-3 sm:px-5" : "px-4 sm:px-6";
+
+  const inner = cx(
+    "mx-auto flex h-full max-w-[1500px] items-center",
+    innerPad
+  );
 
   const dropdownShell =
     "rounded-2xl border border-white/10 bg-black/85 shadow-[0_14px_50px_rgba(0,0,0,0.62)] backdrop-blur-xl z-[80]";
@@ -247,17 +269,20 @@ export function OsGlobalBar() {
   const dropdownFootnote =
     "mt-2 rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-[11px] text-white/55";
 
+  // pill sizing (condensed saves room)
+  const pillBase = condensed ? "px-2.5 py-1.5" : "px-3 py-2";
+  const pillBaseSm = condensed ? "sm:px-3 sm:py-2" : "sm:px-4 sm:py-2";
+
   return (
     <div className="sticky top-0 z-[50]">
-      {/* authority rail */}
-      <div className={cx("relative h-[64px] w-full", shell)}>
+      <div className={cx("relative w-full transition-[height] duration-200", barH, shell)}>
         {/* subtle gold authority line */}
         <div className="pointer-events-none absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-[#c9a227]/35 to-transparent" />
 
         <div className={inner}>
           {/* LEFT */}
           <div className="flex min-w-0 flex-1 items-center gap-3">
-            <div className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#c9a227]/45 bg-black/30 shadow-[0_0_26px_rgba(201,162,39,0.18)]">
+            <div className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#c9a227]/45 bg-black/20 shadow-[0_0_24px_rgba(201,162,39,0.16)]">
               <Shield className="h-4.5 w-4.5 text-[#d6b24a]" />
               <span className="pointer-events-none absolute -inset-1 rounded-full bg-[#c9a227]/10 blur-md" />
             </div>
@@ -271,31 +296,29 @@ export function OsGlobalBar() {
               </div>
             </div>
 
-            {/* Operator pill */}
-            <div className="ml-3 hidden min-w-0 items-center gap-2 rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[12px] text-white/75 shadow-[0_0_18px_rgba(0,0,0,0.22)] lg:flex">
+            {/* Operator pill (hidden in condensed mode to save space) */}
+            <div
+              className={cx(
+                "ml-3 hidden min-w-0 items-center gap-2 rounded-full border border-white/10 bg-black/20 text-[12px] text-white/75 shadow-[0_0_18px_rgba(0,0,0,0.20)] lg:flex",
+                condensed ? "opacity-0 pointer-events-none w-0 px-0" : "px-3 py-2"
+              )}
+            >
               <span className="shrink-0 text-white/50">Operator</span>
               <span className="h-1 w-1 shrink-0 rounded-full bg-white/25" />
               <span className="min-w-0 max-w-[220px] truncate text-white/90">
                 {operatorEmail}
               </span>
             </div>
-
-            {/* System state mini badge (authority feel, no wiring) */}
-            <div
-              className={cx(
-                "ml-2 hidden items-center gap-2 rounded-full border px-3 py-2 text-[11px] tracking-[0.18em] uppercase shadow-[0_0_18px_rgba(0,0,0,0.18)] md:flex",
-                envMeta.badge
-              )}
-              title={envMeta.subtitle}
-            >
-              <span className={cx("h-2 w-2 rounded-full", envMeta.dotClass)} />
-              <span>{envMeta.label}</span>
-            </div>
           </div>
 
-          {/* CENTER clock (absolute center on desktop) */}
+          {/* CENTER clock */}
           <div className="pointer-events-none absolute left-1/2 hidden -translate-x-1/2 items-center justify-center sm:flex">
-            <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-4 py-2 text-[12px] text-white/90 shadow-[0_0_28px_rgba(201,162,39,0.10)]">
+            <div
+              className={cx(
+                "flex items-center gap-2 rounded-full border border-white/10 bg-black/20 text-[12px] text-white/90 shadow-[0_0_26px_rgba(201,162,39,0.10)] transition-all duration-200",
+                condensed ? "px-3 py-1.5" : "px-4 py-2"
+              )}
+            >
               <Clock3 className="h-4 w-4 text-[#c9a227]/85" />
               <span className="min-w-[72px] text-center tracking-[0.20em]">
                 {clock}
@@ -313,7 +336,11 @@ export function OsGlobalBar() {
                   setEntityMenuOpen((v) => !v);
                   setEnvMenuOpen(false);
                 }}
-                className="flex min-w-0 items-center gap-2 rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[12px] text-white/90 shadow-[0_0_18px_rgba(0,0,0,0.22)] hover:bg-white/5 sm:px-4"
+                className={cx(
+                  "flex min-w-0 items-center gap-2 rounded-full border border-white/10 bg-black/20 text-[12px] text-white/90 shadow-[0_0_18px_rgba(0,0,0,0.20)] hover:bg-white/5 transition",
+                  pillBase,
+                  pillBaseSm
+                )}
                 title="Switch entity"
               >
                 <span className="hidden shrink-0 text-white/55 sm:inline">
@@ -327,7 +354,12 @@ export function OsGlobalBar() {
               </button>
 
               {entityMenuOpen && (
-                <div className={cx("absolute right-0 mt-2 w-[320px] p-2 sm:w-[360px]", dropdownShell)}>
+                <div
+                  className={cx(
+                    "absolute right-0 mt-2 w-[320px] p-2 sm:w-[360px]",
+                    dropdownShell
+                  )}
+                >
                   <div className={dropdownHeader}>Switch entity</div>
 
                   {entityOptions.map((opt) => {
@@ -365,7 +397,7 @@ export function OsGlobalBar() {
               )}
             </div>
 
-            {/* Env dropdown */}
+            {/* Env dropdown (single lane indicator; no duplicate env badge elsewhere) */}
             <div className="relative" onClick={(e) => e.stopPropagation()}>
               <button
                 onClick={() => {
@@ -373,13 +405,19 @@ export function OsGlobalBar() {
                   setEntityMenuOpen(false);
                 }}
                 className={cx(
-                  "flex items-center gap-2 rounded-full border px-3 py-2 text-[12px] transition sm:px-4",
+                  "flex items-center gap-2 rounded-full border text-[12px] transition",
+                  pillBase,
+                  pillBaseSm,
                   envMeta.pillClass
                 )}
                 title={envMeta.subtitle}
               >
-                <span className={cx("h-2 w-2 shrink-0 rounded-full", envMeta.dotClass)} />
-                <span className="font-semibold tracking-wide">{envMeta.label}</span>
+                <span
+                  className={cx("h-2 w-2 shrink-0 rounded-full", envMeta.dotClass)}
+                />
+                <span className="font-semibold tracking-wide">
+                  {condensed && envMeta.label === "SANDBOX" ? "SBX" : envMeta.label}
+                </span>
                 <ChevronDown className="h-4 w-4 shrink-0 text-white/60" />
               </button>
 
@@ -458,7 +496,11 @@ export function OsGlobalBar() {
             {/* Sign out */}
             <button
               onClick={onSignOut}
-              className="flex items-center gap-2 rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[12px] text-white/90 shadow-[0_0_18px_rgba(0,0,0,0.22)] hover:bg-white/5 hover:shadow-[0_0_24px_rgba(201,162,39,0.10)] sm:px-4"
+              className={cx(
+                "flex items-center gap-2 rounded-full border border-white/10 bg-black/20 text-[12px] text-white/90 shadow-[0_0_18px_rgba(0,0,0,0.20)] hover:bg-white/5 hover:shadow-[0_0_24px_rgba(201,162,39,0.10)] transition",
+                pillBase,
+                pillBaseSm
+              )}
               title="Sign out"
             >
               <LogOut className="h-4 w-4 text-white/65" />
