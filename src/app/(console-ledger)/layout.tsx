@@ -18,13 +18,13 @@ export default function OsLayout({ children }: { children: ReactNode }) {
             aria-hidden
             className="pointer-events-none fixed inset-0 z-0 flex items-center justify-center"
           >
-            {/* Ledger shield watermark (DEBUG VISIBLE) */}
+            {/* Ledger shield watermark (PNG substrate) */}
             <div
               className="absolute w-[140vw] max-w-none aspect-[3/4] bg-center bg-no-repeat bg-contain"
               style={{
-                backgroundImage: "url(/os/ledger-shield-gold.svg)",
-                opacity: 0.12,      // <- DEBUG (later drop to ~0.035–0.05)
-                filter: "blur(18px)",// <- DEBUG (later raise to ~50–80px)
+                backgroundImage: "url(/os/ledger-shield-gold.png)",
+                opacity: 0.045,          // final tuned value
+                filter: "blur(48px)",    // final tuned value
                 transform: "translateY(-8%)",
               }}
             />
