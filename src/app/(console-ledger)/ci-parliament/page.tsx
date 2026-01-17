@@ -3,11 +3,12 @@
 export const dynamic = "force-dynamic";
 
 /**
- * CI • Parliament (OS Launchpad Surface — NO REGRESSION)
+ * CI • Parliament (OS Launchpad Surface — MATCHES CI-ARCHIVE)
  * ✅ Wiring preserved: same routes (/ci-council, /ci-amendments, /ci-votes, /ci-constitution)
  * ✅ No RPC changes, no authority changes, no data flow changes
- * ✅ OS-matched calm launchpad pattern (same TileCard grammar as CI-Onboarding)
- * ✅ Mobile-safe: stacks vertically on iPhone, 2x2 on large screens
+ * ✅ OS-matched calm launchpad pattern (cloned grammar from CI-ARCHIVE launchpad)
+ * ✅ Mobile-first: 2 cols on iPhone, scales to 4 cols on desktop
+ * ✅ No blackbox window: inherits OS shell naturally
  */
 
 import Link from "next/link";
@@ -19,173 +20,187 @@ function cx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-type Tile = {
-  eyebrow: string;
-  title: string;
-  description: string;
-  href: string;
-  badge?: string;
-  cta: string;
-  disabled?: boolean;
-};
+export default function CIParliamentLaunchpadPage() {
+  const entityCtx = useEntity() as any;
+  const osEnv = useOsEnv() as any;
 
-function TileCard(t: Tile) {
+  // ✅ contamination-safe: never hardcode corporate entity names
+  const entitySlug = (entityCtx?.activeEntity as string) || (entityCtx?.entitySlug as string) || "entity";
+  const entityLabel = useMemo(() => {
+    const fromCtx =
+      (entityCtx?.entityName as string) ||
+      (entityCtx?.activeEntityName as string) ||
+      (entityCtx?.label as string) ||
+      (entityCtx?.name as string);
+    return fromCtx?.trim() ? fromCtx : entitySlug;
+  }, [entityCtx, entitySlug]);
+
+  const isSandbox = !!osEnv?.isSandbox;
+  const envLabel = isSandbox ? "SANDBOX" : "RoT";
+
+  // ✅ WIRING PRESERVED (same routes)
+  const tiles: Array<{
+    title: string;
+    subtitle: string;
+    href: string;
+    badge: string;
+    tone: "emerald" | "amber" | "sky" | "slate";
+  }> = [
+    {
+      title: "CI-Council",
+      subtitle: "Deliberation console for approving or rejecting governance records.",
+      href: "/ci-council",
+      badge: "Authority",
+      tone: "emerald",
+    },
+    {
+      title: "CI-Amendments",
+      subtitle: "Legislative timeline of governed changes and when they became active law.",
+      href: "/ci-amendments",
+      badge: "Timeline",
+      tone: "sky",
+    },
+    {
+      title: "CI-Votes",
+      subtitle: "Official record of approvals and rejections backing each governed change.",
+      href: "/ci-votes",
+      badge: "Record",
+      tone: "slate",
+    },
+    {
+      title: "CI-Constitution",
+      subtitle: "Catalogue of protected constitutional objects requiring amendment + vote gates.",
+      href: "/ci-constitution",
+      badge: "Protected",
+      tone: "amber",
+    },
+  ];
+
+  // ✅ cloned from CI-ARCHIVE launchpad for perfect consistency
   const shell =
-    "group relative overflow-hidden rounded-3xl border border-white/10 bg-black/20 p-7 shadow-[0_28px_120px_rgba(0,0,0,0.55)] transition";
-  const hover =
-    "hover:border-amber-300/25 hover:bg-black/28 hover:shadow-[0_0_0_1px_rgba(250,204,21,0.12),0_34px_140px_rgba(0,0,0,0.70)]";
-  const glow =
-    "before:pointer-events-none before:absolute before:inset-0 before:opacity-0 before:transition before:duration-500 " +
-    "before:bg-[radial-gradient(900px_circle_at_20%_0%,rgba(250,204,21,0.14),transparent_55%),radial-gradient(700px_circle_at_80%_120%,rgba(59,130,246,0.12),transparent_60%)] " +
-    "group-hover:before:opacity-100";
-  const topLine = "absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/20 to-transparent";
+    "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden";
+  const header =
+    "border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent px-4 sm:px-6 py-4 sm:py-5";
+  const body = "px-4 sm:px-6 py-5 sm:py-6";
 
-  const content = (
-    <div className={cx(shell, !t.disabled && hover, glow, t.disabled && "opacity-60")}>
-      <div className={topLine} />
+  const toneRing: Record<string, string> = {
+    emerald: "ring-emerald-400/25 hover:ring-emerald-300/35",
+    sky: "ring-sky-400/25 hover:ring-sky-300/35",
+    amber: "ring-amber-400/25 hover:ring-amber-300/35",
+    slate: "ring-white/10 hover:ring-white/15",
+  };
 
-      <div className="relative z-10">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">{t.eyebrow}</div>
-            <div className="mt-2 text-xl font-semibold text-white/90">{t.title}</div>
-          </div>
-
-          {t.badge ? (
-            <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-3 py-1 text-[11px] font-medium text-amber-100">
-              {t.badge}
-            </span>
-          ) : null}
-        </div>
-
-        <p className="mt-4 max-w-[56ch] text-sm leading-6 text-white/55">{t.description}</p>
-
-        <div className="mt-6 flex items-center justify-between">
-          <div className="text-xs text-white/35">Legislative Authority</div>
-          <div
-            className={cx(
-              "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-xs font-semibold transition",
-              t.disabled
-                ? "border-white/10 bg-white/5 text-white/35"
-                : "border-amber-300/20 bg-amber-300/10 text-amber-100 group-hover:bg-amber-300/14"
-            )}
-          >
-            {t.cta}
-            <span aria-hidden className={cx("transition", t.disabled ? "" : "group-hover:translate-x-0.5")}>
-              →
-            </span>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-
-  if (t.disabled) return <div>{content}</div>;
+  const toneBadge: Record<string, string> = {
+    emerald: "border-emerald-400/25 bg-emerald-500/10 text-emerald-200",
+    sky: "border-sky-400/25 bg-sky-500/10 text-sky-200",
+    amber: "border-amber-400/25 bg-amber-500/10 text-amber-200",
+    slate: "border-white/10 bg-white/5 text-slate-200",
+  };
 
   return (
-    <Link href={t.href} className="block">
-      {content}
-    </Link>
-  );
-}
+    <div className="w-full">
+      <div className="mx-auto w-full max-w-[1200px] px-4 pb-10 pt-4 sm:pt-6">
+        {/* OS-aligned page header */}
+        <div className={shell}>
+          <div className={header}>
+            <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">CI • Parliament</div>
+            <h1 className="mt-1 text-lg sm:text-xl font-semibold text-slate-50">Legislative Launchpad</h1>
+            <p className="mt-1 max-w-3xl text-[11px] sm:text-xs text-slate-400 leading-relaxed">
+              One authority surface. Multiple legislative consoles. Lane-safe. Entity-scoped. OS-native.
+            </p>
 
-export default function CIParliamentPage() {
-  // Entity (defensive — same pattern you used in CI-Onboarding / CI-Evidence)
-  const ec = useEntity() as any;
-  const entityKey: string =
-    (ec?.entityKey as string) || (ec?.activeEntity as string) || (ec?.entity_slug as string) || "";
-
-  const entityName: string =
-    (ec?.entityName as string) ||
-    (ec?.activeEntityName as string) ||
-    (ec?.entities?.find?.((x: any) => x?.slug === entityKey || x?.key === entityKey)?.name as string) ||
-    entityKey;
-
-  // Lane (defensive — same pattern you used in CI-Onboarding / CI-Evidence)
-  const env = useOsEnv() as any;
-  const isTest: boolean = Boolean(env?.is_test ?? env?.isTest ?? env?.lane_is_test ?? env?.sandbox ?? env?.isSandbox);
-
-  const tiles: Tile[] = useMemo(
-    () => [
-      {
-        eyebrow: "CI • Parliament",
-        title: "CI-Council",
-        description:
-          "Deliberation console for drafted resolutions and governance records. Review, approve, or reject — then hand off to Forge for signature execution.",
-        href: "/ci-council",
-        badge: "Authority",
-        cta: "Open Council",
-      },
-      {
-        eyebrow: "CI • Parliament",
-        title: "CI-Amendments",
-        description:
-          "Legislative timeline of governed schema changes. Proposals, classifications, and when changes became active law under constitutional rules.",
-        href: "/ci-amendments",
-        badge: "Timeline",
-        cta: "Open Amendments",
-      },
-      {
-        eyebrow: "CI • Parliament",
-        title: "CI-Votes",
-        description:
-          "Official record of approvals and rejections: who voted, in what role, and when. The democratic ledger backing every governed change.",
-        href: "/ci-votes",
-        badge: "Record",
-        cta: "Open Votes",
-      },
-      {
-        eyebrow: "CI • Parliament",
-        title: "CI-Constitution",
-        description:
-          "Catalogue of protected objects designated constitutional. Changes require amendments + votes approval before they can take effect in the ledger.",
-        href: "/ci-constitution",
-        badge: "Protected",
-        cta: "Open Constitution",
-      },
-    ],
-    []
-  );
-
-  return (
-    <div className="h-full w-full">
-      <div className="mx-auto w-full max-w-[1400px] px-4 pb-12 pt-8">
-        <div className="mb-7 flex items-end justify-between gap-4">
-          <div>
-            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">Oasis Digital Parliament</div>
-            <div className="mt-1 text-3xl font-semibold text-white/90">Launchpad</div>
-            <div className="mt-2 text-sm text-white/50">
-              Entity-scoped: <span className="text-white/70">{entityName || entityKey || "—"}</span> • Lane:{" "}
-              <span className="text-white/70">{isTest ? "SANDBOX" : "RoT"}</span>
+            <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
+              <span>
+                Entity: <span className="text-emerald-300 font-medium">{entityLabel}</span>
+              </span>
+              <span className="text-slate-700">•</span>
+              <span>
+                Lane:{" "}
+                <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>
+                  {envLabel}
+                </span>
+              </span>
+              <span className="text-slate-700">•</span>
+              <span className="text-slate-500">OS module surface</span>
             </div>
           </div>
 
-          <div className="hidden sm:flex items-center gap-2">
-            <span className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs text-white/60">
-              Proposals → Amendments → Votes → Constitutional Law
-            </span>
+          <div className={body}>
+            {/* iPhone-first tiles: 2 cols on mobile, 4 cols on desktop */}
+            <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-4">
+              {tiles.map((t) => (
+                <Link
+                  key={t.href}
+                  href={t.href}
+                  className={cx(
+                    "group relative rounded-3xl border border-white/10 bg-black/25 hover:bg-black/30 transition",
+                    "p-3 sm:p-4",
+                    "ring-1 ring-transparent",
+                    toneRing[t.tone]
+                  )}
+                >
+                  {/* subtle gold signal (same as Archive) */}
+                  <div className="pointer-events-none absolute inset-0 rounded-3xl opacity-0 group-hover:opacity-100 transition">
+                    <div className="absolute -top-20 -right-20 h-40 w-40 rounded-full bg-amber-500/10 blur-2xl" />
+                  </div>
+
+                  <div className="relative flex flex-col gap-2 min-h-[120px] sm:min-h-[150px]">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="truncate text-[13px] sm:text-[14px] font-semibold text-slate-100">
+                          {t.title}
+                        </div>
+                        <div className="mt-1 line-clamp-2 text-[11px] sm:text-[12px] leading-relaxed text-slate-400">
+                          {t.subtitle}
+                        </div>
+                      </div>
+
+                      <span
+                        className={cx(
+                          "shrink-0 rounded-full border px-2 py-1 text-[9px] uppercase tracking-[0.18em]",
+                          toneBadge[t.tone]
+                        )}
+                      >
+                        {t.badge}
+                      </span>
+                    </div>
+
+                    <div className="mt-auto pt-2">
+                      <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 group-hover:bg-white/7">
+                        Open
+                        <span className="text-slate-500 group-hover:text-slate-400">→</span>
+                      </div>
+                      <div className="mt-2 text-[10px] text-slate-600">
+                        {entitySlug} • {envLabel}
+                      </div>
+                    </div>
+                  </div>
+                </Link>
+              ))}
+            </div>
+
+            {/* Compact footnote (mobile-friendly) */}
+            <div className="mt-5 rounded-3xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
+              <div className="font-semibold text-slate-200">OS behavior</div>
+              <div className="mt-1 leading-relaxed text-slate-400">
+                CI-Parliament inherits the OS shell. No module-owned window frames. Authority and law remain inside the
+                dedicated consoles (Council / Amendments / Votes / Constitution).
+              </div>
+            </div>
           </div>
         </div>
 
-        {/* Mobile-first: stacks; Large: 2x2 calm grid */}
-        <div className="grid grid-cols-12 gap-4">
-          <div className="col-span-12 lg:col-span-6">
-            <TileCard {...tiles[0]} />
-          </div>
-          <div className="col-span-12 lg:col-span-6">
-            <TileCard {...tiles[1]} />
-          </div>
-          <div className="col-span-12 lg:col-span-6">
-            <TileCard {...tiles[2]} />
-          </div>
-          <div className="col-span-12 lg:col-span-6">
-            <TileCard {...tiles[3]} />
-          </div>
-        </div>
-
-        <div className="mt-6 text-[10px] text-white/35">
-          Parliament is the legislative and constitutional authority surface. Operational execution remains inside the dedicated consoles
-          (Council, Amendments, Votes, Constitution) — this page is the calm entry point.
+        {/* Optional: quick links row for desktop (stays iPhone-safe) */}
+        <div className="mt-4 flex flex-wrap gap-2">
+          {tiles.map((t) => (
+            <Link
+              key={`${t.href}-pill`}
+              href={t.href}
+              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+            >
+              {t.title}
+            </Link>
+          ))}
         </div>
       </div>
     </div>

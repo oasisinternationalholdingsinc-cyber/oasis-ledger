@@ -2,6 +2,18 @@
 "use client";
 export const dynamic = "force-dynamic";
 
+/**
+ * CI • Onboarding (OS Launchpad Surface — MATCHES CI-ARCHIVE 1:1)
+ * ✅ Wiring preserved (NO REGRESSION):
+ *    - /ci-onboarding/ci-admissions
+ *    - /ci-onboarding/ci-evidence
+ *    - /ci-onboarding/ci-provisioning
+ * ✅ No RPC changes, no authority changes, no data flow changes
+ * ✅ OS-matched calm launchpad pattern (cloned grammar from CI-ARCHIVE launchpad)
+ * ✅ Mobile-first: 2 cols on iPhone, scales to 4 cols on desktop
+ * ✅ No blackbox window: inherits OS shell naturally
+ */
+
 import Link from "next/link";
 import { useMemo } from "react";
 import { useEntity } from "@/components/OsEntityContext";
@@ -11,162 +23,175 @@ function cx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-type Tile = {
-  eyebrow: string;
-  title: string;
-  description: string;
-  href: string;
-  badge?: string;
-  cta: string;
-  disabled?: boolean;
-};
+export default function CiOnboardingLaunchpadPage() {
+  const entityCtx = useEntity() as any;
+  const osEnv = useOsEnv() as any;
 
-function TileCard(t: Tile) {
+  // ✅ contamination-safe: never hardcode corporate entity names
+  const entitySlug = (entityCtx?.activeEntity as string) || (entityCtx?.entitySlug as string) || "entity";
+  const entityLabel = useMemo(() => {
+    const fromCtx =
+      (entityCtx?.entityName as string) ||
+      (entityCtx?.activeEntityName as string) ||
+      (entityCtx?.label as string) ||
+      (entityCtx?.name as string);
+    return fromCtx?.trim() ? fromCtx : entitySlug;
+  }, [entityCtx, entitySlug]);
+
+  const isSandbox = !!osEnv?.isSandbox;
+  const envLabel = isSandbox ? "SANDBOX" : "RoT";
+
+  // ✅ WIRING PRESERVED (same routes)
+  const tiles: Array<{
+    title: string;
+    subtitle: string;
+    href: string;
+    badge: string;
+    tone: "emerald" | "amber" | "sky" | "slate";
+  }> = [
+    {
+      title: "CI-Admissions",
+      subtitle: "Intake decisions, status transitions, assignment, and operator control flow.",
+      href: "/ci-onboarding/ci-admissions",
+      badge: "Inbox",
+      tone: "emerald",
+    },
+    {
+      title: "CI-Evidence",
+      subtitle: "Evidence review workspace: validate completeness and request additional information.",
+      href: "/ci-onboarding/ci-evidence",
+      badge: "Review",
+      tone: "sky",
+    },
+    {
+      title: "CI-Provisioning",
+      subtitle: "Authority grant surface: complete provisioning to create entity + memberships and activate Ledger.",
+      href: "/ci-onboarding/ci-provisioning",
+      badge: "Activation",
+      tone: "amber",
+    },
+  ];
+
+  // ✅ cloned from CI-ARCHIVE launchpad for perfect consistency
   const shell =
-    "group relative overflow-hidden rounded-3xl border border-white/10 bg-black/20 p-7 shadow-[0_28px_120px_rgba(0,0,0,0.55)] transition";
-  const hover =
-    "hover:border-amber-300/25 hover:bg-black/28 hover:shadow-[0_0_0_1px_rgba(250,204,21,0.12),0_34px_140px_rgba(0,0,0,0.70)]";
-  const glow =
-    "before:pointer-events-none before:absolute before:inset-0 before:opacity-0 before:transition before:duration-500 before:bg-[radial-gradient(900px_circle_at_20%_0%,rgba(250,204,21,0.14),transparent_55%),radial-gradient(700px_circle_at_80%_120%,rgba(59,130,246,0.12),transparent_60%)] group-hover:before:opacity-100";
-  const topLine =
-    "absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/20 to-transparent";
+    "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden";
+  const header =
+    "border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent px-4 sm:px-6 py-4 sm:py-5";
+  const body = "px-4 sm:px-6 py-5 sm:py-6";
 
-  const content = (
-    <div className={cx(shell, !t.disabled && hover, glow, t.disabled && "opacity-60")}>
-      <div className={topLine} />
+  const toneRing: Record<string, string> = {
+    emerald: "ring-emerald-400/25 hover:ring-emerald-300/35",
+    sky: "ring-sky-400/25 hover:ring-sky-300/35",
+    amber: "ring-amber-400/25 hover:ring-amber-300/35",
+    slate: "ring-white/10 hover:ring-white/15",
+  };
 
-      <div className="relative z-10">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">{t.eyebrow}</div>
-            <div className="mt-2 text-xl font-semibold text-white/90">{t.title}</div>
-          </div>
-
-          {t.badge ? (
-            <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-3 py-1 text-[11px] font-medium text-amber-100">
-              {t.badge}
-            </span>
-          ) : null}
-        </div>
-
-        <p className="mt-4 max-w-[52ch] text-sm leading-6 text-white/55">{t.description}</p>
-
-        <div className="mt-6 flex items-center justify-between">
-          <div className="text-xs text-white/35">Authority Surface</div>
-          <div
-            className={cx(
-              "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-xs font-semibold transition",
-              t.disabled
-                ? "border-white/10 bg-white/5 text-white/35"
-                : "border-amber-300/20 bg-amber-300/10 text-amber-100 group-hover:bg-amber-300/14"
-            )}
-          >
-            {t.cta}
-            <span aria-hidden className={cx("transition", t.disabled ? "" : "group-hover:translate-x-0.5")}>
-              →
-            </span>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-
-  if (t.disabled) return <div>{content}</div>;
+  const toneBadge: Record<string, string> = {
+    emerald: "border-emerald-400/25 bg-emerald-500/10 text-emerald-200",
+    sky: "border-sky-400/25 bg-sky-500/10 text-sky-200",
+    amber: "border-amber-400/25 bg-amber-500/10 text-amber-200",
+    slate: "border-white/10 bg-white/5 text-slate-200",
+  };
 
   return (
-    <Link href={t.href} className="block">
-      {content}
-    </Link>
-  );
-}
+    <div className="w-full">
+      <div className="mx-auto w-full max-w-[1200px] px-4 pb-10 pt-4 sm:pt-6">
+        <div className={shell}>
+          <div className={header}>
+            <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">CI • Onboarding</div>
+            <h1 className="mt-1 text-lg sm:text-xl font-semibold text-slate-50">Admissions Launchpad</h1>
+            <p className="mt-1 max-w-3xl text-[11px] sm:text-xs text-slate-400 leading-relaxed">
+              One intake surface. Three operator consoles. Lane-safe. Entity-scoped. OS-native.
+            </p>
 
-export default function CiOnboardingLaunchpad() {
-  // Entity (defensive — same pattern you used in CI-Evidence)
-  const ec = useEntity() as any;
-  const entityKey: string =
-    (ec?.entityKey as string) ||
-    (ec?.activeEntity as string) ||
-    (ec?.entity_slug as string) ||
-    "";
-
-  const entityName: string =
-    (ec?.entityName as string) ||
-    (ec?.activeEntityName as string) ||
-    (ec?.entities?.find?.((x: any) => x?.slug === entityKey || x?.key === entityKey)?.name as string) ||
-    entityKey;
-
-  // Lane (defensive — same pattern you used in CI-Evidence)
-  const env = useOsEnv() as any;
-  const isTest: boolean = Boolean(env?.is_test ?? env?.isTest ?? env?.lane_is_test ?? env?.sandbox ?? env?.isSandbox);
-
-  const tiles: Tile[] = useMemo(
-    () => [
-      {
-        eyebrow: "CI • Onboarding",
-        title: "CI-Admissions",
-        description:
-          "Intake decisions, status transitions, operator assignment, and admissions control flow. This is the queue where cases begin.",
-        href: "/ci-onboarding/ci-admissions",
-        badge: "Inbox",
-        cta: "Open Admissions",
-      },
-      {
-        eyebrow: "CI • Onboarding",
-        title: "CI-Evidence",
-        description:
-          "Evidence review and verification workspace. See uploaded documents, validate completeness, and request additional information.",
-        href: "/ci-onboarding/ci-evidence",
-        badge: "Review",
-        cta: "Open Evidence",
-      },
-      {
-        eyebrow: "CI • Onboarding",
-        title: "CI-Provisioning",
-        description:
-          "Authority grant surface. After evidence is satisfactory, complete provisioning to create entity + memberships and activate the Ledger.",
-        href: "/ci-onboarding/ci-provisioning",
-        badge: "Activation",
-        cta: "Open Provisioning",
-      },
-    ],
-    []
-  );
-
-  return (
-    <div className="h-full w-full">
-      <div className="mx-auto w-full max-w-[1400px] px-4 pb-12 pt-8">
-        <div className="mb-7 flex items-end justify-between gap-4">
-          <div>
-            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">CI • Onboarding</div>
-            <div className="mt-1 text-3xl font-semibold text-white/90">Launchpad</div>
-            <div className="mt-2 text-sm text-white/50">
-              Entity-scoped: <span className="text-white/70">{entityName || entityKey || "—"}</span> • Lane:{" "}
-              <span className="text-white/70">{isTest ? "SANDBOX" : "RoT"}</span>
+            <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
+              <span>
+                Entity: <span className="text-emerald-300 font-medium">{entityLabel}</span>
+              </span>
+              <span className="text-slate-700">•</span>
+              <span>
+                Lane:{" "}
+                <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{envLabel}</span>
+              </span>
+              <span className="text-slate-700">•</span>
+              <span className="text-slate-500">OS module surface</span>
             </div>
           </div>
 
-          <div className="hidden sm:flex items-center gap-2">
-            <span className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs text-white/60">
-              Intake → Evidence → Provision
-            </span>
+          <div className={body}>
+            {/* iPhone-first tiles: 2 cols on mobile, 4 cols on desktop (3 tiles will naturally leave one empty spot) */}
+            <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-4">
+              {tiles.map((t) => (
+                <Link
+                  key={t.href}
+                  href={t.href}
+                  className={cx(
+                    "group relative rounded-3xl border border-white/10 bg-black/25 hover:bg-black/30 transition",
+                    "p-3 sm:p-4",
+                    "ring-1 ring-transparent",
+                    toneRing[t.tone]
+                  )}
+                >
+                  {/* subtle gold signal (same as Archive) */}
+                  <div className="pointer-events-none absolute inset-0 rounded-3xl opacity-0 group-hover:opacity-100 transition">
+                    <div className="absolute -top-20 -right-20 h-40 w-40 rounded-full bg-amber-500/10 blur-2xl" />
+                  </div>
+
+                  <div className="relative flex flex-col gap-2 min-h-[120px] sm:min-h-[150px]">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="truncate text-[13px] sm:text-[14px] font-semibold text-slate-100">
+                          {t.title}
+                        </div>
+                        <div className="mt-1 line-clamp-2 text-[11px] sm:text-[12px] leading-relaxed text-slate-400">
+                          {t.subtitle}
+                        </div>
+                      </div>
+
+                      <span
+                        className={cx(
+                          "shrink-0 rounded-full border px-2 py-1 text-[9px] uppercase tracking-[0.18em]",
+                          toneBadge[t.tone]
+                        )}
+                      >
+                        {t.badge}
+                      </span>
+                    </div>
+
+                    <div className="mt-auto pt-2">
+                      <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 group-hover:bg-white/7">
+                        Open
+                        <span className="text-slate-500 group-hover:text-slate-400">→</span>
+                      </div>
+                      <div className="mt-2 text-[10px] text-slate-600">
+                        {entitySlug} • {envLabel}
+                      </div>
+                    </div>
+                  </div>
+                </Link>
+              ))}
+            </div>
+
+            <div className="mt-5 rounded-3xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
+              <div className="font-semibold text-slate-200">OS behavior</div>
+              <div className="mt-1 leading-relaxed text-slate-400">
+                CI-Onboarding inherits the OS shell. No module-owned window frames. Invite/Set-Password can grant portal
+                access for evidence submission, but Ledger activation occurs only after provisioning (entity + memberships).
+              </div>
+            </div>
           </div>
         </div>
 
-        <div className="grid grid-cols-12 gap-4">
-          <div className="col-span-12 lg:col-span-4">
-            <TileCard {...tiles[0]} />
-          </div>
-          <div className="col-span-12 lg:col-span-4">
-            <TileCard {...tiles[1]} />
-          </div>
-          <div className="col-span-12 lg:col-span-4">
-            <TileCard {...tiles[2]} />
-          </div>
-        </div>
-
-        <div className="mt-6 text-[10px] text-white/35">
-          CI-Onboarding is authority-only. Invite/Set-Password can grant portal access for evidence submission, but **Ledger activation
-          occurs only after provisioning** (entity + memberships).
+        <div className="mt-4 flex flex-wrap gap-2">
+          {tiles.map((t) => (
+            <Link
+              key={`${t.href}-pill`}
+              href={t.href}
+              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+            >
+              {t.title}
+            </Link>
+          ))}
         </div>
       </div>
     </div>
