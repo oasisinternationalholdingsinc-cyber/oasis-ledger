@@ -5,13 +5,13 @@ export const dynamic = "force-dynamic";
 /**
  * CI-Archive → Minute Book (PRODUCTION — LOCKED CONTRACT)
  * ✅ SAME data sources + logic (NO wiring changes)
- * ✅ OS-native surface (no black-box window fighting OS shell)
+ * ✅ OS-native surface (matches Verified + Forge 1:1)
  * ✅ iPhone-first: Rail → Reader Sheet (full screen), zero double-scroll
  * ✅ Desktop: 3-column layout preserved (Domains | Entries | Evidence)
  */
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { supabaseBrowser } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 
@@ -778,70 +778,78 @@ export default function MinuteBookClient() {
     }
   }
 
-  /* ---------------- UI atoms ---------------- */
+  /* ---------------- UI atoms (MATCH VERIFIED/FORGE 1:1) ---------------- */
 
-  const Shell = ({ children }: { children: React.ReactNode }) => (
+  const shell =
+    "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden";
+  const header =
+    "border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent px-4 sm:px-6 py-4 sm:py-5";
+  const body = "px-4 sm:px-6 py-5 sm:py-6";
+
+  const Shell = ({ children }: { children: ReactNode }) => (
     <div className="w-full">
-      {/* OS-native spacing (no module-owned viewport/blackbox) */}
-      <div className="mx-auto w-full max-w-[1400px] px-3 sm:px-4 pb-10 pt-4 sm:pt-6">{children}</div>
+      <div className="mx-auto w-full max-w-[1400px] px-4 pb-10 pt-4 sm:pt-6">{children}</div>
     </div>
   );
 
-  const GlassCard = ({
-    className,
-    children,
-  }: {
-    className?: string;
-    children: React.ReactNode;
-  }) => (
-    <div
-      className={cx(
-        "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden",
-        className
-      )}
-    >
-      {children}
-    </div>
+  const GlassCard = ({ className, children }: { className?: string; children: ReactNode }) => (
+    <div className={cx(shell, className)}>{children}</div>
   );
 
-  const CardHeader = ({ children }: { children: React.ReactNode }) => (
-    <div className="border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent px-4 sm:px-5 py-4">
-      {children}
-    </div>
-  );
+  const CardHeader = ({ children }: { children: ReactNode }) => <div className={header}>{children}</div>;
 
-  const CardBody = ({ className, children }: { className?: string; children: React.ReactNode }) => (
-    <div className={cx("px-4 sm:px-5 py-4", className)}>{children}</div>
+  const CardBody = ({ className, children }: { className?: string; children: ReactNode }) => (
+    <div className={cx(body, className)}>{children}</div>
   );
 
   /* ---------------- render ---------------- */
 
   return (
     <Shell>
-      {/* OS page header */}
-      <div className="mb-3 sm:mb-4 flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">CI • Archive</div>
-          <h1 className="mt-1 text-lg sm:text-xl font-semibold text-slate-50 truncate">Minute Book</h1>
-          <p className="mt-1 text-[11px] sm:text-xs text-slate-400">
-            Evidence-first registry indexed by governance domain. Official artifacts are preferred when linked.
-          </p>
-        </div>
-        <div className="shrink-0 flex items-center gap-2">
-          <Link
-            href="/ci-archive"
-            className="hidden sm:inline-flex rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
-          >
-            Launchpad
-          </Link>
-          <Link
-            href="/ci-archive/upload"
-            className="rounded-full border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/15"
-          >
-            Upload →
-          </Link>
-        </div>
-      </div>
+      {/* OS-aligned header (MATCH VERIFIED/FORGE grammar) */}
+      <GlassCard className="mb-4">
+        <CardHeader>
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">CI • Archive</div>
+              <h1 className="mt-1 text-lg sm:text-xl font-semibold text-slate-50 truncate">Minute Book</h1>
+              <p className="mt-1 max-w-3xl text-[11px] sm:text-xs text-slate-400 leading-relaxed">
+                Evidence-first registry indexed by governance domain. Official artifacts are preferred when linked.
+              </p>
+
+              <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
+                <span>
+                  Entity: <span className="text-emerald-300 font-medium">{String(entityKey ?? "—")}</span>
+                </span>
+                <span className="text-slate-700">•</span>
+                <span>
+                  Domain: <span className="text-slate-200 font-medium">{activeDomainLabel}</span>
+                </span>
+                <span className="text-slate-700">•</span>
+                <span className="inline-flex items-center gap-2">
+                  <span className="text-slate-500">Entries:</span>
+                  <span className="text-slate-200 font-semibold">{loading ? "…" : filteredEntries.length}</span>
+                </span>
+              </div>
+            </div>
+
+            <div className="shrink-0 flex items-center gap-2">
+              <Link
+                href="/ci-archive"
+                className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+              >
+                Launchpad
+              </Link>
+              <Link
+                href="/ci-archive/upload"
+                className="rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-amber-200 hover:bg-amber-500/15"
+              >
+                Upload →
+              </Link>
+            </div>
+          </div>
+        </CardHeader>
+      </GlassCard>
 
       {!entityKey ? (
         <GlassCard>
@@ -1015,8 +1023,6 @@ export default function MinuteBookClient() {
                             type="button"
                             onClick={() => {
                               setSelectedId(e.id);
-                              // iPhone: tap record → open reader quickly (but don’t force-load yet)
-                              // keep behavior calm; user can hit Reader button
                             }}
                             className={cx(
                               "w-full text-left px-4 py-4 border-b border-white/10 last:border-b-0 transition",
@@ -1279,9 +1285,49 @@ export default function MinuteBookClient() {
               </GlassCard>
             </div>
           </div>
+
+          {/* OS behavior footnote (matches Verified/FORGE) */}
+          <div className="mt-5 rounded-3xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
+            <div className="font-semibold text-slate-200">OS behavior</div>
+            <div className="mt-1 leading-relaxed text-slate-400">
+              CI-Archive Minute Book inherits the OS shell. No module-owned window frames. Evidence-first registry; verification lives in Verified.
+            </div>
+          </div>
+
+          <div className="mt-5 flex items-center justify-between text-[10px] text-slate-600">
+            <span>CI-Archive · Oasis Digital Parliament</span>
+            <span>ODP.AI · Governance Firmware</span>
+          </div>
+
+          {/* optional quick links row (same grammar as Archive launchpad) */}
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Link
+              href="/ci-archive"
+              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+            >
+              CI-Archive
+            </Link>
+            <Link
+              href="/ci-archive/minute-book"
+              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+            >
+              Minute Book
+            </Link>
+            <Link
+              href="/ci-archive/verified"
+              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+            >
+              Verified
+            </Link>
+            <Link
+              href="/ci-archive/upload"
+              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+            >
+              Upload
+            </Link>
+          </div>
         </>
       )}
-
       {/* ---------------- MOBILE: Domains Sheet ---------------- */}
       {mobileDomainsOpen ? (
         <div className="fixed inset-0 z-[90] bg-black/70 backdrop-blur-xl flex items-end sm:hidden">
@@ -1468,7 +1514,9 @@ export default function MinuteBookClient() {
               </p>
               <div className="mt-2 text-[11px] text-slate-500">
                 Record:{" "}
-                <span className="text-slate-200 font-semibold">{selected.title || selected.file_name || "Untitled filing"}</span>{" "}
+                <span className="text-slate-200 font-semibold">
+                  {selected.title || selected.file_name || "Untitled filing"}
+                </span>{" "}
                 • <span className="font-mono">{shortHash(selected.file_hash || null)}</span>
               </div>
             </div>
