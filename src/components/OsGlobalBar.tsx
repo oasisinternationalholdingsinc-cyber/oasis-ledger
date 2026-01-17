@@ -211,6 +211,8 @@ export function OsGlobalBar() {
         pillClass:
           "bg-[#2a1e0b]/60 border-[#7a5a1a]/55 text-[#f5d47a] shadow-[0_0_28px_rgba(245,212,122,0.12)] hover:shadow-[0_0_34px_rgba(245,212,122,0.16)]",
         dotClass: "bg-[#f5d47a]",
+        badge:
+          "border-amber-400/30 bg-amber-400/10 text-amber-100",
       };
     }
     return {
@@ -219,6 +221,8 @@ export function OsGlobalBar() {
       pillClass:
         "bg-[#0b1f14]/60 border-[#1f6f48]/45 text-[#92f7c6] shadow-[0_0_24px_rgba(146,247,198,0.12)] hover:shadow-[0_0_30px_rgba(146,247,198,0.16)]",
       dotClass: "bg-[#92f7c6]",
+      badge:
+        "border-emerald-400/30 bg-emerald-400/10 text-emerald-100",
     };
   }, [env]);
 
@@ -232,28 +236,42 @@ export function OsGlobalBar() {
     window.location.href = "/login";
   };
 
+  // OS shell/header/body pattern alignment
+  const shell =
+    "border-b border-white/10 bg-black/55 backdrop-blur-xl shadow-[0_18px_80px_rgba(0,0,0,0.55)]";
+  const inner = "mx-auto flex h-full max-w-[1500px] items-center px-4 sm:px-6";
+
+  const dropdownShell =
+    "rounded-2xl border border-white/10 bg-black/85 shadow-[0_14px_50px_rgba(0,0,0,0.62)] backdrop-blur-xl z-[80]";
+  const dropdownHeader = "px-3 py-2 text-[11px] text-white/55";
+  const dropdownFootnote =
+    "mt-2 rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-[11px] text-white/55";
+
   return (
     <div className="sticky top-0 z-[50]">
-      <div className="relative h-[64px] w-full border-b border-white/5 bg-black/55 backdrop-blur-xl">
-        {/* ✅ single flex row; NO forced thirds; no overlap possible */}
-        <div className="mx-auto flex h-full max-w-[1500px] items-center px-4 sm:px-6">
-          {/* LEFT (shrink-safe) */}
+      {/* authority rail */}
+      <div className={cx("relative h-[64px] w-full", shell)}>
+        {/* subtle gold authority line */}
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-[#c9a227]/35 to-transparent" />
+
+        <div className={inner}>
+          {/* LEFT */}
           <div className="flex min-w-0 flex-1 items-center gap-3">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#c9a227]/45 bg-black/30 shadow-[0_0_24px_rgba(201,162,39,0.16)]">
+            <div className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#c9a227]/45 bg-black/30 shadow-[0_0_26px_rgba(201,162,39,0.18)]">
               <Shield className="h-4.5 w-4.5 text-[#d6b24a]" />
+              <span className="pointer-events-none absolute -inset-1 rounded-full bg-[#c9a227]/10 blur-md" />
             </div>
 
             <div className="min-w-0 leading-tight">
-              <div className="truncate text-[10px] tracking-[0.22em] text-white/55">
+              <div className="truncate text-[10px] tracking-[0.28em] uppercase text-white/55">
                 OASIS DIGITAL PARLIAMENT
               </div>
               <div className="truncate text-[13px] font-medium text-white/90">
-                Authority Console{" "}
-                <span className="text-[#c9a227]/85">OS</span>
+                Authority Console <span className="text-[#c9a227]/85">OS</span>
               </div>
             </div>
 
-            {/* Operator pill (already collapses on small widths) */}
+            {/* Operator pill */}
             <div className="ml-3 hidden min-w-0 items-center gap-2 rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[12px] text-white/75 shadow-[0_0_18px_rgba(0,0,0,0.22)] lg:flex">
               <span className="shrink-0 text-white/50">Operator</span>
               <span className="h-1 w-1 shrink-0 rounded-full bg-white/25" />
@@ -261,20 +279,32 @@ export function OsGlobalBar() {
                 {operatorEmail}
               </span>
             </div>
+
+            {/* System state mini badge (authority feel, no wiring) */}
+            <div
+              className={cx(
+                "ml-2 hidden items-center gap-2 rounded-full border px-3 py-2 text-[11px] tracking-[0.18em] uppercase shadow-[0_0_18px_rgba(0,0,0,0.18)] md:flex",
+                envMeta.badge
+              )}
+              title={envMeta.subtitle}
+            >
+              <span className={cx("h-2 w-2 rounded-full", envMeta.dotClass)} />
+              <span>{envMeta.label}</span>
+            </div>
           </div>
 
-          {/* CENTER clock (absolute center on desktop; hides on narrow widths) */}
+          {/* CENTER clock (absolute center on desktop) */}
           <div className="pointer-events-none absolute left-1/2 hidden -translate-x-1/2 items-center justify-center sm:flex">
-            <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-4 py-2 text-[12px] text-white/90 shadow-[0_0_26px_rgba(201,162,39,0.08)]">
+            <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-4 py-2 text-[12px] text-white/90 shadow-[0_0_28px_rgba(201,162,39,0.10)]">
               <Clock3 className="h-4 w-4 text-[#c9a227]/85" />
-              <span className="min-w-[72px] text-center tracking-[0.16em]">
+              <span className="min-w-[72px] text-center tracking-[0.20em]">
                 {clock}
               </span>
               <span className="ml-1 h-1.5 w-1.5 rounded-full bg-[#c9a227]/85 shadow-[0_0_12px_rgba(201,162,39,0.55)]" />
             </div>
           </div>
 
-          {/* RIGHT (never overlaps; buttons collapse by breakpoint) */}
+          {/* RIGHT */}
           <div className="flex shrink-0 items-center justify-end gap-2 sm:gap-3">
             {/* Entity dropdown */}
             <div className="relative" onClick={(e) => e.stopPropagation()}>
@@ -284,8 +314,8 @@ export function OsGlobalBar() {
                   setEnvMenuOpen(false);
                 }}
                 className="flex min-w-0 items-center gap-2 rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[12px] text-white/90 shadow-[0_0_18px_rgba(0,0,0,0.22)] hover:bg-white/5 sm:px-4"
+                title="Switch entity"
               >
-                {/* Hide the word 'Entity' on small screens to prevent crowding */}
                 <span className="hidden shrink-0 text-white/55 sm:inline">
                   Entity
                 </span>
@@ -297,10 +327,8 @@ export function OsGlobalBar() {
               </button>
 
               {entityMenuOpen && (
-                <div className="absolute right-0 mt-2 w-[320px] rounded-2xl border border-white/10 bg-black/85 p-2 shadow-[0_14px_50px_rgba(0,0,0,0.62)] backdrop-blur-xl z-[80] sm:w-[360px]">
-                  <div className="px-3 py-2 text-[11px] text-white/55">
-                    Switch entity
-                  </div>
+                <div className={cx("absolute right-0 mt-2 w-[320px] p-2 sm:w-[360px]", dropdownShell)}>
+                  <div className={dropdownHeader}>Switch entity</div>
 
                   {entityOptions.map((opt) => {
                     const selected = opt.key === activeEntity;
@@ -328,7 +356,7 @@ export function OsGlobalBar() {
                     );
                   })}
 
-                  <div className="mt-2 rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-[11px] text-white/55">
+                  <div className={dropdownFootnote}>
                     Entities shown are derived from your{" "}
                     <span className="text-white/80">memberships</span> and{" "}
                     <span className="text-white/80">entities</span> tables.
@@ -351,16 +379,13 @@ export function OsGlobalBar() {
                 title={envMeta.subtitle}
               >
                 <span className={cx("h-2 w-2 shrink-0 rounded-full", envMeta.dotClass)} />
-                {/* On very small widths, keep label but let it be tighter */}
                 <span className="font-semibold tracking-wide">{envMeta.label}</span>
                 <ChevronDown className="h-4 w-4 shrink-0 text-white/60" />
               </button>
 
               {envMenuOpen && (
-                <div className="absolute right-0 mt-2 w-[320px] rounded-2xl border border-white/10 bg-black/85 p-2 shadow-[0_14px_50px_rgba(0,0,0,0.62)] backdrop-blur-xl z-[80]">
-                  <div className="px-3 py-2 text-[11px] text-white/55">
-                    Switch environment
-                  </div>
+                <div className={cx("absolute right-0 mt-2 w-[320px] p-2", dropdownShell)}>
+                  <div className={dropdownHeader}>Switch environment</div>
 
                   <button
                     onClick={() => {
@@ -406,7 +431,7 @@ export function OsGlobalBar() {
                     </span>
                   </button>
 
-                  <div className="mt-2 rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-[11px] text-white/55">
+                  <div className={dropdownFootnote}>
                     Modules read{" "}
                     <span className="text-white/80">oasis_os_env</span> to select{" "}
                     <span className="text-white/80">*_rot</span> vs{" "}
@@ -430,7 +455,7 @@ export function OsGlobalBar() {
               )}
             </div>
 
-            {/* Sign out (text collapses on small widths; icon remains) */}
+            {/* Sign out */}
             <button
               onClick={onSignOut}
               className="flex items-center gap-2 rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[12px] text-white/90 shadow-[0_0_18px_rgba(0,0,0,0.22)] hover:bg-white/5 hover:shadow-[0_0_24px_rgba(201,162,39,0.10)] sm:px-4"
