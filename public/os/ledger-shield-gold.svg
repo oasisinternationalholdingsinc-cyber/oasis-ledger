@@ -1,0 +1,44 @@
+@'
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1000">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#b08d2a" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#6f5a1f" stop-opacity="0.95"/>
+    </linearGradient>
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="2.5"/>
+    </filter>
+  </defs>
+
+  <!-- Shield silhouette -->
+  <path fill="url(#g)" filter="url(#soft)"
+        d="M400 70
+           C520 135 640 140 680 150
+           V430
+           C680 660 540 820 400 915
+           C260 820 120 660 120 430
+           V150
+           C160 140 280 135 400 70 Z"/>
+
+  <!-- Inner border -->
+  <path fill="none" stroke="#f6d36a" stroke-opacity="0.7" stroke-width="10"
+        d="M400 110
+           C510 170 620 175 650 183
+           V420
+           C650 630 525 775 400 860
+           C275 775 150 630 150 420
+           V183
+           C180 175 290 170 400 110 Z"/>
+
+  <!-- Ledger lines (subtle) -->
+  <g stroke="#fff2b8" stroke-opacity="0.35" stroke-width="8">
+    <line x1="230" y1="330" x2="570" y2="330"/>
+    <line x1="230" y1="410" x2="570" y2="410"/>
+    <line x1="230" y1="490" x2="570" y2="490"/>
+    <line x1="230" y1="570" x2="520" y2="570"/>
+  </g>
+
+  <!-- Central column mark -->
+  <rect x="375" y="300" width="50" height="330" fill="#1b1406" fill-opacity="0.18"/>
+</svg>
+'@ | Set-Content -Encoding UTF8 "public\os\ledger-shield-gold.svg"
