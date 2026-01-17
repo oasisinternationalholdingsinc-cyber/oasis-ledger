@@ -2,22 +2,24 @@
 "use client";
 export const dynamic = "force-dynamic";
 
-import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
+import { useEntity } from "@/components/OsEntityContext";
+import { useOsEnv } from "@/components/OsEnvContext";
 import {
+  ArrowLeft,
   ArrowRight,
   ExternalLink,
   RefreshCcw,
-  Shield,
+  ShieldCheck,
+  Search,
   Hammer,
   Archive as ArchiveIcon,
-  FileCheck2,
+  Shield,
   Trash2,
-  ChevronRight,
+  FileCheck2,
 } from "lucide-react";
-
-import { supabaseBrowser } from "@/lib/supabase/browser";
-import { useEntity } from "@/components/OsEntityContext";
 
 type LedgerStatus =
   | "drafted"
@@ -30,13 +32,13 @@ type LedgerStatus =
   | string;
 
 type TabKey =
-  | "all"
-  | "drafted"
-  | "pending"
-  | "approved"
-  | "signing"
-  | "signed"
-  | "archived";
+  | "ALL"
+  | "DRAFTED"
+  | "PENDING"
+  | "APPROVED"
+  | "SIGNING"
+  | "SIGNED"
+  | "ARCHIVED";
 
 type LedgerRecord = {
   id: string;
@@ -63,10 +65,13 @@ type LedgerRecord = {
   viewer_url?: string | null;
   verify_url?: string | null;
   certificate_url?: string | null;
+
+  // derived (for lane-safe filtering)
+  lane_is_test?: boolean | null;
 };
 
-function cx(...parts: Array<string | false | null | undefined>) {
-  return parts.filter(Boolean).join(" ");
+function cx(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
 }
 
 function formatDate(d: string | null) {
@@ -78,30 +83,30 @@ function formatDate(d: string | null) {
   }
 }
 
-function normalizedStatus(r: LedgerRecord): TabKey {
-  if (r.archived) return "archived";
+function normTabFromRecord(r: LedgerRecord): TabKey {
+  if (r.archived) return "ARCHIVED";
 
   const s = (r.status || "").toString().toLowerCase().trim();
-  if (s === "draft") return "drafted";
-  if (s === "drafted") return "drafted";
-  if (s === "pending") return "pending";
-  if (s === "approved") return "approved";
-  if (s === "signing") return "signing";
-  if (s === "signed") return "signed";
-  if (s === "archived") return "archived";
+  if (s === "draft") return "DRAFTED";
+  if (s === "drafted") return "DRAFTED";
+  if (s === "pending") return "PENDING";
+  if (s === "approved") return "APPROVED";
+  if (s === "signing") return "SIGNING";
+  if (s === "signed") return "SIGNED";
+  if (s === "archived") return "ARCHIVED";
 
-  if (r.approved) return "approved";
-  return "drafted";
+  if (r.approved) return "APPROVED";
+  return "DRAFTED";
 }
 
 function statusPillClass(tab: TabKey) {
-  if (tab === "approved") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-200";
-  if (tab === "signed") return "border-cyan-500/30 bg-cyan-500/10 text-cyan-200";
-  if (tab === "archived") return "border-slate-500/30 bg-slate-500/10 text-slate-200";
-  if (tab === "signing") return "border-amber-500/30 bg-amber-500/10 text-amber-200";
-  if (tab === "pending") return "border-indigo-500/30 bg-indigo-500/10 text-indigo-200";
-  if (tab === "drafted") return "border-slate-600/30 bg-slate-900/40 text-slate-200";
-  return "border-slate-700 bg-slate-900/40 text-slate-200";
+  if (tab === "APPROVED") return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
+  if (tab === "SIGNED") return "border-cyan-400/30 bg-cyan-400/10 text-cyan-100";
+  if (tab === "ARCHIVED") return "border-white/10 bg-white/5 text-slate-200/80";
+  if (tab === "SIGNING") return "border-amber-400/30 bg-amber-400/10 text-amber-100";
+  if (tab === "PENDING") return "border-indigo-400/30 bg-indigo-400/10 text-indigo-100";
+  if (tab === "DRAFTED") return "border-white/10 bg-white/5 text-slate-200/80";
+  return "border-white/10 bg-white/5 text-slate-200/80";
 }
 
 function TabButton({
@@ -119,279 +124,200 @@ function TabButton({
     <button
       onClick={onClick}
       className={cx(
-        "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase transition whitespace-nowrap",
+        "rounded-full border px-3 py-1 text-xs transition",
         active
-          ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
-          : "border-slate-800 bg-slate-950/40 text-slate-300 hover:text-slate-100 hover:border-slate-700"
+          ? "border-amber-400/40 bg-amber-400/10 text-amber-100"
+          : "border-white/10 bg-white/5 text-slate-200/80 hover:bg-white/7"
       )}
     >
-      <span>{label}</span>
-      <span
-        className={cx(
-          "rounded-full px-2 py-0.5 text-[10px] tracking-[0.12em]",
-          active ? "bg-amber-500/10 text-amber-200" : "bg-slate-900/60 text-slate-300"
-        )}
-      >
-        {count}
-      </span>
+      {label} <span className="text-slate-500">·</span>{" "}
+      <span className={cx(active ? "text-amber-100" : "text-slate-200/80")}>{count}</span>
     </button>
   );
 }
 
-function MobileDetailCard({
-  selected,
-  portal,
-  canOpenForge,
-  canArchiveNow,
-  canOpenArchive,
-  openInForgeHref,
-  openInArchiveHref,
-}: {
-  selected: LedgerRecord;
-  portal: { view: string | null; sign: string | null; verify: string | null; certificate: string | null } | null;
-  canOpenForge: boolean;
-  canArchiveNow: boolean;
-  canOpenArchive: boolean;
-  openInForgeHref: string;
-  openInArchiveHref: string;
-}) {
-  const st = normalizedStatus(selected);
+export default function LedgerClient() {
+  // IMPORTANT: same pattern as Verified page (activeEntity is a slug/key string)
+  const { activeEntity } = useEntity();
+  const { env } = useOsEnv();
+  const laneIsTest = env === "SANDBOX";
 
-  return (
-    <div className="lg:hidden mt-3 rounded-3xl border border-slate-900 bg-slate-950/30 overflow-hidden">
-      <div className="p-4 border-b border-slate-900">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="text-sm font-semibold text-slate-50 truncate">
-              {selected.title || "(Untitled record)"}
-            </div>
-            <div className="mt-1 text-[11px] text-slate-400">
-              Created <span className="text-slate-200">{formatDate(selected.created_at)}</span>
-            </div>
-            <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-400">
-              <span className={cx("rounded-full border px-2 py-1 uppercase tracking-[0.22em]", statusPillClass(st))}>
-                {st}
-              </span>
-              {selected.record_type ? (
-                <span className="rounded-full border border-slate-800 bg-black/30 px-2 py-1">
-                  {selected.record_type}
-                </span>
-              ) : null}
-              {selected.record_no ? (
-                <span className="rounded-full border border-slate-800 bg-black/30 px-2 py-1">
-                  #{selected.record_no}
-                </span>
-              ) : null}
-            </div>
-          </div>
-        </div>
-      </div>
+  const [entityId, setEntityId] = useState<string | null>(null);
 
-      <div className="p-4 space-y-3">
-        {/* Primary CTAs (tap-first) */}
-        <div className="grid grid-cols-1 gap-2">
-          <Link
-            href={canOpenForge ? openInForgeHref : "#"}
-            className={cx(
-              "w-full inline-flex items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-sm transition",
-              canOpenForge
-                ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
-                : "border-slate-900 bg-black/20 text-slate-600 pointer-events-none"
-            )}
-          >
-            <span className="inline-flex items-center gap-2">
-              <Hammer className="h-4 w-4" />
-              Open in Forge
-            </span>
-            <ChevronRight className="h-4 w-4" />
-          </Link>
-
-          <button
-            disabled={!canArchiveNow}
-            className={cx(
-              "w-full inline-flex items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-sm transition",
-              canArchiveNow
-                ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
-                : "border-slate-900 bg-black/20 text-slate-600 cursor-not-allowed"
-            )}
-            title={canArchiveNow ? "Archive signed artifact (wiring next)." : "Archive is available once signed."}
-          >
-            <span className="inline-flex items-center gap-2">
-              <ArchiveIcon className="h-4 w-4" />
-              Archive Now
-            </span>
-            <ChevronRight className="h-4 w-4" />
-          </button>
-
-          <Link
-            href={canOpenArchive ? openInArchiveHref : "#"}
-            className={cx(
-              "w-full inline-flex items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-sm transition",
-              canOpenArchive
-                ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
-                : "border-slate-900 bg-black/20 text-slate-600 pointer-events-none"
-            )}
-          >
-            <span className="inline-flex items-center gap-2">
-              <ExternalLink className="h-4 w-4" />
-              Open in CI-Archive
-            </span>
-            <ChevronRight className="h-4 w-4" />
-          </Link>
-        </div>
-
-        {/* Portal quick links */}
-        <div className="rounded-2xl border border-slate-900 bg-black/20 p-3">
-          <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Portal</div>
-          <div className="mt-2 flex flex-wrap gap-2">
-            {(
-              [
-                ["View", portal?.view, "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"],
-                ["Sign", portal?.sign, "border-amber-500/30 bg-amber-500/10 text-amber-200 hover:bg-amber-500/15"],
-                ["Verify", portal?.verify, "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"],
-                ["Certificate", portal?.certificate, "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"],
-              ] as Array<[string, string | null | undefined, string]>
-            ).map(([label, href, cls]) => (
-              <a
-                key={label}
-                href={href ?? "#"}
-                target="_blank"
-                rel="noreferrer"
-                className={cx(
-                  "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold tracking-[0.16em] uppercase transition",
-                  href ? cls : "border-slate-900 bg-black/20 text-slate-600 pointer-events-none"
-                )}
-              >
-                <ExternalLink className="h-4 w-4" /> {label}
-              </a>
-            ))}
-          </div>
-        </div>
-
-        {selected.description ? (
-          <div className="rounded-2xl border border-slate-900 bg-black/20 p-3 text-sm text-slate-200">
-            <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Description</div>
-            <div className="mt-2 whitespace-pre-wrap">{selected.description}</div>
-          </div>
-        ) : null}
-
-        <div className="rounded-2xl border border-slate-900 bg-black/20 p-3 text-xs text-slate-400">
-          Approval ≠ archived. Execution produces archive-quality artifacts (PDF + hash + registry entry).
-        </div>
-      </div>
-    </div>
-  );
-}
-
-export default function DraftsApprovalsClient() {
-  const supabase = useMemo(() => supabaseBrowser(), []);
-
-  const entityCtx: any = useEntity() as any;
-  const activeEntity = entityCtx?.activeEntity ?? null;
-
-  const scopedEntityId: string =
-    (entityCtx?.entityId ||
-      activeEntity?.id ||
-      activeEntity?.entity_id ||
-      entityCtx?.activeEntityId ||
-      "")?.toString() ?? "";
-
-  const scopedEntityLabel: string =
-    (activeEntity?.slug || activeEntity?.key || activeEntity?.name || "")?.toString() ||
-    (scopedEntityId ? "selected" : "—");
-
-  const [loading, setLoading] = useState(true);
+  const [rows, setRows] = useState<LedgerRecord[]>([]);
+  const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  const [records, setRecords] = useState<LedgerRecord[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-
-  const [tab, setTab] = useState<TabKey>("all");
+  const [tab, setTab] = useState<TabKey>("ALL");
   const [q, setQ] = useState("");
 
-  const selected = useMemo(() => records.find((r) => r.id === selectedId) ?? null, [records, selectedId]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  const filtered = useMemo(() => {
-    const term = q.trim().toLowerCase();
+  const selected = useMemo(
+    () => rows.find((r) => r.id === selectedId) ?? null,
+    [rows, selectedId]
+  );
 
-    return records.filter((r) => {
-      const st = normalizedStatus(r);
-      if (tab !== "all" && st !== tab) return false;
-      if (!term) return true;
+  // Resolve entity UUID from entities table using slug (MATCH VERIFIED — NO CHANGE)
+  useEffect(() => {
+    let alive = true;
 
-      const title = (r.title || "").toLowerCase();
-      const type = ((r.record_type as any) || "").toString().toLowerCase();
-      const desc = ((r.description as any) || "").toString().toLowerCase();
-      return title.includes(term) || type.includes(term) || desc.includes(term) || st.includes(term);
-    });
-  }, [records, tab, q]);
+    async function resolveEntity() {
+      if (!activeEntity) {
+        if (alive) setEntityId(null);
+        return;
+      }
 
-  const counts = useMemo(() => {
-    const c: Record<TabKey, number> = {
-      all: records.length,
-      drafted: 0,
-      pending: 0,
-      approved: 0,
-      signing: 0,
-      signed: 0,
-      archived: 0,
-    };
+      const { data, error } = await supabase
+        .from("entities")
+        .select("id")
+        .eq("slug", String(activeEntity))
+        .limit(1)
+        .maybeSingle();
 
-    for (const r of records) {
-      const st = normalizedStatus(r);
-      c[st] += 1;
+      if (!alive) return;
+
+      if (error) {
+        console.error("resolveEntity error", error);
+        setEntityId(null);
+        return;
+      }
+
+      setEntityId(data?.id ?? null);
     }
-    return c;
-  }, [records]);
 
-  const scopeQuery = useMemo(() => (scopedEntityId ? `?entity_id=${encodeURIComponent(scopedEntityId)}` : ""), [scopedEntityId]);
+    resolveEntity();
+    return () => {
+      alive = false;
+    };
+  }, [activeEntity]);
 
   async function load() {
+    if (!entityId) {
+      setRows([]);
+      setSelectedId(null);
+      return;
+    }
+
     setLoading(true);
     setErr(null);
 
     try {
-      let query = supabase
+      // Primary: scoped view (same wiring intent as your original ledger page)
+      const { data: v, error: vErr } = await supabase
         .from("v_governance_ledger_scoped_v3")
         .select("*")
-        .order("created_at", { ascending: false });
+        .eq("entity_id", entityId)
+        .order("created_at", { ascending: false })
+        .limit(500);
 
-      if (scopedEntityId) query = query.eq("entity_id", scopedEntityId);
+      if (vErr) throw vErr;
 
-      const { data, error } = await query;
-      if (error) throw error;
+      const base: LedgerRecord[] = (v ?? []) as any[];
 
-      const list = (data ?? []) as unknown as LedgerRecord[];
-      setRecords(list);
+      // Lane map (MATCH VERIFIED discipline): governance_ledger.id → is_test
+      const ids = base.map((r) => r.id).filter(Boolean) as string[];
+      const laneMap = new Map<string, boolean>();
 
-      // keep selection stable if possible
-      if (selectedId) {
-        const stillThere = list.some((r) => r.id === selectedId);
-        if (!stillThere) setSelectedId(list[0]?.id ?? null);
-      } else {
-        setSelectedId(list[0]?.id ?? null);
+      if (ids.length) {
+        const { data: gl, error: glErr } = await supabase
+          .from("governance_ledger")
+          .select("id,is_test")
+          .in("id", ids);
+
+        if (!glErr && gl) {
+          for (const r of gl as any[]) {
+            laneMap.set(String(r.id), !!r.is_test);
+          }
+        }
+      }
+
+      const merged: LedgerRecord[] = base.map((r) => ({
+        ...(r as LedgerRecord),
+        lane_is_test: laneMap.has(r.id) ? laneMap.get(r.id)! : null,
+      }));
+
+      // Lane filter (MATCH VERIFIED — NO CHANGE)
+      const laneFiltered = merged.filter((r) => {
+        if (r.lane_is_test === null || r.lane_is_test === undefined) return true;
+        return r.lane_is_test === laneIsTest;
+      });
+
+      setRows(laneFiltered);
+
+      // Selection: keep or choose first
+      if (!selectedId && laneFiltered.length) setSelectedId(laneFiltered[0]!.id);
+      else if (selectedId && !laneFiltered.some((r) => r.id === selectedId) && laneFiltered.length) {
+        setSelectedId(laneFiltered[0]!.id);
       }
     } catch (e: any) {
-      setErr(e?.message ?? "Failed to load v_governance_ledger_scoped_v3.");
-      setRecords([]);
+      console.error("ledger load error", e);
+      setErr(e?.message ?? "Failed to load ledger.");
+      setRows([]);
       setSelectedId(null);
     } finally {
       setLoading(false);
     }
   }
 
+  // Load on entity + lane changes
   useEffect(() => {
-    load();
+    let alive = true;
+    (async () => {
+      if (!alive) return;
+      await load();
+    })();
+    return () => {
+      alive = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scopedEntityId]);
+  }, [entityId, laneIsTest]);
 
-  const st: TabKey = selected ? normalizedStatus(selected) : "drafted";
-  const canOpenForge = !!selected && (st === "approved" || st === "signing" || st === "signed");
-  const canArchiveNow = !!selected && st === "signed";
-  const canOpenArchive = !!selected && (st === "archived" || st === "signed" || st === "signing");
+  const filtered = useMemo(() => {
+    const qq = q.trim().toLowerCase();
 
-  const openInForgeHref = selected ? `/ci-forge?record_id=${encodeURIComponent(selected.id)}` : "#";
-  const openInArchiveHref = selected ? `/ci-archive/minute-book${scopeQuery}` : "#";
+    return rows.filter((r) => {
+      const st = normTabFromRecord(r);
+
+      if (tab !== "ALL" && st !== tab) return false;
+      if (!qq) return true;
+
+      const hay = `${r.title ?? ""} ${r.record_type ?? ""} ${r.description ?? ""} ${st}`.toLowerCase();
+      return hay.includes(qq);
+    });
+  }, [rows, tab, q]);
+
+  // Selection resilience under filters/search (OS feel)
+  useEffect(() => {
+    if (!filtered.length) return;
+    if (!selectedId) {
+      setSelectedId(filtered[0]!.id);
+      return;
+    }
+    const still = filtered.some((r) => r.id === selectedId);
+    if (!still) setSelectedId(filtered[0]!.id);
+  }, [filtered, selectedId]);
+
+  const counts = useMemo(() => {
+    const c: Record<TabKey, number> = {
+      ALL: rows.length,
+      DRAFTED: 0,
+      PENDING: 0,
+      APPROVED: 0,
+      SIGNING: 0,
+      SIGNED: 0,
+      ARCHIVED: 0,
+    };
+    for (const r of rows) {
+      c[normTabFromRecord(r)] += 1;
+    }
+    return c;
+  }, [rows]);
+
+  const selectedTab = selected ? normTabFromRecord(selected) : "DRAFTED";
+  const canOpenForge = !!selected && (selectedTab === "APPROVED" || selectedTab === "SIGNING" || selectedTab === "SIGNED");
+  const canArchiveNow = !!selected && selectedTab === "SIGNED";
+  const canOpenArchive = !!selected && (selectedTab === "ARCHIVED" || selectedTab === "SIGNED" || selectedTab === "SIGNING");
 
   const portal = selected?.envelope_id
     ? {
@@ -402,528 +328,437 @@ export default function DraftsApprovalsClient() {
       }
     : null;
 
+  // OS shell/header/body pattern (MATCH VERIFIED)
+  const shell =
+    "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden";
+  const header =
+    "border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent px-4 sm:px-6 py-4 sm:py-5";
+  const body = "px-4 sm:px-6 py-5 sm:py-6";
+
   return (
-    <div className="h-full flex flex-col px-4 md:px-8 pt-5 md:pt-6 pb-5 md:pb-6">
-      {/* OS under-bar label */}
-      <div className="mb-4 shrink-0">
-        <div className="text-xs tracking-[0.3em] uppercase text-slate-500">CI-ARCHIVE</div>
-        <p className="mt-1 text-[11px] text-slate-400">
-          Drafts &amp; Approvals • <span className="font-semibold text-slate-200">Lifecycle surface</span> • Entity-scoped via OS selector
-        </p>
-      </div>
-
-      {/* Main shell (match Upload/Verified) */}
-      <div className="flex-1 min-h-0 flex justify-center overflow-hidden">
-        <div className="w-full max-w-[1600px] h-full rounded-3xl border border-slate-900 bg-black/60 shadow-[0_0_60px_rgba(15,23,42,0.9)] px-4 md:px-6 py-4 md:py-5 flex flex-col overflow-hidden">
-          {/* Title row */}
-          <div className="flex items-start justify-between mb-4 shrink-0 gap-3">
-            <div className="min-w-0">
-              <h1 className="text-lg font-semibold text-slate-50 truncate">Drafts &amp; Approvals</h1>
-              <p className="mt-1 text-xs text-slate-400">
-                Council decides execution mode. Forge is signature-only. Archive remains the registry of record.
-              </p>
-              <div className="mt-2 text-[11px] text-slate-500">
-                Entity: <span className="text-slate-200">{scopedEntityLabel}</span>
-                {!scopedEntityId ? (
-                  <span className="ml-2 text-amber-200/90">• no entity_id in OS context (loading unscoped)</span>
-                ) : null}
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 shrink-0">
-              <div className="hidden md:block text-[10px] uppercase tracking-[0.22em] text-slate-500">
-                Source • <span className="text-slate-300">v_governance_ledger_scoped_v3</span>
-              </div>
-
-              <button
-                onClick={load}
-                className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/40 px-3 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:border-slate-700"
-                title="Refresh"
-              >
-                <RefreshCcw className="h-4 w-4" />
-                <span className="hidden sm:inline">Refresh</span>
-              </button>
-
-              <Link
-                href={`/ci-archive${scopeQuery}`}
-                className="inline-flex items-center gap-2 rounded-full border border-amber-500/30 bg-amber-500 px-3 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-black hover:bg-amber-400"
-                title="Back to CI-Archive Launchpad"
-              >
-                <span className="hidden sm:inline">Back to Launchpad</span>
-                <span className="sm:hidden">Launchpad</span>
-                <ArrowRight className="h-4 w-4" />
-              </Link>
-            </div>
-          </div>
-
-          {/* Mobile: Tabs + Search as a sticky strip inside shell */}
-          <div className="lg:hidden shrink-0 mb-3">
-            <div className="rounded-2xl border border-slate-900 bg-slate-950/30 p-3">
-              <div className="flex items-center justify-between gap-3">
-                <div className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-black/40 px-3 py-1">
-                  <span className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Records</span>
-                  <span className="text-[11px] font-semibold text-slate-200">{loading ? "…" : records.length}</span>
+    <div className="w-full">
+      <div className="mx-auto w-full max-w-[1200px] px-4 pb-10 pt-4 sm:pt-6">
+        <div className={shell}>
+          {/* OS-aligned header (MATCH VERIFIED) */}
+          <div className={header}>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">
+                  CI • Archive
                 </div>
+                <h1 className="mt-1 text-lg sm:text-xl font-semibold text-slate-50">
+                  Drafts &amp; Approvals
+                </h1>
+                <p className="mt-1 max-w-3xl text-[11px] sm:text-xs text-slate-400 leading-relaxed">
+                  Lifecycle surface for records in motion. Read-only. Lane-safe. Entity-scoped.
+                </p>
 
-                {err ? (
-                  <span className="text-[11px] text-red-200">Load error</span>
-                ) : (
-                  <span className="text-[11px] text-slate-500">{loading ? "Loading…" : `${filtered.length} shown`}</span>
-                )}
-              </div>
-
-              <div className="mt-3 overflow-x-auto [-webkit-overflow-scrolling:touch]">
-                <div className="flex gap-2 min-w-max pr-2">
-                  <TabButton active={tab === "all"} label="All" count={counts.all} onClick={() => setTab("all")} />
-                  <TabButton active={tab === "drafted"} label="Drafted" count={counts.drafted} onClick={() => setTab("drafted")} />
-                  <TabButton active={tab === "pending"} label="Pending" count={counts.pending} onClick={() => setTab("pending")} />
-                  <TabButton active={tab === "approved"} label="Approved" count={counts.approved} onClick={() => setTab("approved")} />
-                  <TabButton active={tab === "signing"} label="Signing" count={counts.signing} onClick={() => setTab("signing")} />
-                  <TabButton active={tab === "signed"} label="Signed" count={counts.signed} onClick={() => setTab("signed")} />
-                  <TabButton active={tab === "archived"} label="Archived" count={counts.archived} onClick={() => setTab("archived")} />
+                <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
+                  <span className="inline-flex items-center gap-2">
+                    <ShieldCheck className="h-4 w-4 text-emerald-300" />
+                    <span>Lifecycle surface • No destructive actions</span>
+                  </span>
+                  <span className="text-slate-700">•</span>
+                  <span>
+                    Lane:{" "}
+                    <span className={cx("font-semibold", laneIsTest ? "text-amber-300" : "text-sky-300")}>
+                      {laneIsTest ? "SANDBOX" : "RoT"}
+                    </span>
+                  </span>
+                  <span className="text-slate-700">•</span>
+                  <span>
+                    Entity:{" "}
+                    <span className="text-emerald-300 font-medium">{String(activeEntity ?? "—")}</span>
+                  </span>
                 </div>
               </div>
 
-              <div className="mt-3">
-                <input
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
-                  placeholder="Search title, type, status…"
-                  className="w-full rounded-2xl border border-slate-800 bg-black/40 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 outline-none focus:border-amber-500/30"
-                />
-              </div>
+              <div className="shrink-0 flex items-center gap-2">
+                <button
+                  onClick={load}
+                  className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                  title="Refresh"
+                >
+                  <RefreshCcw className="h-4 w-4" />
+                  Refresh
+                </button>
 
-              {err ? (
-                <div className="mt-3 rounded-2xl border border-red-900/60 bg-red-950/30 px-3 py-2 text-sm text-red-200">
-                  {err}
-                </div>
-              ) : null}
+                <Link
+                  href="/ci-archive"
+                  className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                  title="Back to CI-Archive Launchpad"
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                  Launchpad
+                </Link>
+              </div>
             </div>
           </div>
 
-          {/* Desktop: 3 columns. Mobile: queue + details stacked (no extra scroll hell) */}
-          <div className="flex-1 min-h-0 grid grid-cols-12 gap-4 overflow-hidden">
-            {/* Queue */}
-            <div className="col-span-12 lg:col-span-4 min-h-0 rounded-3xl border border-slate-900 bg-slate-950/30 overflow-hidden flex flex-col">
-              {/* Desktop header */}
-              <div className="hidden lg:block p-4 border-b border-slate-900 shrink-0">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <div className="text-sm font-semibold text-slate-50">Queue</div>
-                    <div className="text-[11px] text-slate-400">
-                      Entity: <span className="text-slate-200">{scopedEntityLabel}</span>
+          <div className={body}>
+            <div className="grid grid-cols-12 gap-4">
+              {/* LEFT: Filters (MATCH VERIFIED grammar) */}
+              <section className="col-span-12 lg:col-span-3">
+                <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-200">Filters</div>
+                      <div className="text-[11px] text-slate-500">Status + search</div>
+                    </div>
+                    <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] tracking-[0.18em] uppercase text-slate-200">
+                      filters
+                    </span>
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <TabButton active={tab === "ALL"} label="ALL" count={counts.ALL} onClick={() => setTab("ALL")} />
+                    <TabButton active={tab === "DRAFTED"} label="DRAFTED" count={counts.DRAFTED} onClick={() => setTab("DRAFTED")} />
+                    <TabButton active={tab === "PENDING"} label="PENDING" count={counts.PENDING} onClick={() => setTab("PENDING")} />
+                    <TabButton active={tab === "APPROVED"} label="APPROVED" count={counts.APPROVED} onClick={() => setTab("APPROVED")} />
+                    <TabButton active={tab === "SIGNING"} label="SIGNING" count={counts.SIGNING} onClick={() => setTab("SIGNING")} />
+                    <TabButton active={tab === "SIGNED"} label="SIGNED" count={counts.SIGNED} onClick={() => setTab("SIGNED")} />
+                    <TabButton active={tab === "ARCHIVED"} label="ARCHIVED" count={counts.ARCHIVED} onClick={() => setTab("ARCHIVED")} />
+                  </div>
+
+                  <div className="mt-4">
+                    <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Search</div>
+                    <div className="mt-2 relative">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
+                      <input
+                        value={q}
+                        onChange={(e) => setQ(e.target.value)}
+                        placeholder="title, type, status..."
+                        className="w-full rounded-2xl border border-white/10 bg-white/5 pl-10 pr-3 py-2 text-sm text-slate-200 outline-none placeholder:text-slate-500 focus:border-amber-400/30"
+                      />
                     </div>
                   </div>
 
-                  <div className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-black/40 px-3 py-1">
-                    <span className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Records</span>
-                    <span className="text-[11px] font-semibold text-slate-200">{loading ? "…" : records.length}</span>
+                  <div className="mt-4 text-xs text-slate-400">
+                    {loading ? "Loading…" : `${filtered.length} result(s)`}
                   </div>
+
+                  {err && (
+                    <div className="mt-3 rounded-2xl border border-red-900/60 bg-red-950/30 px-3 py-2 text-sm text-red-200">
+                      {err}
+                    </div>
+                  )}
+
+                  <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-400">
+                    Lane-safe: filters by <span className="text-slate-200">governance_ledger.is_test</span> using record IDs.
+                  </div>
+
+                  {!entityId && (
+                    <div className="mt-3 rounded-2xl border border-amber-400/20 bg-amber-400/10 p-3 text-xs text-amber-100">
+                      Waiting for entity resolution (slug → entities.id).
+                    </div>
+                  )}
                 </div>
+              </section>
 
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <TabButton active={tab === "all"} label="All" count={counts.all} onClick={() => setTab("all")} />
-                  <TabButton active={tab === "drafted"} label="Drafted" count={counts.drafted} onClick={() => setTab("drafted")} />
-                  <TabButton active={tab === "pending"} label="Pending" count={counts.pending} onClick={() => setTab("pending")} />
-                  <TabButton active={tab === "approved"} label="Approved" count={counts.approved} onClick={() => setTab("approved")} />
-                  <TabButton active={tab === "signing"} label="Signing" count={counts.signing} onClick={() => setTab("signing")} />
-                  <TabButton active={tab === "signed"} label="Signed" count={counts.signed} onClick={() => setTab("signed")} />
-                  <TabButton active={tab === "archived"} label="Archived" count={counts.archived} onClick={() => setTab("archived")} />
-                </div>
-
-                <div className="mt-3">
-                  <input
-                    value={q}
-                    onChange={(e) => setQ(e.target.value)}
-                    placeholder="Search title, type, status…"
-                    className="w-full rounded-2xl border border-slate-800 bg-black/40 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 outline-none focus:border-amber-500/30"
-                  />
-                </div>
-
-                {err ? (
-                  <div className="mt-3 rounded-2xl border border-red-900/60 bg-red-950/30 px-3 py-2 text-sm text-red-200">
-                    {err}
+              {/* MIDDLE: Queue (MATCH VERIFIED “Documents” surface) */}
+              <section className="col-span-12 lg:col-span-6">
+                <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-200">Queue</div>
+                      <div className="text-[11px] text-slate-500">Records in motion</div>
+                    </div>
+                    <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] tracking-[0.18em] uppercase text-slate-200">
+                      ledger
+                    </span>
                   </div>
-                ) : null}
-              </div>
 
-              <div className="flex-1 min-h-0 overflow-auto p-2">
-                {loading ? (
-                  <div className="p-3 text-sm text-slate-400">Loading…</div>
-                ) : filtered.length === 0 ? (
-                  <div className="p-3 text-sm text-slate-500">No records match this view.</div>
-                ) : (
-                  <div className="space-y-2">
-                    {filtered.map((r) => {
-                      const isSel = r.id === selectedId;
-                      const stt = normalizedStatus(r);
-                      return (
-                        <button
-                          key={r.id}
-                          onClick={() => setSelectedId(r.id)}
-                          className={cx(
-                            "w-full text-left rounded-2xl border p-3 transition",
-                            isSel
-                              ? "border-amber-500/35 bg-amber-500/5"
-                              : "border-slate-900 bg-black/30 hover:border-slate-800"
-                          )}
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <div className="text-sm font-semibold text-slate-100 truncate">
-                                {r.title || "(Untitled record)"}
-                              </div>
-                              <div className="mt-1 text-[11px] text-slate-500">
-                                Created: <span className="text-slate-300">{formatDate(r.created_at)}</span>
-                              </div>
-                            </div>
-
-                            <div
-                              className={cx(
-                                "shrink-0 rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.22em]",
-                                statusPillClass(stt)
-                              )}
-                            >
-                              {stt}
-                            </div>
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* Mobile: show details below the list */}
-              {selected ? (
-                <MobileDetailCard
-                  selected={selected}
-                  portal={portal}
-                  canOpenForge={canOpenForge}
-                  canArchiveNow={canArchiveNow}
-                  canOpenArchive={canOpenArchive}
-                  openInForgeHref={openInForgeHref}
-                  openInArchiveHref={openInArchiveHref}
-                />
-              ) : null}
-            </div>
-
-            {/* Record (desktop only) */}
-            <div className="hidden lg:flex col-span-12 lg:col-span-5 min-h-0 rounded-3xl border border-slate-900 bg-slate-950/30 overflow-hidden flex-col">
-              <div className="p-4 border-b border-slate-900 shrink-0">
-                <div className="text-sm font-semibold text-slate-50">Record</div>
-                <div className="text-[11px] text-slate-400">Lifecycle details + execution posture</div>
-              </div>
-
-              <div className="flex-1 min-h-0 overflow-auto p-4">
-                {!selected ? (
-                  <div className="rounded-2xl border border-slate-800 bg-black/30 px-4 py-3 text-sm text-slate-400">
-                    Select a record to review.
-                  </div>
-                ) : (
-                  <div className="space-y-4">
-                    <div className="rounded-3xl border border-slate-900 bg-black/30 p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="text-base font-semibold text-slate-50 truncate">
-                            {selected.title || "(Untitled record)"}
-                          </div>
-                          <div className="mt-2 text-xs text-slate-400 flex flex-wrap gap-x-6 gap-y-2">
-                            <span>
-                              Status: <span className="text-slate-200">{normalizedStatus(selected)}</span>
-                            </span>
-                            <span>
-                              Created: <span className="text-slate-200">{formatDate(selected.created_at)}</span>
-                            </span>
-                            {selected.record_type ? (
-                              <span>
-                                Type: <span className="text-slate-200">{selected.record_type}</span>
-                              </span>
-                            ) : null}
-                            {selected.record_no ? (
-                              <span>
-                                No: <span className="text-slate-200">{selected.record_no}</span>
-                              </span>
-                            ) : null}
-                            {selected.entity_key ? (
-                              <span>
-                                Entity: <span className="text-slate-200">{selected.entity_key}</span>
-                              </span>
-                            ) : null}
-                          </div>
-                        </div>
-
-                        <div
-                          className={cx(
-                            "shrink-0 rounded-full border px-3 py-1.5 text-[10px] uppercase tracking-[0.22em]",
-                            statusPillClass(normalizedStatus(selected))
-                          )}
-                        >
-                          {normalizedStatus(selected)}
-                        </div>
+                  <div className="mt-3 space-y-2">
+                    {filtered.length === 0 ? (
+                      <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-slate-400">
+                        {loading ? "Loading ledger…" : "No records match this view."}
                       </div>
+                    ) : (
+                      filtered.map((r) => {
+                        const isSel = r.id === selectedId;
+                        const st = normTabFromRecord(r);
+
+                        return (
+                          <button
+                            key={r.id}
+                            onClick={() => setSelectedId(r.id)}
+                            className={cx(
+                              "w-full text-left rounded-3xl border p-3 transition outline-none",
+                              "hover:bg-black/25",
+                              isSel
+                                ? "border-amber-400/40 bg-amber-400/10"
+                                : "border-white/10 bg-black/20"
+                            )}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="text-sm font-medium text-slate-100 truncate">
+                                  {r.title || "(Untitled record)"}
+                                </div>
+                                <div className="mt-1 text-xs text-slate-400">
+                                  {r.record_type ? `${r.record_type} · ` : ""}
+                                  Created: {formatDate(r.created_at)}
+                                </div>
+                                {r.description ? (
+                                  <div className="mt-2 text-[11px] text-slate-500 line-clamp-2">
+                                    {r.description}
+                                  </div>
+                                ) : null}
+                              </div>
+
+                              <span
+                                className={cx(
+                                  "shrink-0 rounded-full border px-2 py-1 text-[11px]",
+                                  statusPillClass(st)
+                                )}
+                              >
+                                {st}
+                              </span>
+                            </div>
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              </section>
+
+              {/* RIGHT: Record + Actions + AXIOM (same shell language as Verified) */}
+              <section className="col-span-12 lg:col-span-3">
+                <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-200">Selected</div>
+                      <div className="text-[11px] text-slate-500">Record + posture</div>
                     </div>
+                    <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] tracking-[0.18em] uppercase text-slate-200">
+                      detail
+                    </span>
+                  </div>
 
-                    <div className="rounded-3xl border border-slate-900 bg-black/30 p-4">
-                      <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Execution posture</div>
-
-                      <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
-                        <div className="rounded-2xl border border-slate-900 bg-black/20 p-3">
-                          <div className="text-[11px] text-slate-500">Approved</div>
-                          <div className="mt-1 text-slate-200">{selected.approved ? "Yes" : "No"}</div>
+                  {!selected ? (
+                    <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-slate-400">
+                      Select a record from the queue.
+                    </div>
+                  ) : (
+                    <div className="mt-3 space-y-3">
+                      <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                        <div className="text-sm font-semibold text-slate-100 truncate">
+                          {selected.title || "(Untitled record)"}
+                        </div>
+                        <div className="mt-1 text-xs text-slate-400">
+                          Status:{" "}
+                          <span className="text-slate-200 font-medium">{normTabFromRecord(selected)}</span>
+                          <span className="text-slate-700"> • </span>
+                          {formatDate(selected.created_at)}
                         </div>
 
-                        <div className="rounded-2xl border border-slate-900 bg-black/20 p-3">
-                          <div className="text-[11px] text-slate-500">Archived</div>
-                          <div className="mt-1 text-slate-200">{selected.archived ? "Yes" : "No"}</div>
-                        </div>
-
-                        <div className="col-span-2 rounded-2xl border border-slate-900 bg-black/20 p-3">
-                          <div className="text-[11px] text-slate-500">Discipline</div>
-                          <div className="mt-1 text-slate-200">
-                            Approval ≠ archived. Execution creates archive-quality artifacts (PDF + hash + registry entry).
+                        <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                          <div className="rounded-2xl border border-white/10 bg-black/20 p-2">
+                            <div className="text-[10px] tracking-[0.25em] uppercase text-slate-500">Approved</div>
+                            <div className="mt-1 text-slate-200">{selected.approved ? "Yes" : "No"}</div>
+                          </div>
+                          <div className="rounded-2xl border border-white/10 bg-black/20 p-2">
+                            <div className="text-[10px] tracking-[0.25em] uppercase text-slate-500">Archived</div>
+                            <div className="mt-1 text-slate-200">{selected.archived ? "Yes" : "No"}</div>
                           </div>
                         </div>
 
-                        <div className="col-span-2 rounded-2xl border border-slate-900 bg-black/20 p-3">
-                          <div className="text-[11px] text-slate-500">Portal</div>
+                        {selected.record_no ? (
+                          <div className="mt-2 text-[11px] text-slate-500">
+                            No: <span className="text-slate-200">{selected.record_no}</span>
+                          </div>
+                        ) : null}
+
+                        {selected.entity_key ? (
+                          <div className="mt-1 text-[11px] text-slate-500">
+                            Entity: <span className="text-slate-200">{selected.entity_key}</span>
+                          </div>
+                        ) : null}
+                      </div>
+
+                      {/* Actions (read-only) */}
+                      <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                        <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Actions</div>
+
+                        <div className="mt-2 space-y-2">
+                          <Link
+                            href={canOpenForge ? `/ci-forge?record_id=${encodeURIComponent(selected.id)}` : "#"}
+                            className={cx(
+                              "w-full inline-flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-sm transition",
+                              canOpenForge
+                                ? "border-white/10 bg-white/5 text-slate-200 hover:bg-white/7"
+                                : "border-white/10 bg-black/20 text-slate-600 pointer-events-none"
+                            )}
+                            title={canOpenForge ? "Open in CI-Forge" : "Available after approval (or during signing/signed)."}
+                          >
+                            <span className="inline-flex items-center gap-2">
+                              <Hammer className="h-4 w-4 text-amber-300" />
+                              Open in Forge
+                            </span>
+                            <ArrowRight className="h-4 w-4" />
+                          </Link>
+
+                          <button
+                            disabled={!canArchiveNow}
+                            className={cx(
+                              "w-full inline-flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-sm transition",
+                              canArchiveNow
+                                ? "border-white/10 bg-white/5 text-slate-200 hover:bg-white/7"
+                                : "border-white/10 bg-black/20 text-slate-600 cursor-not-allowed"
+                            )}
+                            title={canArchiveNow ? "Archive signed artifact (wired in Forge)." : "Archive is available once signed."}
+                          >
+                            <span className="inline-flex items-center gap-2">
+                              <ArchiveIcon className="h-4 w-4 text-amber-300" />
+                              Archive Now
+                            </span>
+                            <ArrowRight className="h-4 w-4" />
+                          </button>
+
+                          <Link
+                            href={canOpenArchive ? "/ci-archive/minute-book" : "#"}
+                            className={cx(
+                              "w-full inline-flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-sm transition",
+                              canOpenArchive
+                                ? "border-white/10 bg-white/5 text-slate-200 hover:bg-white/7"
+                                : "border-white/10 bg-black/20 text-slate-600 pointer-events-none"
+                            )}
+                            title={canOpenArchive ? "Open CI-Archive registry surfaces" : "Available after signing / archival."}
+                          >
+                            <span className="inline-flex items-center gap-2">
+                              <ExternalLink className="h-4 w-4 text-amber-300" />
+                              Open Archive
+                            </span>
+                            <ArrowRight className="h-4 w-4" />
+                          </Link>
+                        </div>
+
+                        {/* Portal shortcuts */}
+                        <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3">
+                          <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Portal</div>
                           <div className="mt-2 flex flex-wrap gap-2">
-                            <a
-                              href={portal?.view ?? "#"}
-                              target="_blank"
-                              rel="noreferrer"
-                              className={cx(
-                                "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold tracking-[0.16em] uppercase transition",
-                                portal?.view
-                                  ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
-                                  : "border-slate-900 bg-black/20 text-slate-600 pointer-events-none"
-                              )}
-                            >
-                              <ExternalLink className="h-4 w-4" /> View
-                            </a>
-
-                            <a
-                              href={portal?.sign ?? "#"}
-                              target="_blank"
-                              rel="noreferrer"
-                              className={cx(
-                                "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold tracking-[0.16em] uppercase transition",
-                                portal?.sign
-                                  ? "border-amber-500/30 bg-amber-500/10 text-amber-200 hover:bg-amber-500/15"
-                                  : "border-slate-900 bg-black/20 text-slate-600 pointer-events-none"
-                              )}
-                            >
-                              <ExternalLink className="h-4 w-4" /> Sign
-                            </a>
-
-                            <a
-                              href={portal?.verify ?? "#"}
-                              target="_blank"
-                              rel="noreferrer"
-                              className={cx(
-                                "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold tracking-[0.16em] uppercase transition",
-                                portal?.verify
-                                  ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
-                                  : "border-slate-900 bg-black/20 text-slate-600 pointer-events-none"
-                              )}
-                            >
-                              <ExternalLink className="h-4 w-4" /> Verify
-                            </a>
-
-                            <a
-                              href={portal?.certificate ?? "#"}
-                              target="_blank"
-                              rel="noreferrer"
-                              className={cx(
-                                "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold tracking-[0.16em] uppercase transition",
-                                portal?.certificate
-                                  ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
-                                  : "border-slate-900 bg-black/20 text-slate-600 pointer-events-none"
-                              )}
-                            >
-                              <ExternalLink className="h-4 w-4" /> Certificate
-                            </a>
+                            {([
+                              ["View", portal?.view],
+                              ["Sign", portal?.sign],
+                              ["Verify", portal?.verify],
+                              ["Certificate", portal?.certificate],
+                            ] as Array<[string, string | null | undefined]>).map(([label, href]) => (
+                              <a
+                                key={label}
+                                href={href ?? "#"}
+                                target="_blank"
+                                rel="noreferrer"
+                                className={cx(
+                                  "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase inline-flex items-center gap-2 transition",
+                                  href
+                                    ? "border-amber-400/20 bg-amber-400/10 text-amber-100 hover:bg-amber-400/15"
+                                    : "border-white/10 bg-black/20 text-slate-600 pointer-events-none"
+                                )}
+                              >
+                                <ExternalLink className="h-4 w-4" />
+                                {label}
+                              </a>
+                            ))}
                           </div>
                         </div>
+
+                        {/* Constitutional note */}
+                        <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-400">
+                          No governance_ledger deletes (constitutional memory). Cleanup lives in Drafts/Envelopes.
+                        </div>
+
+                        {/* Locked cleanup buttons (visual parity w/ your old ledger) */}
+                        <div className="mt-3 border-t border-white/10 pt-3">
+                          <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500 mb-2">Cleanup</div>
+                          <button
+                            disabled
+                            className="w-full inline-flex items-center justify-between gap-3 rounded-2xl border border-red-900/60 bg-red-950/30 px-3 py-2 text-sm text-red-200 opacity-70 cursor-not-allowed"
+                            title="Draft deletion remains in CI-Alchemy (blocked here)."
+                          >
+                            <span className="inline-flex items-center gap-2">
+                              <Trash2 className="h-4 w-4" />
+                              Delete Draft
+                            </span>
+                            <ArrowRight className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* AXIOM (same advisory grammar as Verified) */}
+                      <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="inline-flex items-center gap-2">
+                            <Shield className="h-4 w-4 text-amber-300" />
+                            <div>
+                              <div className="text-sm font-semibold text-slate-200">AXIOM Advisory</div>
+                              <div className="text-[11px] text-slate-500">Intelligence support • never blocking</div>
+                            </div>
+                          </div>
+                          <span className="px-2 py-0.5 rounded-full bg-amber-400/10 border border-amber-400/20 text-[10px] tracking-[0.18em] uppercase text-amber-100">
+                            advisory
+                          </span>
+                        </div>
+
+                        <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
+                          <ul className="space-y-2">
+                            <li>• Advisory only — never blocks a human decision.</li>
+                            <li>• Severity flags: GREEN / AMBER / RED (informational).</li>
+                            <li>• Cite the trigger (why the flag exists).</li>
+                            <li>• Clarity over hype.</li>
+                          </ul>
+                        </div>
+
+                        <div className="mt-3 text-[11px] text-slate-500">
+                          Wire AXIOM outputs here later for the selected record.
+                        </div>
+                      </div>
+
+                      <div className="hidden lg:flex items-center gap-2 px-1 text-[10px] uppercase tracking-[0.28em] text-slate-600">
+                        <FileCheck2 className="h-4 w-4" />
+                        Oasis OS • lifecycle discipline • evidence-first registry
                       </div>
                     </div>
+                  )}
+                </div>
+              </section>
+            </div>
 
-                    {selected.description ? (
-                      <div className="rounded-3xl border border-slate-900 bg-black/20 p-4 text-sm text-slate-200">
-                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Description</div>
-                        <div className="mt-2 whitespace-pre-wrap">{selected.description}</div>
-                      </div>
-                    ) : null}
-                  </div>
-                )}
+            {/* OS behavior footnote (MATCH VERIFIED) */}
+            <div className="mt-5 rounded-3xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
+              <div className="font-semibold text-slate-200">OS behavior</div>
+              <div className="mt-1 leading-relaxed text-slate-400">
+                CI-Archive Ledger inherits the OS shell. Lane-safe and entity-scoped. Read-only lifecycle surface.
               </div>
             </div>
 
-            {/* Actions + AXIOM (desktop only) */}
-            <div className="hidden lg:flex col-span-12 lg:col-span-3 min-h-0 overflow-hidden flex-col gap-4">
-              <div className="rounded-3xl border border-slate-900 bg-slate-950/30 overflow-hidden">
-                <div className="p-4 border-b border-slate-900">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="text-sm font-semibold text-slate-50">Actions</div>
-                      <div className="text-[11px] text-slate-400">Context-aware CTAs + cleanup</div>
-                    </div>
-                    <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">CTA</div>
-                  </div>
-                </div>
-
-                <div className="p-4 space-y-2">
-                  <Link
-                    href={canOpenForge ? openInForgeHref : "#"}
-                    className={cx(
-                      "w-full inline-flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-sm transition",
-                      canOpenForge
-                        ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
-                        : "border-slate-900 bg-black/20 text-slate-600 cursor-not-allowed pointer-events-none"
-                    )}
-                    title={canOpenForge ? "Open in CI-Forge" : "Available once approved (or during signing/signed)."}
-                  >
-                    <span className="inline-flex items-center gap-2">
-                      <Hammer className="h-4 w-4" />
-                      Open in Forge
-                    </span>
-                    <ArrowRight className="h-4 w-4" />
-                  </Link>
-
-                  <button
-                    disabled={!canArchiveNow}
-                    className={cx(
-                      "w-full inline-flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-sm transition",
-                      canArchiveNow
-                        ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
-                        : "border-slate-900 bg-black/20 text-slate-600 cursor-not-allowed"
-                    )}
-                    title={canArchiveNow ? "Archive signed artifact (wiring next)." : "Archive is available once signed."}
-                  >
-                    <span className="inline-flex items-center gap-2">
-                      <ArchiveIcon className="h-4 w-4" />
-                      Archive Now
-                    </span>
-                    <ArrowRight className="h-4 w-4" />
-                  </button>
-
-                  <Link
-                    href={canOpenArchive ? openInArchiveHref : "#"}
-                    className={cx(
-                      "w-full inline-flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-sm transition",
-                      canOpenArchive
-                        ? "border-slate-800 bg-black/40 text-slate-100 hover:border-amber-500/30"
-                        : "border-slate-900 bg-black/20 text-slate-600 cursor-not-allowed pointer-events-none"
-                    )}
-                    title={canOpenArchive ? "Open registry surfaces (Minute Book)" : "Available after signing / archival."}
-                  >
-                    <span className="inline-flex items-center gap-2">
-                      <ExternalLink className="h-4 w-4" />
-                      Open in CI-Archive
-                    </span>
-                    <ArrowRight className="h-4 w-4" />
-                  </Link>
-
-                  <div className="mt-3 rounded-2xl border border-slate-900 bg-black/20 p-3 text-xs text-slate-400">
-                    No governance_ledger deletes (constitutional memory). Cleanup happens in drafts + envelopes, and
-                    SANDBOX/TEST is hidden by the scoped view.
-                  </div>
-
-                  <div className="mt-3 border-t border-slate-900 pt-3">
-                    <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500 mb-2">Cleanup</div>
-
-                    <button
-                      className="w-full inline-flex items-center justify-between gap-3 rounded-2xl border border-red-900/60 bg-red-950/30 px-3 py-2 text-sm text-red-200 opacity-70 cursor-not-allowed"
-                      disabled
-                      title="Draft deletion remains in CI-Alchemy (and is blocked here when draft is linked)."
-                    >
-                      <span className="inline-flex items-center gap-2">
-                        <Trash2 className="h-4 w-4" />
-                        Delete Draft
-                      </span>
-                      <ArrowRight className="h-4 w-4" />
-                    </button>
-
-                    <button
-                      className="mt-2 w-full inline-flex items-center justify-between gap-3 rounded-2xl border border-slate-900 bg-black/20 px-3 py-2 text-sm text-slate-600 opacity-70 cursor-not-allowed"
-                      disabled
-                      title="Envelope deletion is controlled in Forge; completed envelopes are immutable."
-                    >
-                      <span className="inline-flex items-center gap-2">
-                        <Trash2 className="h-4 w-4" />
-                        Delete Envelope
-                      </span>
-                      <ArrowRight className="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="rounded-3xl border border-slate-900 bg-slate-950/30 overflow-hidden">
-                <div className="p-4 border-b border-slate-900">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="inline-flex items-center gap-2">
-                      <Shield className="h-4 w-4 text-amber-300" />
-                      <div>
-                        <div className="text-sm font-semibold text-slate-50">AXIOM Advisory</div>
-                        <div className="text-[11px] text-slate-400">Intelligence support • never blocking</div>
-                      </div>
-                    </div>
-                    <div className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] uppercase tracking-[0.22em] text-amber-200">
-                      Advisory
-                    </div>
-                  </div>
-                </div>
-
-                <div className="p-4">
-                  <div className="rounded-2xl border border-slate-900 bg-black/20 p-3">
-                    <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Tone rules</div>
-                    <ul className="mt-2 space-y-2 text-xs text-slate-300">
-                      <li>• Advisory only — never blocks a human decision.</li>
-                      <li>• Severity flags: GREEN / AMBER / RED (informational).</li>
-                      <li>• Always cite the reason (what triggered the flag).</li>
-                      <li>• Prefer clarity + brevity over hype.</li>
-                    </ul>
-                  </div>
-
-                  <div className="mt-3 rounded-2xl border border-slate-900 bg-black/20 p-3 text-xs text-slate-400">
-                    Wire AXIOM outputs here later (summary / risk / compliance flags) for the selected record.
-                  </div>
-                </div>
-              </div>
-
-              <div className="hidden lg:flex items-center gap-2 px-1 text-[10px] uppercase tracking-[0.28em] text-slate-600">
-                <FileCheck2 className="h-4 w-4" />
-                Oasis OS • lifecycle discipline • evidence-first registry
-              </div>
-            </div>
-
-            {/* Mobile: show a minimal guidance card instead of the desktop Actions/AXIOM columns */}
-            <div className="lg:hidden col-span-12">
-              <div className="mt-3 rounded-3xl border border-slate-900 bg-slate-950/30 p-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="inline-flex items-center gap-2">
-                    <Shield className="h-4 w-4 text-amber-300" />
-                    <div>
-                      <div className="text-sm font-semibold text-slate-50">AXIOM Advisory</div>
-                      <div className="text-[11px] text-slate-400">Optional intelligence • never blocking</div>
-                    </div>
-                  </div>
-                  <div className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] uppercase tracking-[0.22em] text-amber-200">
-                    Advisory
-                  </div>
-                </div>
-
-                <div className="mt-3 text-xs text-slate-400">
-                  This mobile view prioritizes execution: queue → details → CTAs. Desktop keeps the full 3-pane discipline.
-                </div>
-              </div>
+            <div className="mt-5 flex items-center justify-between text-[10px] text-slate-600">
+              <span>CI-Archive · Oasis Digital Parliament</span>
+              <span>ODP.AI · Governance Firmware</span>
             </div>
           </div>
+        </div>
 
-          <div className="mt-4 text-[10px] uppercase tracking-[0.28em] text-slate-600">
-            Oasis Digital Parliament • <span className="text-slate-400">Governance firmware</span>
-          </div>
+        {/* optional quick links row (MATCH VERIFIED grammar) */}
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Link
+            href="/ci-archive"
+            className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+          >
+            CI-Archive
+          </Link>
+          <Link
+            href="/ci-archive/minute-book"
+            className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+          >
+            Minute Book
+          </Link>
+          <Link
+            href="/ci-archive/verified"
+            className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+          >
+            Verified
+          </Link>
         </div>
       </div>
     </div>
