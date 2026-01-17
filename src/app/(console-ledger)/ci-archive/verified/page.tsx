@@ -1,3 +1,4 @@
+// src/app/(console-ledger)/ci-archive/verified/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -6,6 +7,7 @@ import Link from "next/link";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
+import { ArrowLeft, FileText, ShieldCheck, Search, CheckCircle2 } from "lucide-react";
 
 type VerifiedRow = {
   id: string;
@@ -31,8 +33,18 @@ type VerifiedRow = {
 
 type Tab = "ALL" | "SIGNED" | "ARCHIVED";
 
+function cx(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
+
+function shortHash(h: string | null | undefined) {
+  if (!h) return "—";
+  if (h.length <= 20) return h;
+  return `${h.slice(0, 16)}…${h.slice(-16)}`;
+}
+
 export default function VerifiedRegistryPage() {
-  const { activeEntity } = useEntity(); // IMPORTANT: this is a slug/key string in your OS (e.g. "holdings")
+  const { activeEntity } = useEntity(); // IMPORTANT: slug/key string (e.g. "holdings")
   const { env } = useOsEnv();
   const laneIsTest = env === "SANDBOX";
 
@@ -42,7 +54,7 @@ export default function VerifiedRegistryPage() {
   const [tab, setTab] = useState<Tab>("ALL");
   const [q, setQ] = useState("");
 
-  // Resolve entity UUID from entities table using slug (no assumptions about OsEntityContext shape)
+  // Resolve entity UUID from entities table using slug (NO CHANGE)
   useEffect(() => {
     let alive = true;
 
@@ -76,6 +88,7 @@ export default function VerifiedRegistryPage() {
     };
   }, [activeEntity]);
 
+  // Load verified_documents + join lane/status (NO CHANGE)
   useEffect(() => {
     let alive = true;
 
@@ -133,9 +146,7 @@ export default function VerifiedRegistryPage() {
         };
       });
 
-      // Lane filter:
-      // - If linked to ledger: enforce lane match
-      // - If NOT linked: show in both lanes (registry-only docs)
+      // Lane filter (NO CHANGE)
       const laneFiltered = merged.filter((r) => {
         if (r.lane_is_test === null || r.lane_is_test === undefined) return true;
         return r.lane_is_test === laneIsTest;
@@ -164,159 +175,270 @@ export default function VerifiedRegistryPage() {
     });
   }, [rows, tab, q]);
 
+  // OS shell/header/body pattern (MATCH CI-ARCHIVE launchpad + Upload)
+  const shell =
+    "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden";
+  const header =
+    "border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent px-4 sm:px-6 py-4 sm:py-5";
+  const body = "px-4 sm:px-6 py-5 sm:py-6";
+
   return (
-    <div className="min-h-[calc(100vh-120px)] px-6 py-6">
-      <div className="mx-auto max-w-[1400px]">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <div className="text-[11px] tracking-[0.28em] text-white/50">CI-ARCHIVE</div>
-            <h1 className="mt-1 text-xl font-semibold text-white">Verified Registry</h1>
-            <div className="mt-1 text-sm text-white/60">
-              Lane: <span className="text-white/80">{laneIsTest ? "SANDBOX" : "RoT"}</span> · Entity:{" "}
-              <span className="text-white/80">{String(activeEntity ?? "").toUpperCase()}</span>
+    <div className="w-full">
+      <div className="mx-auto w-full max-w-[1200px] px-4 pb-10 pt-4 sm:pt-6">
+        <div className={shell}>
+          {/* OS-aligned header */}
+          <div className={header}>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">CI • Archive</div>
+                <h1 className="mt-1 text-lg sm:text-xl font-semibold text-slate-50">Verified Registry</h1>
+                <p className="mt-1 max-w-3xl text-[11px] sm:text-xs text-slate-400 leading-relaxed">
+                  Certified outputs ready for public trust surfaces. Read-only. Lane-safe. Entity-scoped.
+                </p>
+
+                <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
+                  <span className="inline-flex items-center gap-2">
+                    <ShieldCheck className="h-4 w-4 text-emerald-300" />
+                    <span>Registry surface • No destructive actions</span>
+                  </span>
+                  <span className="text-slate-700">•</span>
+                  <span>
+                    Lane:{" "}
+                    <span className={cx("font-semibold", laneIsTest ? "text-amber-300" : "text-sky-300")}>
+                      {laneIsTest ? "SANDBOX" : "RoT"}
+                    </span>
+                  </span>
+                  <span className="text-slate-700">•</span>
+                  <span>
+                    Entity: <span className="text-emerald-300 font-medium">{String(activeEntity ?? "—")}</span>
+                  </span>
+                </div>
+              </div>
+
+              <div className="shrink-0 flex items-center gap-2">
+                <Link
+                  href="/ci-archive"
+                  className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                  title="Back to CI-Archive Launchpad"
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                  Launchpad
+                </Link>
+              </div>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <Link
-              href="/ci-archive"
-              className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/80 hover:bg-white/10"
-            >
-              Back to Launchpad →
-            </Link>
+          <div className={body}>
+            {/* iPhone-first surface: stacks; desktop: 3 columns */}
+            <div className="grid grid-cols-12 gap-4">
+              {/* LEFT: Filters */}
+              <section className="col-span-12 lg:col-span-3">
+                <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-200">Filters</div>
+                      <div className="text-[11px] text-slate-500">View + search</div>
+                    </div>
+                    <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] tracking-[0.18em] uppercase text-slate-200">
+                      filters
+                    </span>
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {(["ALL", "SIGNED", "ARCHIVED"] as Tab[]).map((t) => (
+                      <button
+                        key={t}
+                        onClick={() => setTab(t)}
+                        className={cx(
+                          "rounded-full border px-3 py-1 text-xs transition",
+                          tab === t
+                            ? "border-amber-400/40 bg-amber-400/10 text-amber-100"
+                            : "border-white/10 bg-white/5 text-slate-200/80 hover:bg-white/7"
+                        )}
+                      >
+                        {t}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="mt-4">
+                    <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Search</div>
+                    <div className="mt-2 relative">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
+                      <input
+                        value={q}
+                        onChange={(e) => setQ(e.target.value)}
+                        placeholder="title, hash, path..."
+                        className="w-full rounded-2xl border border-white/10 bg-white/5 pl-10 pr-3 py-2 text-sm text-slate-200 outline-none placeholder:text-slate-500 focus:border-amber-400/30"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-4 text-xs text-slate-400">
+                    {loading ? "Loading…" : `${filtered.length} result(s)`}
+                  </div>
+
+                  <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-400">
+                    Lane-safe: filters by{" "}
+                    <span className="text-slate-200">governance_ledger.is_test</span> via{" "}
+                    <span className="text-slate-200">verified_documents.source_record_id</span>.
+                  </div>
+                </div>
+              </section>
+
+              {/* MIDDLE: Documents */}
+              <section className="col-span-12 lg:col-span-6">
+                <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-200">Documents</div>
+                      <div className="text-[11px] text-slate-500">Certified outputs</div>
+                    </div>
+                    <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] tracking-[0.18em] uppercase text-slate-200">
+                      registry
+                    </span>
+                  </div>
+
+                  <div className="mt-3 space-y-2">
+                    {filtered.length === 0 ? (
+                      <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-slate-400">
+                        {loading ? "Loading registry…" : "No documents match this view."}
+                      </div>
+                    ) : (
+                      filtered.map((r) => (
+                        <div
+                          key={r.id}
+                          className="rounded-3xl border border-white/10 bg-black/20 p-3 hover:bg-black/25 transition"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="text-sm font-medium text-slate-100 truncate">{r.title}</div>
+                              <div className="mt-1 text-xs text-slate-400">
+                                {r.document_class} · {r.verification_level}
+                                {r.ledger_status ? ` · Ledger: ${r.ledger_status}` : ""}
+                              </div>
+                              <div className="mt-2 font-mono break-all text-[11px] text-slate-500">
+                                {r.storage_path}
+                              </div>
+
+                              <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+                                <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1">
+                                  <FileText className="h-4 w-4 text-amber-300" />
+                                  <span className="text-slate-200">{r.storage_bucket}</span>
+                                </span>
+
+                                <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1">
+                                  <CheckCircle2 className="h-4 w-4 text-emerald-300" />
+                                  <span className="text-slate-200">{r.is_archived ? "ARCHIVED" : "VERIFIED"}</span>
+                                </span>
+
+                                <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1">
+                                  <span className="text-slate-500">hash:</span>
+                                  <span className="font-mono text-slate-200">{shortHash(r.file_hash)}</span>
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="flex flex-col items-end gap-2 shrink-0">
+                              <span
+                                className={cx(
+                                  "rounded-full border px-2 py-1 text-[11px]",
+                                  r.signed_at
+                                    ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-100"
+                                    : "border-white/10 bg-white/5 text-slate-400"
+                                )}
+                              >
+                                {r.signed_at ? "SIGNED" : "DRAFT"}
+                              </span>
+
+                              <Link
+                                href={`/ci-archive/verified/${r.id}`}
+                                className="rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-amber-100 hover:bg-amber-400/15"
+                              >
+                                Open →
+                              </Link>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </section>
+
+              {/* RIGHT: Guidance */}
+              <section className="col-span-12 lg:col-span-3">
+                <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-200">Validity path</div>
+                      <div className="text-[11px] text-slate-500">How outputs become certified</div>
+                    </div>
+                    <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] tracking-[0.18em] uppercase text-slate-200">
+                      guide
+                    </span>
+                  </div>
+
+                  <div className="mt-3 space-y-3 text-sm text-slate-300">
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                      1) Council approves → <span className="text-slate-200">approved_by_council = true</span>
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                      2) Forge completes envelope →{" "}
+                      <span className="text-slate-200">signature_envelopes.status = completed</span>
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                      3) Seal/Archive (service role) → writes{" "}
+                      <span className="text-slate-200">verified_documents</span> + minute book evidence
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                      4) verify_governance_archive(record_id) → VALID
+                    </div>
+                  </div>
+
+                  <div className="mt-4 text-[11px] text-slate-500 leading-relaxed">
+                    Verified is read-only. Use Council/Forge for execution and Archive for sealing. This surface is the
+                    trust registry.
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            {/* OS behavior footnote (matches launchpads) */}
+            <div className="mt-5 rounded-3xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
+              <div className="font-semibold text-slate-200">OS behavior</div>
+              <div className="mt-1 leading-relaxed text-slate-400">
+                CI-Archive Verified inherits the OS shell. No module-owned window frames. Lane-safe and entity-scoped.
+              </div>
+            </div>
+
+            <div className="mt-5 flex items-center justify-between text-[10px] text-slate-600">
+              <span>CI-Archive · Oasis Digital Parliament</span>
+              <span>ODP.AI · Governance Firmware</span>
+            </div>
           </div>
         </div>
 
-        <div className="mt-5 grid grid-cols-12 gap-4">
-          {/* Left: filters */}
-          <div className="col-span-12 md:col-span-3">
-            <div className="rounded-2xl border border-white/10 bg-black/40 p-4">
-              <div className="text-[11px] tracking-[0.28em] text-white/50">FILTERS</div>
-
-              <div className="mt-3 flex flex-wrap gap-2">
-                {(["ALL", "SIGNED", "ARCHIVED"] as Tab[]).map((t) => (
-                  <button
-                    key={t}
-                    onClick={() => setTab(t)}
-                    className={[
-                      "rounded-full px-3 py-1 text-xs",
-                      tab === t
-                        ? "border border-amber-400/40 bg-amber-400/10 text-amber-100"
-                        : "border border-white/10 bg-white/5 text-white/70 hover:bg-white/10",
-                    ].join(" ")}
-                  >
-                    {t}
-                  </button>
-                ))}
-              </div>
-
-              <div className="mt-4">
-                <div className="text-[11px] tracking-[0.28em] text-white/50">SEARCH</div>
-                <input
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
-                  placeholder="title, hash, path..."
-                  className="mt-2 w-full rounded-xl border border-white/10 bg-black/50 px-3 py-2 text-sm text-white/80 outline-none placeholder:text-white/30 focus:border-amber-400/30"
-                />
-              </div>
-
-              <div className="mt-4 text-xs text-white/50">
-                {loading ? "Loading..." : `${filtered.length} result(s)`}
-              </div>
-
-              <div className="mt-3 rounded-xl border border-white/10 bg-white/5 p-3 text-xs text-white/60">
-                Registry-only. No destructive actions here.
-              </div>
-            </div>
-          </div>
-
-          {/* Middle: list */}
-          <div className="col-span-12 md:col-span-5">
-            <div className="rounded-2xl border border-white/10 bg-black/40">
-              <div className="border-b border-white/10 px-4 py-3">
-                <div className="text-[11px] tracking-[0.28em] text-white/50">DOCUMENTS</div>
-              </div>
-
-              <div className="max-h-[calc(100vh-260px)] overflow-auto px-2 py-2">
-                {filtered.length === 0 ? (
-                  <div className="p-4 text-sm text-white/50">
-                    {loading ? "Loading registry…" : "No documents match this view."}
-                  </div>
-                ) : (
-                  filtered.map((r) => (
-                    <div
-                      key={r.id}
-                      className="mb-2 rounded-xl border border-white/10 bg-white/5 p-3 hover:bg-white/10"
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="text-sm font-medium text-white">{r.title}</div>
-                          <div className="mt-1 text-xs text-white/55">
-                            {r.document_class} · {r.verification_level}
-                            {r.ledger_status ? ` · Ledger: ${r.ledger_status}` : ""}
-                          </div>
-                          <div className="mt-2 break-all text-[11px] text-white/40">{r.storage_path}</div>
-                        </div>
-
-                        <div className="flex flex-col items-end gap-2">
-                          <span
-                            className={[
-                              "rounded-full px-2 py-1 text-[11px]",
-                              r.signed_at
-                                ? "border border-emerald-400/30 bg-emerald-400/10 text-emerald-100"
-                                : "border border-white/10 bg-black/30 text-white/60",
-                            ].join(" ")}
-                          >
-                            {r.signed_at ? "SIGNED" : "DRAFT"}
-                          </span>
-
-                          <Link
-                            href={`/ci-archive/verified/${r.id}`}
-                            className="rounded-lg border border-amber-400/20 bg-amber-400/10 px-2 py-1 text-[11px] text-amber-100 hover:bg-amber-400/15"
-                          >
-                            Open →
-                          </Link>
-                        </div>
-                      </div>
-
-                      {r.file_hash ? (
-                        <div className="mt-2 break-all text-[11px] text-white/35">hash: {r.file_hash}</div>
-                      ) : null}
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Right: guidance */}
-          <div className="col-span-12 md:col-span-4">
-            <div className="rounded-2xl border border-white/10 bg-black/40 p-4">
-              <div className="text-[11px] tracking-[0.28em] text-white/50">HOW THIS BECOMES “VALID”</div>
-
-              <div className="mt-3 space-y-3 text-sm text-white/70">
-                <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-                  1) Council approves → <span className="text-white/80">approved_by_council = true</span>
-                </div>
-                <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-                  2) Forge completes envelope →{" "}
-                  <span className="text-white/80">signature_envelopes.status = completed</span>
-                </div>
-                <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-                  3) Seal/Archive (service role) → writes{" "}
-                  <span className="text-white/80">verified_documents</span> + minute book evidence
-                </div>
-                <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-                  4) verify_governance_archive(record_id) → VALID
-                </div>
-              </div>
-
-              <div className="mt-4 text-xs text-white/50">
-                Lane-safe: list filters by <span className="text-white/70">governance_ledger.is_test</span> via{" "}
-                <span className="text-white/70">verified_documents.source_record_id</span>.
-              </div>
-            </div>
-          </div>
+        {/* optional quick links row (same grammar as Archive launchpad) */}
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Link
+            href="/ci-archive"
+            className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+          >
+            CI-Archive
+          </Link>
+          <Link
+            href="/ci-archive/minute-book"
+            className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+          >
+            Minute Book
+          </Link>
+          <Link
+            href="/ci-archive/upload"
+            className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+          >
+            Upload
+          </Link>
         </div>
       </div>
     </div>
