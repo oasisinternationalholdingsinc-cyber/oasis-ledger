@@ -1,4 +1,3 @@
-// src/app/(console-ledger)/ci-archive/ledger/ledger.client.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -9,156 +8,89 @@ import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
 import {
   ArrowLeft,
-  ArrowRight,
-  ExternalLink,
-  RefreshCcw,
-  ShieldCheck,
   Search,
-  Hammer,
-  Archive as ArchiveIcon,
   Shield,
-  Trash2,
-  FileCheck2,
+  FileText,
+  CheckCircle2,
+  ExternalLink,
+  Copy,
+  X,
+  ArrowRight,
 } from "lucide-react";
 
-type LedgerStatus =
-  | "drafted"
-  | "pending"
-  | "approved"
-  | "signing"
-  | "signed"
-  | "archived"
-  | "rejected"
-  | string;
+type Tab = "ALL" | "PENDING" | "APPROVED" | "SIGNING" | "SIGNED" | "ARCHIVED";
 
-type TabKey =
-  | "ALL"
-  | "DRAFTED"
-  | "PENDING"
-  | "APPROVED"
-  | "SIGNING"
-  | "SIGNED"
-  | "ARCHIVED";
-
-type LedgerRecord = {
+type LedgerRow = {
   id: string;
+  title: string | null;
+  status: string | null;
 
   entity_id: string | null;
-  entity_key?: string | null;
+  is_test: boolean | null;
 
-  title: string | null;
-  description?: string | null;
-
-  record_type?: string | null;
-  record_no?: string | null;
-
-  status: LedgerStatus | null;
-  approved?: boolean | null;
-  archived?: boolean | null;
-
+  envelope_id: string | null;
   created_at: string | null;
 
-  // from v_governance_ledger_scoped_v3
-  draft_id?: string | null;
-  envelope_id?: string | null;
-  signer_url?: string | null;
-  viewer_url?: string | null;
-  verify_url?: string | null;
-  certificate_url?: string | null;
-
-  // derived (for lane-safe filtering)
-  lane_is_test?: boolean | null;
+  // optional (safe if missing)
+  approved_by_council?: boolean | null;
+  archived_at?: string | null;
 };
 
 function cx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-function formatDate(d: string | null) {
-  if (!d) return "—";
+function normStatusUpper(s: string | null | undefined) {
+  return (s || "").trim().toUpperCase().replace(/[\s-]+/g, "_");
+}
+
+function prettyStatus(s: string | null | undefined) {
+  const u = normStatusUpper(s);
+  if (!u) return "—";
+  return u.replace(/_/g, " ");
+}
+
+function badgeForStatus(statusRaw: string | null | undefined) {
+  const s = normStatusUpper(statusRaw);
+
+  if (s === "PENDING")
+    return "border-sky-400/30 bg-sky-400/10 text-sky-100";
+  if (s === "APPROVED")
+    return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
+  if (s === "SIGNING" || s === "IN_SIGNING")
+    return "border-amber-400/30 bg-amber-400/10 text-amber-100";
+  if (s === "SIGNED")
+    return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
+  if (s === "ARCHIVED")
+    return "border-white/10 bg-white/5 text-slate-300";
+
+  return "border-white/10 bg-white/5 text-slate-400";
+}
+
+function safeCopy(text: string) {
   try {
-    return new Date(d).toLocaleString();
-  } catch {
-    return d;
-  }
+    navigator.clipboard?.writeText(text);
+  } catch {}
 }
 
-function normTabFromRecord(r: LedgerRecord): TabKey {
-  if (r.archived) return "ARCHIVED";
-
-  const s = (r.status || "").toString().toLowerCase().trim();
-  if (s === "draft") return "DRAFTED";
-  if (s === "drafted") return "DRAFTED";
-  if (s === "pending") return "PENDING";
-  if (s === "approved") return "APPROVED";
-  if (s === "signing") return "SIGNING";
-  if (s === "signed") return "SIGNED";
-  if (s === "archived") return "ARCHIVED";
-
-  if (r.approved) return "APPROVED";
-  return "DRAFTED";
-}
-
-function statusPillClass(tab: TabKey) {
-  if (tab === "APPROVED") return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
-  if (tab === "SIGNED") return "border-cyan-400/30 bg-cyan-400/10 text-cyan-100";
-  if (tab === "ARCHIVED") return "border-white/10 bg-white/5 text-slate-200/80";
-  if (tab === "SIGNING") return "border-amber-400/30 bg-amber-400/10 text-amber-100";
-  if (tab === "PENDING") return "border-indigo-400/30 bg-indigo-400/10 text-indigo-100";
-  if (tab === "DRAFTED") return "border-white/10 bg-white/5 text-slate-200/80";
-  return "border-white/10 bg-white/5 text-slate-200/80";
-}
-
-function TabButton({
-  active,
-  label,
-  count,
-  onClick,
-}: {
-  active: boolean;
-  label: string;
-  count: number;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={cx(
-        "rounded-full border px-3 py-1 text-xs transition",
-        active
-          ? "border-amber-400/40 bg-amber-400/10 text-amber-100"
-          : "border-white/10 bg-white/5 text-slate-200/80 hover:bg-white/7"
-      )}
-    >
-      {label} <span className="text-slate-500">·</span>{" "}
-      <span className={cx(active ? "text-amber-100" : "text-slate-200/80")}>{count}</span>
-    </button>
-  );
-}
-
-export default function LedgerClient() {
-  // IMPORTANT: same pattern as Verified page (activeEntity is a slug/key string)
-  const { activeEntity } = useEntity();
+export default function ArchiveLedgerLifecyclePage() {
+  const { activeEntity } = useEntity(); // slug/key string
   const { env } = useOsEnv();
   const laneIsTest = env === "SANDBOX";
 
   const [entityId, setEntityId] = useState<string | null>(null);
 
-  const [rows, setRows] = useState<LedgerRecord[]>([]);
+  const [rows, setRows] = useState<LedgerRow[]>([]);
   const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
 
-  const [tab, setTab] = useState<TabKey>("ALL");
+  const [tab, setTab] = useState<Tab>("ALL");
   const [q, setQ] = useState("");
 
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // modal (details)
+  const [open, setOpen] = useState(false);
+  const [selected, setSelected] = useState<LedgerRow | null>(null);
 
-  const selected = useMemo(
-    () => rows.find((r) => r.id === selectedId) ?? null,
-    [rows, selectedId]
-  );
-
-  // Resolve entity UUID from entities table using slug (MATCH VERIFIED — NO CHANGE)
+  // Resolve entity UUID from entities table using slug (NO hardcoding)
   useEffect(() => {
     let alive = true;
 
@@ -192,143 +124,80 @@ export default function LedgerClient() {
     };
   }, [activeEntity]);
 
-  async function load() {
-    if (!entityId) {
-      setRows([]);
-      setSelectedId(null);
-      return;
-    }
-
-    setLoading(true);
-    setErr(null);
-
-    try {
-      // Primary: scoped view (same wiring intent as your original ledger page)
-      const { data: v, error: vErr } = await supabase
-        .from("v_governance_ledger_scoped_v3")
-        .select("*")
-        .eq("entity_id", entityId)
-        .order("created_at", { ascending: false })
-        .limit(500);
-
-      if (vErr) throw vErr;
-
-      const base: LedgerRecord[] = (v ?? []) as any[];
-
-      // Lane map (MATCH VERIFIED discipline): governance_ledger.id → is_test
-      const ids = base.map((r) => r.id).filter(Boolean) as string[];
-      const laneMap = new Map<string, boolean>();
-
-      if (ids.length) {
-        const { data: gl, error: glErr } = await supabase
-          .from("governance_ledger")
-          .select("id,is_test")
-          .in("id", ids);
-
-        if (!glErr && gl) {
-          for (const r of gl as any[]) {
-            laneMap.set(String(r.id), !!r.is_test);
-          }
-        }
-      }
-
-      const merged: LedgerRecord[] = base.map((r) => ({
-        ...(r as LedgerRecord),
-        lane_is_test: laneMap.has(r.id) ? laneMap.get(r.id)! : null,
-      }));
-
-      // Lane filter (MATCH VERIFIED — NO CHANGE)
-      const laneFiltered = merged.filter((r) => {
-        if (r.lane_is_test === null || r.lane_is_test === undefined) return true;
-        return r.lane_is_test === laneIsTest;
-      });
-
-      setRows(laneFiltered);
-
-      // Selection: keep or choose first
-      if (!selectedId && laneFiltered.length) setSelectedId(laneFiltered[0]!.id);
-      else if (selectedId && !laneFiltered.some((r) => r.id === selectedId) && laneFiltered.length) {
-        setSelectedId(laneFiltered[0]!.id);
-      }
-    } catch (e: any) {
-      console.error("ledger load error", e);
-      setErr(e?.message ?? "Failed to load ledger.");
-      setRows([]);
-      setSelectedId(null);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  // Load on entity + lane changes
+  // Load governance_ledger (entity-scoped + lane-safe)
   useEffect(() => {
     let alive = true;
-    (async () => {
+
+    async function load() {
+      if (!entityId) {
+        setRows([]);
+        return;
+      }
+
+      setLoading(true);
+
+      // Keep select conservative (no schema guessing). Optional columns are fine if they exist.
+      const { data, error } = await supabase
+        .from("governance_ledger")
+        .select("id,title,status,entity_id,is_test,envelope_id,created_at,approved_by_council,archived_at")
+        .eq("entity_id", entityId)
+        .eq("is_test", laneIsTest)
+        .order("created_at", { ascending: false })
+        .limit(400);
+
       if (!alive) return;
-      await load();
-    })();
+
+      if (error) {
+        console.error("governance_ledger load error", error);
+        setRows([]);
+        setLoading(false);
+        return;
+      }
+
+      setRows((data ?? []) as any);
+      setLoading(false);
+    }
+
+    load();
     return () => {
       alive = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entityId, laneIsTest]);
 
   const filtered = useMemo(() => {
     const qq = q.trim().toLowerCase();
 
-    return rows.filter((r) => {
-      const st = normTabFromRecord(r);
+    return (rows ?? []).filter((r) => {
+      const s = normStatusUpper(r.status);
 
-      if (tab !== "ALL" && st !== tab) return false;
+      if (tab !== "ALL") {
+        if (tab === "PENDING" && s !== "PENDING") return false;
+        if (tab === "APPROVED" && s !== "APPROVED") return false;
+        if (tab === "SIGNING" && !(s === "SIGNING" || s === "IN_SIGNING")) return false;
+        if (tab === "SIGNED" && s !== "SIGNED") return false;
+        if (tab === "ARCHIVED" && s !== "ARCHIVED") return false;
+      }
+
       if (!qq) return true;
-
-      const hay = `${r.title ?? ""} ${r.record_type ?? ""} ${r.description ?? ""} ${st}`.toLowerCase();
+      const hay = `${r.id} ${r.title ?? ""} ${r.status ?? ""} ${r.envelope_id ?? ""}`.toLowerCase();
       return hay.includes(qq);
     });
   }, [rows, tab, q]);
 
-  // Selection resilience under filters/search (OS feel)
-  useEffect(() => {
-    if (!filtered.length) return;
-    if (!selectedId) {
-      setSelectedId(filtered[0]!.id);
-      return;
-    }
-    const still = filtered.some((r) => r.id === selectedId);
-    if (!still) setSelectedId(filtered[0]!.id);
-  }, [filtered, selectedId]);
-
   const counts = useMemo(() => {
-    const c: Record<TabKey, number> = {
-      ALL: rows.length,
-      DRAFTED: 0,
-      PENDING: 0,
-      APPROVED: 0,
-      SIGNING: 0,
-      SIGNED: 0,
-      ARCHIVED: 0,
-    };
+    const c = { ALL: rows.length, PENDING: 0, APPROVED: 0, SIGNING: 0, SIGNED: 0, ARCHIVED: 0 } as Record<Tab, number>;
     for (const r of rows) {
-      c[normTabFromRecord(r)] += 1;
+      const s = normStatusUpper(r.status);
+      if (s === "PENDING") c.PENDING++;
+      else if (s === "APPROVED") c.APPROVED++;
+      else if (s === "SIGNING" || s === "IN_SIGNING") c.SIGNING++;
+      else if (s === "SIGNED") c.SIGNED++;
+      else if (s === "ARCHIVED") c.ARCHIVED++;
     }
     return c;
   }, [rows]);
 
-  const selectedTab = selected ? normTabFromRecord(selected) : "DRAFTED";
-  const canOpenForge = !!selected && (selectedTab === "APPROVED" || selectedTab === "SIGNING" || selectedTab === "SIGNED");
-  const canArchiveNow = !!selected && selectedTab === "SIGNED";
-  const canOpenArchive = !!selected && (selectedTab === "ARCHIVED" || selectedTab === "SIGNED" || selectedTab === "SIGNING");
-
-  const portal = selected?.envelope_id
-    ? {
-        view: selected.viewer_url || null,
-        sign: selected.signer_url || null,
-        verify: selected.verify_url || null,
-        certificate: selected.certificate_url || null,
-      }
-    : null;
-
-  // OS shell/header/body pattern (MATCH VERIFIED)
+  // OS shell/header/body pattern (MATCH Verified Registry)
   const shell =
     "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden";
   const header =
@@ -339,7 +208,7 @@ export default function LedgerClient() {
     <div className="w-full">
       <div className="mx-auto w-full max-w-[1200px] px-4 pb-10 pt-4 sm:pt-6">
         <div className={shell}>
-          {/* OS-aligned header (MATCH VERIFIED) */}
+          {/* OS-aligned header */}
           <div className={header}>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -350,13 +219,14 @@ export default function LedgerClient() {
                   Drafts &amp; Approvals
                 </h1>
                 <p className="mt-1 max-w-3xl text-[11px] sm:text-xs text-slate-400 leading-relaxed">
-                  Lifecycle surface for records in motion. Read-only. Lane-safe. Entity-scoped.
+                  Lifecycle surface for governance_ledger. Read-only monitor. Lane-safe. Entity-scoped. Use Council/Forge/Archive
+                  to execute.
                 </p>
 
                 <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
                   <span className="inline-flex items-center gap-2">
-                    <ShieldCheck className="h-4 w-4 text-emerald-300" />
-                    <span>Lifecycle surface • No destructive actions</span>
+                    <Shield className="h-4 w-4 text-emerald-300" />
+                    <span>Registry monitor • No destructive actions</span>
                   </span>
                   <span className="text-slate-700">•</span>
                   <span>
@@ -374,15 +244,6 @@ export default function LedgerClient() {
               </div>
 
               <div className="shrink-0 flex items-center gap-2">
-                <button
-                  onClick={load}
-                  className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
-                  title="Refresh"
-                >
-                  <RefreshCcw className="h-4 w-4" />
-                  Refresh
-                </button>
-
                 <Link
                   href="/ci-archive"
                   className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
@@ -396,8 +257,9 @@ export default function LedgerClient() {
           </div>
 
           <div className={body}>
+            {/* iPhone-first surface: stacks; desktop: 3 columns */}
             <div className="grid grid-cols-12 gap-4">
-              {/* LEFT: Filters (MATCH VERIFIED grammar) */}
+              {/* LEFT: Filters */}
               <section className="col-span-12 lg:col-span-3">
                 <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
                   <div className="flex items-start justify-between gap-3">
@@ -411,13 +273,21 @@ export default function LedgerClient() {
                   </div>
 
                   <div className="mt-3 flex flex-wrap gap-2">
-                    <TabButton active={tab === "ALL"} label="ALL" count={counts.ALL} onClick={() => setTab("ALL")} />
-                    <TabButton active={tab === "DRAFTED"} label="DRAFTED" count={counts.DRAFTED} onClick={() => setTab("DRAFTED")} />
-                    <TabButton active={tab === "PENDING"} label="PENDING" count={counts.PENDING} onClick={() => setTab("PENDING")} />
-                    <TabButton active={tab === "APPROVED"} label="APPROVED" count={counts.APPROVED} onClick={() => setTab("APPROVED")} />
-                    <TabButton active={tab === "SIGNING"} label="SIGNING" count={counts.SIGNING} onClick={() => setTab("SIGNING")} />
-                    <TabButton active={tab === "SIGNED"} label="SIGNED" count={counts.SIGNED} onClick={() => setTab("SIGNED")} />
-                    <TabButton active={tab === "ARCHIVED"} label="ARCHIVED" count={counts.ARCHIVED} onClick={() => setTab("ARCHIVED")} />
+                    {(["ALL", "PENDING", "APPROVED", "SIGNING", "SIGNED", "ARCHIVED"] as Tab[]).map((t) => (
+                      <button
+                        key={t}
+                        onClick={() => setTab(t)}
+                        className={cx(
+                          "rounded-full border px-3 py-1 text-xs transition",
+                          tab === t
+                            ? "border-amber-400/40 bg-amber-400/10 text-amber-100"
+                            : "border-white/10 bg-white/5 text-slate-200/80 hover:bg-white/7"
+                        )}
+                        title={`${t} (${counts[t] ?? 0})`}
+                      >
+                        {t} <span className="opacity-70">({counts[t] ?? 0})</span>
+                      </button>
+                    ))}
                   </div>
 
                   <div className="mt-4">
@@ -427,7 +297,7 @@ export default function LedgerClient() {
                       <input
                         value={q}
                         onChange={(e) => setQ(e.target.value)}
-                        placeholder="title, type, status..."
+                        placeholder="title, id, status..."
                         className="w-full rounded-2xl border border-white/10 bg-white/5 pl-10 pr-3 py-2 text-sm text-slate-200 outline-none placeholder:text-slate-500 focus:border-amber-400/30"
                       />
                     </div>
@@ -437,31 +307,20 @@ export default function LedgerClient() {
                     {loading ? "Loading…" : `${filtered.length} result(s)`}
                   </div>
 
-                  {err && (
-                    <div className="mt-3 rounded-2xl border border-red-900/60 bg-red-950/30 px-3 py-2 text-sm text-red-200">
-                      {err}
-                    </div>
-                  )}
-
                   <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-400">
-                    Lane-safe: filters by <span className="text-slate-200">governance_ledger.is_test</span> using record IDs.
+                    Lane-safe: filters by <span className="text-slate-200">governance_ledger.is_test</span> and{" "}
+                    <span className="text-slate-200">entity_id</span>.
                   </div>
-
-                  {!entityId && (
-                    <div className="mt-3 rounded-2xl border border-amber-400/20 bg-amber-400/10 p-3 text-xs text-amber-100">
-                      Waiting for entity resolution (slug → entities.id).
-                    </div>
-                  )}
                 </div>
               </section>
 
-              {/* MIDDLE: Queue (MATCH VERIFIED “Documents” surface) */}
+              {/* MIDDLE: Records */}
               <section className="col-span-12 lg:col-span-6">
                 <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <div className="text-sm font-semibold text-slate-200">Queue</div>
-                      <div className="text-[11px] text-slate-500">Records in motion</div>
+                      <div className="text-sm font-semibold text-slate-200">Records</div>
+                      <div className="text-[11px] text-slate-500">Lifecycle queue</div>
                     </div>
                     <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] tracking-[0.18em] uppercase text-slate-200">
                       ledger
@@ -475,45 +334,87 @@ export default function LedgerClient() {
                       </div>
                     ) : (
                       filtered.map((r) => {
-                        const isSel = r.id === selectedId;
-                        const st = normTabFromRecord(r);
+                        const statusClass = badgeForStatus(r.status);
+                        const s = normStatusUpper(r.status);
+                        const canGoCouncil = s === "PENDING" || s === "APPROVED";
+                        const canGoForge = s === "APPROVED" || s === "SIGNING" || s === "IN_SIGNING" || s === "SIGNED";
+                        const canGoArchive = s === "SIGNED" || s === "ARCHIVED";
 
                         return (
                           <button
                             key={r.id}
-                            onClick={() => setSelectedId(r.id)}
-                            className={cx(
-                              "w-full text-left rounded-3xl border p-3 transition outline-none",
-                              "hover:bg-black/25",
-                              isSel
-                                ? "border-amber-400/40 bg-amber-400/10"
-                                : "border-white/10 bg-black/20"
-                            )}
+                            onClick={() => {
+                              setSelected(r);
+                              setOpen(true);
+                            }}
+                            className="w-full text-left rounded-3xl border border-white/10 bg-black/20 p-3 hover:bg-black/25 transition"
                           >
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0">
                                 <div className="text-sm font-medium text-slate-100 truncate">
-                                  {r.title || "(Untitled record)"}
+                                  {r.title || "Untitled record"}
                                 </div>
                                 <div className="mt-1 text-xs text-slate-400">
-                                  {r.record_type ? `${r.record_type} · ` : ""}
-                                  Created: {formatDate(r.created_at)}
+                                  Status: {prettyStatus(r.status)}
+                                  {r.envelope_id ? " · Envelope attached" : ""}
                                 </div>
-                                {r.description ? (
-                                  <div className="mt-2 text-[11px] text-slate-500 line-clamp-2">
-                                    {r.description}
-                                  </div>
-                                ) : null}
+
+                                <div className="mt-2 font-mono break-all text-[11px] text-slate-500">
+                                  {r.id}
+                                </div>
+
+                                <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+                                  <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1">
+                                    <FileText className="h-4 w-4 text-amber-300" />
+                                    <span className="text-slate-200">governance_ledger</span>
+                                  </span>
+
+                                  <span className={cx("inline-flex items-center gap-2 rounded-full border px-3 py-1", statusClass)}>
+                                    <CheckCircle2 className="h-4 w-4" />
+                                    <span className="text-slate-200">{prettyStatus(r.status)}</span>
+                                  </span>
+
+                                  <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1">
+                                    <span className="text-slate-500">lane:</span>
+                                    <span className={cx("font-semibold", laneIsTest ? "text-amber-200" : "text-sky-200")}>
+                                      {laneIsTest ? "SANDBOX" : "RoT"}
+                                    </span>
+                                  </span>
+                                </div>
                               </div>
 
-                              <span
-                                className={cx(
-                                  "shrink-0 rounded-full border px-2 py-1 text-[11px]",
-                                  statusPillClass(st)
-                                )}
-                              >
-                                {st}
-                              </span>
+                              <div className="flex flex-col items-end gap-2 shrink-0">
+                                <span className={cx("rounded-full border px-2 py-1 text-[11px]", statusClass)}>
+                                  {prettyStatus(r.status)}
+                                </span>
+
+                                <div className="flex items-center gap-2">
+                                  <span
+                                    className={cx(
+                                      "rounded-full border px-2 py-1 text-[10px] tracking-[0.18em] uppercase",
+                                      canGoCouncil ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-black/20 text-slate-500"
+                                    )}
+                                  >
+                                    Council
+                                  </span>
+                                  <span
+                                    className={cx(
+                                      "rounded-full border px-2 py-1 text-[10px] tracking-[0.18em] uppercase",
+                                      canGoForge ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-black/20 text-slate-500"
+                                    )}
+                                  >
+                                    Forge
+                                  </span>
+                                  <span
+                                    className={cx(
+                                      "rounded-full border px-2 py-1 text-[10px] tracking-[0.18em] uppercase",
+                                      canGoArchive ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-black/20 text-slate-500"
+                                    )}
+                                  >
+                                    Archive
+                                  </span>
+                                </div>
+                              </div>
                             </div>
                           </button>
                         );
@@ -523,212 +424,46 @@ export default function LedgerClient() {
                 </div>
               </section>
 
-              {/* RIGHT: Record + Actions + AXIOM (same shell language as Verified) */}
+              {/* RIGHT: Guidance */}
               <section className="col-span-12 lg:col-span-3">
                 <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <div className="text-sm font-semibold text-slate-200">Selected</div>
-                      <div className="text-[11px] text-slate-500">Record + posture</div>
+                      <div className="text-sm font-semibold text-slate-200">Lifecycle</div>
+                      <div className="text-[11px] text-slate-500">What to do next</div>
                     </div>
                     <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] tracking-[0.18em] uppercase text-slate-200">
-                      detail
+                      guide
                     </span>
                   </div>
 
-                  {!selected ? (
-                    <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-slate-400">
-                      Select a record from the queue.
+                  <div className="mt-3 space-y-3 text-sm text-slate-300">
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                      <span className="text-slate-200">PENDING</span> → review &amp; approve in <span className="text-slate-200">Council</span>
                     </div>
-                  ) : (
-                    <div className="mt-3 space-y-3">
-                      <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                        <div className="text-sm font-semibold text-slate-100 truncate">
-                          {selected.title || "(Untitled record)"}
-                        </div>
-                        <div className="mt-1 text-xs text-slate-400">
-                          Status:{" "}
-                          <span className="text-slate-200 font-medium">{normTabFromRecord(selected)}</span>
-                          <span className="text-slate-700"> • </span>
-                          {formatDate(selected.created_at)}
-                        </div>
-
-                        <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-                          <div className="rounded-2xl border border-white/10 bg-black/20 p-2">
-                            <div className="text-[10px] tracking-[0.25em] uppercase text-slate-500">Approved</div>
-                            <div className="mt-1 text-slate-200">{selected.approved ? "Yes" : "No"}</div>
-                          </div>
-                          <div className="rounded-2xl border border-white/10 bg-black/20 p-2">
-                            <div className="text-[10px] tracking-[0.25em] uppercase text-slate-500">Archived</div>
-                            <div className="mt-1 text-slate-200">{selected.archived ? "Yes" : "No"}</div>
-                          </div>
-                        </div>
-
-                        {selected.record_no ? (
-                          <div className="mt-2 text-[11px] text-slate-500">
-                            No: <span className="text-slate-200">{selected.record_no}</span>
-                          </div>
-                        ) : null}
-
-                        {selected.entity_key ? (
-                          <div className="mt-1 text-[11px] text-slate-500">
-                            Entity: <span className="text-slate-200">{selected.entity_key}</span>
-                          </div>
-                        ) : null}
-                      </div>
-
-                      {/* Actions (read-only) */}
-                      <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                        <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Actions</div>
-
-                        <div className="mt-2 space-y-2">
-                          <Link
-                            href={canOpenForge ? `/ci-forge?record_id=${encodeURIComponent(selected.id)}` : "#"}
-                            className={cx(
-                              "w-full inline-flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-sm transition",
-                              canOpenForge
-                                ? "border-white/10 bg-white/5 text-slate-200 hover:bg-white/7"
-                                : "border-white/10 bg-black/20 text-slate-600 pointer-events-none"
-                            )}
-                            title={canOpenForge ? "Open in CI-Forge" : "Available after approval (or during signing/signed)."}
-                          >
-                            <span className="inline-flex items-center gap-2">
-                              <Hammer className="h-4 w-4 text-amber-300" />
-                              Open in Forge
-                            </span>
-                            <ArrowRight className="h-4 w-4" />
-                          </Link>
-
-                          <button
-                            disabled={!canArchiveNow}
-                            className={cx(
-                              "w-full inline-flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-sm transition",
-                              canArchiveNow
-                                ? "border-white/10 bg-white/5 text-slate-200 hover:bg-white/7"
-                                : "border-white/10 bg-black/20 text-slate-600 cursor-not-allowed"
-                            )}
-                            title={canArchiveNow ? "Archive signed artifact (wired in Forge)." : "Archive is available once signed."}
-                          >
-                            <span className="inline-flex items-center gap-2">
-                              <ArchiveIcon className="h-4 w-4 text-amber-300" />
-                              Archive Now
-                            </span>
-                            <ArrowRight className="h-4 w-4" />
-                          </button>
-
-                          <Link
-                            href={canOpenArchive ? "/ci-archive/minute-book" : "#"}
-                            className={cx(
-                              "w-full inline-flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-sm transition",
-                              canOpenArchive
-                                ? "border-white/10 bg-white/5 text-slate-200 hover:bg-white/7"
-                                : "border-white/10 bg-black/20 text-slate-600 pointer-events-none"
-                            )}
-                            title={canOpenArchive ? "Open CI-Archive registry surfaces" : "Available after signing / archival."}
-                          >
-                            <span className="inline-flex items-center gap-2">
-                              <ExternalLink className="h-4 w-4 text-amber-300" />
-                              Open Archive
-                            </span>
-                            <ArrowRight className="h-4 w-4" />
-                          </Link>
-                        </div>
-
-                        {/* Portal shortcuts */}
-                        <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3">
-                          <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Portal</div>
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            {([
-                              ["View", portal?.view],
-                              ["Sign", portal?.sign],
-                              ["Verify", portal?.verify],
-                              ["Certificate", portal?.certificate],
-                            ] as Array<[string, string | null | undefined]>).map(([label, href]) => (
-                              <a
-                                key={label}
-                                href={href ?? "#"}
-                                target="_blank"
-                                rel="noreferrer"
-                                className={cx(
-                                  "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase inline-flex items-center gap-2 transition",
-                                  href
-                                    ? "border-amber-400/20 bg-amber-400/10 text-amber-100 hover:bg-amber-400/15"
-                                    : "border-white/10 bg-black/20 text-slate-600 pointer-events-none"
-                                )}
-                              >
-                                <ExternalLink className="h-4 w-4" />
-                                {label}
-                              </a>
-                            ))}
-                          </div>
-                        </div>
-
-                        {/* Constitutional note */}
-                        <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-400">
-                          No governance_ledger deletes (constitutional memory). Cleanup lives in Drafts/Envelopes.
-                        </div>
-
-                        {/* Locked cleanup buttons (visual parity w/ your old ledger) */}
-                        <div className="mt-3 border-t border-white/10 pt-3">
-                          <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500 mb-2">Cleanup</div>
-                          <button
-                            disabled
-                            className="w-full inline-flex items-center justify-between gap-3 rounded-2xl border border-red-900/60 bg-red-950/30 px-3 py-2 text-sm text-red-200 opacity-70 cursor-not-allowed"
-                            title="Draft deletion remains in CI-Alchemy (blocked here)."
-                          >
-                            <span className="inline-flex items-center gap-2">
-                              <Trash2 className="h-4 w-4" />
-                              Delete Draft
-                            </span>
-                            <ArrowRight className="h-4 w-4" />
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* AXIOM (same advisory grammar as Verified) */}
-                      <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="inline-flex items-center gap-2">
-                            <Shield className="h-4 w-4 text-amber-300" />
-                            <div>
-                              <div className="text-sm font-semibold text-slate-200">AXIOM Advisory</div>
-                              <div className="text-[11px] text-slate-500">Intelligence support • never blocking</div>
-                            </div>
-                          </div>
-                          <span className="px-2 py-0.5 rounded-full bg-amber-400/10 border border-amber-400/20 text-[10px] tracking-[0.18em] uppercase text-amber-100">
-                            advisory
-                          </span>
-                        </div>
-
-                        <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
-                          <ul className="space-y-2">
-                            <li>• Advisory only — never blocks a human decision.</li>
-                            <li>• Severity flags: GREEN / AMBER / RED (informational).</li>
-                            <li>• Cite the trigger (why the flag exists).</li>
-                            <li>• Clarity over hype.</li>
-                          </ul>
-                        </div>
-
-                        <div className="mt-3 text-[11px] text-slate-500">
-                          Wire AXIOM outputs here later for the selected record.
-                        </div>
-                      </div>
-
-                      <div className="hidden lg:flex items-center gap-2 px-1 text-[10px] uppercase tracking-[0.28em] text-slate-600">
-                        <FileCheck2 className="h-4 w-4" />
-                        Oasis OS • lifecycle discipline • evidence-first registry
-                      </div>
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                      <span className="text-slate-200">APPROVED</span> → execute via <span className="text-slate-200">Forge</span> (signature-only)
                     </div>
-                  )}
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                      <span className="text-slate-200">SIGNED</span> → seal via <span className="text-slate-200">Archive</span> (idempotent)
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                      <span className="text-slate-200">ARCHIVED</span> → record is sealed; no action required
+                    </div>
+                  </div>
+
+                  <div className="mt-4 text-[11px] text-slate-500 leading-relaxed">
+                    This page is a monitor. Actions are performed in Council/Forge/Archive. Details modal includes safe copy and jump links.
+                  </div>
                 </div>
               </section>
             </div>
 
-            {/* OS behavior footnote (MATCH VERIFIED) */}
+            {/* OS behavior footnote */}
             <div className="mt-5 rounded-3xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
               <div className="font-semibold text-slate-200">OS behavior</div>
               <div className="mt-1 leading-relaxed text-slate-400">
-                CI-Archive Ledger inherits the OS shell. Lane-safe and entity-scoped. Read-only lifecycle surface.
+                Drafts &amp; Approvals inherits the OS shell. Lane-safe and entity-scoped. No module-owned window frames.
               </div>
             </div>
 
@@ -739,13 +474,25 @@ export default function LedgerClient() {
           </div>
         </div>
 
-        {/* optional quick links row (MATCH VERIFIED grammar) */}
+        {/* optional quick links row */}
         <div className="mt-4 flex flex-wrap gap-2">
           <Link
             href="/ci-archive"
             className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
           >
             CI-Archive
+          </Link>
+          <Link
+            href="/ci-council"
+            className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+          >
+            Council
+          </Link>
+          <Link
+            href="/ci-forge"
+            className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+          >
+            Forge
           </Link>
           <Link
             href="/ci-archive/minute-book"
@@ -761,6 +508,176 @@ export default function LedgerClient() {
           </Link>
         </div>
       </div>
+
+      {/* DETAILS MODAL (OS modern) */}
+      {open && selected && (
+        <div className="fixed inset-0 z-[80]">
+          <div
+            className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+            onClick={() => {
+              setOpen(false);
+              setSelected(null);
+            }}
+          />
+          <div className="absolute inset-0 flex items-center justify-center p-4">
+            <div className="w-full max-w-[860px] rounded-3xl border border-white/10 bg-black/60 shadow-[0_40px_140px_rgba(0,0,0,0.65)] overflow-hidden">
+              <div className="border-b border-white/10 bg-gradient-to-b from-white/[0.08] to-transparent px-5 py-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Record</div>
+                    <div className="mt-1 text-lg font-semibold text-slate-50 truncate">
+                      {selected.title || "Untitled record"}
+                    </div>
+                    <div className="mt-1 text-xs text-slate-400">
+                      Status: <span className="text-slate-200">{prettyStatus(selected.status)}</span>
+                      {" · "}
+                      Lane:{" "}
+                      <span className={cx("font-semibold", laneIsTest ? "text-amber-300" : "text-sky-300")}>
+                        {laneIsTest ? "SANDBOX" : "RoT"}
+                      </span>
+                      {" · "}
+                      Entity: <span className="text-emerald-300">{String(activeEntity ?? "—")}</span>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => {
+                      setOpen(false);
+                      setSelected(null);
+                    }}
+                    className="rounded-full border border-white/10 bg-white/5 p-2 hover:bg-white/7"
+                    aria-label="Close"
+                  >
+                    <X className="h-4 w-4 text-slate-200" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="px-5 py-5">
+                <div className="grid grid-cols-12 gap-4">
+                  <div className="col-span-12 lg:col-span-7">
+                    <div className="rounded-3xl border border-white/10 bg-black/30 p-4">
+                      <div className="text-sm font-semibold text-slate-200">Identifiers</div>
+
+                      <div className="mt-3 space-y-3 text-sm text-slate-300">
+                        <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                          <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">ledger_id</div>
+                          <div className="mt-1 font-mono break-all text-[12px] text-slate-200">{selected.id}</div>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            <button
+                              onClick={() => safeCopy(selected.id)}
+                              className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                            >
+                              <Copy className="h-4 w-4" />
+                              Copy ID
+                            </button>
+
+                            {selected.envelope_id && (
+                              <button
+                                onClick={() => safeCopy(String(selected.envelope_id))}
+                                className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                              >
+                                <Copy className="h-4 w-4" />
+                                Copy Envelope
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {selected.envelope_id ? (
+                          <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                            <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">envelope_id</div>
+                            <div className="mt-1 font-mono break-all text-[12px] text-slate-200">
+                              {selected.envelope_id}
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="rounded-2xl border border-white/10 bg-black/20 p-3 text-sm text-slate-400">
+                            No envelope linked yet (signature not started).
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="col-span-12 lg:col-span-5">
+                    <div className="rounded-3xl border border-white/10 bg-black/30 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-semibold text-slate-200">Jump to module</div>
+                          <div className="text-[11px] text-slate-500">Perform actions in the right place</div>
+                        </div>
+                        <span
+                          className={cx(
+                            "rounded-full border px-2 py-1 text-[11px]",
+                            badgeForStatus(selected.status)
+                          )}
+                        >
+                          {prettyStatus(selected.status)}
+                        </span>
+                      </div>
+
+                      <div className="mt-4 space-y-2">
+                        <Link
+                          href="/ci-council"
+                          className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200 hover:bg-white/7 inline-flex items-center justify-between"
+                        >
+                          <span className="inline-flex items-center gap-2">
+                            <Shield className="h-4 w-4 text-sky-300" />
+                            Council
+                          </span>
+                          <ArrowRight className="h-4 w-4" />
+                        </Link>
+
+                        <Link
+                          href="/ci-forge"
+                          className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200 hover:bg-white/7 inline-flex items-center justify-between"
+                        >
+                          <span className="inline-flex items-center gap-2">
+                            <ExternalLink className="h-4 w-4 text-amber-300" />
+                            Forge
+                          </span>
+                          <ArrowRight className="h-4 w-4" />
+                        </Link>
+
+                        <Link
+                          href={`/ci-archive/minute-book`}
+                          className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200 hover:bg-white/7 inline-flex items-center justify-between"
+                        >
+                          <span className="inline-flex items-center gap-2">
+                            <FileText className="h-4 w-4 text-emerald-300" />
+                            Minute Book
+                          </span>
+                          <ArrowRight className="h-4 w-4" />
+                        </Link>
+                      </div>
+
+                      <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-3 text-[11px] text-slate-400">
+                        This modal is informational + safe copy only. No deletes, no direct mutations.
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="border-t border-white/10 bg-black/30 px-5 py-4 flex flex-wrap items-center justify-between gap-2">
+                <div className="text-[11px] text-slate-500">
+                  Tip: use Forge for signature execution, Archive for sealing, Council for approval gate.
+                </div>
+                <button
+                  onClick={() => {
+                    setOpen(false);
+                    setSelected(null);
+                  }}
+                  className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
