@@ -71,26 +71,26 @@ export function OsDock() {
   };
 
   // Apple-ish auto-hide:
-  // - on TOUCH devices: hide during finger scroll (touchmove) + any scroll events; show shortly after stop
-  // - on DESKTOP: keep visible (safe/enterprise)
+  // - TOUCH: hide during scroll/touchmove (iOS-safe), show shortly after stop
+  // - DESKTOP: keep visible (enterprise-safe)
   useEffect(() => {
     if (typeof document === "undefined") return;
 
     const root = document.querySelector(".os-root") as HTMLElement | null;
     const dockEl = document.querySelector(".os-dock") as HTMLElement | null;
+    const workspace = document.querySelector(".os-workspace") as HTMLElement | null;
 
     if (!root || !dockEl) return;
 
-    // expose for CSS (NO UI regressions: you already style via [data-dock])
     const apply = (visible: boolean) => {
       root.dataset.dock = visible ? "visible" : "hidden";
       setDockVisible(visible);
     };
 
-    // Default state
+    // Default
     apply(true);
 
-    // Desktop stays visible (your locked behavior)
+    // Desktop stays visible
     if (!touch) {
       root.dataset.dock = "visible";
       return;
@@ -99,9 +99,22 @@ export function OsDock() {
     let revealTimer: number | null = null;
     let lastHideT = 0;
 
-    const HIDE_THROTTLE_MS = 50; // iOS touchmove can be very frequent
-    const SHOW_AFTER_MS = 260; // show shortly after scroll stops
-    const TOP_GRACE_PX = 18; // near top, prefer visible
+    const HIDE_THROTTLE_MS = 50;
+    const SHOW_AFTER_MS = 260;
+    const TOP_GRACE_PX = 18;
+
+    const getPrimaryScrollTop = () => {
+      // ✅ OS scroll happens in workspace (body is overflow:hidden)
+      if (workspace) return workspace.scrollTop || 0;
+      // fallback if a route ever enables window scroll
+      return window.scrollY || 0;
+    };
+
+    const getEventScrollTop = (evtTarget: EventTarget | null) => {
+      const el = evtTarget as any;
+      const st = typeof el?.scrollTop === "number" ? el.scrollTop : 0;
+      return st;
+    };
 
     const scheduleReveal = () => {
       if (revealTimer) window.clearTimeout(revealTimer);
@@ -111,13 +124,19 @@ export function OsDock() {
       }, SHOW_AFTER_MS);
     };
 
-    const hideNow = () => {
+    const hideNow = (evtTarget?: EventTarget | null) => {
       const now = performance.now();
       if (now - lastHideT < HIDE_THROTTLE_MS) return;
       lastHideT = now;
 
-      // keep visible near top (feels native)
-      const y = window.scrollY || 0;
+      // Grace near the *actual* scroller top (workspace)
+      const yPrimary = getPrimaryScrollTop();
+
+      // If the event came from a nested scroller, use its scrollTop too
+      const yEvent = evtTarget ? getEventScrollTop(evtTarget) : 0;
+
+      const y = Math.max(yPrimary, yEvent);
+
       if (y <= TOP_GRACE_PX) {
         apply(true);
         return;
@@ -127,29 +146,30 @@ export function OsDock() {
       scheduleReveal();
     };
 
-    // iOS reliability: touchmove is the best "user is scrolling" signal for nested momentum scrollers
-    const onTouchMove = () => hideNow();
+    // iOS: touchmove is the reliable “user is scrolling” signal
+    const onTouchMove = (e: TouchEvent) => hideNow(e.target);
 
-    // Backup: catch scroll from ANY nested container too
-    const onAnyScroll = () => hideNow();
+    // Backup: catch scroll from workspace and any nested scrollers
+    const onWorkspaceScroll = () => hideNow(workspace);
+    const onAnyScrollCapture = (e: Event) => hideNow(e.target);
 
-    // Reveal on tap / focus (native safety)
+    // Reveal on tap/focus (safety)
     const onPointerDown = () => apply(true);
     const onFocusIn = (e: FocusEvent) => {
       if (dockEl.contains(e.target as Node)) apply(true);
     };
 
     document.addEventListener("touchmove", onTouchMove, { passive: true });
-    window.addEventListener("scroll", onAnyScroll, { passive: true });
-    document.addEventListener("scroll", onAnyScroll, { passive: true, capture: true });
+    if (workspace) workspace.addEventListener("scroll", onWorkspaceScroll, { passive: true });
+    document.addEventListener("scroll", onAnyScrollCapture, { passive: true, capture: true });
 
     dockEl.addEventListener("pointerdown", onPointerDown);
     dockEl.addEventListener("focusin", onFocusIn);
 
     return () => {
       document.removeEventListener("touchmove", onTouchMove);
-      window.removeEventListener("scroll", onAnyScroll as any);
-      document.removeEventListener("scroll", onAnyScroll as any, true as any);
+      if (workspace) workspace.removeEventListener("scroll", onWorkspaceScroll as any);
+      document.removeEventListener("scroll", onAnyScrollCapture as any, true as any);
 
       dockEl.removeEventListener("pointerdown", onPointerDown as any);
       dockEl.removeEventListener("focusin", onFocusIn as any);
