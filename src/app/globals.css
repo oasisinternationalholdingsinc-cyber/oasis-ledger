@@ -1,20 +1,36 @@
 /* =========================================================
    OASIS DIGITAL PARLIAMENT • ODP.AI
    Governance-Operated Ledger OS – Global Styles
+   (PRISTINE • NO DOCK REGRESSION • APPLE LIGHT MODE + OASIS GOLD)
    ========================================================= */
 
 @import "tailwindcss";
 
-/* ===== Base theming (Next starter) ===== */
+/* =========================================================
+   BASE TOKENS (DARK DEFAULT)
+   ========================================================= */
 
 :root {
   --background: #020617;
   --foreground: #e5e7eb;
 
+  /* ✅ Apple-style OS gradient tokens (dark) */
+  --os-bg-top: #020c24;
+  --os-bg-mid: #020617;
+  --os-bg-bottom: #000000;
+
+  /* ✅ Oasis gold (signal) */
+  --os-gold: #facc15;
+  --os-gold-border: rgba(250, 204, 21, 0.35);
+
+  /* ✅ Surfaces (glass) + borders */
+  --os-surface: rgba(2, 6, 23, 0.55);
+  --os-border: rgba(255, 255, 255, 0.10);
+
   /* Dock sizing */
-  --dock-h: 92px;         /* approx: icon bubble + label hover space */
-  --dock-peek: 6px;       /* handle edge height */
-  --dock-gap: 14px;       /* air between dock and screen edge */
+  --dock-h: 92px; /* approx: icon bubble + label hover space */
+  --dock-peek: 6px; /* handle edge height */
+  --dock-gap: 14px; /* air between dock and screen edge */
 
   /* Auto-hide motion */
   --dock-hide-shift: 76px; /* how far the dock slides down when hidden */
@@ -25,6 +41,7 @@
   --lane-sandbox: rgba(245, 212, 122, 0.22);
 }
 
+/* Tailwind bridge */
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -32,11 +49,36 @@
   --font-mono: var(--font-geist-mono);
 }
 
+/* Keep default dark unless OS prefers light (no auto light here; theme provider controls it) */
 @media (prefers-color-scheme: dark) {
   :root {
     --background: #020617;
     --foreground: #e5e7eb;
   }
+}
+
+/* =========================================================
+   APPLE LIGHT MODE + OASIS GOLD (ENABLED BY:
+   .os-root[data-theme="light"] set by OsThemeProvider)
+   ========================================================= */
+
+.os-root[data-theme="light"] {
+  /* Apple paper + ink (NOT pure white, NOT pure black) */
+  --background: #f5f5f7;
+  --foreground: rgba(0, 0, 0, 0.88);
+
+  /* Subtle gradient depth */
+  --os-bg-top: #ffffff;
+  --os-bg-mid: #f5f5f7;
+  --os-bg-bottom: #ededf0;
+
+  /* Oasis gold in light mode = deeper authority gold */
+  --os-gold: #b08d2a;
+  --os-gold-border: rgba(176, 141, 42, 0.42);
+
+  /* Glass + separators (Apple-like) */
+  --os-surface: rgba(255, 255, 255, 0.72);
+  --os-border: rgba(0, 0, 0, 0.10);
 }
 
 /* ✅ app-like behavior: OS shell controls scrolling */
@@ -55,15 +97,23 @@ body {
 }
 
 /* =========================================================
-   OASIS OS SHELL – STABLE
+   OASIS OS SHELL – STABLE (NO REGRESSIONS)
    ========================================================= */
 
 /* ===== OS ROOT ===== */
 .os-root {
   height: 100vh;
   max-height: 100vh;
-  background: radial-gradient(circle at top, #020c24 0%, #020617 45%, #000 100%);
-  color: #e5e7eb;
+
+  /* ✅ tokenized so theme can flip */
+  background: radial-gradient(
+    circle at top,
+    var(--os-bg-top) 0%,
+    var(--os-bg-mid) 45%,
+    var(--os-bg-bottom) 100%
+  );
+
+  color: var(--foreground);
   display: flex;
   flex-direction: column;
 }
@@ -74,7 +124,10 @@ body {
   display: flex;
   align-items: center;
   padding: 0 20px;
-  border-bottom: 1px solid rgba(250, 204, 21, 0.35);
+
+  /* ✅ tokenized border so it works in light + dark */
+  border-bottom: 1px solid var(--os-gold-border);
+
   font-size: 12px;
   position: relative;
 }
@@ -87,7 +140,7 @@ body {
 }
 
 .os-brand-title {
-  color: #facc15;
+  color: var(--os-gold); /* ✅ token */
   font-weight: 700;
   letter-spacing: 0.18em;
   font-size: 11px;
@@ -139,13 +192,20 @@ body {
   margin-left: 18px;
 }
 
+/* ✅ theme-safe without changing structure */
 .os-entity {
-  background: #020617;
-  border: 1px solid #1f2937;
+  background: rgba(2, 6, 23, 0.55);
+  border: 1px solid rgba(31, 41, 55, 0.85);
   color: #e5e7eb;
   padding: 4px 10px;
   border-radius: 6px;
   font-size: 11px;
+}
+
+.os-root[data-theme="light"] .os-entity {
+  background: var(--os-surface);
+  border-color: var(--os-border);
+  color: var(--foreground);
 }
 
 .os-role-pill {
@@ -158,15 +218,25 @@ body {
   opacity: 0.85;
 }
 
+.os-root[data-theme="light"] .os-role-pill {
+  border-color: var(--os-border);
+  color: rgba(0, 0, 0, 0.60);
+}
+
 .os-email {
   font-size: 11px;
   opacity: 0.8;
 }
 
+.os-root[data-theme="light"] .os-email {
+  color: rgba(0, 0, 0, 0.60);
+  opacity: 1;
+}
+
 .os-signout {
   background: transparent;
   border: none;
-  color: #facc15;
+  color: var(--os-gold); /* ✅ token */
   font-size: 11px;
   cursor: pointer;
 }
@@ -174,9 +244,9 @@ body {
 /* ===== SHELL ===== */
 .os-shell {
   flex: 1;
-  min-height: 0;           /* critical for nested scroll */
+  min-height: 0; /* critical for nested scroll */
   display: flex;
-  flex-direction: column;  /* single column; dock is overlay */
+  flex-direction: column; /* single column; dock is overlay */
   position: relative;
 }
 
@@ -193,7 +263,7 @@ body {
 }
 
 /* =========================================================
-   OS DOCK (BOTTOM OVERLAY + AUTOHIDE)
+   OS DOCK (BOTTOM OVERLAY + AUTOHIDE) — NO REGRESSION
    ========================================================= */
 
 .os-dock {
