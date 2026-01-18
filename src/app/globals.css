@@ -2,6 +2,7 @@
    OASIS DIGITAL PARLIAMENT • ODP.AI
    Governance-Operated Ledger OS – Global Styles
    (PRISTINE • NO DOCK REGRESSION • APPLE LIGHT MODE + OASIS GOLD)
+   + ✅ AUTHORITY SURFACES (CRISP / DECISIVE IN LIGHT MODE)
    ========================================================= */
 
 @import "tailwindcss";
@@ -32,6 +33,17 @@
   --os-ink: rgba(229, 231, 235, 0.95);
   --os-ink-muted: rgba(229, 231, 235, 0.72);
   --os-ink-faint: rgba(229, 231, 235, 0.48);
+
+  /* ✅ AUTHORITY SURFACES (default = dark) */
+  --authority-bg: rgba(2, 6, 23, 0.94);        /* more solid than glass */
+  --authority-border: rgba(255, 255, 255, 0.12);
+  --authority-ink: rgba(229, 231, 235, 0.96);
+  --authority-ink-muted: rgba(229, 231, 235, 0.72);
+
+  /* ✅ AUTHORITY STAMP (status/seal) */
+  --stamp-bg: rgba(250, 204, 21, 0.14);
+  --stamp-border: rgba(250, 204, 21, 0.36);
+  --stamp-ink: rgba(250, 204, 21, 0.98);
 
   /* Dock sizing */
   --dock-h: 92px; /* approx: icon bubble + label hover space */
@@ -91,6 +103,17 @@
   --os-ink: rgba(10, 12, 16, 0.92);
   --os-ink-muted: rgba(10, 12, 16, 0.68);
   --os-ink-faint: rgba(10, 12, 16, 0.48);
+
+  /* ✅ AUTHORITY SURFACES (light mode = CRISP, NO GLASS) */
+  --authority-bg: #ffffff;                    /* decisive paper plane */
+  --authority-border: rgba(10, 12, 16, 0.10);
+  --authority-ink: rgba(10, 12, 16, 0.94);
+  --authority-ink-muted: rgba(10, 12, 16, 0.66);
+
+  /* ✅ AUTHORITY STAMP (light mode) */
+  --stamp-bg: rgba(159, 127, 34, 0.14);
+  --stamp-border: rgba(159, 127, 34, 0.32);
+  --stamp-ink: rgba(120, 92, 18, 0.98);
 }
 
 /* ✅ app-like behavior: OS shell controls scrolling */
@@ -270,6 +293,60 @@ body {
 
   /* keep content clear of the dock handle */
   padding-bottom: calc(var(--dock-gap) + var(--dock-peek) + 18px);
+}
+
+/* =========================================================
+   AUTHORITY SURFACES (OPT-IN) — CRISP DECISION PLANES
+   Use on Council "Authority" panel, Verified detail pane, etc.
+   ========================================================= */
+
+.authority-surface {
+  background: var(--authority-bg);
+  border: 1px solid var(--authority-border);
+  color: var(--authority-ink);
+
+  /* decisive: NO GLASS */
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+
+  /* enterprise restraint */
+  box-shadow:
+    0 18px 52px rgba(0, 0, 0, 0.14),
+    0 0 0 1px rgba(0, 0, 0, 0.03);
+}
+
+.os-root:not([data-theme="light"]) .authority-surface {
+  box-shadow:
+    0 22px 70px rgba(0, 0, 0, 0.50),
+    0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+.authority-muted {
+  color: var(--authority-ink-muted);
+}
+
+.authority-stamp {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+
+  background: var(--stamp-bg);
+  border: 1px solid var(--stamp-border);
+  color: var(--stamp-ink);
+
+  padding: 4px 10px;
+  border-radius: 999px;
+
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.authority-divider {
+  height: 1px;
+  background: var(--authority-border);
+  opacity: 0.9;
 }
 
 /* =========================================================
