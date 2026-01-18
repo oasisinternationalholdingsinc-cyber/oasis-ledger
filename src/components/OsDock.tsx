@@ -46,7 +46,6 @@ function isTouchDevice() {
 
 export function OsDock() {
   const pathname = usePathname();
-  const dockRef = useRef<HTMLElement | null>(null);
 
   const [touch] = useState(() => isTouchDevice());
   const [dockVisible, setDockVisible] = useState(true);
@@ -58,7 +57,6 @@ export function OsDock() {
 
   const renderItem = ({ href, label, Icon, tintClass, moduleKey }: DockItem) => {
     const active = isActive(href);
-
     return (
       <Link key={href} href={href} className="dock-item" data-module={moduleKey}>
         <div className={clsx("dock-icon", active && "active")}>
@@ -69,9 +67,7 @@ export function OsDock() {
     );
   };
 
-  // Apple-ish auto-hide:
-  // - on TOUCH devices: scroll down hides, scroll up shows
-  // - on DESKTOP: keep visible (no cursor-edge reveal yet), but we still show on hover/tap handle
+  // ===== AUTOHIDE ENGINE (no wiring changes; only behavior) =====
   useEffect(() => {
     if (typeof document === "undefined") return;
 
@@ -81,7 +77,6 @@ export function OsDock() {
 
     if (!root || !workspace || !dockEl) return;
 
-    // expose for CSS
     const apply = (visible: boolean) => {
       root.dataset.dock = visible ? "visible" : "hidden";
       setDockVisible(visible);
@@ -90,67 +85,152 @@ export function OsDock() {
     // Default state
     apply(true);
 
-    // If not touch device, keep it visible (safe/enterprise)
-    if (!touch) {
-      root.dataset.dock = "visible";
-      return;
-    }
+    // Heuristics
+    const TOP_REVEAL_PX = 24;          // always show near top
+    const SCROLL_HIDE_AFTER_PX = 48;   // don't hide immediately
+    const DY_THRESHOLD = 8;            // ignore tiny movements
+    const QUIET_MS = 900;              // after user stops scrolling, allow hide again
+    const BOTTOM_REVEAL_PX = 84;       // mouse near bottom reveals (desktop)
 
     let lastY = workspace.scrollTop;
-    let lastT = performance.now();
+    let lastDir: "up" | "down" | "none" = "none";
+    let raf = 0;
 
-    const thresholdPx = 10;      // ignore tiny movements
-    const minIntervalMs = 50;    // ignore super high-frequency noise
+    // track "reading / interacting"
+    let pointerNearDock = false;
+    let lastInteractAt = 0;
+    let lastScrollAt = performance.now();
+
+    const now = () => performance.now();
+    const markInteract = () => {
+      lastInteractAt = now();
+      apply(true);
+    };
+
+    const shouldLockVisible = () => {
+      // if user is actively interacting / hovering near dock, keep visible
+      if (pointerNearDock) return true;
+      // if user just interacted recently, keep visible
+      if (now() - lastInteractAt < 650) return true;
+      return false;
+    };
 
     const onScroll = () => {
-      const nowT = performance.now();
-      const y = workspace.scrollTop;
+      if (raf) return;
+      raf = window.requestAnimationFrame(() => {
+        raf = 0;
 
-      if (nowT - lastT < minIntervalMs) return;
+        const y = workspace.scrollTop;
+        const dy = y - lastY;
 
-      const dy = y - lastY;
-      if (Math.abs(dy) < thresholdPx) return;
+        // always show near top
+        if (y <= TOP_REVEAL_PX) {
+          lastY = y;
+          lastDir = "none";
+          apply(true);
+          return;
+        }
 
-      // scroll down -> hide (unless near top)
-      if (dy > 0 && y > 24) apply(false);
+        // ignore micro-scroll noise
+        if (Math.abs(dy) < DY_THRESHOLD) return;
 
-      // scroll up -> show
-      if (dy < 0) apply(true);
+        lastScrollAt = now();
 
-      lastY = y;
-      lastT = nowT;
+        // Determine direction
+        const dir: "up" | "down" = dy > 0 ? "down" : "up";
+        lastDir = dir;
+
+        // Scroll up -> show (reading / correction)
+        if (dir === "up") {
+          apply(true);
+          lastY = y;
+          return;
+        }
+
+        // Scroll down -> hide only after some travel, and not while interacting
+        if (dir === "down") {
+          if (shouldLockVisible()) {
+            apply(true);
+            lastY = y;
+            return;
+          }
+
+          if (y > SCROLL_HIDE_AFTER_PX) {
+            apply(false);
+          }
+        }
+
+        lastY = y;
+      });
     };
 
-    // Tap the dock/handle to reveal
-    const onPointerDown = () => apply(true);
-
-    workspace.addEventListener("scroll", onScroll, { passive: true });
-    dockEl.addEventListener("pointerdown", onPointerDown);
-
-    return () => {
-      workspace.removeEventListener("scroll", onScroll as any);
-      dockEl.removeEventListener("pointerdown", onPointerDown as any);
+    // After scrolling stops, if we were going down, hide (unless interacting)
+    let idleTimer: any = null;
+    const onScrollEndTick = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        if (shouldLockVisible()) return;
+        const y = workspace.scrollTop;
+        if (y > SCROLL_HIDE_AFTER_PX && lastDir === "down") apply(false);
+      }, QUIET_MS);
     };
-  }, [touch]);
 
-  // Keep ref (optional)
-  useEffect(() => {
-    dockRef.current = document.querySelector(".os-dock") as HTMLElement | null;
-  }, []);
+    // Pointer logic: reveal when user approaches bottom (desktop + touchpads)
+    const onMouseMove = (e: MouseEvent) => {
+      if (touch) return; // touch devices use scroll + tap
+      const vh = window.innerHeight || 0;
+      const nearBottom = vh - e.clientY < BOTTOM_REVEAL_PX;
+      if (nearBottom) apply(true);
+    };
 
-  // (optional) keyboard safety: if user tabs into dock, reveal
-  useEffect(() => {
-    if (!touch) return;
-    const root = document.querySelector(".os-root") as HTMLElement | null;
-    const dockEl = document.querySelector(".os-dock") as HTMLElement | null;
-    if (!root || !dockEl) return;
+    // Hover / focus / tap keeps visible
+    const onDockEnter = () => {
+      pointerNearDock = true;
+      apply(true);
+    };
+    const onDockLeave = () => {
+      pointerNearDock = false;
+      // don't immediately hide; let idle timer decide
+    };
 
+    const onPointerDown = () => markInteract();
     const onFocusIn = (e: FocusEvent) => {
-      if (dockEl.contains(e.target as Node)) root.dataset.dock = "visible";
+      if (dockEl.contains(e.target as Node)) markInteract();
     };
 
+    // Keyboard: ESC closes nothing here, but we keep dock visible on Tab focus anyway
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Tab") apply(true);
+    };
+
+    // Attach listeners
+    workspace.addEventListener("scroll", onScroll, { passive: true });
+    workspace.addEventListener("scroll", onScrollEndTick as any, { passive: true });
+
+    dockEl.addEventListener("pointerdown", onPointerDown);
+    dockEl.addEventListener("mouseenter", onDockEnter);
+    dockEl.addEventListener("mouseleave", onDockLeave);
     dockEl.addEventListener("focusin", onFocusIn);
-    return () => dockEl.removeEventListener("focusin", onFocusIn);
+
+    window.addEventListener("mousemove", onMouseMove, { passive: true });
+    window.addEventListener("keydown", onKeyDown);
+
+    // Cleanup
+    return () => {
+      if (raf) window.cancelAnimationFrame(raf);
+      if (idleTimer) clearTimeout(idleTimer);
+
+      workspace.removeEventListener("scroll", onScroll as any);
+      workspace.removeEventListener("scroll", onScrollEndTick as any);
+
+      dockEl.removeEventListener("pointerdown", onPointerDown as any);
+      dockEl.removeEventListener("mouseenter", onDockEnter as any);
+      dockEl.removeEventListener("mouseleave", onDockLeave as any);
+      dockEl.removeEventListener("focusin", onFocusIn as any);
+
+      window.removeEventListener("mousemove", onMouseMove as any);
+      window.removeEventListener("keydown", onKeyDown as any);
+    };
   }, [touch]);
 
   // Keep output identical structure (no module wiring changes)

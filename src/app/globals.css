@@ -1,20 +1,37 @@
 /* =========================================================
    OASIS DIGITAL PARLIAMENT • ODP.AI
    Governance-Operated Ledger OS – Global Styles
+   (Final • No regressions • Light-mode ready via os-root[data-theme])
    ========================================================= */
 
 @import "tailwindcss";
 
-/* ===== Base theming (Next starter) ===== */
+/* =========================================================
+   BASE TOKENS (DARK DEFAULT)
+   ========================================================= */
 
 :root {
   --background: #020617;
   --foreground: #e5e7eb;
 
+  /* OS gradient tokens */
+  --os-bg-top: #020c24;
+  --os-bg-mid: #020617;
+  --os-bg-bottom: #000000;
+
+  /* Gold signal + borders */
+  --os-gold: #facc15;
+  --os-gold-border: rgba(250, 204, 21, 0.35);
+
+  /* Subtle surface tokens (used for light-mode safe overrides too) */
+  --os-surface: rgba(2, 6, 23, 0.55);
+  --os-surface-strong: rgba(2, 6, 23, 0.85);
+  --os-border: rgba(255, 255, 255, 0.10);
+
   /* Dock sizing */
-  --dock-h: 92px;         /* approx: icon bubble + label hover space */
-  --dock-peek: 6px;       /* handle edge height */
-  --dock-gap: 14px;       /* air between dock and screen edge */
+  --dock-h: 92px; /* approx: icon bubble + label hover space */
+  --dock-peek: 6px; /* handle edge height */
+  --dock-gap: 14px; /* air between dock and screen edge */
 
   /* Auto-hide motion */
   --dock-hide-shift: 76px; /* how far the dock slides down when hidden */
@@ -25,6 +42,7 @@
   --lane-sandbox: rgba(245, 212, 122, 0.22);
 }
 
+/* Tailwind theme bridge */
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -32,6 +50,7 @@
   --font-mono: var(--font-geist-mono);
 }
 
+/* Keep default as dark unless OS prefers dark (no change) */
 @media (prefers-color-scheme: dark) {
   :root {
     --background: #020617;
@@ -39,7 +58,32 @@
   }
 }
 
-/* ✅ app-like behavior: OS shell controls scrolling */
+/* =========================================================
+   LIGHT MODE TOKENS (Apple-style parchment)
+   Enable by setting: .os-root[data-theme="light"]
+   ========================================================= */
+
+.os-root[data-theme="light"] {
+  --background: #f6f3ea; /* warm parchment */
+  --foreground: #0b1220; /* charcoal */
+
+  --os-bg-top: #ffffff;
+  --os-bg-mid: #f6f3ea;
+  --os-bg-bottom: #efe8d6;
+
+  /* Gold stays signal, slightly deeper */
+  --os-gold: #b08d2a;
+  --os-gold-border: rgba(176, 141, 42, 0.40);
+
+  /* Light surfaces */
+  --os-surface: rgba(255, 255, 255, 0.62);
+  --os-surface-strong: rgba(255, 255, 255, 0.88);
+  --os-border: rgba(2, 6, 23, 0.12);
+}
+
+/* =========================================================
+   APP-LIKE BEHAVIOR: OS SHELL CONTROLS SCROLLING
+   ========================================================= */
 
 html,
 body {
@@ -62,8 +106,13 @@ body {
 .os-root {
   height: 100vh;
   max-height: 100vh;
-  background: radial-gradient(circle at top, #020c24 0%, #020617 45%, #000 100%);
-  color: #e5e7eb;
+  background: radial-gradient(
+    circle at top,
+    var(--os-bg-top) 0%,
+    var(--os-bg-mid) 45%,
+    var(--os-bg-bottom) 100%
+  );
+  color: var(--foreground);
   display: flex;
   flex-direction: column;
 }
@@ -74,7 +123,7 @@ body {
   display: flex;
   align-items: center;
   padding: 0 20px;
-  border-bottom: 1px solid rgba(250, 204, 21, 0.35);
+  border-bottom: 1px solid var(--os-gold-border);
   font-size: 12px;
   position: relative;
 }
@@ -87,7 +136,7 @@ body {
 }
 
 .os-brand-title {
-  color: #facc15;
+  color: var(--os-gold);
   font-weight: 700;
   letter-spacing: 0.18em;
   font-size: 11px;
@@ -139,13 +188,20 @@ body {
   margin-left: 18px;
 }
 
+/* ✅ make entity chip theme-safe without touching wiring */
 .os-entity {
-  background: #020617;
-  border: 1px solid #1f2937;
-  color: #e5e7eb;
+  background: rgba(2, 6, 23, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  color: var(--foreground);
   padding: 4px 10px;
   border-radius: 6px;
   font-size: 11px;
+}
+
+.os-root[data-theme="light"] .os-entity {
+  background: var(--os-surface-strong);
+  border-color: var(--os-border);
+  color: var(--foreground);
 }
 
 .os-role-pill {
@@ -158,6 +214,10 @@ body {
   opacity: 0.85;
 }
 
+.os-root[data-theme="light"] .os-role-pill {
+  border-color: rgba(2, 6, 23, 0.18);
+}
+
 .os-email {
   font-size: 11px;
   opacity: 0.8;
@@ -166,7 +226,7 @@ body {
 .os-signout {
   background: transparent;
   border: none;
-  color: #facc15;
+  color: var(--os-gold);
   font-size: 11px;
   cursor: pointer;
 }
@@ -174,9 +234,9 @@ body {
 /* ===== SHELL ===== */
 .os-shell {
   flex: 1;
-  min-height: 0;           /* critical for nested scroll */
+  min-height: 0; /* critical for nested scroll */
   display: flex;
-  flex-direction: column;  /* single column; dock is overlay */
+  flex-direction: column; /* single column; dock is overlay */
   position: relative;
 }
 
@@ -210,12 +270,11 @@ body {
 
   padding: 10px 14px;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.10);
-  background: rgba(2, 6, 23, 0.55);
+  border: 1px solid var(--os-border);
+  background: var(--os-surface);
   backdrop-filter: blur(18px);
 
-  box-shadow:
-    0 22px 70px rgba(0, 0, 0, 0.60),
+  box-shadow: 0 22px 70px rgba(0, 0, 0, 0.60),
     0 0 0 1px rgba(250, 204, 21, 0.10);
 
   width: auto;
@@ -226,9 +285,7 @@ body {
   overflow-y: visible;
   scrollbar-width: none;
 
-  transition:
-    transform var(--dock-ease) ease,
-    opacity var(--dock-ease) ease;
+  transition: transform var(--dock-ease) ease, opacity var(--dock-ease) ease;
 }
 
 .os-dock::-webkit-scrollbar {
@@ -252,8 +309,7 @@ body {
   border-radius: 999px;
 
   background: rgba(250, 204, 21, 0.18);
-  box-shadow:
-    0 0 18px rgba(250, 204, 21, 0.35),
+  box-shadow: 0 0 18px rgba(250, 204, 21, 0.35),
     0 0 40px rgba(56, 189, 248, 0.10);
   opacity: 0.85;
 }
@@ -261,15 +317,13 @@ body {
 /* Optional env tint via data attribute on .os-root */
 .os-root[data-env="sandbox"] .os-dock::before {
   background: var(--lane-sandbox);
-  box-shadow:
-    0 0 18px rgba(245, 212, 122, 0.42),
+  box-shadow: 0 0 18px rgba(245, 212, 122, 0.42),
     0 0 44px rgba(250, 204, 21, 0.18);
 }
 
 .os-root[data-env="rot"] .os-dock::before {
   background: var(--lane-rot);
-  box-shadow:
-    0 0 18px rgba(146, 247, 198, 0.42),
+  box-shadow: 0 0 18px rgba(146, 247, 198, 0.42),
     0 0 44px rgba(34, 197, 148, 0.14);
 }
 
@@ -290,31 +344,37 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+
   background: radial-gradient(circle, #0f172a, #020617);
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.18),
+
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18),
     0 14px 28px rgba(0, 0, 0, 0.6);
   font-size: 24px;
-  transition:
-    box-shadow 0.18s ease,
-    background 0.18s ease,
+  transition: box-shadow 0.18s ease, background 0.18s ease,
     transform 0.18s ease;
+}
+
+/* ✅ light-mode icon bubble stays “glass”, not dark slab */
+.os-root[data-theme="light"] .dock-icon {
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.92), rgba(239, 232, 214, 0.85));
+  box-shadow: 0 0 0 1px rgba(2, 6, 23, 0.12),
+    0 14px 28px rgba(2, 6, 23, 0.18);
 }
 
 /* HOVER: glow + slightly brighter bg, NO size change */
 .dock-item:hover .dock-icon {
-  box-shadow:
-    0 0 0 2px #facc15,
-    0 0 42px rgba(250, 204, 21, 0.9),
+  box-shadow: 0 0 0 2px #facc15, 0 0 42px rgba(250, 204, 21, 0.9),
     0 0 80px rgba(56, 189, 248, 0.5);
   background: radial-gradient(circle, #1e293b, #020617);
 }
 
+.os-root[data-theme="light"] .dock-item:hover .dock-icon {
+  background: radial-gradient(circle, #ffffff, rgba(246, 243, 234, 0.9));
+}
+
 /* active route glow */
 .dock-icon.active {
-  box-shadow:
-    0 0 0 2px #facc15,
-    0 0 40px rgba(250, 204, 21, 0.85);
+  box-shadow: 0 0 0 2px #facc15, 0 0 40px rgba(250, 204, 21, 0.85);
 }
 
 /* label under the icon */
@@ -326,10 +386,12 @@ body {
   white-space: nowrap;
   opacity: 0;
   transform: translateY(2px);
-  transition:
-    opacity 0.16s ease,
-    transform 0.16s ease;
+  transition: opacity 0.16s ease, transform 0.16s ease;
   pointer-events: none;
+}
+
+.os-root[data-theme="light"] .dock-label {
+  color: rgba(11, 18, 32, 0.72);
 }
 
 .dock-item:hover .dock-label {
@@ -347,62 +409,48 @@ body {
   flex: 0 0 auto;
 }
 
+.os-root[data-theme="light"] .dock-divider {
+  background: rgba(2, 6, 23, 0.16);
+}
+
 /* =========================================================
    MODULE IDENTITY AURAS – PER-MODULE ACTIVE GLOW
    ========================================================= */
 
 .dock-item[data-module="orbit"] .dock-icon.active {
-  box-shadow:
-    0 0 0 2px #facc15,
-    0 0 45px rgba(56, 189, 248, 0.6);
+  box-shadow: 0 0 0 2px #facc15, 0 0 45px rgba(56, 189, 248, 0.6);
 }
 
 .dock-item[data-module="alchemy"] .dock-icon.active {
-  box-shadow:
-    0 0 0 2px #38bdf8,
-    0 0 45px rgba(56, 189, 248, 0.7);
+  box-shadow: 0 0 0 2px #38bdf8, 0 0 45px rgba(56, 189, 248, 0.7);
 }
 
 .dock-item[data-module="council"] .dock-icon.active {
-  box-shadow:
-    0 0 0 2px #f8fafc,
-    0 0 40px rgba(248, 250, 252, 0.5);
+  box-shadow: 0 0 0 2px #f8fafc, 0 0 40px rgba(248, 250, 252, 0.5);
 }
 
 .dock-item[data-module="forge"] .dock-icon.active {
-  box-shadow:
-    0 0 0 2px #fb923c,
-    0 0 50px rgba(251, 146, 60, 0.85);
+  box-shadow: 0 0 0 2px #fb923c, 0 0 50px rgba(251, 146, 60, 0.85);
 }
 
 .dock-item[data-module="sentinel"] .dock-icon.active {
-  box-shadow:
-    0 0 0 2px #f87171,
-    0 0 44px rgba(248, 113, 113, 0.75);
+  box-shadow: 0 0 0 2px #f87171, 0 0 44px rgba(248, 113, 113, 0.75);
 }
 
 .dock-item[data-module="oracle"] .dock-icon.active {
-  box-shadow:
-    0 0 0 2px #c084fc,
-    0 0 45px rgba(192, 132, 252, 0.8);
+  box-shadow: 0 0 0 2px #c084fc, 0 0 45px rgba(192, 132, 252, 0.8);
 }
 
 .dock-item[data-module="archive"] .dock-icon.active {
-  box-shadow:
-    0 0 0 2px #64748b,
-    0 0 40px rgba(100, 116, 139, 0.7);
+  box-shadow: 0 0 0 2px #64748b, 0 0 40px rgba(100, 116, 139, 0.7);
 }
 
 .dock-item[data-module="kernel"] .dock-icon.active {
-  box-shadow:
-    0 0 0 2px #22c55e,
-    0 0 48px rgba(34, 197, 94, 0.85);
+  box-shadow: 0 0 0 2px #22c55e, 0 0 48px rgba(34, 197, 94, 0.85);
 }
 
 .dock-item[data-module="genesis"] .dock-icon.active {
-  box-shadow:
-    0 0 0 2px #a3e635,
-    0 0 46px rgba(163, 230, 53, 0.9);
+  box-shadow: 0 0 0 2px #a3e635, 0 0 46px rgba(163, 230, 53, 0.9);
 }
 
 /* Small-screen ergonomics */

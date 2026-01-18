@@ -5,7 +5,17 @@ import { useEffect, useMemo, useState } from "react";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import type { EntityKey } from "@/components/OsEntityContext";
-import { Shield, ChevronDown, LogOut, Clock3 } from "lucide-react";
+import { useOsTheme } from "@/components/OsThemeContext";
+import type { OsTheme } from "@/components/OsThemeContext";
+import {
+  Shield,
+  ChevronDown,
+  LogOut,
+  Clock3,
+  Sun,
+  Moon,
+  Monitor,
+} from "lucide-react";
 
 type OsEnv = "RoT" | "SANDBOX";
 const ENV_KEY = "oasis_os_env";
@@ -65,12 +75,14 @@ function useClockLabel24h() {
 
 export function OsGlobalBar() {
   const { activeEntity, setActiveEntity } = useEntity();
+  const { theme, resolved, setTheme } = useOsTheme();
 
   const [env, setEnvState] = useState<OsEnv>(() => getInitialEnv());
   const [operatorEmail, setOperatorEmail] = useState<string>("—");
 
   const [envMenuOpen, setEnvMenuOpen] = useState(false);
   const [entityMenuOpen, setEntityMenuOpen] = useState(false);
+  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
 
   // ✅ condensed mode on scroll (Apple-style). UI-only.
   const [condensed, setCondensed] = useState(false);
@@ -130,11 +142,13 @@ export function OsGlobalBar() {
       if (e.key === "Escape") {
         setEnvMenuOpen(false);
         setEntityMenuOpen(false);
+        setThemeMenuOpen(false);
       }
     };
     const onClick = () => {
       setEnvMenuOpen(false);
       setEntityMenuOpen(false);
+      setThemeMenuOpen(false);
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("click", onClick);
@@ -238,6 +252,23 @@ export function OsGlobalBar() {
     };
   }, [env]);
 
+  // ✅ theme meta (Apple-style: System/Dark/Light)
+  const themeMeta = useMemo(() => {
+    const Icon = theme === "system" ? Monitor : resolved === "dark" ? Moon : Sun;
+
+    const label =
+      theme === "system" ? "Auto" : resolved === "dark" ? "Dark" : "Light";
+
+    const subtitle =
+      theme === "system"
+        ? "Follows system appearance"
+        : resolved === "dark"
+        ? "Dark appearance"
+        : "Light appearance";
+
+    return { Icon, label, subtitle };
+  }, [theme, resolved]);
+
   const activeEntityLabel = useMemo(() => {
     const hit = entityOptions.find((e) => e.key === activeEntity);
     return hit?.label ?? entityOptions[0]?.label ?? "Workspace";
@@ -258,10 +289,7 @@ export function OsGlobalBar() {
   const barH = condensed ? "h-[56px]" : "h-[64px]";
   const innerPad = condensed ? "px-3 sm:px-5" : "px-4 sm:px-6";
 
-  const inner = cx(
-    "mx-auto flex h-full max-w-[1500px] items-center",
-    innerPad
-  );
+  const inner = cx("mx-auto flex h-full max-w-[1500px] items-center", innerPad);
 
   const dropdownShell =
     "rounded-2xl border border-white/10 bg-black/85 shadow-[0_14px_50px_rgba(0,0,0,0.62)] backdrop-blur-xl z-[80]";
@@ -335,6 +363,7 @@ export function OsGlobalBar() {
                 onClick={() => {
                   setEntityMenuOpen((v) => !v);
                   setEnvMenuOpen(false);
+                  setThemeMenuOpen(false);
                 }}
                 className={cx(
                   "flex min-w-0 items-center gap-2 rounded-full border border-white/10 bg-black/20 text-[12px] text-white/90 shadow-[0_0_18px_rgba(0,0,0,0.20)] hover:bg-white/5 transition",
@@ -403,6 +432,7 @@ export function OsGlobalBar() {
                 onClick={() => {
                   setEnvMenuOpen((v) => !v);
                   setEntityMenuOpen(false);
+                  setThemeMenuOpen(false);
                 }}
                 className={cx(
                   "flex items-center gap-2 rounded-full border text-[12px] transition",
@@ -412,9 +442,7 @@ export function OsGlobalBar() {
                 )}
                 title={envMeta.subtitle}
               >
-                <span
-                  className={cx("h-2 w-2 shrink-0 rounded-full", envMeta.dotClass)}
-                />
+                <span className={cx("h-2 w-2 shrink-0 rounded-full", envMeta.dotClass)} />
                 <span className="font-semibold tracking-wide">
                   {condensed && envMeta.label === "SANDBOX" ? "SBX" : envMeta.label}
                 </span>
@@ -442,9 +470,7 @@ export function OsGlobalBar() {
                       <span className="h-2 w-2 rounded-full bg-[#92f7c6]" />
                       RoT
                     </span>
-                    <span className="text-[11px] text-white/45">
-                      System of Record
-                    </span>
+                    <span className="text-[11px] text-white/45">System of Record</span>
                   </button>
 
                   <button
@@ -464,9 +490,7 @@ export function OsGlobalBar() {
                       <span className="h-2 w-2 rounded-full bg-[#f5d47a]" />
                       SANDBOX
                     </span>
-                    <span className="text-[11px] text-white/45">
-                      Test artifacts only
-                    </span>
+                    <span className="text-[11px] text-white/45">Test artifacts only</span>
                   </button>
 
                   <div className={dropdownFootnote}>
@@ -488,6 +512,70 @@ export function OsGlobalBar() {
                     >
                       Quick toggle
                     </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Appearance (Theme) dropdown — OS-level only */}
+            <div className="relative" onClick={(e) => e.stopPropagation()}>
+              <button
+                onClick={() => {
+                  setThemeMenuOpen((v) => !v);
+                  setEnvMenuOpen(false);
+                  setEntityMenuOpen(false);
+                }}
+                className={cx(
+                  "flex items-center gap-2 rounded-full border border-white/10 bg-black/20 text-[12px] text-white/90 shadow-[0_0_18px_rgba(0,0,0,0.20)] hover:bg-white/5 transition",
+                  pillBase,
+                  pillBaseSm
+                )}
+                title={themeMeta.subtitle}
+              >
+                <themeMeta.Icon className="h-4 w-4 text-[#c9a227]/85" />
+                <span className="hidden sm:inline text-white/70">Appearance</span>
+                <span className="hidden h-1 w-1 shrink-0 rounded-full bg-white/25 sm:inline" />
+                <span className="font-semibold tracking-wide">{themeMeta.label}</span>
+                <ChevronDown className="h-4 w-4 shrink-0 text-white/55" />
+              </button>
+
+              {themeMenuOpen && (
+                <div className={cx("absolute right-0 mt-2 w-[320px] p-2", dropdownShell)}>
+                  <div className={dropdownHeader}>Appearance</div>
+
+                  {(
+                    [
+                      { key: "system", label: "System (Auto)", Icon: Monitor, hint: "Follows OS setting" },
+                      { key: "dark", label: "Dark", Icon: Moon, hint: "Low-glare authority" },
+                      { key: "light", label: "Light", Icon: Sun, hint: "Parchment + ink" },
+                    ] as Array<{ key: OsTheme; label: string; Icon: any; hint: string }>
+                  ).map((opt) => {
+                    const selected = theme === opt.key;
+                    return (
+                      <button
+                        key={opt.key}
+                        onClick={() => {
+                          setTheme(opt.key);
+                          setThemeMenuOpen(false);
+                        }}
+                        className={cx(
+                          "flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[13px] transition",
+                          selected ? "bg-white/10 text-white" : "hover:bg-white/5 text-white/85"
+                        )}
+                      >
+                        <span className="flex items-center gap-2 min-w-0">
+                          <opt.Icon className="h-4 w-4 text-[#c9a227]/80" />
+                          <span className="truncate">{opt.label}</span>
+                        </span>
+                        <span className="text-[11px] text-white/45">{opt.hint}</span>
+                      </button>
+                    );
+                  })}
+
+                  <div className={dropdownFootnote}>
+                    Current resolved theme:{" "}
+                    <span className="text-white/80">{resolved}</span>. Theme is stored locally
+                    and applied OS-wide (no module changes).
                   </div>
                 </div>
               )}

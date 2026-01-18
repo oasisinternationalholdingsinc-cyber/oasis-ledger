@@ -5,48 +5,51 @@ import { OsDock } from "@/components/OsDock";
 
 import { OsEntityProvider } from "@/components/OsEntityContext";
 import { OsEnvProvider } from "@/components/OsEnvContext";
+import { OsThemeProvider } from "@/components/OsThemeContext";
 
 import OsAuthGate from "./os-auth-gate";
 
 export default function OsLayout({ children }: { children: ReactNode }) {
   return (
-    <OsEntityProvider>
-      <OsEnvProvider>
-        <div className="os-root relative overflow-x-hidden">
-          {/* === OS ENVIRONMENT (DOES NOT SCROLL) === */}
-          <div
-            aria-hidden
-            className="pointer-events-none fixed inset-0 z-0 flex items-center justify-center"
-          >
-            {/* Ledger shield watermark (PNG substrate) */}
+    <OsThemeProvider>
+      <OsEntityProvider>
+        <OsEnvProvider>
+          <div className="os-root relative overflow-x-hidden">
+            {/* === OS ENVIRONMENT (DOES NOT SCROLL) === */}
             <div
-              className="absolute w-[140vw] max-w-none aspect-[3/4] bg-center bg-no-repeat bg-contain"
-              style={{
-                backgroundImage: "url(/os/ledger-shield-gold.png)",
-                opacity: 0.045, // final tuned value
-                filter: "blur(48px)", // final tuned value
-                transform: "translateY(-8%)",
-              }}
-            />
+              aria-hidden
+              className="pointer-events-none fixed inset-0 z-0 flex items-center justify-center"
+            >
+              {/* Ledger shield watermark (PNG substrate) */}
+              <div
+                className="absolute w-[140vw] max-w-none aspect-[3/4] bg-center bg-no-repeat bg-contain"
+                style={{
+                  backgroundImage: "url(/os/ledger-shield-gold.png)",
+                  opacity: 0.045,
+                  filter: "blur(48px)",
+                  transform: "translateY(-8%)",
+                }}
+              />
 
-            {/* SAFE vignette (NO mask-image; won't hide shield) */}
-            <div className="absolute inset-0 bg-gradient-radial from-transparent via-black/40 to-black/80" />
-          </div>
-
-          {/* === OS UI LAYER === */}
-          <div className="relative z-10">
-            <OsHeader />
-
-            <div className="os-shell">
-              <OsAuthGate>
-                <div className="os-workspace">{children}</div>
-              </OsAuthGate>
+              {/* SAFE vignette (no mask-image; won't hide shield) */}
+              <div className="absolute inset-0 bg-gradient-radial from-transparent via-black/40 to-black/80" />
             </div>
 
-            <OsDock />
+            {/* === OS UI LAYER === */}
+            <div className="relative z-10">
+              <OsHeader />
+
+              <div className="os-shell">
+                <OsAuthGate>
+                  <div className="os-workspace">{children}</div>
+                </OsAuthGate>
+              </div>
+
+              <OsDock />
+            </div>
           </div>
-        </div>
-      </OsEnvProvider>
-    </OsEntityProvider>
+        </OsEnvProvider>
+      </OsEntityProvider>
+    </OsThemeProvider>
   );
 }
