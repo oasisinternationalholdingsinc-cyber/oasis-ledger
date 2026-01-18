@@ -1,3 +1,4 @@
+// src/app/(console-ledger)/ci-archive/ledger/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -53,16 +54,11 @@ function prettyStatus(s: string | null | undefined) {
 function badgeForStatus(statusRaw: string | null | undefined) {
   const s = normStatusUpper(statusRaw);
 
-  if (s === "PENDING")
-    return "border-sky-400/30 bg-sky-400/10 text-sky-100";
-  if (s === "APPROVED")
-    return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
-  if (s === "SIGNING" || s === "IN_SIGNING")
-    return "border-amber-400/30 bg-amber-400/10 text-amber-100";
-  if (s === "SIGNED")
-    return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
-  if (s === "ARCHIVED")
-    return "border-white/10 bg-white/5 text-slate-300";
+  if (s === "PENDING") return "border-sky-400/30 bg-sky-400/10 text-sky-100";
+  if (s === "APPROVED") return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
+  if (s === "SIGNING" || s === "IN_SIGNING") return "border-amber-400/30 bg-amber-400/10 text-amber-100";
+  if (s === "SIGNED") return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
+  if (s === "ARCHIVED") return "border-white/10 bg-white/5 text-slate-300";
 
   return "border-white/10 bg-white/5 text-slate-400";
 }
@@ -137,13 +133,21 @@ export default function ArchiveLedgerLifecyclePage() {
       setLoading(true);
 
       // Keep select conservative (no schema guessing). Optional columns are fine if they exist.
-      const { data, error } = await supabase
+      let qry = supabase
         .from("governance_ledger")
         .select("id,title,status,entity_id,is_test,envelope_id,created_at,approved_by_council,archived_at")
-        .eq("entity_id", entityId)
-        .eq("is_test", laneIsTest)
-        .order("created_at", { ascending: false })
-        .limit(400);
+        .eq("entity_id", entityId);
+
+      // ✅ lane boundary (sacred):
+      // - SANDBOX shows ONLY is_test = true
+      // - RoT shows is_test = false OR legacy null (treated as RoT, never as sandbox)
+      if (laneIsTest) {
+        qry = qry.eq("is_test", true);
+      } else {
+        qry = qry.or("is_test.eq.false,is_test.is.null");
+      }
+
+      const { data, error } = await qry.order("created_at", { ascending: false }).limit(400);
 
       if (!alive) return;
 
@@ -212,12 +216,8 @@ export default function ArchiveLedgerLifecyclePage() {
           <div className={header}>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">
-                  CI • Archive
-                </div>
-                <h1 className="mt-1 text-lg sm:text-xl font-semibold text-slate-50">
-                  Drafts &amp; Approvals
-                </h1>
+                <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">CI • Archive</div>
+                <h1 className="mt-1 text-lg sm:text-xl font-semibold text-slate-50">Drafts &amp; Approvals</h1>
                 <p className="mt-1 max-w-3xl text-[11px] sm:text-xs text-slate-400 leading-relaxed">
                   Lifecycle surface for governance_ledger. Read-only monitor. Lane-safe. Entity-scoped. Use Council/Forge/Archive
                   to execute.
@@ -237,8 +237,7 @@ export default function ArchiveLedgerLifecyclePage() {
                   </span>
                   <span className="text-slate-700">•</span>
                   <span>
-                    Entity:{" "}
-                    <span className="text-emerald-300 font-medium">{String(activeEntity ?? "—")}</span>
+                    Entity: <span className="text-emerald-300 font-medium">{String(activeEntity ?? "—")}</span>
                   </span>
                 </div>
               </div>
@@ -303,13 +302,11 @@ export default function ArchiveLedgerLifecyclePage() {
                     </div>
                   </div>
 
-                  <div className="mt-4 text-xs text-slate-400">
-                    {loading ? "Loading…" : `${filtered.length} result(s)`}
-                  </div>
+                  <div className="mt-4 text-xs text-slate-400">{loading ? "Loading…" : `${filtered.length} result(s)`}</div>
 
                   <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-400">
                     Lane-safe: filters by <span className="text-slate-200">governance_ledger.is_test</span> and{" "}
-                    <span className="text-slate-200">entity_id</span>.
+                    <span className="text-slate-200">entity_id</span>. RoT includes legacy NULL (treated as RoT).
                   </div>
                 </div>
               </section>
@@ -351,17 +348,13 @@ export default function ArchiveLedgerLifecyclePage() {
                           >
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0">
-                                <div className="text-sm font-medium text-slate-100 truncate">
-                                  {r.title || "Untitled record"}
-                                </div>
+                                <div className="text-sm font-medium text-slate-100 truncate">{r.title || "Untitled record"}</div>
                                 <div className="mt-1 text-xs text-slate-400">
                                   Status: {prettyStatus(r.status)}
                                   {r.envelope_id ? " · Envelope attached" : ""}
                                 </div>
 
-                                <div className="mt-2 font-mono break-all text-[11px] text-slate-500">
-                                  {r.id}
-                                </div>
+                                <div className="mt-2 font-mono break-all text-[11px] text-slate-500">{r.id}</div>
 
                                 <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
                                   <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1">
@@ -384,9 +377,7 @@ export default function ArchiveLedgerLifecyclePage() {
                               </div>
 
                               <div className="flex flex-col items-end gap-2 shrink-0">
-                                <span className={cx("rounded-full border px-2 py-1 text-[11px]", statusClass)}>
-                                  {prettyStatus(r.status)}
-                                </span>
+                                <span className={cx("rounded-full border px-2 py-1 text-[11px]", statusClass)}>{prettyStatus(r.status)}</span>
 
                                 <div className="flex items-center gap-2">
                                   <span
@@ -525,9 +516,7 @@ export default function ArchiveLedgerLifecyclePage() {
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Record</div>
-                    <div className="mt-1 text-lg font-semibold text-slate-50 truncate">
-                      {selected.title || "Untitled record"}
-                    </div>
+                    <div className="mt-1 text-lg font-semibold text-slate-50 truncate">{selected.title || "Untitled record"}</div>
                     <div className="mt-1 text-xs text-slate-400">
                       Status: <span className="text-slate-200">{prettyStatus(selected.status)}</span>
                       {" · "}
@@ -587,9 +576,7 @@ export default function ArchiveLedgerLifecyclePage() {
                         {selected.envelope_id ? (
                           <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                             <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">envelope_id</div>
-                            <div className="mt-1 font-mono break-all text-[12px] text-slate-200">
-                              {selected.envelope_id}
-                            </div>
+                            <div className="mt-1 font-mono break-all text-[12px] text-slate-200">{selected.envelope_id}</div>
                           </div>
                         ) : (
                           <div className="rounded-2xl border border-white/10 bg-black/20 p-3 text-sm text-slate-400">
@@ -607,12 +594,7 @@ export default function ArchiveLedgerLifecyclePage() {
                           <div className="text-sm font-semibold text-slate-200">Jump to module</div>
                           <div className="text-[11px] text-slate-500">Perform actions in the right place</div>
                         </div>
-                        <span
-                          className={cx(
-                            "rounded-full border px-2 py-1 text-[11px]",
-                            badgeForStatus(selected.status)
-                          )}
-                        >
+                        <span className={cx("rounded-full border px-2 py-1 text-[11px]", badgeForStatus(selected.status))}>
                           {prettyStatus(selected.status)}
                         </span>
                       </div>
@@ -641,7 +623,7 @@ export default function ArchiveLedgerLifecyclePage() {
                         </Link>
 
                         <Link
-                          href={`/ci-archive/minute-book`}
+                          href="/ci-archive/minute-book"
                           className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200 hover:bg-white/7 inline-flex items-center justify-between"
                         >
                           <span className="inline-flex items-center gap-2">
@@ -661,9 +643,7 @@ export default function ArchiveLedgerLifecyclePage() {
               </div>
 
               <div className="border-t border-white/10 bg-black/30 px-5 py-4 flex flex-wrap items-center justify-between gap-2">
-                <div className="text-[11px] text-slate-500">
-                  Tip: use Forge for signature execution, Archive for sealing, Council for approval gate.
-                </div>
+                <div className="text-[11px] text-slate-500">Tip: use Forge for signature execution, Archive for sealing, Council for approval gate.</div>
                 <button
                   onClick={() => {
                     setOpen(false);
