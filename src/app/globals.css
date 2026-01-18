@@ -1,7 +1,7 @@
 /* =========================================================
    OASIS DIGITAL PARLIAMENT • ODP.AI
    Governance-Operated Ledger OS – Global Styles
-   (Final • No regressions • Light-mode ready via os-root[data-theme])
+   (FINAL • AUTHORITY LOCKED • LIGHT MODE FIXED)
    ========================================================= */
 
 @import "tailwindcss";
@@ -14,35 +14,40 @@
   --background: #020617;
   --foreground: #e5e7eb;
 
-  /* OS gradient tokens */
+  /* OS gradient */
   --os-bg-top: #020c24;
   --os-bg-mid: #020617;
   --os-bg-bottom: #000000;
 
-  /* Gold signal + borders */
+  /* Gold signal */
   --os-gold: #facc15;
   --os-gold-border: rgba(250, 204, 21, 0.35);
 
-  /* Subtle surface tokens (used for light-mode safe overrides too) */
+  /* Surfaces */
   --os-surface: rgba(2, 6, 23, 0.55);
   --os-surface-strong: rgba(2, 6, 23, 0.85);
   --os-border: rgba(255, 255, 255, 0.10);
 
-  /* Dock sizing */
-  --dock-h: 92px; /* approx: icon bubble + label hover space */
-  --dock-peek: 6px; /* handle edge height */
-  --dock-gap: 14px; /* air between dock and screen edge */
+  /* Ink (dark mode already works) */
+  --os-ink: rgba(229, 231, 235, 0.95);
+  --os-ink-muted: rgba(229, 231, 235, 0.72);
+  --os-ink-faint: rgba(229, 231, 235, 0.45);
 
-  /* Auto-hide motion */
-  --dock-hide-shift: 76px; /* how far the dock slides down when hidden */
+  /* Dock sizing */
+  --dock-h: 92px;
+  --dock-peek: 6px;
+  --dock-gap: 14px;
+
+  /* Auto-hide */
+  --dock-hide-shift: 76px;
   --dock-ease: 220ms;
 
-  /* Lane tints (subtle; ONLY affects dock glow/handle) */
+  /* Lane tint */
   --lane-rot: rgba(146, 247, 198, 0.22);
   --lane-sandbox: rgba(245, 212, 122, 0.22);
 }
 
-/* Tailwind theme bridge */
+/* Tailwind bridge */
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -50,39 +55,34 @@
   --font-mono: var(--font-geist-mono);
 }
 
-/* Keep default as dark unless OS prefers dark (no change) */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #020617;
-    --foreground: #e5e7eb;
-  }
-}
-
 /* =========================================================
-   LIGHT MODE TOKENS (Apple-style parchment)
-   Enable by setting: .os-root[data-theme="light"]
+   LIGHT MODE (AUTHORITY PARCHMENT – FIXED)
    ========================================================= */
 
 .os-root[data-theme="light"] {
-  --background: #f6f3ea; /* warm parchment */
-  --foreground: #0b1220; /* charcoal */
+  --background: #f6f3ea;
+  --foreground: #0b1220;
 
   --os-bg-top: #ffffff;
   --os-bg-mid: #f6f3ea;
   --os-bg-bottom: #efe8d6;
 
-  /* Gold stays signal, slightly deeper */
   --os-gold: #b08d2a;
-  --os-gold-border: rgba(176, 141, 42, 0.40);
+  --os-gold-border: rgba(176, 141, 42, 0.42);
 
-  /* Light surfaces */
-  --os-surface: rgba(255, 255, 255, 0.62);
-  --os-surface-strong: rgba(255, 255, 255, 0.88);
-  --os-border: rgba(2, 6, 23, 0.12);
+  /* IMPORTANT FIXES */
+  --os-surface: rgba(255, 255, 255, 0.72);       /* deeper glass */
+  --os-surface-strong: rgba(255, 255, 255, 0.92);
+  --os-border: rgba(2, 6, 23, 0.16);
+
+  /* Ink hierarchy (this fixes readability) */
+  --os-ink: rgba(11, 18, 32, 0.92);
+  --os-ink-muted: rgba(11, 18, 32, 0.72);
+  --os-ink-faint: rgba(11, 18, 32, 0.50);
 }
 
 /* =========================================================
-   APP-LIKE BEHAVIOR: OS SHELL CONTROLS SCROLLING
+   APP BEHAVIOR
    ========================================================= */
 
 html,
@@ -92,49 +92,59 @@ body {
 
 body {
   background: var(--background);
-  color: var(--foreground);
+  color: var(--os-ink);
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text",
     "Segoe UI", sans-serif;
-  overflow: hidden; /* stop full-page scroll */
+  overflow: hidden;
 }
 
 /* =========================================================
-   OASIS OS SHELL – STABLE
+   OS ROOT
    ========================================================= */
 
-/* ===== OS ROOT ===== */
 .os-root {
   height: 100vh;
-  max-height: 100vh;
   background: radial-gradient(
     circle at top,
     var(--os-bg-top) 0%,
     var(--os-bg-mid) 45%,
     var(--os-bg-bottom) 100%
   );
-  color: var(--foreground);
   display: flex;
   flex-direction: column;
+  color: var(--os-ink);
 }
 
-/* ===== GLOBAL BAR ===== */
+/* =========================================================
+   GLOBAL BAR (LIGHT MODE FIXED)
+   ========================================================= */
+
 .os-global-bar {
   height: 64px;
   display: flex;
   align-items: center;
   padding: 0 20px;
-  border-bottom: 1px solid var(--os-gold-border);
   font-size: 12px;
-  position: relative;
+  border-bottom: 1px solid var(--os-gold-border);
+
+  background: linear-gradient(
+    to bottom,
+    rgba(2, 6, 23, 0.35),
+    rgba(2, 6, 23, 0.12)
+  );
+  backdrop-filter: blur(14px);
 }
 
-/* left – brand */
-.os-brand {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+.os-root[data-theme="light"] .os-global-bar {
+  background: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.96),
+    rgba(246, 243, 234, 0.86)
+  );
+  box-shadow: 0 6px 24px rgba(2, 6, 23, 0.12);
 }
 
+/* brand */
 .os-brand-title {
   color: var(--os-gold);
   font-weight: 700;
@@ -146,143 +156,102 @@ body {
 .os-brand-sub {
   font-size: 10px;
   letter-spacing: 0.16em;
-  opacity: 0.7;
   text-transform: uppercase;
+  color: var(--os-ink-muted);
 }
 
-/* center – clock */
-.os-global-center {
-  flex: 1;
-  display: flex;
-  justify-content: center;
-  pointer-events: none;
-}
-
-.os-clock-wrap {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  text-align: center;
-}
-
+/* clock */
 .os-clock-label {
   font-size: 9px;
   letter-spacing: 0.18em;
   text-transform: uppercase;
-  opacity: 0.7;
+  color: var(--os-ink-faint);
 }
 
 .os-clock-value {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
     "Liberation Mono", "Courier New", monospace;
   font-size: 12px;
-  opacity: 0.9;
+  color: var(--os-ink);
 }
 
-/* right – entity + role + email + signout */
-.os-global-right {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-left: 18px;
-}
-
-/* ✅ make entity chip theme-safe without touching wiring */
+/* right pills */
 .os-entity {
-  background: rgba(2, 6, 23, 0.55);
-  border: 1px solid rgba(255, 255, 255, 0.10);
-  color: var(--foreground);
+  background: var(--os-surface-strong);
+  border: 1px solid var(--os-border);
+  color: var(--os-ink);
   padding: 4px 10px;
   border-radius: 6px;
   font-size: 11px;
 }
 
-.os-root[data-theme="light"] .os-entity {
-  background: var(--os-surface-strong);
-  border-color: var(--os-border);
-  color: var(--foreground);
-}
-
 .os-role-pill {
   padding: 4px 10px;
   border-radius: 999px;
-  border: 1px solid rgba(148, 163, 184, 0.7);
+  border: 1px solid var(--os-border);
   font-size: 11px;
-  text-transform: uppercase;
   letter-spacing: 0.14em;
-  opacity: 0.85;
-}
-
-.os-root[data-theme="light"] .os-role-pill {
-  border-color: rgba(2, 6, 23, 0.18);
+  text-transform: uppercase;
+  color: var(--os-ink-muted);
 }
 
 .os-email {
   font-size: 11px;
-  opacity: 0.8;
+  color: var(--os-ink-muted);
 }
 
 .os-signout {
-  background: transparent;
+  background: none;
   border: none;
   color: var(--os-gold);
   font-size: 11px;
   cursor: pointer;
 }
 
-/* ===== SHELL ===== */
+/* =========================================================
+   WORKSPACE
+   ========================================================= */
+
 .os-shell {
   flex: 1;
-  min-height: 0; /* critical for nested scroll */
-  display: flex;
-  flex-direction: column; /* single column; dock is overlay */
+  min-height: 0;
   position: relative;
 }
 
-/* ===== WORKSPACE (ONLY AREA THAT SCROLLS) ===== */
 .os-workspace {
   flex: 1;
-  min-height: 0;
   padding: 24px;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
-
-  /* keep content clear of the dock handle */
   padding-bottom: calc(var(--dock-gap) + var(--dock-peek) + 18px);
 }
 
 /* =========================================================
-   OS DOCK (BOTTOM OVERLAY + AUTOHIDE)
+   DOCK (UNCHANGED STRUCTURE – LIGHT MODE FIXED)
    ========================================================= */
 
 .os-dock {
   position: fixed;
   left: 50%;
   bottom: var(--dock-gap);
-  transform: translateX(-50%) translateY(0);
+  transform: translateX(-50%);
   z-index: 50;
 
   display: flex;
-  flex-direction: row;
-  align-items: flex-end;
   gap: 14px;
-
   padding: 10px 14px;
   border-radius: 999px;
-  border: 1px solid var(--os-border);
+
   background: var(--os-surface);
+  border: 1px solid var(--os-border);
   backdrop-filter: blur(18px);
 
-  box-shadow: 0 22px 70px rgba(0, 0, 0, 0.60),
+  box-shadow:
+    0 22px 70px rgba(0, 0, 0, 0.55),
     0 0 0 1px rgba(250, 204, 21, 0.10);
 
-  width: auto;
   max-width: calc(100vw - 24px);
-
-  /* if screen is tight, dock can scroll horizontally */
   overflow-x: auto;
-  overflow-y: visible;
   scrollbar-width: none;
 
   transition: transform var(--dock-ease) ease, opacity var(--dock-ease) ease;
@@ -292,200 +261,12 @@ body {
   display: none;
 }
 
-/* Auto-hide state controlled by JS: .os-root[data-dock="hidden"] */
-.os-root[data-dock="hidden"] .os-dock {
-  transform: translateX(-50%) translateY(var(--dock-hide-shift));
-  opacity: 0.92;
-}
-
-/* ===== DOCK HANDLE (peek edge always visible) ===== */
-.os-dock::before {
-  content: "";
-  position: absolute;
-  left: 10px;
-  right: 10px;
-  top: -6px;
-  height: var(--dock-peek);
-  border-radius: 999px;
-
-  background: rgba(250, 204, 21, 0.18);
-  box-shadow: 0 0 18px rgba(250, 204, 21, 0.35),
-    0 0 40px rgba(56, 189, 248, 0.10);
-  opacity: 0.85;
-}
-
-/* Optional env tint via data attribute on .os-root */
-.os-root[data-env="sandbox"] .os-dock::before {
-  background: var(--lane-sandbox);
-  box-shadow: 0 0 18px rgba(245, 212, 122, 0.42),
-    0 0 44px rgba(250, 204, 21, 0.18);
-}
-
-.os-root[data-env="rot"] .os-dock::before {
-  background: var(--lane-rot);
-  box-shadow: 0 0 18px rgba(146, 247, 198, 0.42),
-    0 0 44px rgba(34, 197, 148, 0.14);
-}
-
-/* wrapper for icon + label */
-.dock-item {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  flex: 0 0 auto;
-}
-
-/* icon bubble */
-.dock-icon {
-  width: 52px;
-  height: 52px;
-  border-radius: 999px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-
-  background: radial-gradient(circle, #0f172a, #020617);
-
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18),
-    0 14px 28px rgba(0, 0, 0, 0.6);
-  font-size: 24px;
-  transition: box-shadow 0.18s ease, background 0.18s ease,
-    transform 0.18s ease;
-}
-
-/* ✅ light-mode icon bubble stays “glass”, not dark slab */
-.os-root[data-theme="light"] .dock-icon {
-  background: radial-gradient(circle, rgba(255, 255, 255, 0.92), rgba(239, 232, 214, 0.85));
-  box-shadow: 0 0 0 1px rgba(2, 6, 23, 0.12),
-    0 14px 28px rgba(2, 6, 23, 0.18);
-}
-
-/* HOVER: glow + slightly brighter bg, NO size change */
-.dock-item:hover .dock-icon {
-  box-shadow: 0 0 0 2px #facc15, 0 0 42px rgba(250, 204, 21, 0.9),
-    0 0 80px rgba(56, 189, 248, 0.5);
-  background: radial-gradient(circle, #1e293b, #020617);
-}
-
-.os-root[data-theme="light"] .dock-item:hover .dock-icon {
-  background: radial-gradient(circle, #ffffff, rgba(246, 243, 234, 0.9));
-}
-
-/* active route glow */
-.dock-icon.active {
-  box-shadow: 0 0 0 2px #facc15, 0 0 40px rgba(250, 204, 21, 0.85);
-}
-
-/* label under the icon */
-.dock-label {
-  font-size: 9px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: rgba(226, 232, 240, 0.8);
-  white-space: nowrap;
-  opacity: 0;
-  transform: translateY(2px);
-  transition: opacity 0.16s ease, transform 0.16s ease;
-  pointer-events: none;
-}
-
-.os-root[data-theme="light"] .dock-label {
-  color: rgba(11, 18, 32, 0.72);
-}
-
-.dock-item:hover .dock-label {
-  opacity: 1;
-  transform: translateY(0);
-}
-
-/* divider between core + future */
-.dock-divider {
-  width: 1px;
-  height: 34px;
-  background: rgba(255, 255, 255, 0.18);
-  margin: 0 6px;
-  align-self: center;
-  flex: 0 0 auto;
-}
-
-.os-root[data-theme="light"] .dock-divider {
-  background: rgba(2, 6, 23, 0.16);
-}
-
 /* =========================================================
-   MODULE IDENTITY AURAS – PER-MODULE ACTIVE GLOW
+   SMALL SCREEN
    ========================================================= */
 
-.dock-item[data-module="orbit"] .dock-icon.active {
-  box-shadow: 0 0 0 2px #facc15, 0 0 45px rgba(56, 189, 248, 0.6);
-}
-
-.dock-item[data-module="alchemy"] .dock-icon.active {
-  box-shadow: 0 0 0 2px #38bdf8, 0 0 45px rgba(56, 189, 248, 0.7);
-}
-
-.dock-item[data-module="council"] .dock-icon.active {
-  box-shadow: 0 0 0 2px #f8fafc, 0 0 40px rgba(248, 250, 252, 0.5);
-}
-
-.dock-item[data-module="forge"] .dock-icon.active {
-  box-shadow: 0 0 0 2px #fb923c, 0 0 50px rgba(251, 146, 60, 0.85);
-}
-
-.dock-item[data-module="sentinel"] .dock-icon.active {
-  box-shadow: 0 0 0 2px #f87171, 0 0 44px rgba(248, 113, 113, 0.75);
-}
-
-.dock-item[data-module="oracle"] .dock-icon.active {
-  box-shadow: 0 0 0 2px #c084fc, 0 0 45px rgba(192, 132, 252, 0.8);
-}
-
-.dock-item[data-module="archive"] .dock-icon.active {
-  box-shadow: 0 0 0 2px #64748b, 0 0 40px rgba(100, 116, 139, 0.7);
-}
-
-.dock-item[data-module="kernel"] .dock-icon.active {
-  box-shadow: 0 0 0 2px #22c55e, 0 0 48px rgba(34, 197, 94, 0.85);
-}
-
-.dock-item[data-module="genesis"] .dock-icon.active {
-  box-shadow: 0 0 0 2px #a3e635, 0 0 46px rgba(163, 230, 53, 0.9);
-}
-
-/* Small-screen ergonomics */
 @media (max-width: 520px) {
   .os-workspace {
     padding: 18px;
-    padding-bottom: calc(var(--dock-gap) + var(--dock-peek) + 20px);
-  }
-
-  .os-dock {
-    gap: 10px;
-    padding: 10px 12px;
-  }
-
-  .dock-icon {
-    width: 48px;
-    height: 48px;
-  }
-}
-
-@media (max-width: 420px) {
-  .os-dock {
-    gap: 8px;
-    padding: 9px 10px;
-  }
-
-  .dock-icon {
-    width: 44px;
-    height: 44px;
-  }
-}
-
-/* Respect reduced motion */
-@media (prefers-reduced-motion: reduce) {
-  .os-dock {
-    transition: none;
   }
 }

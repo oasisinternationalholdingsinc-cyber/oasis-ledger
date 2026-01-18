@@ -15,6 +15,8 @@ import {
   Sun,
   Moon,
   Monitor,
+  MoreHorizontal,
+  User,
 } from "lucide-react";
 
 type OsEnv = "RoT" | "SANDBOX";
@@ -83,6 +85,7 @@ export function OsGlobalBar() {
   const [envMenuOpen, setEnvMenuOpen] = useState(false);
   const [entityMenuOpen, setEntityMenuOpen] = useState(false);
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
 
   // ✅ condensed mode on scroll (Apple-style). UI-only.
   const [condensed, setCondensed] = useState(false);
@@ -125,7 +128,7 @@ export function OsGlobalBar() {
     };
   }, []);
 
-  // condensed mode on scroll (threshold 24px)
+  // condensed mode on scroll (threshold 24px) — supports both page scroll and workspace scroll
   useEffect(() => {
     const onScroll = () => {
       const y = window.scrollY || 0;
@@ -133,29 +136,32 @@ export function OsGlobalBar() {
     };
     onScroll();
     window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll as any);
+
+    const ws = document.querySelector(".os-workspace");
+    const onWs = () => {
+      const y = (ws as HTMLElement | null)?.scrollTop ?? 0;
+      setCondensed(y > 24);
+    };
+    if (ws) ws.addEventListener("scroll", onWs, { passive: true });
+
+    return () => {
+      window.removeEventListener("scroll", onScroll as any);
+      if (ws) ws.removeEventListener("scroll", onWs as any);
+    };
   }, []);
 
-  // close menus on outside click / ESC
+  // close menus on ESC
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setEnvMenuOpen(false);
         setEntityMenuOpen(false);
         setThemeMenuOpen(false);
+        setMoreMenuOpen(false);
       }
     };
-    const onClick = () => {
-      setEnvMenuOpen(false);
-      setEntityMenuOpen(false);
-      setThemeMenuOpen(false);
-    };
     window.addEventListener("keydown", onKey);
-    window.addEventListener("click", onClick);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("click", onClick);
-    };
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   // ✅ real entities for signed-in user (via memberships -> entities)
@@ -237,6 +243,7 @@ export function OsGlobalBar() {
     if (env === "SANDBOX") {
       return {
         label: "SANDBOX",
+        short: "SBX",
         subtitle: "Test artifacts only • Not the system of record",
         pillClass:
           "bg-[#2a1e0b]/55 border-[#7a5a1a]/50 text-[#f5d47a] shadow-[0_0_26px_rgba(245,212,122,0.10)] hover:shadow-[0_0_32px_rgba(245,212,122,0.14)]",
@@ -245,6 +252,7 @@ export function OsGlobalBar() {
     }
     return {
       label: "RoT",
+      short: "RoT",
       subtitle: "System of Record",
       pillClass:
         "bg-[#0b1f14]/55 border-[#1f6f48]/42 text-[#92f7c6] shadow-[0_0_22px_rgba(146,247,198,0.10)] hover:shadow-[0_0_28px_rgba(146,247,198,0.14)]",
@@ -301,6 +309,22 @@ export function OsGlobalBar() {
   const pillBase = condensed ? "px-2.5 py-1.5" : "px-3 py-2";
   const pillBaseSm = condensed ? "sm:px-3 sm:py-2" : "sm:px-4 sm:py-2";
 
+  // close all menus helper
+  const closeAllMenus = () => {
+    setEnvMenuOpen(false);
+    setEntityMenuOpen(false);
+    setThemeMenuOpen(false);
+    setMoreMenuOpen(false);
+  };
+
+  // close menus on outside click (but allow internal clicks)
+  useEffect(() => {
+    const onClick = () => closeAllMenus();
+    window.addEventListener("click", onClick);
+    return () => window.removeEventListener("click", onClick);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <div className="sticky top-0 z-[50]">
       <div className={cx("relative w-full transition-[height] duration-200", barH, shell)}>
@@ -324,7 +348,7 @@ export function OsGlobalBar() {
               </div>
             </div>
 
-            {/* Operator pill (hidden in condensed mode to save space) */}
+            {/* Operator pill (desktop only; hidden on mobile) */}
             <div
               className={cx(
                 "ml-3 hidden min-w-0 items-center gap-2 rounded-full border border-white/10 bg-black/20 text-[12px] text-white/75 shadow-[0_0_18px_rgba(0,0,0,0.20)] lg:flex",
@@ -339,7 +363,7 @@ export function OsGlobalBar() {
             </div>
           </div>
 
-          {/* CENTER clock */}
+          {/* CENTER clock (desktop only; mobile clock moves into More menu) */}
           <div className="pointer-events-none absolute left-1/2 hidden -translate-x-1/2 items-center justify-center sm:flex">
             <div
               className={cx(
@@ -357,13 +381,14 @@ export function OsGlobalBar() {
 
           {/* RIGHT */}
           <div className="flex shrink-0 items-center justify-end gap-2 sm:gap-3">
-            {/* Entity dropdown */}
+            {/* Entity dropdown (kept on mobile) */}
             <div className="relative" onClick={(e) => e.stopPropagation()}>
               <button
                 onClick={() => {
                   setEntityMenuOpen((v) => !v);
                   setEnvMenuOpen(false);
                   setThemeMenuOpen(false);
+                  setMoreMenuOpen(false);
                 }}
                 className={cx(
                   "flex min-w-0 items-center gap-2 rounded-full border border-white/10 bg-black/20 text-[12px] text-white/90 shadow-[0_0_18px_rgba(0,0,0,0.20)] hover:bg-white/5 transition",
@@ -376,7 +401,7 @@ export function OsGlobalBar() {
                   Entity
                 </span>
                 <span className="hidden h-1 w-1 shrink-0 rounded-full bg-white/25 sm:inline" />
-                <span className="min-w-0 max-w-[140px] truncate text-white/95 sm:max-w-[220px] md:max-w-[260px]">
+                <span className="min-w-0 max-w-[120px] truncate text-white/95 sm:max-w-[220px] md:max-w-[260px]">
                   {activeEntityLabel}
                 </span>
                 <ChevronDown className="h-4 w-4 shrink-0 text-white/55" />
@@ -426,13 +451,14 @@ export function OsGlobalBar() {
               )}
             </div>
 
-            {/* Env dropdown (single lane indicator; no duplicate env badge elsewhere) */}
+            {/* Env dropdown (kept on mobile) */}
             <div className="relative" onClick={(e) => e.stopPropagation()}>
               <button
                 onClick={() => {
                   setEnvMenuOpen((v) => !v);
                   setEntityMenuOpen(false);
                   setThemeMenuOpen(false);
+                  setMoreMenuOpen(false);
                 }}
                 className={cx(
                   "flex items-center gap-2 rounded-full border text-[12px] transition",
@@ -444,7 +470,9 @@ export function OsGlobalBar() {
               >
                 <span className={cx("h-2 w-2 shrink-0 rounded-full", envMeta.dotClass)} />
                 <span className="font-semibold tracking-wide">
-                  {condensed && envMeta.label === "SANDBOX" ? "SBX" : envMeta.label}
+                  {/* Mobile short label */}
+                  <span className="sm:hidden">{envMeta.short}</span>
+                  <span className="hidden sm:inline">{envMeta.label}</span>
                 </span>
                 <ChevronDown className="h-4 w-4 shrink-0 text-white/60" />
               </button>
@@ -517,37 +545,146 @@ export function OsGlobalBar() {
               )}
             </div>
 
-            {/* Appearance (Theme) dropdown — OS-level only */}
-            <div className="relative" onClick={(e) => e.stopPropagation()}>
+            {/* Desktop: Appearance + Sign out remain as pills */}
+            <div className="hidden sm:flex items-center gap-2 sm:gap-3">
+              {/* Appearance */}
+              <div className="relative" onClick={(e) => e.stopPropagation()}>
+                <button
+                  onClick={() => {
+                    setThemeMenuOpen((v) => !v);
+                    setEnvMenuOpen(false);
+                    setEntityMenuOpen(false);
+                    setMoreMenuOpen(false);
+                  }}
+                  className={cx(
+                    "flex items-center gap-2 rounded-full border border-white/10 bg-black/20 text-[12px] text-white/90 shadow-[0_0_18px_rgba(0,0,0,0.20)] hover:bg-white/5 transition",
+                    pillBase,
+                    pillBaseSm
+                  )}
+                  title={themeMeta.subtitle}
+                >
+                  <themeMeta.Icon className="h-4 w-4 text-[#c9a227]/85" />
+                  <span className="hidden sm:inline text-white/70">Appearance</span>
+                  <span className="hidden h-1 w-1 shrink-0 rounded-full bg-white/25 sm:inline" />
+                  <span className="font-semibold tracking-wide">{themeMeta.label}</span>
+                  <ChevronDown className="h-4 w-4 shrink-0 text-white/55" />
+                </button>
+
+                {themeMenuOpen && (
+                  <div className={cx("absolute right-0 mt-2 w-[320px] p-2", dropdownShell)}>
+                    <div className={dropdownHeader}>Appearance</div>
+
+                    {(
+                      [
+                        { key: "system", label: "System (Auto)", Icon: Monitor, hint: "Follows OS setting" },
+                        { key: "dark", label: "Dark", Icon: Moon, hint: "Low-glare authority" },
+                        { key: "light", label: "Light", Icon: Sun, hint: "Parchment + ink" },
+                      ] as Array<{ key: OsTheme; label: string; Icon: any; hint: string }>
+                    ).map((opt) => {
+                      const selected = theme === opt.key;
+                      return (
+                        <button
+                          key={opt.key}
+                          onClick={() => {
+                            setTheme(opt.key);
+                            setThemeMenuOpen(false);
+                          }}
+                          className={cx(
+                            "flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[13px] transition",
+                            selected ? "bg-white/10 text-white" : "hover:bg-white/5 text-white/85"
+                          )}
+                        >
+                          <span className="flex items-center gap-2 min-w-0">
+                            <opt.Icon className="h-4 w-4 text-[#c9a227]/80" />
+                            <span className="truncate">{opt.label}</span>
+                          </span>
+                          <span className="text-[11px] text-white/45">{opt.hint}</span>
+                        </button>
+                      );
+                    })}
+
+                    <div className={dropdownFootnote}>
+                      Current resolved theme:{" "}
+                      <span className="text-white/80">{resolved}</span>. Theme is stored locally
+                      and applied OS-wide (no module changes).
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Sign out */}
+              <button
+                onClick={onSignOut}
+                className={cx(
+                  "flex items-center gap-2 rounded-full border border-white/10 bg-black/20 text-[12px] text-white/90 shadow-[0_0_18px_rgba(0,0,0,0.20)] hover:bg-white/5 hover:shadow-[0_0_24px_rgba(201,162,39,0.10)] transition",
+                  pillBase,
+                  pillBaseSm
+                )}
+                title="Sign out"
+              >
+                <LogOut className="h-4 w-4 text-white/65" />
+                <span className="hidden sm:inline">Sign out</span>
+              </button>
+            </div>
+
+            {/* Mobile: single "More" control (prevents pill explosion) */}
+            <div className="relative sm:hidden" onClick={(e) => e.stopPropagation()}>
               <button
                 onClick={() => {
-                  setThemeMenuOpen((v) => !v);
+                  setMoreMenuOpen((v) => !v);
+                  setThemeMenuOpen(false);
                   setEnvMenuOpen(false);
                   setEntityMenuOpen(false);
                 }}
                 className={cx(
                   "flex items-center gap-2 rounded-full border border-white/10 bg-black/20 text-[12px] text-white/90 shadow-[0_0_18px_rgba(0,0,0,0.20)] hover:bg-white/5 transition",
-                  pillBase,
-                  pillBaseSm
+                  pillBase
                 )}
-                title={themeMeta.subtitle}
+                title="More"
               >
-                <themeMeta.Icon className="h-4 w-4 text-[#c9a227]/85" />
-                <span className="hidden sm:inline text-white/70">Appearance</span>
-                <span className="hidden h-1 w-1 shrink-0 rounded-full bg-white/25 sm:inline" />
-                <span className="font-semibold tracking-wide">{themeMeta.label}</span>
-                <ChevronDown className="h-4 w-4 shrink-0 text-white/55" />
+                <MoreHorizontal className="h-4 w-4 text-white/70" />
               </button>
 
-              {themeMenuOpen && (
+              {moreMenuOpen && (
                 <div className={cx("absolute right-0 mt-2 w-[320px] p-2", dropdownShell)}>
-                  <div className={dropdownHeader}>Appearance</div>
+                  <div className={dropdownHeader}>Console</div>
+
+                  {/* Clock (mobile) */}
+                  <div className="px-3 py-2 text-[12px] text-white/80">
+                    <div className="flex items-center justify-between">
+                      <span className="flex items-center gap-2 text-white/60">
+                        <Clock3 className="h-4 w-4 text-[#c9a227]/85" />
+                        Time
+                      </span>
+                      <span className="font-mono tracking-[0.20em] text-white/90">
+                        {clock}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Operator (mobile) */}
+                  <div className="px-3 py-2 text-[12px] text-white/80">
+                    <div className="flex items-center justify-between">
+                      <span className="flex items-center gap-2 text-white/60">
+                        <User className="h-4 w-4 text-white/60" />
+                        Operator
+                      </span>
+                      <span className="max-w-[180px] truncate text-white/90">
+                        {operatorEmail}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="my-2 h-px bg-white/10" />
+
+                  {/* Appearance (mobile) */}
+                  <div className="px-3 py-2 text-[11px] text-white/55">Appearance</div>
 
                   {(
                     [
-                      { key: "system", label: "System (Auto)", Icon: Monitor, hint: "Follows OS setting" },
-                      { key: "dark", label: "Dark", Icon: Moon, hint: "Low-glare authority" },
-                      { key: "light", label: "Light", Icon: Sun, hint: "Parchment + ink" },
+                      { key: "system", label: "System (Auto)", Icon: Monitor, hint: "Follows OS" },
+                      { key: "dark", label: "Dark", Icon: Moon, hint: "Low-glare" },
+                      { key: "light", label: "Light", Icon: Sun, hint: "Parchment" },
                     ] as Array<{ key: OsTheme; label: string; Icon: any; hint: string }>
                   ).map((opt) => {
                     const selected = theme === opt.key;
@@ -556,7 +693,7 @@ export function OsGlobalBar() {
                         key={opt.key}
                         onClick={() => {
                           setTheme(opt.key);
-                          setThemeMenuOpen(false);
+                          setMoreMenuOpen(false);
                         }}
                         className={cx(
                           "flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[13px] transition",
@@ -572,28 +709,30 @@ export function OsGlobalBar() {
                     );
                   })}
 
+                  <div className="my-2 h-px bg-white/10" />
+
+                  {/* Sign out (mobile) */}
+                  <button
+                    onClick={async () => {
+                      setMoreMenuOpen(false);
+                      await onSignOut();
+                    }}
+                    className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-[13px] text-white/90 hover:bg-white/5"
+                  >
+                    <span className="flex items-center gap-2">
+                      <LogOut className="h-4 w-4 text-white/65" />
+                      Sign out
+                    </span>
+                    <span className="text-[11px] text-white/45">End session</span>
+                  </button>
+
                   <div className={dropdownFootnote}>
-                    Current resolved theme:{" "}
-                    <span className="text-white/80">{resolved}</span>. Theme is stored locally
-                    and applied OS-wide (no module changes).
+                    Mobile view collapses non-essential pills into this menu to avoid wrapping.
+                    Entity + Env remain always visible.
                   </div>
                 </div>
               )}
             </div>
-
-            {/* Sign out */}
-            <button
-              onClick={onSignOut}
-              className={cx(
-                "flex items-center gap-2 rounded-full border border-white/10 bg-black/20 text-[12px] text-white/90 shadow-[0_0_18px_rgba(0,0,0,0.20)] hover:bg-white/5 hover:shadow-[0_0_24px_rgba(201,162,39,0.10)] transition",
-                pillBase,
-                pillBaseSm
-              )}
-              title="Sign out"
-            >
-              <LogOut className="h-4 w-4 text-white/65" />
-              <span className="hidden sm:inline">Sign out</span>
-            </button>
           </div>
         </div>
       </div>
