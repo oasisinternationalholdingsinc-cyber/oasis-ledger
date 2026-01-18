@@ -8,12 +8,14 @@ export const dynamic = "force-dynamic";
  * ✅ OS-native surface (matches Verified + Forge 1:1)
  * ✅ iPhone-first: Rail → Reader Sheet (full screen), zero double-scroll
  * ✅ Desktop: 3-column layout preserved (Domains | Entries | Evidence)
+ * ✅ Lane-safe: respects RoT vs SANDBOX (via governance_ledger.is_test)
  */
 
 import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { supabaseBrowser } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
+import { useOsEnv } from "@/components/OsEnvContext";
 
 /* ---------------- types (schema-aligned) ---------------- */
 
@@ -59,6 +61,10 @@ type EntryWithDoc = MinuteBookEntry & {
   file_hash?: string | null;
   file_size?: number | null;
   mime_type?: string | null;
+
+  // lane-safe metadata (UI-only)
+  lane_is_test?: boolean | null;
+  ledger_status?: string | null;
 };
 
 type OfficialArtifact = {
@@ -248,14 +254,28 @@ function pickPrimaryDocByEntry(docs: SupportingDoc[]): Map<string, SupportingDoc
 }
 
 /**
- * ✅ OFFICIAL resolver (read-only)
+ * ✅ OFFICIAL resolver (read-only) — lane-aware (checks governance_ledger.is_test)
  */
-async function resolveOfficialArtifact(_entityKey: string, entry: EntryWithDoc): Promise<OfficialArtifact | null> {
+async function resolveOfficialArtifact(
+  _entityKey: string,
+  entry: EntryWithDoc,
+  laneIsTest: boolean
+): Promise<OfficialArtifact | null> {
   const sb = supabaseBrowser;
   const ledgerId = (entry.source_record_id || "").toString().trim();
   if (!ledgerId) return null;
 
   try {
+    // lane gate
+    const { data: gl } = await sb
+      .from("governance_ledger")
+      .select("id,is_test")
+      .eq("id", ledgerId)
+      .limit(1);
+
+    const isTest = gl?.[0]?.is_test;
+    if (typeof isTest === "boolean" && isTest !== laneIsTest) return null;
+
     const { data, error } = await sb
       .from("verified_documents")
       .select("storage_bucket,storage_path,file_name,created_at")
@@ -427,11 +447,12 @@ async function bestSignedUrlForMinuteBookEvidence(
   const msg = lastErr instanceof Error ? lastErr.message : "Object not found in candidate buckets.";
   throw new Error(msg);
 }
-
 /* ---------------- UI ---------------- */
 
 export default function MinuteBookClient() {
   const { entityKey } = useEntity();
+  const { env } = useOsEnv();
+  const laneIsTest = env === "SANDBOX";
 
   // domains
   const [domains, setDomains] = useState<GovernanceDomain[]>([]);
@@ -490,7 +511,7 @@ export default function MinuteBookClient() {
     };
   }, []);
 
-  // Load entries (entity-scoped) + resolve primary docs
+  // Load entries (entity-scoped) + resolve primary docs + lane filter
   useEffect(() => {
     let alive = true;
 
@@ -523,8 +544,28 @@ export default function MinuteBookClient() {
 
         const primary = pickPrimaryDocByEntry(docs);
 
+        // lane map from governance_ledger for source_record_id
+        const recordIds = uniq(base.map((r) => r.source_record_id).filter(Boolean) as string[]);
+        const laneMap = new Map<string, { is_test: boolean; status: string }>();
+
+        if (recordIds.length) {
+          const { data } = await supabaseBrowser
+            .from("governance_ledger")
+            .select("id,is_test,status")
+            .in("id", recordIds);
+
+          for (const r of data ?? []) {
+            laneMap.set(String((r as any).id), {
+              is_test: !!(r as any).is_test,
+              status: String((r as any).status ?? ""),
+            });
+          }
+        }
+
         const merged: EntryWithDoc[] = base.map((e: MinuteBookEntry) => {
           const doc = primary.get(e.id);
+          const lm = e.source_record_id ? laneMap.get(String(e.source_record_id)) : null;
+
           return {
             ...e,
             document_id: doc?.id ?? null,
@@ -533,13 +574,22 @@ export default function MinuteBookClient() {
             file_hash: doc?.file_hash ?? null,
             file_size: doc?.file_size ?? null,
             mime_type: doc?.mime_type ?? null,
+
+            lane_is_test: lm?.is_test ?? null,
+            ledger_status: lm?.status ?? null,
           };
         });
 
-        merged.sort((a, b) => getCreatedAtMs(b.created_at) - getCreatedAtMs(a.created_at));
+        // lane boundary: if we can resolve lane, enforce it; otherwise keep entry visible
+        const laneFiltered = merged.filter((r) => {
+          if (r.lane_is_test === null || r.lane_is_test === undefined) return true;
+          return r.lane_is_test === laneIsTest;
+        });
 
-        setEntries(merged);
-        setSelectedId(merged[0]?.id ?? null);
+        laneFiltered.sort((a, b) => getCreatedAtMs(b.created_at) - getCreatedAtMs(a.created_at));
+
+        setEntries(laneFiltered);
+        setSelectedId(laneFiltered[0]?.id ?? null);
 
         if (activeDomainKey !== "all") {
           const exists = domains.some((d) => d.key === activeDomainKey);
@@ -559,7 +609,7 @@ export default function MinuteBookClient() {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entityKey]);
+  }, [entityKey, laneIsTest]);
 
   const filteredEntries = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -580,6 +630,7 @@ export default function MinuteBookClient() {
           e.storage_path || "",
           e.file_hash || "",
           e.source_record_id || "",
+          e.ledger_status || "",
         ]
           .join(" ")
           .toLowerCase();
@@ -615,7 +666,7 @@ export default function MinuteBookClient() {
     return { label: "UPLOADED", tone: "neutral" as const };
   }, [selected?.id, !!official]);
 
-  // Resolve official artifact on selection
+  // Resolve official artifact on selection (lane-aware)
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -629,7 +680,7 @@ export default function MinuteBookClient() {
 
       setPdfBusy(true);
       try {
-        const off = await resolveOfficialArtifact(entityKey, selected);
+        const off = await resolveOfficialArtifact(entityKey, selected, laneIsTest);
         if (!alive) return;
         setOfficial(off);
       } finally {
@@ -640,7 +691,7 @@ export default function MinuteBookClient() {
     return () => {
       alive = false;
     };
-  }, [entityKey, selected?.id]);
+  }, [entityKey, selected?.id, laneIsTest]);
 
   async function ensurePreviewUrl(openReader: boolean) {
     if (!selected) return;
@@ -754,8 +805,27 @@ export default function MinuteBookClient() {
         const docs = await loadSupportingDocs(ids);
         const primary = pickPrimaryDocByEntry(docs);
 
+        const recordIds = uniq(base.map((r) => r.source_record_id).filter(Boolean) as string[]);
+        const laneMap = new Map<string, { is_test: boolean; status: string }>();
+
+        if (recordIds.length) {
+          const { data: gl } = await supabaseBrowser
+            .from("governance_ledger")
+            .select("id,is_test,status")
+            .in("id", recordIds);
+
+          for (const r of gl ?? []) {
+            laneMap.set(String((r as any).id), {
+              is_test: !!(r as any).is_test,
+              status: String((r as any).status ?? ""),
+            });
+          }
+        }
+
         const merged: EntryWithDoc[] = base.map((e: MinuteBookEntry) => {
           const doc = primary.get(e.id);
+          const lm = e.source_record_id ? laneMap.get(String(e.source_record_id)) : null;
+
           return {
             ...e,
             document_id: doc?.id ?? null,
@@ -764,12 +834,19 @@ export default function MinuteBookClient() {
             file_hash: doc?.file_hash ?? null,
             file_size: doc?.file_size ?? null,
             mime_type: doc?.mime_type ?? null,
+            lane_is_test: lm?.is_test ?? null,
+            ledger_status: lm?.status ?? null,
           };
         });
 
-        merged.sort((a, b) => getCreatedAtMs(b.created_at) - getCreatedAtMs(a.created_at));
-        setEntries(merged);
-        setSelectedId(merged[0]?.id ?? null);
+        const laneFiltered = merged.filter((r) => {
+          if (r.lane_is_test === null || r.lane_is_test === undefined) return true;
+          return r.lane_is_test === laneIsTest;
+        });
+
+        laneFiltered.sort((a, b) => getCreatedAtMs(b.created_at) - getCreatedAtMs(a.created_at));
+        setEntries(laneFiltered);
+        setSelectedId(laneFiltered[0]?.id ?? null);
       }
     } catch (e: unknown) {
       setDeleteErr(e instanceof Error ? e.message : "Delete failed.");
@@ -820,6 +897,13 @@ export default function MinuteBookClient() {
               <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
                 <span>
                   Entity: <span className="text-emerald-300 font-medium">{String(entityKey ?? "—")}</span>
+                </span>
+                <span className="text-slate-700">•</span>
+                <span>
+                  Lane:{" "}
+                  <span className={cx("font-medium", laneIsTest ? "text-amber-200" : "text-slate-200")}>
+                    {laneIsTest ? "SANDBOX" : "RoT"}
+                  </span>
                 </span>
                 <span className="text-slate-700">•</span>
                 <span>
@@ -1108,6 +1192,9 @@ export default function MinuteBookClient() {
                           <span className="px-2 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200">
                             {domains.find((d) => d.key === selected.domain_key)?.label || norm(selected.domain_key, "—")}
                           </span>
+                          <span className="px-2 py-1 rounded-full bg-white/5 border border-white/10 text-[11px] text-slate-200">
+                            {laneIsTest ? "SANDBOX" : "RoT"}
+                          </span>
                         </div>
 
                         {pdfErr ? (
@@ -1194,89 +1281,49 @@ export default function MinuteBookClient() {
                           </div>
                         )}
                       </div>
-
+                      {/* Metadata Zone */}
                       <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-4">
-                        <div className="flex items-center justify-between mb-2">
-                          <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Metadata</div>
-                          <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] tracking-[0.18em] uppercase text-slate-300">
-                            secondary
-                          </span>
-                        </div>
+                        <div className="text-[10px] uppercase tracking-[0.25em] text-slate-500">Metadata Zone</div>
 
-                        <div className="space-y-2">
-                          <details className="rounded-2xl border border-white/10 bg-black/20 px-3 py-2">
-                            <summary className="cursor-pointer text-[11px] text-slate-200">Storage</summary>
-                            <div className="mt-2 space-y-1 text-[11px] text-slate-300">
-                              <div className="flex items-start justify-between gap-3">
-                                <span className="text-slate-500">Primary Path</span>
-                                <span className="text-right font-mono break-all">{norm(selected.storage_path, "—")}</span>
-                              </div>
-                              <div className="flex items-start justify-between gap-3">
-                                <span className="text-slate-500">Source Record</span>
-                                <span className="text-right font-mono break-all">{norm(selected.source_record_id, "—")}</span>
-                              </div>
-                              <div className="flex items-start justify-between gap-3">
-                                <span className="text-slate-500">Resolved Bucket</span>
-                                <span className="text-right font-mono break-all">{norm(resolvedBucket, "—")}</span>
-                              </div>
-                              <div className="flex items-start justify-between gap-3">
-                                <span className="text-slate-500">Resolved Path</span>
-                                <span className="text-right font-mono break-all">{norm(resolvedPath, "—")}</span>
-                              </div>
-                              <div className="flex items-start justify-between gap-3">
-                                <span className="text-slate-500">File</span>
-                                <span className="text-right break-all">{norm(selected.file_name, "—")}</span>
-                              </div>
-                              <div className="flex items-start justify-between gap-3">
-                                <span className="text-slate-500">Size</span>
-                                <span className="text-right">{fmtBytes(selected.file_size)}</span>
-                              </div>
-                              <div className="flex items-start justify-between gap-3">
-                                <span className="text-slate-500">MIME</span>
-                                <span className="text-right">{norm(selected.mime_type, "—")}</span>
-                              </div>
-                            </div>
-                          </details>
+                        <div className="mt-3 grid grid-cols-1 gap-2 text-[11px]">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="text-slate-500">Storage</span>
+                            <span className="text-slate-200 truncate max-w-[60%]">
+                              {resolvedBucket && resolvedPath
+                                ? `${resolvedBucket} • ${resolvedPath}`
+                                : selected.storage_path
+                                  ? `— • ${selected.storage_path}`
+                                  : "—"}
+                            </span>
+                          </div>
 
-                          <details open className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-3 py-2">
-                            <summary className="cursor-pointer text-[11px] text-amber-200">Hash</summary>
-                            <div className="mt-2 text-[11px] text-amber-100/90">
-                              <div className="flex items-start justify-between gap-3">
-                                <span className="text-amber-200/60">SHA-256</span>
-                                <span className="text-right font-mono break-all">{shortHash(selected.file_hash)}</span>
-                              </div>
-                              <div className="mt-1 text-[10px] text-amber-200/60">
-                                Minute Book = evidence access. Certification/attestation lives in Verified Registry.
-                              </div>
-                            </div>
-                          </details>
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="text-slate-500">Hash</span>
+                            <span className="text-slate-200 font-mono truncate max-w-[60%]">
+                              {shortHash(selected.file_hash)}
+                            </span>
+                          </div>
 
-                          <details className="rounded-2xl border border-white/10 bg-black/20 px-3 py-2">
-                            <summary className="cursor-pointer text-[11px] text-slate-200">Audit</summary>
-                            <div className="mt-2 space-y-1 text-[11px] text-slate-300">
-                              <div className="flex items-start justify-between gap-3">
-                                <span className="text-slate-500">Created</span>
-                                <span className="text-right">
-                                  {selected.created_at ? new Date(selected.created_at).toLocaleString() : "—"}
-                                </span>
-                              </div>
-                              <div className="flex items-start justify-between gap-3">
-                                <span className="text-slate-500">Created By</span>
-                                <span className="text-right font-mono break-all">{norm(selected.created_by, "—")}</span>
-                              </div>
-                              <div className="flex items-start justify-between gap-3">
-                                <span className="text-slate-500">Source</span>
-                                <span className="text-right break-all">{norm(selected.source, "—")}</span>
-                              </div>
-                            </div>
-                          </details>
-                        </div>
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="text-slate-500">Record</span>
+                            <span className="text-slate-200 truncate max-w-[60%]">
+                              {selected.source_record_id ? String(selected.source_record_id) : "—"}
+                            </span>
+                          </div>
 
-                        <div className="mt-3 flex items-center justify-between text-[10px] text-slate-500">
-                          <Link href="/ci-archive" className="hover:text-slate-200">
-                            Archive Launchpad
-                          </Link>
-                          <span>Evidence-first. Verification lives in Verified.</span>
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="text-slate-500">Status</span>
+                            <span className="text-slate-200 truncate max-w-[60%]">
+                              {norm(selected.ledger_status, "—")}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="text-slate-500">Lane</span>
+                            <span className="text-slate-200 truncate max-w-[60%]">
+                              {laneIsTest ? "SANDBOX" : "RoT"}
+                            </span>
+                          </div>
                         </div>
                       </div>
                     </>
@@ -1286,322 +1333,244 @@ export default function MinuteBookClient() {
             </div>
           </div>
 
-          {/* OS behavior footnote (matches Verified/FORGE) */}
-          <div className="mt-5 rounded-3xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
-            <div className="font-semibold text-slate-200">OS behavior</div>
-            <div className="mt-1 leading-relaxed text-slate-400">
-              CI-Archive Minute Book inherits the OS shell. No module-owned window frames. Evidence-first registry; verification lives in Verified.
+          {/* ---------------- MOBILE: Domains Sheet ---------------- */}
+          {mobileDomainsOpen ? (
+            <div className="sm:hidden fixed inset-0 z-[60]">
+              <div
+                className="absolute inset-0 bg-black/60"
+                onClick={() => setMobileDomainsOpen(false)}
+              />
+              <div className="absolute inset-x-0 bottom-0 rounded-t-3xl border border-white/10 bg-black/70 backdrop-blur-xl">
+                <div className="px-4 py-4 border-b border-white/10">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-[0.25em] text-slate-500">Domains</div>
+                      <div className="text-sm font-semibold text-slate-100">{activeDomainLabel}</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setMobileDomainsOpen(false)}
+                      className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+
+                <div className="px-3 py-3 max-h-[60vh] overflow-y-auto">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveDomainKey("all");
+                      setMobileDomainsOpen(false);
+                    }}
+                    className={cx(
+                      "w-full flex items-center justify-between gap-3 px-3 py-3 rounded-2xl border transition",
+                      activeDomainKey === "all"
+                        ? "bg-amber-500/10 border-amber-500/40"
+                        : "bg-white/5 border-white/10"
+                    )}
+                  >
+                    <span className="text-sm text-slate-100">All</span>
+                    <span className="text-[11px] text-slate-300">{entries.length}</span>
+                  </button>
+
+                  <div className="mt-2 space-y-2">
+                    {domains.map((d) => {
+                      const active = d.key === activeDomainKey;
+                      const count = domainCounts.get(d.key) || 0;
+                      const icon = DOMAIN_ICON[d.key] || "•";
+                      return (
+                        <button
+                          key={d.key}
+                          type="button"
+                          onClick={() => {
+                            setActiveDomainKey(d.key);
+                            setMobileDomainsOpen(false);
+                          }}
+                          className={cx(
+                            "w-full flex items-center justify-between gap-3 px-3 py-3 rounded-2xl border transition",
+                            active ? "bg-amber-500/10 border-amber-500/40" : "bg-white/5 border-white/10"
+                          )}
+                        >
+                          <span className="flex items-center gap-2 min-w-0">
+                            <span className="w-7 h-7 grid place-items-center rounded-xl border border-white/10 bg-black/20 text-[12px]">
+                              {icon}
+                            </span>
+                            <span className="text-sm text-slate-100 truncate">{d.label}</span>
+                          </span>
+                          <span className={cx("text-[11px]", count ? "text-amber-200/80" : "text-slate-500")}>
+                            {count}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="mt-4 text-[10px] text-slate-500 flex items-center justify-between px-1">
+                    <span>
+                      Lane: <span className="text-slate-200">{laneIsTest ? "SANDBOX" : "RoT"}</span>
+                    </span>
+                    <span>
+                      Entity: <span className="text-slate-200">{String(entityKey)}</span>
+                    </span>
+                  </div>
+                </div>
+              </div>
             </div>
-          </div>
+          ) : null}
 
-          <div className="mt-5 flex items-center justify-between text-[10px] text-slate-600">
-            <span>CI-Archive · Oasis Digital Parliament</span>
-            <span>ODP.AI · Governance Firmware</span>
-          </div>
+          {/* ---------------- READER OVERLAY (mobile + desktop) ---------------- */}
+          {mobileReaderOpen ? (
+            <div className="fixed inset-0 z-[70]">
+              <div className="absolute inset-0 bg-black/70" onClick={() => setMobileReaderOpen(false)} />
+              <div
+                className={cx(
+                  "absolute inset-x-0 bottom-0 sm:inset-6 rounded-t-3xl sm:rounded-3xl border border-white/10 overflow-hidden",
+                  readerTone === "glass" ? "bg-black/50 backdrop-blur-xl" : "bg-black"
+                )}
+              >
+                <div className="border-b border-white/10 px-4 sm:px-5 py-4 flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-[10px] uppercase tracking-[0.25em] text-slate-500">Reader</div>
+                    <div className="mt-1 text-sm font-semibold text-slate-100 truncate">
+                      {selected?.title || selected?.file_name || "Untitled"}
+                    </div>
+                    <div className="mt-1 text-[11px] text-slate-500 flex items-center gap-2 flex-wrap">
+                      <span>{laneIsTest ? "SANDBOX" : "RoT"}</span>
+                      <span className="w-1 h-1 rounded-full bg-slate-700" />
+                      <span>{authorityBadge?.label || "—"}</span>
+                      {showHashInReader ? (
+                        <>
+                          <span className="w-1 h-1 rounded-full bg-slate-700" />
+                          <span className="font-mono text-slate-300">{shortHash(selected?.file_hash ?? null)}</span>
+                        </>
+                      ) : null}
+                    </div>
+                  </div>
 
-          {/* optional quick links row (same grammar as Archive launchpad) */}
-          <div className="mt-4 flex flex-wrap gap-2">
-            <Link
-              href="/ci-archive"
-              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
-            >
-              CI-Archive
-            </Link>
-            <Link
-              href="/ci-archive/minute-book"
-              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
-            >
-              Minute Book
-            </Link>
-            <Link
-              href="/ci-archive/verified"
-              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
-            >
-              Verified
-            </Link>
-            <Link
-              href="/ci-archive/upload"
-              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
-            >
-              Upload
-            </Link>
+                  <div className="shrink-0 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowHashInReader((v) => !v)}
+                      className="hidden sm:inline-flex rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200"
+                    >
+                      Hash
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setReaderTone((t) => (t === "glass" ? "solid" : "glass"))}
+                      className="hidden sm:inline-flex rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200"
+                    >
+                      Tone
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setMobileReaderOpen(false)}
+                      className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+
+                <div className="h-[70vh] sm:h-full bg-black/10">
+                  {previewUrl ? (
+                    <iframe title="PDF Reader" src={previewUrl} className="h-full w-full" />
+                  ) : (
+                    <div className="h-full w-full grid place-items-center text-[11px] text-slate-500">
+                      No preview loaded. Tap{" "}
+                      <button
+                        type="button"
+                        onClick={() => ensurePreviewUrl(false)}
+                        className="text-amber-200 underline underline-offset-2"
+                      >
+                        Refresh
+                      </button>
+                      .
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {/* ---------------- DELETE MODAL ---------------- */}
+          {deleteOpen ? (
+            <div className="fixed inset-0 z-[80]">
+              <div className="absolute inset-0 bg-black/70" onClick={() => setDeleteOpen(false)} />
+              <div className="absolute inset-x-0 bottom-0 sm:inset-0 sm:flex sm:items-center sm:justify-center p-3">
+                <div className="w-full sm:max-w-[520px] rounded-3xl border border-white/10 bg-black/70 backdrop-blur-xl overflow-hidden">
+                  <div className="px-4 py-4 border-b border-white/10">
+                    <div className="text-[10px] uppercase tracking-[0.25em] text-slate-500">Danger Zone</div>
+                    <div className="mt-1 text-sm font-semibold text-slate-100">Delete Minute Book Entry</div>
+                    <div className="mt-1 text-[11px] text-slate-400">
+                      This will hard-delete the entry and remove associated storage objects. Requires a reason.
+                    </div>
+                  </div>
+
+                  <div className="px-4 py-4">
+                    <label className="block text-[10px] uppercase tracking-[0.25em] text-slate-500">Reason</label>
+                    <input
+                      value={deleteReason}
+                      onChange={(e) => setDeleteReason(e.target.value)}
+                      placeholder="e.g., mistaken upload, wrong domain, duplicate…"
+                      className="mt-2 w-full rounded-2xl bg-black/20 border border-white/10 px-3 py-3 text-sm text-slate-100 placeholder:text-slate-600 outline-none focus:border-red-500/40"
+                    />
+
+                    {deleteErr ? (
+                      <div className="mt-3 rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
+                        {deleteErr}
+                      </div>
+                    ) : null}
+
+                    <div className="mt-4 flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setDeleteOpen(false)}
+                        className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200"
+                      >
+                        Cancel
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={deleteBusy || !deleteReason.trim()}
+                        onClick={runDelete}
+                        className={cx(
+                          "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
+                          deleteBusy || !deleteReason.trim()
+                            ? "border-red-500/20 bg-red-500/10 text-red-200/50"
+                            : "border-red-500/40 bg-red-500/15 text-red-200 hover:bg-red-500/20"
+                        )}
+                      >
+                        {deleteBusy ? "Deleting…" : "Delete"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="px-4 py-3 border-t border-white/10 text-[10px] text-slate-500 flex items-center justify-between">
+                    <span>Lane: {laneIsTest ? "SANDBOX" : "RoT"}</span>
+                    <span>Entity: {String(entityKey)}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {/* OS behavior footnote */}
+          <div className="mt-4 text-[10px] text-slate-600 flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span>Minute Book is a registry view.</span>
+            <span className="text-slate-700">•</span>
+            <span>Uploads remain pristine; official artifacts resolve via Verified registry.</span>
+            <span className="text-slate-700">•</span>
+            <span>Lane boundary enforced via governance_ledger.is_test.</span>
           </div>
         </>
       )}
-      {/* ---------------- MOBILE: Domains Sheet ---------------- */}
-      {mobileDomainsOpen ? (
-        <div className="fixed inset-0 z-[90] bg-black/70 backdrop-blur-xl flex items-end sm:hidden">
-          <div className="w-full rounded-t-3xl border-t border-white/10 bg-slate-950/90 max-h-[85vh] overflow-hidden">
-            <div className="px-4 py-4 border-b border-white/10 flex items-center justify-between">
-              <div>
-                <div className="text-[10px] uppercase tracking-[0.3em] text-slate-500">Domains</div>
-                <div className="mt-1 text-sm font-semibold text-slate-100">Select a domain</div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setMobileDomainsOpen(false)}
-                className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[11px] font-semibold text-slate-200"
-              >
-                Close
-              </button>
-            </div>
-
-            <div className="p-3 overflow-y-auto">
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveDomainKey("all");
-                  setMobileDomainsOpen(false);
-                }}
-                className={cx(
-                  "w-full flex items-center justify-between gap-3 px-4 py-3 rounded-2xl border",
-                  activeDomainKey === "all" ? "border-amber-500/40 bg-amber-500/10" : "border-white/10 bg-white/5"
-                )}
-              >
-                <span className="text-sm font-semibold text-slate-100">All</span>
-                <span className="text-[11px] text-slate-400">{entries.length}</span>
-              </button>
-
-              <div className="mt-2 space-y-2">
-                {domains.map((d) => {
-                  const count = domainCounts.get(d.key) || 0;
-                  const active = d.key === activeDomainKey;
-                  const icon = DOMAIN_ICON[d.key] || "•";
-
-                  return (
-                    <button
-                      key={d.key}
-                      type="button"
-                      onClick={() => {
-                        setActiveDomainKey(d.key);
-                        setMobileDomainsOpen(false);
-                      }}
-                      className={cx(
-                        "w-full flex items-center justify-between gap-3 px-4 py-3 rounded-2xl border",
-                        active ? "border-amber-500/40 bg-amber-500/10" : "border-white/10 bg-white/5"
-                      )}
-                    >
-                      <span className="flex items-center gap-2 min-w-0">
-                        <span className="w-8 h-8 grid place-items-center rounded-2xl border border-white/10 bg-black/20">
-                          {icon}
-                        </span>
-                        <span className="text-sm font-semibold text-slate-100 truncate">{d.label}</span>
-                      </span>
-                      <span className={cx("text-[11px]", count ? "text-amber-200" : "text-slate-500")}>{count}</span>
-                    </button>
-                  );
-                })}
-              </div>
-
-              {err ? (
-                <div className="mt-3 rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
-                  {err}
-                </div>
-              ) : null}
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {/* ---------------- Reader Sheet (mobile + desktop overlay) ---------------- */}
-      {mobileReaderOpen ? (
-        <div
-          className={cx(
-            "fixed inset-0 z-[95] flex items-end sm:items-center sm:justify-center",
-            readerTone === "glass" ? "bg-black/70 backdrop-blur-xl" : "bg-black"
-          )}
-        >
-          <div
-            className={cx(
-              "w-full sm:max-w-[1200px] sm:h-[86vh] h-[92vh] rounded-t-3xl sm:rounded-3xl border border-white/10 bg-slate-950/85 overflow-hidden flex flex-col"
-            )}
-          >
-            <div className="px-4 sm:px-5 py-4 border-b border-white/10 flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="text-[10px] uppercase tracking-[0.3em] text-slate-500">Reader</div>
-                <div className="mt-1 text-sm font-semibold text-slate-100 truncate">
-                  {selected?.title || selected?.file_name || "Document"}
-                </div>
-                <div className="mt-1 text-[11px] text-slate-500">
-                  {official ? "Official preferred • " : "Uploaded evidence • "}
-                  {showHashInReader ? <span className="font-mono">{shortHash(selected?.file_hash || null)}</span> : null}
-                </div>
-                {resolvedBucket ? (
-                  <div className="mt-1 text-[10px] text-slate-600">
-                    Resolved: <span className="font-mono text-slate-300">{resolvedBucket}</span>{" "}
-                    <span className="text-slate-700">•</span>{" "}
-                    <span className="font-mono text-slate-400">{shortHash(resolvedPath || null)}</span>
-                  </div>
-                ) : null}
-              </div>
-
-              <div className="flex items-center gap-2 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setReaderTone((t) => (t === "glass" ? "solid" : "glass"))}
-                  className="hidden sm:inline-flex rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[11px] text-slate-200 hover:border-amber-500/25"
-                  title="Toggle overlay tone"
-                >
-                  {readerTone === "glass" ? "Glass" : "Solid"}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setShowHashInReader((v) => !v)}
-                  className="hidden sm:inline-flex rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[11px] text-slate-200 hover:border-amber-500/25"
-                  title="Toggle hash in header"
-                >
-                  Hash
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setMobileReaderOpen(false)}
-                  className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[11px] font-semibold text-slate-200 hover:bg-white/7"
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-
-            <div className="flex-1 min-h-0 bg-black">
-              {previewUrl ? (
-                <iframe title="PDF Reader" src={previewUrl} className="h-full w-full" />
-              ) : (
-                <div className="h-full w-full grid place-items-center text-[11px] text-slate-400 px-4 text-center">
-                  <div>
-                    <div className="text-slate-200 font-semibold">No preview loaded</div>
-                    <div className="mt-1 text-slate-500">Close, then tap Reader again.</div>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="px-4 sm:px-5 py-3 border-t border-white/10 flex items-center justify-between text-[11px] text-slate-500">
-              <span className="hidden sm:inline">
-                Record ID: <span className="font-mono text-slate-300">{selected?.id || "—"}</span>
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={downloadPdf}
-                  className="rounded-full bg-slate-200 text-black px-4 py-2 text-[11px] font-semibold hover:bg-white"
-                >
-                  Download
-                </button>
-                <button
-                  type="button"
-                  onClick={openNewTab}
-                  className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[11px] font-semibold text-slate-200 hover:bg-white/7"
-                >
-                  Open
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {/* ---------------- Delete Confirm Modal ---------------- */}
-      {deleteOpen && selected ? (
-        <div className="fixed inset-0 z-[99] bg-black/70 backdrop-blur-xl flex items-center justify-center p-4">
-          <div className="w-full max-w-[720px] rounded-3xl border border-red-500/30 bg-slate-950/85 shadow-[0_0_70px_rgba(0,0,0,0.55)] overflow-hidden">
-            <div className="px-6 py-5 border-b border-white/10">
-              <div className="text-xs tracking-[0.3em] uppercase text-red-300">HARD DELETE</div>
-              <div className="mt-2 text-lg font-semibold text-slate-100">Delete Minute Book entry?</div>
-              <p className="mt-2 text-sm text-slate-300">
-                This permanently removes the entry and all related files. Owner/Admin only.
-              </p>
-              <div className="mt-2 text-[11px] text-slate-500">
-                Record:{" "}
-                <span className="text-slate-200 font-semibold">
-                  {selected.title || selected.file_name || "Untitled filing"}
-                </span>{" "}
-                • <span className="font-mono">{shortHash(selected.file_hash || null)}</span>
-              </div>
-            </div>
-
-            <div className="px-6 py-5">
-              <label className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Reason (required)</label>
-              <input
-                value={deleteReason}
-                onChange={(e) => setDeleteReason(e.target.value)}
-                placeholder="e.g., Wrong entity / wrong domain / duplicate / test upload"
-                className="mt-2 w-full rounded-2xl bg-black/30 border border-white/10 px-3 py-3 text-sm text-slate-100 placeholder:text-slate-600 outline-none focus:border-red-500/40"
-              />
-
-              {deleteErr ? (
-                <div className="mt-3 rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
-                  {deleteErr}
-                </div>
-              ) : null}
-
-              <div className="mt-5 flex items-center justify-between">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setDeleteOpen(false);
-                    setDeleteErr(null);
-                  }}
-                  className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
-                >
-                  Cancel
-                </button>
-
-                <button
-                  type="button"
-                  disabled={deleteBusy || deleteReason.trim().length < 3}
-                  onClick={runDelete}
-                  className={cx(
-                    "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
-                    deleteBusy || deleteReason.trim().length < 3
-                      ? "bg-red-500/20 text-red-200/60 cursor-not-allowed"
-                      : "bg-red-500 text-white hover:bg-red-400"
-                  )}
-                >
-                  {deleteBusy ? "Deleting…" : "Confirm Delete"}
-                </button>
-              </div>
-
-              <div className="mt-3 text-[10px] text-slate-500">
-                ISO language: record lifecycle correction • controlled disposal • reason captured.
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {/* iPhone sticky bottom bar (thumb-safe) */}
-      {entityKey ? (
-        <div className="lg:hidden fixed bottom-0 left-0 right-0 z-[60] pb-[env(safe-area-inset-bottom)]">
-          <div className="mx-auto max-w-[1400px] px-3">
-            <div className="mb-2 rounded-2xl border border-white/10 bg-slate-950/80 backdrop-blur-xl px-3 py-2 flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setMobileDomainsOpen(true)}
-                className="flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-left"
-              >
-                <div className="text-[9px] uppercase tracking-[0.25em] text-slate-500">Domain</div>
-                <div className="mt-0.5 text-[11px] font-semibold text-slate-100 truncate">{activeDomainLabel}</div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => ensurePreviewUrl(true)}
-                disabled={!selected || pdfBusy}
-                className={cx(
-                  "rounded-xl px-4 py-3 border text-[11px] font-semibold tracking-[0.18em] uppercase",
-                  !selected || pdfBusy
-                    ? "border-white/10 bg-white/5 text-slate-500"
-                    : "border-amber-500/40 bg-amber-500/10 text-amber-200"
-                )}
-              >
-                Reader
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
     </Shell>
   );
 }
+
