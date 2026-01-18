@@ -143,7 +143,11 @@ export default function VerifiedRegistryPage() {
   // ✅ Minute-Book-style Reader Sheet state (NO routing / NO 404)
   const [readerOpen, setReaderOpen] = useState(false);
   const [readerDoc, setReaderDoc] = useState<VerifiedRow | null>(null);
-  const [readerUrl, setReaderUrl] = useState<string | null>(null);
+
+  // ✅ TWO URLS: preview (inline) + download (attachment)
+  const [readerUrl, setReaderUrl] = useState<string | null>(null); // iframe preview (no download hint)
+  const [readerDownloadUrl, setReaderDownloadUrl] = useState<string | null>(null); // download link (with filename)
+
   const [readerLoading, setReaderLoading] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -151,6 +155,7 @@ export default function VerifiedRegistryPage() {
     setReaderOpen(false);
     setReaderDoc(null);
     setReaderUrl(null);
+    setReaderDownloadUrl(null);
     setReaderLoading(false);
     setCopied(false);
   }
@@ -276,7 +281,9 @@ export default function VerifiedRegistryPage() {
 
   /**
    * ✅ Open Verified -> Reader Sheet (iPhone-first)
-   * NO routing. NO 404 pages. Uses the same signedUrlForVerified() you already trust.
+   * ✅ FIX: preview uses inline URL (no download disposition) so iframe renders.
+   * ✅ Download uses attachment URL (with filename).
+   * NO routing. NO 404 pages. Same signedUrlForVerified() contract you already trust.
    */
   async function openVerified(r: VerifiedRow) {
     setOpenErr(null);
@@ -294,10 +301,16 @@ export default function VerifiedRegistryPage() {
       setReaderOpen(true);
       setReaderLoading(true);
       setReaderUrl(null);
+      setReaderDownloadUrl(null);
 
-      // Generate preview URL (same contract)
-      const url = await signedUrlForVerified(bucket, path, name);
-      setReaderUrl(url);
+      // ✅ preview URL (NO download hint) => iframe renders
+      const previewUrl = await signedUrlForVerified(bucket, path, null);
+
+      // ✅ download URL (with filename) => Download button is consistent
+      const dlUrl = await signedUrlForVerified(bucket, path, name);
+
+      setReaderUrl(previewUrl);
+      setReaderDownloadUrl(dlUrl);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Failed to open verified document.";
       setOpenErr(msg);
@@ -305,6 +318,7 @@ export default function VerifiedRegistryPage() {
       setReaderOpen(false);
       setReaderDoc(null);
       setReaderUrl(null);
+      setReaderDownloadUrl(null);
     } finally {
       setReaderLoading(false);
       setOpenBusyId(null);
@@ -317,11 +331,10 @@ export default function VerifiedRegistryPage() {
   }
 
   function downloadNow() {
-    if (!readerUrl || !readerDoc) return;
-    // We already passed `download` hint into createSignedUrl, but browsers vary.
-    // Force download via anchor click (safe).
+    if (!readerDownloadUrl || !readerDoc) return;
+
     const a = document.createElement("a");
-    a.href = readerUrl;
+    a.href = readerDownloadUrl;
     a.target = "_blank";
     a.rel = "noopener noreferrer";
     a.download = `${safeFilename(readerDoc.title || "document")}.pdf`;
@@ -620,11 +633,7 @@ export default function VerifiedRegistryPage() {
       {/* ✅ Reader Sheet (iPhone-first, desktop centered) */}
       {readerOpen ? (
         <div className="fixed inset-0 z-[80]">
-          <div
-            className="absolute inset-0 bg-black/60 backdrop-blur-md"
-            onClick={closeReader}
-            aria-hidden="true"
-          />
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-md" onClick={closeReader} aria-hidden="true" />
           <div className="absolute inset-0 p-0 sm:p-6 flex items-end sm:items-center justify-center">
             <div className="w-full sm:max-w-[980px] h-[92vh] sm:h-[88vh] rounded-none sm:rounded-3xl border border-white/10 bg-black/30 shadow-[0_28px_120px_rgba(0,0,0,0.65)] overflow-hidden">
               <div className="flex items-center justify-between gap-3 px-4 sm:px-5 py-3 border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent">
@@ -676,10 +685,10 @@ export default function VerifiedRegistryPage() {
                   <button
                     type="button"
                     onClick={downloadNow}
-                    disabled={!readerUrl}
+                    disabled={!readerDownloadUrl}
                     className={cx(
                       "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase inline-flex items-center gap-2 transition",
-                      !readerUrl
+                      !readerDownloadUrl
                         ? "border-white/10 bg-white/5 text-slate-500 cursor-not-allowed"
                         : "border-amber-400/20 bg-amber-400/10 text-amber-100 hover:bg-amber-400/15"
                     )}
@@ -710,12 +719,7 @@ export default function VerifiedRegistryPage() {
                     </div>
                   </div>
                 ) : readerUrl ? (
-                  <iframe
-                    key={readerUrl}
-                    src={readerUrl}
-                    className="h-full w-full"
-                    title="Verified PDF Preview"
-                  />
+                  <iframe key={readerUrl} src={readerUrl} className="h-full w-full" title="Verified PDF Preview" />
                 ) : (
                   <div className="h-full w-full flex items-center justify-center text-slate-400">
                     <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm">
