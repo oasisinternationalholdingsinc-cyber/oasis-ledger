@@ -50,40 +50,27 @@ type DrawOptions = {
   lineHeight: number;
 };
 
-// simple word-wrap helper for pdf-lib
+// Word-wrap helper for pdf-lib with basic page-break support.
+// IMPORTANT: returns updated page + y so caller can continue drawing.
 function drawWrappedText(
+  pdfDoc: PDFDocument,
   text: string,
   opts: DrawOptions,
+  addPageFn: () => { page: any; startY: number },
 ): { page: any; y: number } {
   let { page, font, margin, maxWidth, startY, lineHeight } = opts;
   let y = startY;
 
-  const paragraphs = text.split(/\n\s*\n/);
+  const safeBottom = 92; // keep clear of footer/signature zones
+  const paragraphs = String(text ?? "").split(/\n\s*\n/);
 
   for (const para of paragraphs) {
-    const words = para.split(/\s+/);
+    // Preserve intentional blank lines lightly
+    const words = para.trim().length ? para.split(/\s+/) : [];
     let line = "";
 
-    for (const word of words) {
-      const testLine = line ? `${line} ${word}` : word;
-      const width = font.widthOfTextAtSize(testLine, 11);
-
-      if (width > maxWidth) {
-        page.drawText(line, {
-          x: margin,
-          y,
-          size: 11,
-          font,
-          color: rgb(0.16, 0.18, 0.22),
-        });
-        y -= lineHeight;
-        line = word;
-      } else {
-        line = testLine;
-      }
-    }
-
-    if (line) {
+    const flushLine = () => {
+      if (!line) return;
       page.drawText(line, {
         x: margin,
         y,
@@ -92,17 +79,58 @@ function drawWrappedText(
         color: rgb(0.16, 0.18, 0.22),
       });
       y -= lineHeight;
+      line = "";
+    };
+
+    for (const word of words) {
+      const testLine = line ? `${line} ${word}` : word;
+      const width = font.widthOfTextAtSize(testLine, 11);
+
+      if (width > maxWidth) {
+        // flush current line
+        flushLine();
+
+        // page break if needed
+        if (y < safeBottom) {
+          const next = addPageFn();
+          page = next.page;
+          y = next.startY;
+        }
+
+        // start new line with word
+        line = word;
+      } else {
+        line = testLine;
+      }
+
+      // page break guard (if we are at bottom mid-paragraph)
+      if (y < safeBottom) {
+        flushLine();
+        const next = addPageFn();
+        page = next.page;
+        y = next.startY;
+      }
     }
 
-    // small gap between paragraphs
-    y -= lineHeight * 0.3;
+    // flush any remaining line
+    flushLine();
+
+    // paragraph spacing
+    y -= lineHeight * 0.35;
+
+    // page break guard after paragraph gap
+    if (y < safeBottom) {
+      const next = addPageFn();
+      page = next.page;
+      y = next.startY;
+    }
   }
 
   return { page, y };
 }
 
-async function addOasisHeader(
-  pdfDoc: PDFDocument,
+// Enterprise header: clean, minimal, print-safe (no heavy bands).
+function addOasisHeader(
   page: any,
   font: any,
   fontBold: any,
@@ -114,101 +142,118 @@ async function addOasisHeader(
   const height = page.getHeight();
 
   const margin = 50;
-  const headerHeight = 70;
 
-  const accent = rgb(0.11, 0.77, 0.55); // emerald
-  const textMuted = rgb(0.7, 0.75, 0.82);
-  const textSoft = rgb(0.8, 0.84, 0.9);
-
-  // dark header band
-  page.drawRectangle({
-    x: 0,
-    y: height - headerHeight,
-    width,
-    height: headerHeight,
-    color: rgb(0.04, 0.08, 0.12),
-  });
-
-  // left header
+  // top rule + brand
   page.drawText("Oasis Digital Parliament", {
     x: margin,
-    y: height - headerHeight + 32,
-    size: 16,
+    y: height - 52,
+    size: 12,
     font: fontBold,
-    color: accent,
+    color: rgb(0.12, 0.14, 0.18),
   });
 
   page.drawText(entityName, {
     x: margin,
-    y: height - headerHeight + 14,
-    size: 10,
-    font,
-    color: textSoft,
-  });
-
-  // right meta pill
-  const pillText = "Resolution · Generated via CI-Alchemy / CI-Forge";
-  const pillWidth = font.widthOfTextAtSize(pillText, 9) + 24;
-  const pillHeight = 22;
-  const pillX = width - margin - pillWidth;
-  const pillY = height - headerHeight + 28;
-
-  page.drawRectangle({
-    x: pillX,
-    y: pillY,
-    width: pillWidth,
-    height: pillHeight,
-    color: rgb(0.07, 0.11, 0.18),
-  });
-
-  page.drawText(pillText, {
-    x: pillX + 12,
-    y: pillY + 7,
+    y: height - 68,
     size: 9,
     font,
-    color: textMuted,
+    color: rgb(0.38, 0.42, 0.5),
   });
 
-  // tiny date under pill
+  // right meta: date
   const dateText = createdAt
-    ? `Created: ${new Date(createdAt).toISOString().slice(0, 10)}`
+    ? `Created ${new Date(createdAt).toISOString().slice(0, 10)}`
     : "";
   if (dateText) {
-    const dateWidth = font.widthOfTextAtSize(dateText, 8);
+    const dateW = font.widthOfTextAtSize(dateText, 9);
     page.drawText(dateText, {
-      x: width - margin - dateWidth,
-      y: height - headerHeight + 10,
-      size: 8,
+      x: width - margin - dateW,
+      y: height - 52,
+      size: 9,
       font,
-      color: textMuted,
+      color: rgb(0.38, 0.42, 0.5),
     });
   }
 
-  // title block under header
-  let y = height - headerHeight - 40;
-
-  const titleWidth = fontBold.widthOfTextAtSize(title, 15);
-  const titleX = Math.max(margin, (width - titleWidth) / 2);
-
-  page.drawText(title, {
-    x: titleX,
-    y,
-    size: 15,
-    font: fontBold,
-    color: rgb(0.96, 0.8, 0.3), // gold
+  // divider line
+  page.drawLine({
+    start: { x: margin, y: height - 80 },
+    end: { x: width - margin, y: height - 80 },
+    thickness: 0.6,
+    color: rgb(0.82, 0.84, 0.88),
   });
 
-  y -= 26;
+  // Title block (centered but restrained)
+  const titleText = title || "Corporate Resolution";
+  const titleSize = 14;
+  const titleW = fontBold.widthOfTextAtSize(titleText, titleSize);
+  const titleX = Math.max(margin, (width - titleW) / 2);
+
+  page.drawText(titleText, {
+    x: titleX,
+    y: height - 112,
+    size: titleSize,
+    font: fontBold,
+    color: rgb(0.12, 0.14, 0.18),
+  });
 
   page.drawText("Corporate Resolution", {
     x: titleX,
-    y,
-    size: 10,
+    y: height - 130,
+    size: 9,
+    font,
+    color: rgb(0.45, 0.48, 0.55),
+  });
+
+  // return body start Y
+  return height - 165;
+}
+
+function addFooter(page: any, font: any) {
+  const width = page.getWidth();
+  const margin = 50;
+
+  page.drawLine({
+    start: { x: margin, y: 64 },
+    end: { x: width - margin, y: 64 },
+    thickness: 0.6,
+    color: rgb(0.88, 0.9, 0.93),
+  });
+
+  page.drawText("Generated by Oasis Digital Parliament · CI-Alchemy / CI-Forge", {
+    x: margin,
+    y: 44,
+    size: 8,
     font,
     color: rgb(0.5, 0.55, 0.6),
   });
+}
 
-  return y - 30; // starting Y for body
+function addSignatureBlock(page: any, font: any, fontBold: any) {
+  const margin = 50;
+
+  page.drawText("Authorized Signatory", {
+    x: margin,
+    y: 150,
+    size: 10,
+    font: fontBold,
+    color: rgb(0.16, 0.18, 0.22),
+  });
+
+  page.drawLine({
+    start: { x: margin, y: 128 },
+    end: { x: margin + 280, y: 128 },
+    thickness: 0.8,
+    color: rgb(0.25, 0.28, 0.32),
+  });
+
+  page.drawText("Name / Title", {
+    x: margin,
+    y: 110,
+    size: 9,
+    font,
+    color: rgb(0.45, 0.48, 0.55),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -292,103 +337,68 @@ serve(async (req) => {
       );
     }
 
-    // 4) Build Oasis OS–styled PDF
+    // 4) Build enterprise, print-safe PDF (no layout overlap, correct pagination)
     const pdfDoc = await PDFDocument.create();
-    const page = pdfDoc.addPage();
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
     const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
 
-    const margin = 50;
-    const width = page.getWidth();
-    const maxWidth = width - margin * 2;
-    const lineHeight = 16;
-
-    const entityName = entity.name ?? "Oasis International Holdings Inc.";
+    const entityName = entity?.name ?? entity?.slug ?? "Entity";
     const title = record.title ?? "Corporate Resolution";
     const createdAt = record.created_at ?? null;
 
-    let bodyStartY = await addOasisHeader(
-      pdfDoc,
-      page,
-      font,
-      fontBold,
-      entityName,
-      title,
-      createdAt,
-    );
+    // helper to create a fully framed page (header+footer) and return body start Y
+    const newFramedPage = () => {
+      const p = pdfDoc.addPage(); // default size (letter-ish) – consistent with your current behavior
+      const startY = addOasisHeader(p, font, fontBold, entityName, title, createdAt);
+      addFooter(p, font);
+      return { page: p, startY };
+    };
+
+    // First page
+    let { page: currPage, startY } = newFramedPage();
+
+    const margin = 50;
+    const maxWidth = currPage.getWidth() - margin * 2;
+    const lineHeight = 16;
 
     const bodyText =
       record.body ||
       "No resolution body found. This is a placeholder generated by Oasis Digital Parliament.";
 
-    const { y: afterBodyY } = drawWrappedText(bodyText, {
-      page,
-      font,
-      fontBold,
-      margin,
-      maxWidth,
-      startY: bodyStartY,
-      lineHeight,
-    });
-
-    let y = afterBodyY - 24;
-
-    // simple signature block
-    if (y < 120) {
-      const sigPage = pdfDoc.addPage();
-      y = await addOasisHeader(
-        pdfDoc,
-        sigPage,
+    // Draw body with page breaks
+    const out = drawWrappedText(
+      pdfDoc,
+      bodyText,
+      {
+        page: currPage,
         font,
         fontBold,
-        entityName,
-        title,
-        createdAt,
-      );
-      y -= 40;
+        margin,
+        maxWidth,
+        startY,
+        lineHeight,
+      },
+      () => newFramedPage(),
+    );
+
+    currPage = out.page;
+
+    // Always place signature block on a clean final page if we're too low.
+    // (enterprise: never crowd signatures into the last lines of body)
+    const yAfter = out.y;
+    const needSigPage = yAfter < 200;
+
+    if (needSigPage) {
+      const next = newFramedPage();
+      currPage = next.page;
     }
 
-    page.drawText("Authorized Signatory", {
-      x: margin,
-      y,
-      size: 10,
-      font: fontBold,
-      color: rgb(0.16, 0.18, 0.22),
-    });
-    y -= 18;
-
-    page.drawLine({
-      start: { x: margin, y },
-      end: { x: margin + 260, y },
-      thickness: 0.8,
-      color: rgb(0.25, 0.28, 0.32),
-    });
-    y -= 12;
-
-    page.drawText("Name / Title", {
-      x: margin,
-      y,
-      size: 9,
-      font,
-      color: rgb(0.45, 0.48, 0.55),
-    });
-
-    // footer
-    page.drawText(
-      "Generated by Oasis Digital Parliament – CI-Alchemy / CI-Forge",
-      {
-        x: margin,
-        y: 40,
-        size: 8,
-        font,
-        color: rgb(0.5, 0.55, 0.6),
-      },
-    );
+    addSignatureBlock(currPage, font, fontBold);
 
     // 5) Save + upload base PDF
     const pdfBytes = await pdfDoc.save();
     const fileName = `${record.id}.pdf`;
-    const storagePath = `${entity.slug}/Resolutions/${fileName}`;
+    const storagePath = `${entity.slug}/Resolutions/${fileName}`; // KEEP EXACT PATH (no wiring change)
 
     const { error: uploadErr } = await supabase.storage
       .from(BUCKET)
