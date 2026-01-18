@@ -43,6 +43,65 @@ function shortHash(h: string | null | undefined) {
   return `${h.slice(0, 16)}…${h.slice(-16)}`;
 }
 
+function normalizeSlashes(s: string) {
+  return s.replace(/\\/g, "/").replace(/\/+/g, "/");
+}
+
+function looksLikeNotFound(err: unknown) {
+  const msg = (err as any)?.message ? String((err as any).message) : "";
+  return /not\s*found/i.test(msg) || (/object/i.test(msg) && /not\s*found/i.test(msg));
+}
+
+async function signedUrlForVerified(bucket: string, path: string, downloadName?: string | null) {
+  const p = normalizeSlashes(path).replace(/^\/+/, "");
+  const opts: { download?: string } | undefined = downloadName ? { download: downloadName } : undefined;
+
+  // 1) exact path
+  {
+    const { data, error } = await supabase.storage.from(bucket).createSignedUrl(p, 60 * 10, opts);
+    if (!error && data?.signedUrl) return data.signedUrl;
+    if (error && !looksLikeNotFound(error)) throw error;
+  }
+
+  // 2) mild repair: try same dir listing and pick a PDF with same prefix
+  const dir = p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
+  const base = p.includes("/") ? p.slice(p.lastIndexOf("/") + 1) : p;
+
+  const uuidPrefix =
+    base.match(/^([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/i)?.[1] ?? null;
+
+  if (!dir) throw new Error(`Object not found in bucket "${bucket}" for "${p}".`);
+
+  const { data: list, error: listErr } = await supabase.storage.from(bucket).list(dir, {
+    limit: 200,
+    sortBy: { column: "updated_at", order: "desc" },
+  });
+
+  if (listErr || !list?.length) throw new Error(`Object not found in bucket "${bucket}" for "${p}".`);
+
+  const pdfs = (list as any[])
+    .map((it) => (it?.name ? `${dir}/${it.name}` : null))
+    .filter(Boolean) as string[];
+
+  let candidates = pdfs.filter((x) => x.toLowerCase().endsWith(".pdf"));
+
+  if (uuidPrefix) {
+    const up = uuidPrefix.toLowerCase();
+    candidates = candidates.filter((x) => x.split("/").pop()!.toLowerCase().startsWith(up));
+  } else {
+    const stem = base.toLowerCase().replace(/\.pdf$/i, "");
+    candidates = candidates.filter((x) => x.split("/").pop()!.toLowerCase().includes(stem));
+  }
+
+  const best = candidates.find((x) => x.toLowerCase().includes("-signed")) || candidates[0];
+  if (!best) throw new Error(`Object not found in bucket "${bucket}" for "${p}".`);
+
+  const { data: data2, error: err2 } = await supabase.storage.from(bucket).createSignedUrl(best, 60 * 10, opts);
+  if (err2) throw err2;
+  if (!data2?.signedUrl) throw new Error("Signed URL generation failed.");
+  return data2.signedUrl;
+}
+
 export default function VerifiedRegistryPage() {
   const { activeEntity } = useEntity(); // IMPORTANT: slug/key string (e.g. "holdings")
   const { env } = useOsEnv();
@@ -53,6 +112,10 @@ export default function VerifiedRegistryPage() {
   const [loading, setLoading] = useState(false);
   const [tab, setTab] = useState<Tab>("ALL");
   const [q, setQ] = useState("");
+
+  // open state
+  const [openBusyId, setOpenBusyId] = useState<string | null>(null);
+  const [openErr, setOpenErr] = useState<string | null>(null);
 
   // Resolve entity UUID from entities table using slug (NO CHANGE)
   useEffect(() => {
@@ -118,17 +181,12 @@ export default function VerifiedRegistryPage() {
         return;
       }
 
-      const recordIds = (vd ?? [])
-        .map((r: any) => r.source_record_id)
-        .filter(Boolean) as string[];
+      const recordIds = (vd ?? []).map((r: any) => r.source_record_id).filter(Boolean) as string[];
 
       const laneMap = new Map<string, { is_test: boolean; status: string }>();
 
       if (recordIds.length) {
-        const { data: gl, error: glErr } = await supabase
-          .from("governance_ledger")
-          .select("id,is_test,status")
-          .in("id", recordIds);
+        const { data: gl, error: glErr } = await supabase.from("governance_ledger").select("id,is_test,status").in("id", recordIds);
 
         if (!glErr && gl) {
           for (const r of gl as any[]) {
@@ -174,6 +232,27 @@ export default function VerifiedRegistryPage() {
       return hay.includes(qq);
     });
   }, [rows, tab, q]);
+
+  async function openVerified(r: VerifiedRow) {
+    setOpenErr(null);
+    setOpenBusyId(r.id);
+
+    try {
+      const bucket = String(r.storage_bucket || "").trim();
+      const path = String(r.storage_path || "").trim();
+      if (!bucket || !path) throw new Error("Missing storage_bucket/storage_path on verified record.");
+
+      const name = `${r.title || "document"}.pdf`;
+      const url = await signedUrlForVerified(bucket, path, name);
+
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Failed to open verified document.";
+      setOpenErr(msg);
+    } finally {
+      setOpenBusyId(null);
+    }
+  }
 
   // OS shell/header/body pattern (MATCH CI-ARCHIVE launchpad + Upload)
   const shell =
@@ -229,6 +308,12 @@ export default function VerifiedRegistryPage() {
           </div>
 
           <div className={body}>
+            {openErr ? (
+              <div className="mb-4 rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
+                {openErr}
+              </div>
+            ) : null}
+
             {/* iPhone-first surface: stacks; desktop: 3 columns */}
             <div className="grid grid-cols-12 gap-4">
               {/* LEFT: Filters */}
@@ -274,9 +359,7 @@ export default function VerifiedRegistryPage() {
                     </div>
                   </div>
 
-                  <div className="mt-4 text-xs text-slate-400">
-                    {loading ? "Loading…" : `${filtered.length} result(s)`}
-                  </div>
+                  <div className="mt-4 text-xs text-slate-400">{loading ? "Loading…" : `${filtered.length} result(s)`}</div>
 
                   <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-400">
                     Lane-safe: filters by{" "}
@@ -317,9 +400,7 @@ export default function VerifiedRegistryPage() {
                                 {r.document_class} · {r.verification_level}
                                 {r.ledger_status ? ` · Ledger: ${r.ledger_status}` : ""}
                               </div>
-                              <div className="mt-2 font-mono break-all text-[11px] text-slate-500">
-                                {r.storage_path}
-                              </div>
+                              <div className="mt-2 font-mono break-all text-[11px] text-slate-500">{r.storage_path}</div>
 
                               <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
                                 <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1">
@@ -351,12 +432,20 @@ export default function VerifiedRegistryPage() {
                                 {r.signed_at ? "SIGNED" : "DRAFT"}
                               </span>
 
-                              <Link
-                                href={`/ci-archive/verified/${r.id}`}
-                                className="rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-amber-100 hover:bg-amber-400/15"
+                              <button
+                                type="button"
+                                onClick={() => openVerified(r)}
+                                disabled={openBusyId === r.id}
+                                className={cx(
+                                  "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase transition",
+                                  openBusyId === r.id
+                                    ? "border-white/10 bg-white/5 text-slate-500 cursor-not-allowed"
+                                    : "border-amber-400/20 bg-amber-400/10 text-amber-100 hover:bg-amber-400/15"
+                                )}
+                                title="Open verified PDF (signed URL)"
                               >
-                                Open →
-                              </Link>
+                                {openBusyId === r.id ? "Opening…" : "Open →"}
+                              </button>
                             </div>
                           </div>
                         </div>
@@ -384,21 +473,16 @@ export default function VerifiedRegistryPage() {
                       1) Council approves → <span className="text-slate-200">approved_by_council = true</span>
                     </div>
                     <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                      2) Forge completes envelope →{" "}
-                      <span className="text-slate-200">signature_envelopes.status = completed</span>
+                      2) Forge completes envelope → <span className="text-slate-200">signature_envelopes.status = completed</span>
                     </div>
                     <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                      3) Seal/Archive (service role) → writes{" "}
-                      <span className="text-slate-200">verified_documents</span> + minute book evidence
+                      3) Seal/Archive (service role) → writes <span className="text-slate-200">verified_documents</span> + minute book evidence
                     </div>
-                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                      4) verify_governance_archive(record_id) → VALID
-                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">4) verify_governance_archive(record_id) → VALID</div>
                   </div>
 
                   <div className="mt-4 text-[11px] text-slate-500 leading-relaxed">
-                    Verified is read-only. Use Council/Forge for execution and Archive for sealing. This surface is the
-                    trust registry.
+                    Verified is read-only. Use Council/Forge for execution and Archive for sealing. This surface is the trust registry.
                   </div>
                 </div>
               </section>
