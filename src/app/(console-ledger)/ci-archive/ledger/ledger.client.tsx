@@ -1,4 +1,4 @@
-// src/app/(console-ledger)/ci-archive/ledger/page.tsx
+// src/app/(console-ledger)/ci-archive/ledger/ledger.client.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -120,7 +120,7 @@ export default function ArchiveLedgerLifecyclePage() {
     };
   }, [activeEntity]);
 
-  // Load governance_ledger (entity-scoped + lane-safe)
+  // Load ledger lifecycle from canonical scoped view (entity-scoped + lane-safe)
   useEffect(() => {
     let alive = true;
 
@@ -132,27 +132,30 @@ export default function ArchiveLedgerLifecyclePage() {
 
       setLoading(true);
 
-      // Keep select conservative (no schema guessing). Optional columns are fine if they exist.
-      let qry = supabase
-        .from("governance_ledger")
+      // ✅ IMPORTANT: use the scoped view (RLS-safe read surface)
+      // Keeps enterprise posture (no direct governance_ledger table reads).
+      let query = supabase
+        .from("v_governance_ledger_scoped_v3")
         .select("id,title,status,entity_id,is_test,envelope_id,created_at,approved_by_council,archived_at")
         .eq("entity_id", entityId);
 
       // ✅ lane boundary (sacred):
-      // - SANDBOX shows ONLY is_test = true
-      // - RoT shows is_test = false OR legacy null (treated as RoT, never as sandbox)
+      // - SANDBOX: ONLY is_test = true
+      // - RoT: is_test = false OR legacy null (treated as RoT)
       if (laneIsTest) {
-        qry = qry.eq("is_test", true);
+        query = query.eq("is_test", true);
       } else {
-        qry = qry.or("is_test.eq.false,is_test.is.null");
+        query = query.or("is_test.eq.false,is_test.is.null");
       }
 
-      const { data, error } = await qry.order("created_at", { ascending: false }).limit(400);
+      const { data, error } = await query
+        .order("created_at", { ascending: false })
+        .limit(400);
 
       if (!alive) return;
 
       if (error) {
-        console.error("governance_ledger load error", error);
+        console.error("ledger_scoped_v3 load error", error);
         setRows([]);
         setLoading(false);
         return;
@@ -189,7 +192,10 @@ export default function ArchiveLedgerLifecyclePage() {
   }, [rows, tab, q]);
 
   const counts = useMemo(() => {
-    const c = { ALL: rows.length, PENDING: 0, APPROVED: 0, SIGNING: 0, SIGNED: 0, ARCHIVED: 0 } as Record<Tab, number>;
+    const c = { ALL: rows.length, PENDING: 0, APPROVED: 0, SIGNING: 0, SIGNED: 0, ARCHIVED: 0 } as Record<
+      Tab,
+      number
+    >;
     for (const r of rows) {
       const s = normStatusUpper(r.status);
       if (s === "PENDING") c.PENDING++;
@@ -305,7 +311,7 @@ export default function ArchiveLedgerLifecyclePage() {
                   <div className="mt-4 text-xs text-slate-400">{loading ? "Loading…" : `${filtered.length} result(s)`}</div>
 
                   <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-400">
-                    Lane-safe: filters by <span className="text-slate-200">governance_ledger.is_test</span> and{" "}
+                    Lane-safe: filters by <span className="text-slate-200">is_test</span> and{" "}
                     <span className="text-slate-200">entity_id</span>. RoT includes legacy NULL (treated as RoT).
                   </div>
                 </div>
@@ -377,7 +383,9 @@ export default function ArchiveLedgerLifecyclePage() {
                               </div>
 
                               <div className="flex flex-col items-end gap-2 shrink-0">
-                                <span className={cx("rounded-full border px-2 py-1 text-[11px]", statusClass)}>{prettyStatus(r.status)}</span>
+                                <span className={cx("rounded-full border px-2 py-1 text-[11px]", statusClass)}>
+                                  {prettyStatus(r.status)}
+                                </span>
 
                                 <div className="flex items-center gap-2">
                                   <span
@@ -430,13 +438,16 @@ export default function ArchiveLedgerLifecyclePage() {
 
                   <div className="mt-3 space-y-3 text-sm text-slate-300">
                     <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                      <span className="text-slate-200">PENDING</span> → review &amp; approve in <span className="text-slate-200">Council</span>
+                      <span className="text-slate-200">PENDING</span> → review &amp; approve in{" "}
+                      <span className="text-slate-200">Council</span>
                     </div>
                     <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                      <span className="text-slate-200">APPROVED</span> → execute via <span className="text-slate-200">Forge</span> (signature-only)
+                      <span className="text-slate-200">APPROVED</span> → execute via{" "}
+                      <span className="text-slate-200">Forge</span> (signature-only)
                     </div>
                     <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                      <span className="text-slate-200">SIGNED</span> → seal via <span className="text-slate-200">Archive</span> (idempotent)
+                      <span className="text-slate-200">SIGNED</span> → seal via{" "}
+                      <span className="text-slate-200">Archive</span> (idempotent)
                     </div>
                     <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                       <span className="text-slate-200">ARCHIVED</span> → record is sealed; no action required
@@ -623,7 +634,7 @@ export default function ArchiveLedgerLifecyclePage() {
                         </Link>
 
                         <Link
-                          href="/ci-archive/minute-book"
+                          href={`/ci-archive/minute-book`}
                           className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200 hover:bg-white/7 inline-flex items-center justify-between"
                         >
                           <span className="inline-flex items-center gap-2">
@@ -643,7 +654,9 @@ export default function ArchiveLedgerLifecyclePage() {
               </div>
 
               <div className="border-t border-white/10 bg-black/30 px-5 py-4 flex flex-wrap items-center justify-between gap-2">
-                <div className="text-[11px] text-slate-500">Tip: use Forge for signature execution, Archive for sealing, Council for approval gate.</div>
+                <div className="text-[11px] text-slate-500">
+                  Tip: use Forge for signature execution, Archive for sealing, Council for approval gate.
+                </div>
                 <button
                   onClick={() => {
                     setOpen(false);
