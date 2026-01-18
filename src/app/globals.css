@@ -3,6 +3,8 @@
    Governance-Operated Ledger OS – Global Styles
    (PRISTINE • NO DOCK REGRESSION • APPLE LIGHT MODE + OASIS GOLD)
    + ✅ AUTHORITY SURFACES (CRISP / DECISIVE IN LIGHT MODE)
+   + ✅ LIGHT MODE ANTI-FOG PATCH (WORK SURFACES SOLID, INPUTS CRISP)
+   + ✅ DARK MODE UNTOUCHED (GLASS STAYS)
    ========================================================= */
 
 @import "tailwindcss";
@@ -35,7 +37,7 @@
   --os-ink-faint: rgba(229, 231, 235, 0.48);
 
   /* ✅ AUTHORITY SURFACES (default = dark) */
-  --authority-bg: rgba(2, 6, 23, 0.94);        /* more solid than glass */
+  --authority-bg: rgba(2, 6, 23, 0.94); /* more solid than glass */
   --authority-border: rgba(255, 255, 255, 0.12);
   --authority-ink: rgba(229, 231, 235, 0.96);
   --authority-ink-muted: rgba(229, 231, 235, 0.72);
@@ -44,6 +46,12 @@
   --stamp-bg: rgba(250, 204, 21, 0.14);
   --stamp-border: rgba(250, 204, 21, 0.36);
   --stamp-ink: rgba(250, 204, 21, 0.98);
+
+  /* ✅ CONTROL SURFACES (inputs, pills) */
+  --control-bg: rgba(2, 6, 23, 0.38);
+  --control-border: rgba(255, 255, 255, 0.14);
+  --control-ink: rgba(229, 231, 235, 0.92);
+  --control-placeholder: rgba(229, 231, 235, 0.44);
 
   /* Dock sizing */
   --dock-h: 92px; /* approx: icon bubble + label hover space */
@@ -94,7 +102,7 @@
   --os-gold: #9f7f22;
   --os-gold-border: rgba(159, 127, 34, 0.40);
 
-  /* ✅ Glass + separators tuned to avoid “faded fog” */
+  /* ✅ Glass + separators (NAV ONLY) */
   --os-surface: rgba(255, 255, 255, 0.70);
   --os-surface-strong: rgba(255, 255, 255, 0.90);
   --os-border: rgba(10, 12, 16, 0.14);
@@ -105,7 +113,7 @@
   --os-ink-faint: rgba(10, 12, 16, 0.48);
 
   /* ✅ AUTHORITY SURFACES (light mode = CRISP, NO GLASS) */
-  --authority-bg: #ffffff;                    /* decisive paper plane */
+  --authority-bg: #ffffff; /* decisive paper plane */
   --authority-border: rgba(10, 12, 16, 0.10);
   --authority-ink: rgba(10, 12, 16, 0.94);
   --authority-ink-muted: rgba(10, 12, 16, 0.66);
@@ -114,10 +122,15 @@
   --stamp-bg: rgba(159, 127, 34, 0.14);
   --stamp-border: rgba(159, 127, 34, 0.32);
   --stamp-ink: rgba(120, 92, 18, 0.98);
+
+  /* ✅ CONTROLS (inputs/pills) — FIXES “FOG” */
+  --control-bg: #ffffff;
+  --control-border: rgba(10, 12, 16, 0.16);
+  --control-ink: rgba(10, 12, 16, 0.92);
+  --control-placeholder: rgba(10, 12, 16, 0.42);
 }
 
 /* ✅ app-like behavior: OS shell controls scrolling */
-
 html,
 body {
   height: 100%;
@@ -296,8 +309,47 @@ body {
 }
 
 /* =========================================================
+   LIGHT MODE ANTI-FOG PATCH (NO DARK MODE IMPACT)
+   - glass stays for nav
+   - work surfaces are solid via .authority-surface
+   - inputs/search/pills become crisp white controls
+   ========================================================= */
+
+.os-root[data-theme="light"] * {
+  text-shadow: none;
+}
+
+/* In light mode: make ALL backdrop blur lighter by default (DARK UNTOUCHED) */
+.os-root[data-theme="light"] .os-dock {
+  backdrop-filter: blur(12px); /* dock stays premium */
+}
+
+/* Inputs / selects / textareas – crisp controls */
+.os-root[data-theme="light"] input,
+.os-root[data-theme="light"] textarea,
+.os-root[data-theme="light"] select {
+  background: var(--control-bg);
+  color: var(--control-ink);
+  border: 1px solid var(--control-border);
+  outline: none;
+}
+
+.os-root[data-theme="light"] input::placeholder,
+.os-root[data-theme="light"] textarea::placeholder {
+  color: var(--control-placeholder);
+}
+
+/* Optional helper class if you want pills/search wrappers consistent */
+.os-control {
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  color: var(--control-ink);
+}
+
+/* =========================================================
    AUTHORITY SURFACES (OPT-IN) — CRISP DECISION PLANES
-   Use on Council "Authority" panel, Verified detail pane, etc.
+   Use on Council "Authority" panel, Admissions columns,
+   Verified detail pane, etc.
    ========================================================= */
 
 .authority-surface {
@@ -315,6 +367,7 @@ body {
     0 0 0 1px rgba(0, 0, 0, 0.03);
 }
 
+/* Dark mode keeps its heavy depth (UNCHANGED) */
 .os-root:not([data-theme="light"]) .authority-surface {
   box-shadow:
     0 22px 70px rgba(0, 0, 0, 0.50),
