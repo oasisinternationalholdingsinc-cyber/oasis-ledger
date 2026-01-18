@@ -50,7 +50,7 @@ export function OsDock() {
   const dockRef = useRef<HTMLElement | null>(null);
 
   const [touch] = useState(() => isTouchDevice());
-  const [dockVisible, setDockVisible] = useState(true);
+  const [_dockVisible, setDockVisible] = useState(true);
 
   const isActive = (href: string) => {
     if (href === "/") return pathname === "/" || pathname === "/os";
@@ -71,8 +71,8 @@ export function OsDock() {
   };
 
   // Apple-ish auto-hide:
-  // - on TOUCH devices: any scroll hides, stop scrolling shows (works with nested scrollers)
-  // - on DESKTOP: keep visible (safe/enterprise), but still reveal on click/focus
+  // - on TOUCH devices: hide during finger scroll (touchmove) + any scroll events; show shortly after stop
+  // - on DESKTOP: keep visible (safe/enterprise)
   useEffect(() => {
     if (typeof document === "undefined") return;
 
@@ -96,21 +96,27 @@ export function OsDock() {
       return;
     }
 
-    // IMPORTANT: catch scroll from ANY nested container (3-pane pages),
-    // not just a specific ".os-workspace" node.
-    let hideTimer: number | null = null;
+    let revealTimer: number | null = null;
     let lastHideT = 0;
 
-    const HIDE_THROTTLE_MS = 60; // ignore high-frequency jitter
-    const SHOW_AFTER_MS = 220; // show shortly after scroll stops
+    const HIDE_THROTTLE_MS = 50; // iOS touchmove can be very frequent
+    const SHOW_AFTER_MS = 260; // show shortly after scroll stops
     const TOP_GRACE_PX = 18; // near top, prefer visible
+
+    const scheduleReveal = () => {
+      if (revealTimer) window.clearTimeout(revealTimer);
+      revealTimer = window.setTimeout(() => {
+        apply(true);
+        revealTimer = null;
+      }, SHOW_AFTER_MS);
+    };
 
     const hideNow = () => {
       const now = performance.now();
       if (now - lastHideT < HIDE_THROTTLE_MS) return;
       lastHideT = now;
 
-      // keep visible near top (feels more native)
+      // keep visible near top (feels native)
       const y = window.scrollY || 0;
       if (y <= TOP_GRACE_PX) {
         apply(true);
@@ -118,15 +124,13 @@ export function OsDock() {
       }
 
       apply(false);
-
-      if (hideTimer) window.clearTimeout(hideTimer);
-      hideTimer = window.setTimeout(() => {
-        apply(true);
-        hideTimer = null;
-      }, SHOW_AFTER_MS);
+      scheduleReveal();
     };
 
-    // Capture-phase listener catches scroll events from inner scroll containers too.
+    // iOS reliability: touchmove is the best "user is scrolling" signal for nested momentum scrollers
+    const onTouchMove = () => hideNow();
+
+    // Backup: catch scroll from ANY nested container too
     const onAnyScroll = () => hideNow();
 
     // Reveal on tap / focus (native safety)
@@ -135,17 +139,22 @@ export function OsDock() {
       if (dockEl.contains(e.target as Node)) apply(true);
     };
 
+    document.addEventListener("touchmove", onTouchMove, { passive: true });
     window.addEventListener("scroll", onAnyScroll, { passive: true });
     document.addEventListener("scroll", onAnyScroll, { passive: true, capture: true });
+
     dockEl.addEventListener("pointerdown", onPointerDown);
     dockEl.addEventListener("focusin", onFocusIn);
 
     return () => {
+      document.removeEventListener("touchmove", onTouchMove);
       window.removeEventListener("scroll", onAnyScroll as any);
       document.removeEventListener("scroll", onAnyScroll as any, true as any);
+
       dockEl.removeEventListener("pointerdown", onPointerDown as any);
       dockEl.removeEventListener("focusin", onFocusIn as any);
-      if (hideTimer) window.clearTimeout(hideTimer);
+
+      if (revealTimer) window.clearTimeout(revealTimer);
     };
   }, [touch]);
 
