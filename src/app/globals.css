@@ -25,7 +25,13 @@
 
   /* ✅ Surfaces (glass) + borders */
   --os-surface: rgba(2, 6, 23, 0.55);
+  --os-surface-strong: rgba(2, 6, 23, 0.82);
   --os-border: rgba(255, 255, 255, 0.10);
+
+  /* ✅ Ink hierarchy */
+  --os-ink: rgba(229, 231, 235, 0.95);
+  --os-ink-muted: rgba(229, 231, 235, 0.72);
+  --os-ink-faint: rgba(229, 231, 235, 0.48);
 
   /* Dock sizing */
   --dock-h: 92px; /* approx: icon bubble + label hover space */
@@ -49,7 +55,7 @@
   --font-mono: var(--font-geist-mono);
 }
 
-/* Keep default dark unless OS prefers light (no auto light here; theme provider controls it) */
+/* Keep default dark unless OS prefers dark (theme provider controls actual flip) */
 @media (prefers-color-scheme: dark) {
   :root {
     --background: #020617;
@@ -63,22 +69,28 @@
    ========================================================= */
 
 .os-root[data-theme="light"] {
-  /* Apple paper + ink (NOT pure white, NOT pure black) */
+  /* ✅ Apple "paper" is not white — it’s a warm/neutral canvas */
   --background: #f5f5f7;
-  --foreground: rgba(0, 0, 0, 0.88);
+  --foreground: rgba(10, 12, 16, 0.92);
 
-  /* Subtle gradient depth */
+  /* ✅ Slight depth, no flat white */
   --os-bg-top: #ffffff;
   --os-bg-mid: #f5f5f7;
-  --os-bg-bottom: #ededf0;
+  --os-bg-bottom: #ececf0;
 
-  /* Oasis gold in light mode = deeper authority gold */
-  --os-gold: #b08d2a;
-  --os-gold-border: rgba(176, 141, 42, 0.42);
+  /* ✅ Authority gold (deeper in light mode) */
+  --os-gold: #9f7f22;
+  --os-gold-border: rgba(159, 127, 34, 0.40);
 
-  /* Glass + separators (Apple-like) */
-  --os-surface: rgba(255, 255, 255, 0.72);
-  --os-border: rgba(0, 0, 0, 0.10);
+  /* ✅ Glass + separators tuned to avoid “faded fog” */
+  --os-surface: rgba(255, 255, 255, 0.70);
+  --os-surface-strong: rgba(255, 255, 255, 0.90);
+  --os-border: rgba(10, 12, 16, 0.14);
+
+  /* ✅ Ink hierarchy (fixes readability) */
+  --os-ink: rgba(10, 12, 16, 0.92);
+  --os-ink-muted: rgba(10, 12, 16, 0.68);
+  --os-ink-faint: rgba(10, 12, 16, 0.48);
 }
 
 /* ✅ app-like behavior: OS shell controls scrolling */
@@ -90,7 +102,7 @@ body {
 
 body {
   background: var(--background);
-  color: var(--foreground);
+  color: var(--os-ink);
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text",
     "Segoe UI", sans-serif;
   overflow: hidden; /* stop full-page scroll */
@@ -113,7 +125,7 @@ body {
     var(--os-bg-bottom) 100%
   );
 
-  color: var(--foreground);
+  color: var(--os-ink);
   display: flex;
   flex-direction: column;
 }
@@ -150,7 +162,7 @@ body {
 .os-brand-sub {
   font-size: 10px;
   letter-spacing: 0.16em;
-  opacity: 0.7;
+  color: var(--os-ink-muted);
   text-transform: uppercase;
 }
 
@@ -174,14 +186,15 @@ body {
   font-size: 9px;
   letter-spacing: 0.18em;
   text-transform: uppercase;
-  opacity: 0.7;
+  color: var(--os-ink-faint);
 }
 
 .os-clock-value {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
     "Liberation Mono", "Courier New", monospace;
   font-size: 12px;
-  opacity: 0.9;
+  color: var(--os-ink);
+  opacity: 0.92;
 }
 
 /* right – entity + role + email + signout */
@@ -196,16 +209,16 @@ body {
 .os-entity {
   background: rgba(2, 6, 23, 0.55);
   border: 1px solid rgba(31, 41, 55, 0.85);
-  color: #e5e7eb;
+  color: rgba(229, 231, 235, 0.95);
   padding: 4px 10px;
   border-radius: 6px;
   font-size: 11px;
 }
 
 .os-root[data-theme="light"] .os-entity {
-  background: var(--os-surface);
+  background: var(--os-surface-strong);
   border-color: var(--os-border);
-  color: var(--foreground);
+  color: var(--os-ink);
 }
 
 .os-role-pill {
@@ -215,22 +228,19 @@ body {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.14em;
-  opacity: 0.85;
+  color: var(--os-ink-muted);
+  opacity: 0.95;
 }
 
 .os-root[data-theme="light"] .os-role-pill {
   border-color: var(--os-border);
-  color: rgba(0, 0, 0, 0.60);
+  color: var(--os-ink-muted);
 }
 
 .os-email {
   font-size: 11px;
-  opacity: 0.8;
-}
-
-.os-root[data-theme="light"] .os-email {
-  color: rgba(0, 0, 0, 0.60);
-  opacity: 1;
+  color: var(--os-ink-muted);
+  opacity: 0.95;
 }
 
 .os-signout {
@@ -301,6 +311,14 @@ body {
     opacity var(--dock-ease) ease;
 }
 
+.os-root[data-theme="light"] .os-dock {
+  background: var(--os-surface);
+  border-color: var(--os-border);
+  box-shadow:
+    0 22px 70px rgba(0, 0, 0, 0.18),
+    0 0 0 1px rgba(159, 127, 34, 0.10);
+}
+
 .os-dock::-webkit-scrollbar {
   display: none;
 }
@@ -326,6 +344,13 @@ body {
     0 0 18px rgba(250, 204, 21, 0.35),
     0 0 40px rgba(56, 189, 248, 0.10);
   opacity: 0.85;
+}
+
+.os-root[data-theme="light"] .os-dock::before {
+  background: rgba(159, 127, 34, 0.18);
+  box-shadow:
+    0 0 18px rgba(159, 127, 34, 0.32),
+    0 0 38px rgba(0, 0, 0, 0.08);
 }
 
 /* Optional env tint via data attribute on .os-root */

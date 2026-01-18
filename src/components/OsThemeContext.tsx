@@ -34,6 +34,9 @@ function applyTheme(resolved: ResolvedTheme) {
   // 1) Global surface (useful if you later theme generic tokens)
   document.documentElement.dataset.theme = resolved;
 
+  // ✅ Enterprise polish: native widgets (inputs/scrollbars) follow theme
+  document.documentElement.style.colorScheme = resolved;
+
   // 2) OS shell surface (matches your Oasis OS selectors)
   const root = document.querySelector(".os-root") as HTMLElement | null;
   if (root) root.dataset.theme = resolved;
@@ -41,7 +44,9 @@ function applyTheme(resolved: ResolvedTheme) {
 
 export function OsThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<OsTheme>(() => readStoredTheme());
-  const [resolved, setResolved] = useState<ResolvedTheme>(() => resolveTheme(readStoredTheme()));
+  const [resolved, setResolved] = useState<ResolvedTheme>(() =>
+    resolveTheme(readStoredTheme())
+  );
 
   // Apply on mount + whenever theme changes
   useEffect(() => {
