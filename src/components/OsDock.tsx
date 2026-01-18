@@ -1,17 +1,18 @@
+// src/components/OsDock.tsx
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import clsx from "clsx";
 import {
-  Orbit,       // Dashboard – Oasis Os Core
-  Edit,        // CI-Alchemy – Scribe / Drafting
-  Landmark,    // CI-Parliament – Parliament / Council
-  Flame,       // CI-Forge – Execution / Fire
+  Orbit, // Dashboard – Oasis Os Core
+  Edit, // CI-Alchemy – Scribe / Drafting
+  Landmark, // CI-Parliament – Parliament / Council
+  Flame, // CI-Forge – Execution / Fire
   ShieldAlert, // CI-Sentinel – Guardian / Alerts
-  Archive,     // CI-Archive – Vault / Records
-  IdCard,      // CI-Onboarding – Intake / Authority Gateway
+  Archive, // CI-Archive – Vault / Records
+  IdCard, // CI-Onboarding – Intake / Authority Gateway
 } from "lucide-react";
 
 type DockItem = {
@@ -70,18 +71,17 @@ export function OsDock() {
   };
 
   // Apple-ish auto-hide:
-  // - on TOUCH devices: scroll down hides, scroll up shows
-  // - on DESKTOP: keep visible (no cursor-edge reveal yet), but we still show on hover/tap handle
+  // - on TOUCH devices: any scroll hides, stop scrolling shows (works with nested scrollers)
+  // - on DESKTOP: keep visible (safe/enterprise), but still reveal on click/focus
   useEffect(() => {
     if (typeof document === "undefined") return;
 
     const root = document.querySelector(".os-root") as HTMLElement | null;
-    const workspace = document.querySelector(".os-workspace") as HTMLElement | null;
     const dockEl = document.querySelector(".os-dock") as HTMLElement | null;
 
-    if (!root || !workspace || !dockEl) return;
+    if (!root || !dockEl) return;
 
-    // expose for CSS
+    // expose for CSS (NO UI regressions: you already style via [data-dock])
     const apply = (visible: boolean) => {
       root.dataset.dock = visible ? "visible" : "hidden";
       setDockVisible(visible);
@@ -90,46 +90,62 @@ export function OsDock() {
     // Default state
     apply(true);
 
-    // If not touch device, keep it visible (safe/enterprise)
+    // Desktop stays visible (your locked behavior)
     if (!touch) {
       root.dataset.dock = "visible";
       return;
     }
 
-    let lastY = workspace.scrollTop;
-    let lastT = performance.now();
+    // IMPORTANT: catch scroll from ANY nested container (3-pane pages),
+    // not just a specific ".os-workspace" node.
+    let hideTimer: number | null = null;
+    let lastHideT = 0;
 
-    const thresholdPx = 10;      // ignore tiny movements
-    const minIntervalMs = 50;    // ignore super high-frequency noise
+    const HIDE_THROTTLE_MS = 60; // ignore high-frequency jitter
+    const SHOW_AFTER_MS = 220; // show shortly after scroll stops
+    const TOP_GRACE_PX = 18; // near top, prefer visible
 
-    const onScroll = () => {
-      const nowT = performance.now();
-      const y = workspace.scrollTop;
+    const hideNow = () => {
+      const now = performance.now();
+      if (now - lastHideT < HIDE_THROTTLE_MS) return;
+      lastHideT = now;
 
-      if (nowT - lastT < minIntervalMs) return;
+      // keep visible near top (feels more native)
+      const y = window.scrollY || 0;
+      if (y <= TOP_GRACE_PX) {
+        apply(true);
+        return;
+      }
 
-      const dy = y - lastY;
-      if (Math.abs(dy) < thresholdPx) return;
+      apply(false);
 
-      // scroll down -> hide (unless near top)
-      if (dy > 0 && y > 24) apply(false);
-
-      // scroll up -> show
-      if (dy < 0) apply(true);
-
-      lastY = y;
-      lastT = nowT;
+      if (hideTimer) window.clearTimeout(hideTimer);
+      hideTimer = window.setTimeout(() => {
+        apply(true);
+        hideTimer = null;
+      }, SHOW_AFTER_MS);
     };
 
-    // Tap the dock/handle to reveal
-    const onPointerDown = () => apply(true);
+    // Capture-phase listener catches scroll events from inner scroll containers too.
+    const onAnyScroll = () => hideNow();
 
-    workspace.addEventListener("scroll", onScroll, { passive: true });
+    // Reveal on tap / focus (native safety)
+    const onPointerDown = () => apply(true);
+    const onFocusIn = (e: FocusEvent) => {
+      if (dockEl.contains(e.target as Node)) apply(true);
+    };
+
+    window.addEventListener("scroll", onAnyScroll, { passive: true });
+    document.addEventListener("scroll", onAnyScroll, { passive: true, capture: true });
     dockEl.addEventListener("pointerdown", onPointerDown);
+    dockEl.addEventListener("focusin", onFocusIn);
 
     return () => {
-      workspace.removeEventListener("scroll", onScroll as any);
+      window.removeEventListener("scroll", onAnyScroll as any);
+      document.removeEventListener("scroll", onAnyScroll as any, true as any);
       dockEl.removeEventListener("pointerdown", onPointerDown as any);
+      dockEl.removeEventListener("focusin", onFocusIn as any);
+      if (hideTimer) window.clearTimeout(hideTimer);
     };
   }, [touch]);
 
@@ -137,21 +153,6 @@ export function OsDock() {
   useEffect(() => {
     dockRef.current = document.querySelector(".os-dock") as HTMLElement | null;
   }, []);
-
-  // (optional) keyboard safety: if user tabs into dock, reveal
-  useEffect(() => {
-    if (!touch) return;
-    const root = document.querySelector(".os-root") as HTMLElement | null;
-    const dockEl = document.querySelector(".os-dock") as HTMLElement | null;
-    if (!root || !dockEl) return;
-
-    const onFocusIn = (e: FocusEvent) => {
-      if (dockEl.contains(e.target as Node)) root.dataset.dock = "visible";
-    };
-
-    dockEl.addEventListener("focusin", onFocusIn);
-    return () => dockEl.removeEventListener("focusin", onFocusIn);
-  }, [touch]);
 
   // Keep output identical structure (no module wiring changes)
   return (
