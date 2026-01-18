@@ -1,18 +1,17 @@
-// src/components/OsDock.tsx
 "use client";
 
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import clsx from "clsx";
 import {
-  Orbit, // Dashboard
-  Edit, // CI-Alchemy
-  Landmark, // CI-Parliament
-  Flame, // CI-Forge
-  ShieldAlert, // CI-Sentinel
-  Archive, // CI-Archive
-  IdCard, // CI-Onboarding
+  Orbit,       // Dashboard – Oasis Os Core
+  Edit,        // CI-Alchemy – Scribe / Drafting
+  Landmark,    // CI-Parliament – Parliament / Council
+  Flame,       // CI-Forge – Execution / Fire
+  ShieldAlert, // CI-Sentinel – Guardian / Alerts
+  Archive,     // CI-Archive – Vault / Records
+  IdCard,      // CI-Onboarding – Intake / Authority Gateway
 } from "lucide-react";
 
 type DockItem = {
@@ -24,58 +23,16 @@ type DockItem = {
 };
 
 const CORE_ITEMS: DockItem[] = [
-  {
-    href: "/",
-    label: "Dashboard",
-    Icon: Orbit,
-    tintClass: "text-amber-300",
-    moduleKey: "orbit",
-  },
-  {
-    href: "/ci-alchemy",
-    label: "CI-Alchemy",
-    Icon: Edit,
-    tintClass: "text-sky-300",
-    moduleKey: "alchemy",
-  },
-  {
-    href: "/ci-parliament",
-    label: "CI-Parliament",
-    Icon: Landmark,
-    tintClass: "text-emerald-300",
-    moduleKey: "parliament",
-  },
-  {
-    href: "/ci-forge",
-    label: "CI-Forge",
-    Icon: Flame,
-    tintClass: "text-orange-300",
-    moduleKey: "forge",
-  },
+  { href: "/", label: "Dashboard", Icon: Orbit, tintClass: "text-amber-300", moduleKey: "orbit" },
+  { href: "/ci-alchemy", label: "CI-Alchemy", Icon: Edit, tintClass: "text-sky-300", moduleKey: "alchemy" },
+  { href: "/ci-parliament", label: "CI-Parliament", Icon: Landmark, tintClass: "text-emerald-300", moduleKey: "parliament" },
+  { href: "/ci-forge", label: "CI-Forge", Icon: Flame, tintClass: "text-orange-300", moduleKey: "forge" },
 ];
 
 const FUTURE_ITEMS: DockItem[] = [
-  {
-    href: "/ci-onboarding",
-    label: "CI-Onboarding",
-    Icon: IdCard,
-    tintClass: "text-amber-200",
-    moduleKey: "admissions",
-  },
-  {
-    href: "/ci-sentinel",
-    label: "CI-Sentinel",
-    Icon: ShieldAlert,
-    tintClass: "text-rose-300",
-    moduleKey: "sentinel",
-  },
-  {
-    href: "/ci-archive",
-    label: "CI-Archive",
-    Icon: Archive,
-    tintClass: "text-slate-200",
-    moduleKey: "archive",
-  },
+  { href: "/ci-onboarding", label: "CI-Onboarding", Icon: IdCard, tintClass: "text-amber-200", moduleKey: "admissions" },
+  { href: "/ci-sentinel", label: "CI-Sentinel", Icon: ShieldAlert, tintClass: "text-rose-300", moduleKey: "sentinel" },
+  { href: "/ci-archive", label: "CI-Archive", Icon: Archive, tintClass: "text-slate-200", moduleKey: "archive" },
 ];
 
 function isTouchDevice() {
@@ -89,50 +46,32 @@ function isTouchDevice() {
 
 export function OsDock() {
   const pathname = usePathname();
+  const dockRef = useRef<HTMLElement | null>(null);
 
   const [touch] = useState(() => isTouchDevice());
-
-  // NOTE: state kept for debugging parity; CSS is driven by root.dataset.dock.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [dockVisible, setDockVisible] = useState(true);
 
-  const isActive = useCallback(
-    (href: string) => {
-      if (href === "/") return pathname === "/" || pathname === "/os";
-      return pathname.startsWith(href);
-    },
-    [pathname]
-  );
+  const isActive = (href: string) => {
+    if (href === "/") return pathname === "/" || pathname === "/os";
+    return pathname.startsWith(href);
+  };
 
-  const renderItem = useCallback(
-    ({ href, label, Icon, tintClass, moduleKey }: DockItem) => {
-      const active = isActive(href);
+  const renderItem = ({ href, label, Icon, tintClass, moduleKey }: DockItem) => {
+    const active = isActive(href);
 
-      return (
-        <Link
-          key={href}
-          href={href}
-          className="dock-item"
-          data-module={moduleKey}
-          aria-label={label}
-          aria-current={active ? "page" : undefined}
-        >
-          <div className={clsx("dock-icon", active && "active")}>
-            <Icon className={clsx("h-5 w-5", tintClass)} />
-          </div>
+    return (
+      <Link key={href} href={href} className="dock-item" data-module={moduleKey}>
+        <div className={clsx("dock-icon", active && "active")}>
+          <Icon className={clsx("w-5 h-5", tintClass)} />
+        </div>
+        <div className="dock-label">{label}</div>
+      </Link>
+    );
+  };
 
-          {/* Label visibility is CSS-controlled:
-              - desktop: hidden until hover (your original “elite” behavior)
-              - touch: you can choose to show labels via CSS if desired
-          */}
-          <div className="dock-label">{label}</div>
-        </Link>
-      );
-    },
-    [isActive]
-  );
-
-  // ===== AUTOHIDE ENGINE (KEEP — hides while scrolling, shows on hover/near-bottom) =====
+  // Apple-ish auto-hide:
+  // - on TOUCH devices: scroll down hides, scroll up shows
+  // - on DESKTOP: keep visible (no cursor-edge reveal yet), but we still show on hover/tap handle
   useEffect(() => {
     if (typeof document === "undefined") return;
 
@@ -142,9 +81,7 @@ export function OsDock() {
 
     if (!root || !workspace || !dockEl) return;
 
-    // expose touch hint to CSS (NO wiring change)
-    root.dataset.touch = touch ? "1" : "0";
-
+    // expose for CSS
     const apply = (visible: boolean) => {
       root.dataset.dock = visible ? "visible" : "hidden";
       setDockVisible(visible);
@@ -153,145 +90,70 @@ export function OsDock() {
     // Default state
     apply(true);
 
-    // Heuristics
-    const TOP_REVEAL_PX = 24; // always show near top
-    const SCROLL_HIDE_AFTER_PX = 48; // don't hide immediately
-    const DY_THRESHOLD = 8; // ignore tiny movements
-    const QUIET_MS = 900; // after user stops scrolling, allow hide again
-    const BOTTOM_REVEAL_PX = 84; // mouse near bottom reveals (desktop)
+    // If not touch device, keep it visible (safe/enterprise)
+    if (!touch) {
+      root.dataset.dock = "visible";
+      return;
+    }
 
     let lastY = workspace.scrollTop;
-    let lastDir: "up" | "down" | "none" = "none";
-    let raf = 0;
+    let lastT = performance.now();
 
-    // track "reading / interacting"
-    let pointerNearDock = false;
-    let lastInteractAt = 0;
-
-    const now = () => performance.now();
-    const markInteract = () => {
-      lastInteractAt = now();
-      apply(true);
-    };
-
-    const shouldLockVisible = () => {
-      if (pointerNearDock) return true;
-      if (now() - lastInteractAt < 650) return true;
-      return false;
-    };
+    const thresholdPx = 10;      // ignore tiny movements
+    const minIntervalMs = 50;    // ignore super high-frequency noise
 
     const onScroll = () => {
-      if (raf) return;
-      raf = window.requestAnimationFrame(() => {
-        raf = 0;
+      const nowT = performance.now();
+      const y = workspace.scrollTop;
 
-        const y = workspace.scrollTop;
-        const dy = y - lastY;
+      if (nowT - lastT < minIntervalMs) return;
 
-        // always show near top
-        if (y <= TOP_REVEAL_PX) {
-          lastY = y;
-          lastDir = "none";
-          apply(true);
-          return;
-        }
+      const dy = y - lastY;
+      if (Math.abs(dy) < thresholdPx) return;
 
-        // ignore micro-scroll noise
-        if (Math.abs(dy) < DY_THRESHOLD) return;
+      // scroll down -> hide (unless near top)
+      if (dy > 0 && y > 24) apply(false);
 
-        // Determine direction
-        const dir: "up" | "down" = dy > 0 ? "down" : "up";
-        lastDir = dir;
+      // scroll up -> show
+      if (dy < 0) apply(true);
 
-        // Scroll up -> show
-        if (dir === "up") {
-          apply(true);
-          lastY = y;
-          return;
-        }
-
-        // Scroll down -> hide only after some travel, and not while interacting
-        if (dir === "down") {
-          if (shouldLockVisible()) {
-            apply(true);
-            lastY = y;
-            return;
-          }
-          if (y > SCROLL_HIDE_AFTER_PX) apply(false);
-        }
-
-        lastY = y;
-      });
+      lastY = y;
+      lastT = nowT;
     };
 
-    // After scrolling stops, if we were going down, hide (unless interacting)
-    let idleTimer: any = null;
-    const onScrollEndTick = () => {
-      if (idleTimer) clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => {
-        if (shouldLockVisible()) return;
-        const y = workspace.scrollTop;
-        if (y > SCROLL_HIDE_AFTER_PX && lastDir === "down") apply(false);
-      }, QUIET_MS);
-    };
+    // Tap the dock/handle to reveal
+    const onPointerDown = () => apply(true);
 
-    // Pointer logic: reveal when user approaches bottom (desktop + touchpads)
-    const onMouseMove = (e: MouseEvent) => {
-      if (touch) return;
-      const vh = window.innerHeight || 0;
-      const nearBottom = vh - e.clientY < BOTTOM_REVEAL_PX;
-      if (nearBottom) apply(true);
-    };
-
-    // Hover / focus / tap keeps visible
-    const onDockEnter = () => {
-      pointerNearDock = true;
-      apply(true);
-    };
-    const onDockLeave = () => {
-      pointerNearDock = false;
-    };
-
-    const onPointerDown = () => markInteract();
-    const onFocusIn = (e: FocusEvent) => {
-      if (dockEl.contains(e.target as Node)) markInteract();
-    };
-
-    // Keyboard: keep dock visible on Tab focus movement
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Tab") apply(true);
-    };
-
-    // Attach listeners
     workspace.addEventListener("scroll", onScroll, { passive: true });
-    workspace.addEventListener("scroll", onScrollEndTick as any, { passive: true });
-
     dockEl.addEventListener("pointerdown", onPointerDown);
-    dockEl.addEventListener("mouseenter", onDockEnter);
-    dockEl.addEventListener("mouseleave", onDockLeave);
-    dockEl.addEventListener("focusin", onFocusIn);
 
-    window.addEventListener("mousemove", onMouseMove, { passive: true });
-    window.addEventListener("keydown", onKeyDown);
-
-    // Cleanup
     return () => {
-      if (raf) window.cancelAnimationFrame(raf);
-      if (idleTimer) clearTimeout(idleTimer);
-
       workspace.removeEventListener("scroll", onScroll as any);
-      workspace.removeEventListener("scroll", onScrollEndTick as any);
-
       dockEl.removeEventListener("pointerdown", onPointerDown as any);
-      dockEl.removeEventListener("mouseenter", onDockEnter as any);
-      dockEl.removeEventListener("mouseleave", onDockLeave as any);
-      dockEl.removeEventListener("focusin", onFocusIn as any);
-
-      window.removeEventListener("mousemove", onMouseMove as any);
-      window.removeEventListener("keydown", onKeyDown as any);
     };
   }, [touch]);
 
+  // Keep ref (optional)
+  useEffect(() => {
+    dockRef.current = document.querySelector(".os-dock") as HTMLElement | null;
+  }, []);
+
+  // (optional) keyboard safety: if user tabs into dock, reveal
+  useEffect(() => {
+    if (!touch) return;
+    const root = document.querySelector(".os-root") as HTMLElement | null;
+    const dockEl = document.querySelector(".os-dock") as HTMLElement | null;
+    if (!root || !dockEl) return;
+
+    const onFocusIn = (e: FocusEvent) => {
+      if (dockEl.contains(e.target as Node)) root.dataset.dock = "visible";
+    };
+
+    dockEl.addEventListener("focusin", onFocusIn);
+    return () => dockEl.removeEventListener("focusin", onFocusIn);
+  }, [touch]);
+
+  // Keep output identical structure (no module wiring changes)
   return (
     <nav className="os-dock" aria-label="Oasis OS dock">
       {CORE_ITEMS.map(renderItem)}
@@ -300,5 +162,3 @@ export function OsDock() {
     </nav>
   );
 }
-
-export default OsDock;
