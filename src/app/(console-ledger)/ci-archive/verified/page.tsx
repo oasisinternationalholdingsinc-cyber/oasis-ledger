@@ -7,7 +7,18 @@ import Link from "next/link";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
-import { ArrowLeft, FileText, ShieldCheck, Search, CheckCircle2 } from "lucide-react";
+import {
+  ArrowLeft,
+  FileText,
+  ShieldCheck,
+  Search,
+  CheckCircle2,
+  X,
+  ExternalLink,
+  Download,
+  Copy,
+  Loader2,
+} from "lucide-react";
 
 type VerifiedRow = {
   id: string;
@@ -52,6 +63,10 @@ function looksLikeNotFound(err: unknown) {
   return /not\s*found/i.test(msg) || (/object/i.test(msg) && /not\s*found/i.test(msg));
 }
 
+/**
+ * Signed URL helper (kept) — includes mild repair by listing dir & selecting best PDF candidate.
+ * NO wiring change: still uses verified_documents.storage_bucket + storage_path as canonical pointers.
+ */
 async function signedUrlForVerified(bucket: string, path: string, downloadName?: string | null) {
   const p = normalizeSlashes(path).replace(/^\/+/, "");
   const opts: { download?: string } | undefined = downloadName ? { download: downloadName } : undefined;
@@ -102,6 +117,14 @@ async function signedUrlForVerified(bucket: string, path: string, downloadName?:
   return data2.signedUrl;
 }
 
+function safeFilename(name: string) {
+  const n = String(name || "document")
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return n.length ? n : "document";
+}
+
 export default function VerifiedRegistryPage() {
   const { activeEntity } = useEntity(); // IMPORTANT: slug/key string (e.g. "holdings")
   const { env } = useOsEnv();
@@ -113,9 +136,24 @@ export default function VerifiedRegistryPage() {
   const [tab, setTab] = useState<Tab>("ALL");
   const [q, setQ] = useState("");
 
-  // open state
+  // open state (busy + error)
   const [openBusyId, setOpenBusyId] = useState<string | null>(null);
   const [openErr, setOpenErr] = useState<string | null>(null);
+
+  // ✅ Minute-Book-style Reader Sheet state (NO routing / NO 404)
+  const [readerOpen, setReaderOpen] = useState(false);
+  const [readerDoc, setReaderDoc] = useState<VerifiedRow | null>(null);
+  const [readerUrl, setReaderUrl] = useState<string | null>(null);
+  const [readerLoading, setReaderLoading] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  function closeReader() {
+    setReaderOpen(false);
+    setReaderDoc(null);
+    setReaderUrl(null);
+    setReaderLoading(false);
+    setCopied(false);
+  }
 
   // Resolve entity UUID from entities table using slug (NO CHANGE)
   useEffect(() => {
@@ -186,7 +224,10 @@ export default function VerifiedRegistryPage() {
       const laneMap = new Map<string, { is_test: boolean; status: string }>();
 
       if (recordIds.length) {
-        const { data: gl, error: glErr } = await supabase.from("governance_ledger").select("id,is_test,status").in("id", recordIds);
+        const { data: gl, error: glErr } = await supabase
+          .from("governance_ledger")
+          .select("id,is_test,status")
+          .in("id", recordIds);
 
         if (!glErr && gl) {
           for (const r of gl as any[]) {
@@ -233,24 +274,70 @@ export default function VerifiedRegistryPage() {
     });
   }, [rows, tab, q]);
 
+  /**
+   * ✅ Open Verified -> Reader Sheet (iPhone-first)
+   * NO routing. NO 404 pages. Uses the same signedUrlForVerified() you already trust.
+   */
   async function openVerified(r: VerifiedRow) {
     setOpenErr(null);
     setOpenBusyId(r.id);
+    setCopied(false);
 
     try {
       const bucket = String(r.storage_bucket || "").trim();
       const path = String(r.storage_path || "").trim();
       if (!bucket || !path) throw new Error("Missing storage_bucket/storage_path on verified record.");
 
-      const name = `${r.title || "document"}.pdf`;
-      const url = await signedUrlForVerified(bucket, path, name);
+      const name = `${safeFilename(r.title || "document")}.pdf`;
 
-      window.open(url, "_blank", "noopener,noreferrer");
+      setReaderDoc(r);
+      setReaderOpen(true);
+      setReaderLoading(true);
+      setReaderUrl(null);
+
+      // Generate preview URL (same contract)
+      const url = await signedUrlForVerified(bucket, path, name);
+      setReaderUrl(url);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Failed to open verified document.";
       setOpenErr(msg);
+      // if reader was opened, close it cleanly
+      setReaderOpen(false);
+      setReaderDoc(null);
+      setReaderUrl(null);
     } finally {
+      setReaderLoading(false);
       setOpenBusyId(null);
+    }
+  }
+
+  function openInNewTab() {
+    if (!readerUrl) return;
+    window.open(readerUrl, "_blank", "noopener,noreferrer");
+  }
+
+  function downloadNow() {
+    if (!readerUrl || !readerDoc) return;
+    // We already passed `download` hint into createSignedUrl, but browsers vary.
+    // Force download via anchor click (safe).
+    const a = document.createElement("a");
+    a.href = readerUrl;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.download = `${safeFilename(readerDoc.title || "document")}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  async function copyLink() {
+    if (!readerUrl) return;
+    try {
+      await navigator.clipboard.writeText(readerUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
     }
   }
 
@@ -313,7 +400,6 @@ export default function VerifiedRegistryPage() {
                 {openErr}
               </div>
             ) : null}
-
             {/* iPhone-first surface: stacks; desktop: 3 columns */}
             <div className="grid grid-cols-12 gap-4">
               {/* LEFT: Filters */}
@@ -442,7 +528,7 @@ export default function VerifiedRegistryPage() {
                                     ? "border-white/10 bg-white/5 text-slate-500 cursor-not-allowed"
                                     : "border-amber-400/20 bg-amber-400/10 text-amber-100 hover:bg-amber-400/15"
                                 )}
-                                title="Open verified PDF (signed URL)"
+                                title="Open verified PDF (Reader Sheet)"
                               >
                                 {openBusyId === r.id ? "Opening…" : "Open →"}
                               </button>
@@ -473,16 +559,21 @@ export default function VerifiedRegistryPage() {
                       1) Council approves → <span className="text-slate-200">approved_by_council = true</span>
                     </div>
                     <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                      2) Forge completes envelope → <span className="text-slate-200">signature_envelopes.status = completed</span>
+                      2) Forge completes envelope →{" "}
+                      <span className="text-slate-200">signature_envelopes.status = completed</span>
                     </div>
                     <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                      3) Seal/Archive (service role) → writes <span className="text-slate-200">verified_documents</span> + minute book evidence
+                      3) Seal/Archive (service role) → writes{" "}
+                      <span className="text-slate-200">verified_documents</span> + minute book evidence
                     </div>
-                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">4) verify_governance_archive(record_id) → VALID</div>
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                      4) verify_governance_archive(record_id) → VALID
+                    </div>
                   </div>
 
                   <div className="mt-4 text-[11px] text-slate-500 leading-relaxed">
-                    Verified is read-only. Use Council/Forge for execution and Archive for sealing. This surface is the trust registry.
+                    Verified is read-only. Use Council/Forge for execution and Archive for sealing. This surface is the trust
+                    registry.
                   </div>
                 </div>
               </section>
@@ -525,6 +616,118 @@ export default function VerifiedRegistryPage() {
           </Link>
         </div>
       </div>
+
+      {/* ✅ Reader Sheet (iPhone-first, desktop centered) */}
+      {readerOpen ? (
+        <div className="fixed inset-0 z-[80]">
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-md"
+            onClick={closeReader}
+            aria-hidden="true"
+          />
+          <div className="absolute inset-0 p-0 sm:p-6 flex items-end sm:items-center justify-center">
+            <div className="w-full sm:max-w-[980px] h-[92vh] sm:h-[88vh] rounded-none sm:rounded-3xl border border-white/10 bg-black/30 shadow-[0_28px_120px_rgba(0,0,0,0.65)] overflow-hidden">
+              <div className="flex items-center justify-between gap-3 px-4 sm:px-5 py-3 border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent">
+                <div className="min-w-0">
+                  <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Verified • Reader</div>
+                  <div className="mt-0.5 text-sm sm:text-base font-semibold text-slate-100 truncate">
+                    {readerDoc?.title ?? "Document"}
+                  </div>
+                  <div className="mt-0.5 text-[11px] text-slate-400 truncate">
+                    {readerDoc?.storage_bucket ?? "—"} · {readerDoc?.document_class ?? "—"}
+                  </div>
+                </div>
+
+                <div className="shrink-0 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={copyLink}
+                    disabled={!readerUrl}
+                    className={cx(
+                      "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase inline-flex items-center gap-2 transition",
+                      !readerUrl
+                        ? "border-white/10 bg-white/5 text-slate-500 cursor-not-allowed"
+                        : copied
+                        ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-100"
+                        : "border-white/10 bg-white/5 text-slate-200 hover:bg-white/7"
+                    )}
+                    title="Copy signed link"
+                  >
+                    <Copy className="h-4 w-4" />
+                    {copied ? "Copied" : "Copy"}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={openInNewTab}
+                    disabled={!readerUrl}
+                    className={cx(
+                      "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase inline-flex items-center gap-2 transition",
+                      !readerUrl
+                        ? "border-white/10 bg-white/5 text-slate-500 cursor-not-allowed"
+                        : "border-white/10 bg-white/5 text-slate-200 hover:bg-white/7"
+                    )}
+                    title="Open in new tab"
+                  >
+                    <ExternalLink className="h-4 w-4" />
+                    Open
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={downloadNow}
+                    disabled={!readerUrl}
+                    className={cx(
+                      "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase inline-flex items-center gap-2 transition",
+                      !readerUrl
+                        ? "border-white/10 bg-white/5 text-slate-500 cursor-not-allowed"
+                        : "border-amber-400/20 bg-amber-400/10 text-amber-100 hover:bg-amber-400/15"
+                    )}
+                    title="Download PDF"
+                  >
+                    <Download className="h-4 w-4" />
+                    Download
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={closeReader}
+                    className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                    title="Close"
+                  >
+                    <X className="h-4 w-4" />
+                    Close
+                  </button>
+                </div>
+              </div>
+
+              <div className="h-[calc(100%-56px)] sm:h-[calc(100%-60px)] bg-black/20">
+                {readerLoading ? (
+                  <div className="h-full w-full flex items-center justify-center text-slate-300">
+                    <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-black/20 px-4 py-3">
+                      <Loader2 className="h-5 w-5 animate-spin text-amber-300" />
+                      <span className="text-sm">Generating secure preview…</span>
+                    </div>
+                  </div>
+                ) : readerUrl ? (
+                  <iframe
+                    key={readerUrl}
+                    src={readerUrl}
+                    className="h-full w-full"
+                    title="Verified PDF Preview"
+                  />
+                ) : (
+                  <div className="h-full w-full flex items-center justify-center text-slate-400">
+                    <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm">
+                      Preview unavailable. Try “Open” or “Download”.
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
