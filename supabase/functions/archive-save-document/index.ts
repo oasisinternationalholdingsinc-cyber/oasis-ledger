@@ -33,14 +33,20 @@ const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ??
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
+// ✅ Needed so the RPC can run with a real auth.uid() when your SQL uses auth.uid()
+// (prevents supporting_documents.owner_id = null failures when calling via service_role)
+const ANON_KEY =
+  Deno.env.get("SUPABASE_ANON_KEY") ??
+  Deno.env.get("SUPABASE_ANON_PUBLIC_KEY") ??
+  Deno.env.get("ANON_KEY") ??
+  null;
+
 const isUuid = (s: string) =>
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    s,
-  );
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    .test(s);
 
 /* ============================
-   🔐 SHA-256 helper (NEW)
-   — only used if hash missing
+   🔐 SHA-256 helper
 ============================ */
 async function sha256Hex(blob: Blob): Promise<string> {
   const buf = await blob.arrayBuffer();
@@ -59,13 +65,21 @@ serve(async (req) => {
   try {
     if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
     if (req.method !== "POST")
-      return json({ ok: false, error: "POST only" }, 405);
+      return json({ ok: false, error: "POST only", request_id: reqId }, 405);
 
     const body = (await req.json().catch(() => ({}))) as ReqBody;
 
     const ledgerId = (body.ledger_id ?? body.record_id)?.trim();
-    if (!ledgerId || !isUuid(ledgerId))
-      return json({ ok: false, error: "ledger_id must be uuid" }, 400);
+    if (!ledgerId || !isUuid(ledgerId)) {
+      return json(
+        { ok: false, error: "ledger_id must be uuid", request_id: reqId },
+        400,
+      );
+    }
+
+    const authHeader =
+      req.headers.get("authorization") ?? req.headers.get("Authorization");
+    const jwt = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
 
     const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
       global: { fetch },
@@ -73,17 +87,30 @@ serve(async (req) => {
     });
 
     /* -------- resolve actor -------- */
-    let actorId = body.actor_id ?? null;
-    if (!actorId) {
-      const authHeader = req.headers.get("authorization");
-      if (!authHeader?.startsWith("Bearer "))
-        return json({ ok: false, error: "Auth required" }, 401);
+    let actorId = body.actor_id?.trim() ?? null;
 
-      const jwt = authHeader.slice(7);
+    if (actorId && !isUuid(actorId)) {
+      return json(
+        { ok: false, error: "actor_id must be uuid", request_id: reqId },
+        400,
+      );
+    }
+
+    if (!actorId) {
+      if (!jwt) {
+        return json(
+          { ok: false, error: "Auth required", request_id: reqId },
+          401,
+        );
+      }
       const { data } = await supabaseAdmin.auth.getUser(jwt);
       actorId = data?.user?.id ?? null;
-      if (!actorId)
-        return json({ ok: false, error: "Actor unresolved" }, 401);
+      if (!actorId) {
+        return json(
+          { ok: false, error: "Actor unresolved", request_id: reqId },
+          401,
+        );
+      }
     }
 
     /* -------- load minute book entry -------- */
@@ -97,34 +124,55 @@ serve(async (req) => {
 
     let fileHash = mbe?.pdf_hash ?? null;
 
-    /* -------- 🔐 compute hash ONLY if missing -------- */
+    /* -------- compute hash ONLY if missing -------- */
     if (!fileHash && mbe?.storage_path) {
       const { data: pdf } = await supabaseAdmin.storage
         .from("minute_book")
         .download(mbe.storage_path);
 
-      if (pdf) {
-        fileHash = await sha256Hex(pdf);
-      }
+      if (pdf) fileHash = await sha256Hex(pdf);
     }
 
-    /* -------- canonical sealer call (NO REGRESSION) -------- */
+    /* -------- canonical sealer call (NO REGRESSION) --------
+       IMPORTANT FIX:
+       Try calling RPC as the *user* (auth.uid() present) to avoid
+       supporting_documents.owner_id NOT NULL failures when SQL uses auth.uid().
+       Fallback to service_role RPC only if needed.
+    */
     const rpcArgs: Record<string, unknown> = {
       p_actor_id: actorId,
       p_ledger_id: ledgerId,
     };
     if (fileHash) rpcArgs.p_file_hash = fileHash;
 
-    const { data, error } = await supabaseAdmin.rpc(
-      "seal_governance_record_for_archive",
-      rpcArgs,
-    );
+    let data: any = null;
+    let error: any = null;
 
-    if (error)
+    // Attempt as authenticated user (auth.uid() = actor)
+    if (jwt && ANON_KEY) {
+      const supabaseUser = createClient(SUPABASE_URL, ANON_KEY, {
+        global: { fetch, headers: { Authorization: `Bearer ${jwt}` } },
+        auth: { persistSession: false },
+      });
+
+      const r1 = await supabaseUser.rpc("seal_governance_record_for_archive", rpcArgs);
+      data = r1.data;
+      error = r1.error;
+    }
+
+    // Fallback to admin RPC if anon key missing or user RPC failed for permission reasons
+    if (error || !data) {
+      const r2 = await supabaseAdmin.rpc("seal_governance_record_for_archive", rpcArgs);
+      data = r2.data;
+      error = r2.error;
+    }
+
+    if (error) {
       return json(
-        { ok: false, error: error.message, request_id: reqId },
+        { ok: false, error: error.message ?? String(error), request_id: reqId },
         500,
       );
+    }
 
     const row = Array.isArray(data) ? data[0] : data;
 
@@ -137,7 +185,7 @@ serve(async (req) => {
       storage_bucket: "minute_book",
       storage_path: row?.storage_path ?? mbe?.storage_path ?? null,
 
-      /* 🔐 restored hash */
+      /* Hash */
       file_hash: fileHash ?? row?.file_hash ?? null,
 
       minute_book_entry_id: row?.minute_book_entry_id ?? mbe?.id ?? null,
