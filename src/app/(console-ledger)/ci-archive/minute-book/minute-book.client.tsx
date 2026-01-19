@@ -278,7 +278,7 @@ async function resolveOfficialArtifact(
 
     const { data, error } = await sb
       .from("verified_documents")
-      .select("storage_bucket,storage_path,file_name,created_at")
+      .select("storage_bucket,storage_path,file_hash,created_at")
       .eq("source_record_id", ledgerId)
       .order("created_at", { ascending: false })
       .limit(1);
