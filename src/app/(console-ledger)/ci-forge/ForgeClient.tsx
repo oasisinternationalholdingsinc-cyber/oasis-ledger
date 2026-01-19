@@ -1,4 +1,3 @@
-// src/app/(os)/ci-forge/forge.client.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -75,7 +74,10 @@ type AxiomReviewResponse = {
 };
 
 type RiskLevel = "GREEN" | "AMBER" | "RED" | "IDLE";
-type TabKey = "active" | "completed";
+
+// ✅ minor adjustment: add Archived tab (NO wiring change)
+type TabKey = "active" | "completed" | "archived";
+
 type AxiomTab = "advisory" | "summary" | "analysis" | "advice";
 type RightTab = "evidence" | "axiom" | "portal" | "notes";
 
@@ -295,15 +297,13 @@ export default function ForgeClient() {
   const [archiveModalOpen, setArchiveModalOpen] = useState(false);
   const [resealModalOpen, setResealModalOpen] = useState(false);
 
-  // ✅ FRONTEND-ONLY FIX: keep “recently archived” record visible in Completed even if the queue view stops returning it
+  // ✅ FRONTEND-ONLY: keep recently archived/sealed record visible even if view stops returning it
   const [pinned, setPinned] = useState<ForgeQueueItem | null>(null);
 
   useEffect(() => {
-    // lane/entity change — drop any pinned ghost record
     setPinned(null);
   }, [activeEntity, isTest]);
 
-  // Verified-Registry OS shell/header/body pattern
   const shell =
     "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden";
   const header =
@@ -311,10 +311,8 @@ export default function ForgeClient() {
   const body = "px-4 sm:px-6 py-5 sm:py-6";
 
   const isCompleted = (item: ForgeQueueItem) => item.envelope_status === "completed";
+  const isArchived = (item: ForgeQueueItem) => (item.ledger_status || "").toUpperCase() === "ARCHIVED";
 
-  // --------------------------
-  // Queue loader
-  // --------------------------
   async function fetchQueue() {
     setLoadingQueue(true);
     setError(null);
@@ -379,22 +377,37 @@ export default function ForgeClient() {
   }, [activeEntity, isTest]);
 
   const activeQueueRaw = useMemo(() => queue.filter((q) => !isCompleted(q)), [queue]);
-
-  const completedQueue = useMemo(() => {
-    const base = queue.filter((q) => isCompleted(q));
-    if (!pinned) return base;
-    if (pinned.is_test !== isTest) return base;
-    if (pinned.entity_slug !== activeEntity) return base;
-    if (base.some((x) => x.ledger_id === pinned.ledger_id)) return base;
-    return [pinned, ...base];
-  }, [queue, pinned, isTest, activeEntity]);
+  const completedQueueRaw = useMemo(() => queue.filter((q) => isCompleted(q) && !isArchived(q)), [queue]);
+  const archivedQueueRaw = useMemo(() => queue.filter((q) => isCompleted(q) && isArchived(q)), [queue]);
 
   const activeQueue = useMemo(() => {
     if (!hideEnvelopes) return activeQueueRaw;
     return activeQueueRaw.filter((q) => !q.envelope_id);
   }, [activeQueueRaw, hideEnvelopes]);
 
-  const visibleQueue = tab === "active" ? activeQueue : completedQueue;
+  const completedQueue = useMemo(() => {
+    const base = completedQueueRaw;
+    if (!pinned) return base;
+    if (pinned.is_test !== isTest) return base;
+    if (pinned.entity_slug !== activeEntity) return base;
+    if (base.some((x) => x.ledger_id === pinned.ledger_id)) return base;
+    // if pinned is archived, don't stick it into Completed
+    if (isArchived(pinned)) return base;
+    return [pinned, ...base];
+  }, [completedQueueRaw, pinned, isTest, activeEntity]);
+
+  const archivedQueue = useMemo(() => {
+    const base = archivedQueueRaw;
+    if (!pinned) return base;
+    if (pinned.is_test !== isTest) return base;
+    if (pinned.entity_slug !== activeEntity) return base;
+    if (base.some((x) => x.ledger_id === pinned.ledger_id)) return base;
+    // only include pinned here if it’s archived
+    if (!isArchived(pinned)) return base;
+    return [pinned, ...base];
+  }, [archivedQueueRaw, pinned, isTest, activeEntity]);
+
+  const visibleQueue = tab === "active" ? activeQueue : tab === "archived" ? archivedQueue : completedQueue;
 
   useEffect(() => {
     setSelectedId(visibleQueue[0]?.ledger_id ?? null);
@@ -523,7 +536,6 @@ export default function ForgeClient() {
       const rows = ((data ?? []) as unknown as ForgeQueueItem[]) ?? [];
       setQueue(rows);
 
-      // keepLedgerId disappeared from the view? pin it (Completed surface) so it doesn’t “vanish”
       if (keepLedgerId) {
         const stillInRows = rows.some((x) => x.ledger_id === keepLedgerId);
 
@@ -535,8 +547,9 @@ export default function ForgeClient() {
 
           if (prev) {
             setPinned(prev);
-            // If the record moved out of Active eligibility, show it under Completed.
-            if (tab === "active") setTab("completed");
+            // if it’s now archived, show Archived tab; otherwise Completed
+            if (isArchived(prev)) setTab("archived");
+            else if (tab === "active") setTab("completed");
             setSelectedId(keepLedgerId);
             return;
           }
@@ -544,10 +557,13 @@ export default function ForgeClient() {
       }
 
       const nextVisibleBase =
-        tab === "active" ? rows.filter((r) => !isCompleted(r)) : rows.filter((r) => isCompleted(r));
+        tab === "active"
+          ? rows.filter((r) => !isCompleted(r))
+          : tab === "archived"
+          ? rows.filter((r) => isCompleted(r) && isArchived(r))
+          : rows.filter((r) => isCompleted(r) && !isArchived(r));
 
-      const nextVisible =
-        tab === "active" && hideEnvelopes ? nextVisibleBase.filter((r) => !r.envelope_id) : nextVisibleBase;
+      const nextVisible = tab === "active" && hideEnvelopes ? nextVisibleBase.filter((r) => !r.envelope_id) : nextVisibleBase;
 
       const fallback = nextVisible[0]?.ledger_id ?? null;
       const desired = keepLedgerId && nextVisible.some((x) => x.ledger_id === keepLedgerId) ? keepLedgerId : fallback;
@@ -557,6 +573,7 @@ export default function ForgeClient() {
       console.error("refreshQueue error", e);
     }
   }
+
   // --------------------------
   // Portal URLs
   // --------------------------
@@ -801,7 +818,6 @@ export default function ForgeClient() {
 
     setIsResealing(true);
     try {
-      // pin immediately so UX never “vanishes” after reseal
       setPinned(selected);
 
       const { data, error } = await supabase.functions.invoke("archive-save-document", {
@@ -932,7 +948,6 @@ export default function ForgeClient() {
       setIsSendingInvite(false);
     }
   }
-
   async function doArchiveSigned() {
     setError(null);
     setInfo(null);
@@ -970,13 +985,15 @@ export default function ForgeClient() {
       }
 
       flashInfo(res.already_archived ? "Already archived." : "Archived into CI-Archive Minute Book.");
-      // if the view drops the record after archive, keep it pinned + visible under Completed
+      // if the view drops the record after archive, keep it pinned + visible
       setPinned(selected);
+
       await refreshQueueKeepSelection(selected.ledger_id);
       await loadArchiveEvidence(selected.ledger_id);
+
       setArchiveModalOpen(false);
       setRightTab("evidence");
-      setTab("completed");
+      setTab("archived"); // ✅ minor adjustment: goes to Archived tab after Archive
     } catch (err: any) {
       console.error("archive-signed-resolution error", err);
       flashError(err?.message || "Unable to archive signed resolution.");
@@ -1038,8 +1055,10 @@ export default function ForgeClient() {
     if (!selected.envelope_id) bullets.push("No envelope exists yet. Start the envelope to begin signing.");
     if (selected.envelope_id && selected.envelope_status !== "completed")
       bullets.push("Envelope is active. Monitor progress; resend invite if stalled.");
-    if (selected.envelope_status === "completed")
+    if (selected.envelope_status === "completed" && !isArchived(selected))
       bullets.push("Envelope completed. Next action is Archive Now to generate archive-grade artifacts + registry entry.");
+    if (selected.envelope_status === "completed" && isArchived(selected))
+      bullets.push("Record archived. Use Re-seal/Repair anytime to regenerate pointers (idempotent).");
 
     if (archiveMissing)
       bullets.push("Archive pointers appear missing. Use Re-seal/Repair to regenerate registry pointers (idempotent).");
@@ -1180,9 +1199,8 @@ export default function ForgeClient() {
   return (
     <div className="w-full">
       <div className="mx-auto w-full max-w-[1400px] px-4 pb-10 pt-4 sm:pt-6">
-        {/* OS Shell (MATCH Verified Registry) */}
         <div className={shell}>
-          {/* OS Header */}
+          {/* Header */}
           <div className={header}>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -1228,7 +1246,7 @@ export default function ForgeClient() {
             </div>
           </div>
 
-          {/* OS Body */}
+          {/* Body */}
           <div className={body}>
             <div className="grid grid-cols-12 gap-4">
               {/* LEFT */}
@@ -1247,6 +1265,7 @@ export default function ForgeClient() {
                   <div className="mt-3 flex flex-wrap gap-2">
                     {tabBtn("active", "Active", activeQueue.length)}
                     {tabBtn("completed", "Completed", completedQueue.length)}
+                    {tabBtn("archived", "Archived", archivedQueue.length)}
                   </div>
 
                   <div className="mt-4">
