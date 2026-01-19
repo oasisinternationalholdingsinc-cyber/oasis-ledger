@@ -4,7 +4,7 @@ export const dynamic = "force-dynamic";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
-import { supabaseBrowser } from "@/lib/supabaseClient";
+import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
 import { ShieldCheck, Search, ArrowLeft } from "lucide-react";
