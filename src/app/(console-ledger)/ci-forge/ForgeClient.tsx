@@ -1,3 +1,4 @@
+// src/app/(os)/ci-forge/forge.client.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -7,7 +8,7 @@ import Link from "next/link";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
-import { ShieldCheck, Search, CheckCircle2, ArrowLeft, FileText } from "lucide-react";
+import { ShieldCheck, Search, ArrowLeft } from "lucide-react";
 
 type ForgeQueueItem = {
   ledger_id: string;
@@ -294,12 +295,22 @@ export default function ForgeClient() {
   const [archiveModalOpen, setArchiveModalOpen] = useState(false);
   const [resealModalOpen, setResealModalOpen] = useState(false);
 
+  // ✅ FRONTEND-ONLY FIX: keep “recently archived” record visible in Completed even if the queue view stops returning it
+  const [pinned, setPinned] = useState<ForgeQueueItem | null>(null);
+
+  useEffect(() => {
+    // lane/entity change — drop any pinned ghost record
+    setPinned(null);
+  }, [activeEntity, isTest]);
+
   // Verified-Registry OS shell/header/body pattern
   const shell =
     "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden";
   const header =
     "border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent px-4 sm:px-6 py-4 sm:py-5";
   const body = "px-4 sm:px-6 py-5 sm:py-6";
+
+  const isCompleted = (item: ForgeQueueItem) => item.envelope_status === "completed";
 
   // --------------------------
   // Queue loader
@@ -367,9 +378,16 @@ export default function ForgeClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeEntity, isTest]);
 
-  const isCompleted = (item: ForgeQueueItem) => item.envelope_status === "completed";
   const activeQueueRaw = useMemo(() => queue.filter((q) => !isCompleted(q)), [queue]);
-  const completedQueue = useMemo(() => queue.filter((q) => isCompleted(q)), [queue]);
+
+  const completedQueue = useMemo(() => {
+    const base = queue.filter((q) => isCompleted(q));
+    if (!pinned) return base;
+    if (pinned.is_test !== isTest) return base;
+    if (pinned.entity_slug !== activeEntity) return base;
+    if (base.some((x) => x.ledger_id === pinned.ledger_id)) return base;
+    return [pinned, ...base];
+  }, [queue, pinned, isTest, activeEntity]);
 
   const activeQueue = useMemo(() => {
     if (!hideEnvelopes) return activeQueueRaw;
@@ -505,6 +523,26 @@ export default function ForgeClient() {
       const rows = ((data ?? []) as unknown as ForgeQueueItem[]) ?? [];
       setQueue(rows);
 
+      // keepLedgerId disappeared from the view? pin it (Completed surface) so it doesn’t “vanish”
+      if (keepLedgerId) {
+        const stillInRows = rows.some((x) => x.ledger_id === keepLedgerId);
+
+        if (!stillInRows) {
+          const prev =
+            (selected && selected.ledger_id === keepLedgerId ? selected : null) ??
+            (pinned && pinned.ledger_id === keepLedgerId ? pinned : null) ??
+            null;
+
+          if (prev) {
+            setPinned(prev);
+            // If the record moved out of Active eligibility, show it under Completed.
+            if (tab === "active") setTab("completed");
+            setSelectedId(keepLedgerId);
+            return;
+          }
+        }
+      }
+
       const nextVisibleBase =
         tab === "active" ? rows.filter((r) => !isCompleted(r)) : rows.filter((r) => isCompleted(r));
 
@@ -519,7 +557,6 @@ export default function ForgeClient() {
       console.error("refreshQueue error", e);
     }
   }
-
   // --------------------------
   // Portal URLs
   // --------------------------
@@ -572,9 +609,27 @@ export default function ForgeClient() {
     setAxiomError(null);
     try {
       const [s, a, adv] = await Promise.all([
-        supabase.from("ai_summaries").select("id, summary, generated_at, model").eq("record_id", recordId).order("generated_at", { ascending: false }).limit(1).maybeSingle(),
-        supabase.from("ai_analyses").select("id, analysis, generated_at, model").eq("record_id", recordId).order("generated_at", { ascending: false }).limit(1).maybeSingle(),
-        supabase.from("ai_advice").select("id, advice, recommendation, generated_at, model").eq("record_id", recordId).order("generated_at", { ascending: false }).limit(1).maybeSingle(),
+        supabase
+          .from("ai_summaries")
+          .select("id, summary, generated_at, model")
+          .eq("record_id", recordId)
+          .order("generated_at", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+        supabase
+          .from("ai_analyses")
+          .select("id, analysis, generated_at, model")
+          .eq("record_id", recordId)
+          .order("generated_at", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+        supabase
+          .from("ai_advice")
+          .select("id, advice, recommendation, generated_at, model")
+          .eq("record_id", recordId)
+          .order("generated_at", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
       ]);
 
       if (s.error) console.warn("AXIOM latest summary load error:", s.error);
@@ -690,6 +745,9 @@ export default function ForgeClient() {
   const alreadyArchived = !!evidence.minute_book_entry_id || !!evidence.verified_document?.id;
   const archiveLocked = (selected?.ledger_status || "").toUpperCase() === "ARCHIVED" || alreadyArchived;
 
+  const archiveMissing =
+    selected?.envelope_status === "completed" && !evidence.minute_book_entry_id && !evidence.verified_document?.id;
+
   async function openStorageObject(bucket: string, path: string) {
     const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, 60);
     if (error || !data?.signedUrl) throw new Error(error?.message || "Unable to create signed URL.");
@@ -743,6 +801,9 @@ export default function ForgeClient() {
 
     setIsResealing(true);
     try {
+      // pin immediately so UX never “vanishes” after reseal
+      setPinned(selected);
+
       const { data, error } = await supabase.functions.invoke("archive-save-document", {
         body: { record_id: selected.ledger_id, is_test: isTest, trigger: "forge-reseal-repair" },
       });
@@ -789,7 +850,12 @@ export default function ForgeClient() {
     setIsStarting(true);
     try {
       const parties = [
-        { signer_name: primarySignerName.trim(), signer_email: primarySignerEmail.trim(), role: "signer", signing_order: 1 },
+        {
+          signer_name: primarySignerName.trim(),
+          signer_email: primarySignerEmail.trim(),
+          role: "signer",
+          signing_order: 1,
+        },
       ];
 
       const { data, error } = await supabase.functions.invoke("start-signature", {
@@ -799,7 +865,10 @@ export default function ForgeClient() {
           parties,
           entity_id: selected.entity_id,
           is_test: isTest,
-          cc_emails: ccEmails.split(",").map((x) => x.trim()).filter(Boolean),
+          cc_emails: ccEmails
+            .split(",")
+            .map((x) => x.trim())
+            .filter(Boolean),
         },
       });
 
@@ -901,10 +970,13 @@ export default function ForgeClient() {
       }
 
       flashInfo(res.already_archived ? "Already archived." : "Archived into CI-Archive Minute Book.");
+      // if the view drops the record after archive, keep it pinned + visible under Completed
+      setPinned(selected);
       await refreshQueueKeepSelection(selected.ledger_id);
       await loadArchiveEvidence(selected.ledger_id);
       setArchiveModalOpen(false);
       setRightTab("evidence");
+      setTab("completed");
     } catch (err: any) {
       console.error("archive-signed-resolution error", err);
       flashError(err?.message || "Unable to archive signed resolution.");
@@ -969,12 +1041,14 @@ export default function ForgeClient() {
     if (selected.envelope_status === "completed")
       bullets.push("Envelope completed. Next action is Archive Now to generate archive-grade artifacts + registry entry.");
 
+    if (archiveMissing)
+      bullets.push("Archive pointers appear missing. Use Re-seal/Repair to regenerate registry pointers (idempotent).");
+
     bullets.push("AXIOM Review generates advisory intelligence (side-car).");
     bullets.push("AXIOM is advisory-only. It never blocks authority.");
-    bullets.push("Signing PDF stays pristine; archive render embeds immutable AXIOM snapshot at seal-time.");
 
     return { severity: risk, bullets };
-  }, [selected]);
+  }, [selected, archiveMissing]);
 
   const tabBtn = (k: TabKey, label: string, count: number) => (
     <button
@@ -1031,7 +1105,9 @@ export default function ForgeClient() {
       onClick={() => setAxiomTab(k)}
       className={cx(
         "rounded-full px-3 py-1.5 text-[11px] font-semibold transition border",
-        axiomTab === k ? "bg-cyan-500/15 text-cyan-100 border-cyan-500/40" : "bg-slate-950/40 text-slate-300 border-slate-800 hover:border-slate-700 hover:text-slate-100"
+        axiomTab === k
+          ? "bg-cyan-500/15 text-cyan-100 border-cyan-500/40"
+          : "bg-slate-950/40 text-slate-300 border-slate-800 hover:border-slate-700 hover:text-slate-100"
       )}
     >
       {label}
@@ -1042,16 +1118,26 @@ export default function ForgeClient() {
     <div className="mt-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3">
       <div className="text-[10px] uppercase tracking-[0.22em] text-amber-200">Lane Clarification</div>
       <div className="mt-2 text-[11px] text-slate-200">
-        <span className="font-semibold text-amber-200">Signed ≠ Archived.</span> Signing completes the envelope. Archiving
-        creates the Minute Book registry entry, generates the archive-grade render + hash, and writes Verified pointers. If
-        pointers ever go missing, use <span className="font-semibold text-amber-200">Re-seal/Repair</span> (idempotent).
+        <span className="font-semibold text-amber-200">Signed ≠ Archived.</span> Signing completes the envelope.
+        Archiving creates the registry pointers (Minute Book + Verified). If pointers ever go missing, use{" "}
+        <span className="font-semibold text-amber-200">Re-seal/Repair</span> (idempotent).
       </div>
     </div>
   );
 
   const archiveBanner = () => {
     if (!selected) return null;
+
+    if (archiveMissing) {
+      return (
+        <div className="mt-2 text-[11px] text-amber-200 bg-amber-950/30 border border-amber-700/40 rounded-xl px-3 py-2">
+          Archive pointers missing — use Re-seal/Repair (idempotent).
+        </div>
+      );
+    }
+
     if (!archiveLocked) return null;
+
     return (
       <div className="mt-2 text-[11px] text-amber-200 bg-amber-950/30 border border-amber-700/40 rounded-xl px-3 py-2">
         Record already archived — no action required.
@@ -1079,8 +1165,6 @@ export default function ForgeClient() {
     return <span className={cx("h-2.5 w-2.5 rounded-full", cls)} />;
   };
 
-  const selectedRisk = selected ? computeRiskLevel(selected) : "IDLE";
-
   // ============================
   // UI SEARCH (Verified-style)
   // ============================
@@ -1088,14 +1172,17 @@ export default function ForgeClient() {
   const filteredQueue = useMemo(() => {
     const qq = q.trim().toLowerCase();
     if (!qq) return visibleQueue;
-    return visibleQueue.filter((r) => `${r.title} ${r.ledger_status} ${r.envelope_status ?? ""}`.toLowerCase().includes(qq));
+    return visibleQueue.filter((r) =>
+      `${r.title} ${r.ledger_status} ${r.envelope_status ?? ""}`.toLowerCase().includes(qq)
+    );
   }, [q, visibleQueue]);
+
   return (
     <div className="w-full">
       <div className="mx-auto w-full max-w-[1400px] px-4 pb-10 pt-4 sm:pt-6">
         {/* OS Shell (MATCH Verified Registry) */}
         <div className={shell}>
-          {/* OS Header (MATCH Verified Registry grammar) */}
+          {/* OS Header */}
           <div className={header}>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -1143,9 +1230,8 @@ export default function ForgeClient() {
 
           {/* OS Body */}
           <div className={body}>
-            {/* iPhone-first: stacks; desktop: 3 columns */}
             <div className="grid grid-cols-12 gap-4">
-              {/* LEFT: Filters */}
+              {/* LEFT */}
               <section className="col-span-12 lg:col-span-3">
                 <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
                   <div className="flex items-start justify-between gap-3">
@@ -1201,7 +1287,7 @@ export default function ForgeClient() {
                 </div>
               </section>
 
-              {/* MIDDLE: Queue */}
+              {/* MIDDLE */}
               <section className="col-span-12 lg:col-span-6">
                 <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
                   <div className="flex items-start justify-between gap-3">
@@ -1243,9 +1329,7 @@ export default function ForgeClient() {
                             onClick={() => setSelectedId(item.ledger_id)}
                             className={cx(
                               "w-full text-left rounded-3xl border p-3 transition",
-                              selectedRow
-                                ? "border-amber-400/30 bg-amber-400/10"
-                                : "border-white/10 bg-black/20 hover:bg-black/25"
+                              selectedRow ? "border-amber-400/30 bg-amber-400/10" : "border-white/10 bg-black/20 hover:bg-black/25"
                             )}
                           >
                             <div className="flex items-start justify-between gap-3">
@@ -1273,7 +1357,7 @@ export default function ForgeClient() {
                 </div>
               </section>
 
-              {/* RIGHT: Authority / Details */}
+              {/* RIGHT */}
               <section className="col-span-12 lg:col-span-3">
                 <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
                   <div className="flex items-start justify-between gap-3">
@@ -1313,7 +1397,6 @@ export default function ForgeClient() {
                         {archiveBanner()}
                       </div>
 
-                      {/* Right tabs (preserved, restyled only) */}
                       <div className="mt-3 flex flex-wrap gap-2">
                         {rightTabBtn("evidence", "Evidence")}
                         {rightTabBtn("axiom", "AXIOM")}
@@ -1321,7 +1404,6 @@ export default function ForgeClient() {
                         {rightTabBtn("notes", "Notes")}
                       </div>
 
-                      {/* PRIMARY ACTION (same logic) */}
                       <div className="mt-3">
                         <button
                           type="button"
@@ -1374,18 +1456,13 @@ export default function ForgeClient() {
                         </div>
                       </div>
 
-                      {/* RIGHT TAB CONTENTS — UNCHANGED CONTENT, OS WRAPPERS ONLY */}
                       <div className="mt-3">
                         {rightTab === "portal" ? (
                           <div className="rounded-3xl border border-white/10 bg-black/20 p-3">
                             <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Portal</div>
-                            <div className="mt-2 text-xs text-slate-400">
-                              External trust surfaces (from ci_portal_urls).
-                            </div>
+                            <div className="mt-2 text-xs text-slate-400">External trust surfaces (from ci_portal_urls).</div>
 
-                            {portalError ? (
-                              <div className="mt-2 text-xs text-rose-200">{portalError}</div>
-                            ) : null}
+                            {portalError ? <div className="mt-2 text-xs text-rose-200">{portalError}</div> : null}
 
                             <div className="mt-3 flex flex-col gap-2">
                               {portal.signer_url ? portalBtn(portal.signer_url, "Open Signer") : null}
@@ -1452,15 +1529,11 @@ export default function ForgeClient() {
                               ) : null}
 
                               {axiomTab === "summary" ? (
-                                <div className="whitespace-pre-wrap">
-                                  {axiomLatest.summary?.summary || "No summary yet."}
-                                </div>
+                                <div className="whitespace-pre-wrap">{axiomLatest.summary?.summary || "No summary yet."}</div>
                               ) : null}
 
                               {axiomTab === "analysis" ? (
-                                <div className="whitespace-pre-wrap">
-                                  {axiomLatest.analysis?.analysis || "No analysis yet."}
-                                </div>
+                                <div className="whitespace-pre-wrap">{axiomLatest.analysis?.analysis || "No analysis yet."}</div>
                               ) : null}
 
                               {axiomTab === "advice" ? (
@@ -1475,13 +1548,9 @@ export default function ForgeClient() {
                         {rightTab === "evidence" ? (
                           <div className="rounded-3xl border border-white/10 bg-black/20 p-3">
                             <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Archive evidence</div>
-                            <div className="mt-1 text-xs text-slate-400">
-                              Minute Book + supporting docs + verified registry pointers.
-                            </div>
+                            <div className="mt-1 text-xs text-slate-400">Minute Book + supporting docs + verified pointers.</div>
 
-                            {evidenceError ? (
-                              <div className="mt-2 text-xs text-rose-200">{evidenceError}</div>
-                            ) : null}
+                            {evidenceError ? <div className="mt-2 text-xs text-rose-200">{evidenceError}</div> : null}
 
                             <div className="mt-3 space-y-2 text-xs text-slate-300">
                               <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
@@ -1523,9 +1592,7 @@ export default function ForgeClient() {
                         {rightTab === "notes" ? (
                           <div className="rounded-3xl border border-white/10 bg-black/20 p-3">
                             <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Notes</div>
-                            <div className="mt-2 text-xs text-slate-400">
-                              (Reserved) Operator notes. No mutations here.
-                            </div>
+                            <div className="mt-2 text-xs text-slate-400">(Reserved) Operator notes. No mutations here.</div>
                           </div>
                         ) : null}
                       </div>
@@ -1535,7 +1602,6 @@ export default function ForgeClient() {
               </section>
             </div>
 
-            {/* OS behavior footnote (matches Verified Registry) */}
             <div className="mt-5 rounded-3xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
               <div className="font-semibold text-slate-200">OS behavior</div>
               <div className="mt-1 leading-relaxed text-slate-400">
@@ -1550,7 +1616,6 @@ export default function ForgeClient() {
           </div>
         </div>
 
-        {/* optional quick links row (same grammar as Archive launchpad) */}
         <div className="mt-4 flex flex-wrap gap-2">
           <Link
             href="/ci-archive"
@@ -1633,9 +1698,7 @@ export default function ForgeClient() {
         onConfirm={doSendInvite}
         onClose={() => setInviteModalOpen(false)}
       >
-        <div className="text-sm text-slate-300">
-          This will send/re-send the invite for the current envelope.
-        </div>
+        <div className="text-sm text-slate-300">This will send/re-send the invite for the current envelope.</div>
       </Modal>
 
       <Modal
@@ -1673,4 +1736,3 @@ export default function ForgeClient() {
     </div>
   );
 }
-
