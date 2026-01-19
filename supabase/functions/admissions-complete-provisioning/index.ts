@@ -4,7 +4,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
@@ -17,7 +18,13 @@ function json(status: number, body: unknown) {
 
 function isUuidLike(x: string) {
   const s = (x || "").trim();
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    s,
+  );
+}
+
+function normStatus(x: unknown) {
+  return String(x || "").trim().toLowerCase();
 }
 
 Deno.serve(async (req) => {
@@ -56,29 +63,19 @@ Deno.serve(async (req) => {
     // Accept app_id variants (defensive)
     let app_id = String(body?.app_id || body?.application_id || body?.p_application_id || "").trim();
 
-    // ✅ Admin client MUST be explicit: apikey + Authorization = service_role
+    // ✅ Service-role admin client (keep same wiring: RPC + direct reads)
+    // Use apikey=ANON_KEY (Supabase convention) + Authorization=service_role (privilege)
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
       auth: { persistSession: false },
       global: {
         headers: {
-          apikey: SERVICE_ROLE_KEY,
+          apikey: ANON_KEY,
           Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
         },
       },
     });
 
-    // 🔎 DIAGNOSTIC: prove service_role can read the table
-    // If this returns 0 rows, your SERVICE_ROLE_KEY secret is wrong in Edge Function env.
-    const diag = await admin.from("onboarding_applications").select("id").limit(1);
-    if (diag.error) {
-      return json(500, {
-        ok: false,
-        error: "SERVICE_ROLE_READ_FAILED",
-        details: diag.error.message,
-      });
-    }
-
-    // If missing app_id, resolve by caller email
+    // If missing app_id, resolve by caller email (idempotent convenience)
     if (!app_id) {
       if (!caller_email) return json(400, { ok: false, error: "MISSING_APP_ID" });
 
@@ -91,7 +88,13 @@ Deno.serve(async (req) => {
         .maybeSingle();
 
       if (resErr) return json(500, { ok: false, error: "APP_RESOLVE_FAILED", details: resErr.message });
-      if (!resolved?.id) return json(404, { ok: false, error: "APP_NOT_FOUND_FOR_EMAIL", applicant_email: caller_email });
+      if (!resolved?.id) {
+        return json(404, {
+          ok: false,
+          error: "APP_NOT_FOUND_FOR_EMAIL",
+          applicant_email: caller_email,
+        });
+      }
 
       app_id = resolved.id as string;
     }
@@ -106,20 +109,22 @@ Deno.serve(async (req) => {
       .maybeSingle();
 
     if (appErr) return json(500, { ok: false, error: "APP_LOOKUP_FAILED", details: appErr.message });
+    if (!app) return json(404, { ok: false, error: "APP_NOT_FOUND", app_id });
 
-    if (!app) {
-      // Add extra debug: show that the id exists check failed
-      return json(404, { ok: false, error: "APP_NOT_FOUND", app_id });
-    }
-
-    // Safety: ensure session email matches applicant_email
+    // Safety: ensure session email matches applicant_email (portal-only)
     const appEmail = (app.applicant_email || "").trim().toLowerCase();
     if (appEmail && caller_email && appEmail !== caller_email) {
-      return json(403, { ok: false, error: "EMAIL_MISMATCH", applicant_email: appEmail, session_email: caller_email });
+      return json(403, {
+        ok: false,
+        error: "EMAIL_MISMATCH",
+        applicant_email: appEmail,
+        session_email: caller_email,
+      });
     }
 
-    // Idempotency: already provisioned
-    if (app.provisioned_at) {
+    // ✅ Idempotency: already provisioned if provisioned_at OR entity_id already set
+    // (prevents repeat clicks from minting more entities if status didn't update cleanly once)
+    if (app.provisioned_at || app.entity_id) {
       return json(200, {
         ok: true,
         already: true,
@@ -132,21 +137,46 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Gate: must be APPROVED or PROVISIONING (enum values are uppercase)
-    const st = String(app.status || "").toUpperCase();
-    if (st !== "PROVISIONING" && st !== "APPROVED") {
+    // ✅ Gate: your enum values are lowercase (submitted/in_review/.../provisioning/provisioned)
+    const st = normStatus(app.status);
+    if (st !== "provisioning" && st !== "approved") {
       return json(409, { ok: false, error: "BAD_STATE", status: app.status });
     }
 
-    // Execute canonical provisioning RPC
+    // Execute canonical provisioning RPC (no contract change)
     const { data: rpcData, error: rpcErr } = await admin.rpc("admissions_complete_provisioning", {
       p_application_id: app_id,
       p_user_id: user_id,
     });
 
-    if (rpcErr) return json(500, { ok: false, error: "PROVISIONING_RPC_FAILED", details: rpcErr.message });
+    if (rpcErr) {
+      // If RPC (or any downstream) now throws because entity slug uniqueness is enforced,
+      // return a stable error envelope (no retries creating new slugs).
+      return json(500, { ok: false, error: "PROVISIONING_RPC_FAILED", details: rpcErr.message });
+    }
 
-    return json(200, { ok: true, app_id, user_id, result: rpcData ?? null });
+    // Re-read app to return canonical entity pointers after provisioning
+    const { data: app2, error: app2Err } = await admin
+      .from("onboarding_applications")
+      .select("id, status, provisioned_at, entity_id, entity_slug")
+      .eq("id", app_id)
+      .maybeSingle();
+
+    if (app2Err) {
+      // provisioning succeeded; app reload failed (still return ok)
+      return json(200, { ok: true, app_id, user_id, result: rpcData ?? null });
+    }
+
+    return json(200, {
+      ok: true,
+      app_id,
+      user_id,
+      status: app2?.status ?? null,
+      provisioned_at: app2?.provisioned_at ?? null,
+      entity_id: app2?.entity_id ?? null,
+      entity_slug: app2?.entity_slug ?? null,
+      result: rpcData ?? null,
+    });
   } catch (e) {
     return json(500, { ok: false, error: "UNHANDLED", details: String((e as any)?.message ?? e) });
   }

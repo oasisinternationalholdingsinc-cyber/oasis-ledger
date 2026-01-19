@@ -4,7 +4,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 
 type ReqBody = {
   envelope_id: string; // signature_envelopes.id
-  actor_id?: string;   // optional override
+  actor_id?: string; // optional override
 };
 
 const cors = {
@@ -25,6 +25,10 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ??
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
+  throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
+}
 
 const isUuid = (s: string) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -129,16 +133,45 @@ serve(async (req) => {
 
     const row = Array.isArray(data) ? data[0] : data;
 
+    // ✅ No-wiring regression: always surface Minute Book pointers as primary output.
+    // We read the canonical minute_book_entries.storage_path using minute_book_entry_id.
+    let minuteBookPath: string | null = null;
+    const mbeId = (row?.minute_book_entry_id as string | null)?.trim?.() ?? null;
+
+    if (mbeId && isUuid(mbeId)) {
+      const { data: mbe, error: mbeErr } = await supabaseAdmin
+        .from("minute_book_entries")
+        .select("storage_path")
+        .eq("id", mbeId)
+        .maybeSingle();
+
+      if (!mbeErr) {
+        minuteBookPath = (mbe?.storage_path ?? null)?.toString?.() ?? null;
+      }
+      // If mbe lookup fails, we still return null path rather than trusting sealed artifact path.
+    }
+
     return json({
       ok: true,
       envelope_id: envelopeId,
       ledger_id: ledgerId,
       actor_id: actorId,
-      storage_bucket: row?.storage_bucket ?? null,
-      storage_path: row?.storage_path ?? null,
+
+      // ✅ PRIMARY POINTERS (UI must use these)
+      storage_bucket: "minute_book",
+      storage_path: minuteBookPath,
+
+      // Keep ids/hashes unchanged
       file_hash: row?.file_hash ?? null,
       verified_document_id: row?.verified_document_id ?? null,
       minute_book_entry_id: row?.minute_book_entry_id ?? null,
+
+      // Optional debug (does not affect UI)
+      sealed_artifact: {
+        storage_bucket: row?.storage_bucket ?? null,
+        storage_path: row?.storage_path ?? null,
+      },
+
       request_id: reqId,
     });
   } catch (e) {

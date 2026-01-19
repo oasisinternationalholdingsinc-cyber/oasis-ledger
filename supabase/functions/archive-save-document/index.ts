@@ -11,7 +11,8 @@ type ReqBody = {
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Allow-Headers":
+    "authorization, apikey, content-type, x-client-info",
   "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
@@ -31,9 +32,8 @@ if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
 }
 
 const isUuid = (s: string) =>
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    s,
-  );
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    .test(s);
 
 function splitPath(p: string) {
   const norm = p.replace(/^\/+/, "");
@@ -61,7 +61,9 @@ async function storageCopy(
   src: { bucket: string; path: string },
   dst: { bucket: string; path: string },
 ) {
-  const { data: dl, error: dlErr } = await supabaseAdmin.storage.from(src.bucket).download(src.path);
+  const { data: dl, error: dlErr } = await supabaseAdmin.storage
+    .from(src.bucket)
+    .download(src.path);
   if (dlErr) throw new Error(`Storage download failed (${src.bucket}): ${dlErr.message}`);
   if (!dl) throw new Error(`Storage download returned empty for ${src.bucket}:${src.path}`);
 
@@ -284,7 +286,12 @@ serve(async (req) => {
       const { data: userRes, error: userErr } = await supabaseAdmin.auth.getUser(jwt);
       if (userErr || !userRes?.user?.id) {
         return json(
-          { ok: false, error: "Unable to resolve actor", details: userErr?.message ?? userErr, request_id: reqId },
+          {
+            ok: false,
+            error: "Unable to resolve actor",
+            details: userErr?.message ?? userErr,
+            request_id: reqId,
+          },
           401,
         );
       }
@@ -318,19 +325,34 @@ serve(async (req) => {
       },
     });
 
+    // ✅ No-wiring regression: always surface Minute Book pointers as primary output.
+    const minuteBookBucket = "minute_book";
+    const minuteBookPath =
+      (repair && typeof repair === "object" && "minute_book_path" in repair
+        ? (repair as { minute_book_path?: string | null }).minute_book_path
+        : null) ?? null;
+
     return json({
       ok: true,
       ledger_id: ledgerId,
       actor_id: actorId,
 
-      // sealed artifact (certified registry path)
-      storage_bucket: row?.storage_bucket ?? null,
-      storage_path: row?.storage_path ?? null,
+      // ✅ PRIMARY POINTERS (UI must use these)
+      storage_bucket: minuteBookBucket,
+      storage_path: minuteBookPath,
+
+      // Hash + ids unchanged
       file_hash: row?.file_hash ?? null,
       verified_document_id: row?.verified_document_id ?? null,
-
-      // minute book registry pointers
       minute_book_entry_id: row?.minute_book_entry_id ?? null,
+
+      // Optional debug (does not affect UI)
+      sealed_artifact: {
+        storage_bucket: row?.storage_bucket ?? null,
+        storage_path: row?.storage_path ?? null,
+      },
+
+      // Repair details
       minute_book_repair: repair ?? null,
 
       request_id: reqId,
