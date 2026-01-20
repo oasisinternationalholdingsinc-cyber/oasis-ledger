@@ -56,7 +56,8 @@ function badgeForStatus(statusRaw: string | null | undefined) {
 
   if (s === "PENDING") return "border-sky-400/30 bg-sky-400/10 text-sky-100";
   if (s === "APPROVED") return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
-  if (s === "SIGNING" || s === "IN_SIGNING") return "border-amber-400/30 bg-amber-400/10 text-amber-100";
+  if (s === "SIGNING" || s === "IN_SIGNING")
+    return "border-amber-400/30 bg-amber-400/10 text-amber-100";
   if (s === "SIGNED") return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
   if (s === "ARCHIVED") return "border-white/10 bg-white/5 text-slate-300";
 
@@ -120,6 +121,7 @@ export default function ArchiveLedgerLifecyclePage() {
         const { data: byKey, error: keyErr } = await supabase
           .from("entities")
           .select("id")
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           .eq("key" as any, ae as any)
           .limit(1)
           .maybeSingle();
@@ -556,7 +558,9 @@ export default function ArchiveLedgerLifecyclePage() {
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Record</div>
-                    <div className="mt-1 text-lg font-semibold text-slate-50 truncate">{selected.title || "Untitled record"}</div>
+                    <div className="mt-1 text-lg font-semibold text-slate-50 truncate">
+                      {selected.title || "Untitled record"}
+                    </div>
                     <div className="mt-1 text-xs text-slate-400">
                       Status: <span className="text-slate-200">{prettyStatus(selected.status)}</span>
                       {" · "}
@@ -616,7 +620,9 @@ export default function ArchiveLedgerLifecyclePage() {
                         {selected.envelope_id ? (
                           <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                             <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">envelope_id</div>
-                            <div className="mt-1 font-mono break-all text-[12px] text-slate-200">{selected.envelope_id}</div>
+                            <div className="mt-1 font-mono break-all text-[12px] text-slate-200">
+                              {selected.envelope_id}
+                            </div>
                           </div>
                         ) : (
                           <div className="rounded-2xl border border-white/10 bg-black/20 p-3 text-sm text-slate-400">
