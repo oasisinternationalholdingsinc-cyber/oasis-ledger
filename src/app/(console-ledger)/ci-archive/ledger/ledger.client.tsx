@@ -1,4 +1,3 @@
-// src/app/(console-ledger)/ci-archive/ledger/ledger.client.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -32,9 +31,8 @@ type LedgerRow = {
   envelope_id: string | null;
   created_at: string | null;
 
-  // optional (safe if missing)
   approved_by_council?: boolean | null;
-  archived_at?: string | null;
+  archived?: boolean | null;
 };
 
 function cx(...xs: Array<string | false | null | undefined>) {
@@ -99,7 +97,6 @@ export default function ArchiveLedgerLifecyclePage() {
         return;
       }
 
-      // ✅ robust: some contexts may pass slug or an enum-like key; try slug first, then key (if present)
       const ae = String(activeEntity);
 
       const { data: bySlug, error: slugErr } = await supabase
@@ -116,7 +113,7 @@ export default function ArchiveLedgerLifecyclePage() {
         return;
       }
 
-      // fallback: try key if your entities table has it (safe: if column missing, we catch and null out)
+      // fallback: try key if your entities table has it
       try {
         const { data: byKey, error: keyErr } = await supabase
           .from("entities")
@@ -147,7 +144,7 @@ export default function ArchiveLedgerLifecyclePage() {
     };
   }, [activeEntity]);
 
-  // Load ledger lifecycle from canonical scoped view (entity-scoped + lane-safe)
+  // ✅ Load ledger lifecycle via SECURITY DEFINER RPC (RLS-safe for browser)
   useEffect(() => {
     let alive = true;
 
@@ -159,34 +156,22 @@ export default function ArchiveLedgerLifecyclePage() {
 
       setLoading(true);
 
-      // ✅ IMPORTANT: use the scoped view (RLS-safe read surface)
-      // Keeps enterprise posture (no direct governance_ledger table reads).
-      let query = supabase
-        .from("v_governance_ledger_scoped_v3")
-        .select("id,title,status,entity_id,is_test,envelope_id,created_at,approved_by_council,archived_at")
-        .eq("entity_id", entityId);
-
-      // ✅ lane boundary (sacred):
-      // - SANDBOX: ONLY is_test = true
-      // - RoT: is_test = false OR legacy null (treated as RoT)
-      if (laneIsTest) {
-        query = query.eq("is_test", true);
-      } else {
-        query = query.or("is_test.eq.false,is_test.is.null");
-      }
-
-      const { data, error } = await query.order("created_at", { ascending: false }).limit(400);
+      const { data, error } = await supabase.rpc("ledger_scoped_v3", {
+        p_entity_id: entityId,
+        p_is_test: laneIsTest,
+      });
 
       if (!alive) return;
 
       if (error) {
-        console.error("ledger_scoped_v3 load error", error);
+        console.error("ledger_scoped_v3 rpc error", error);
         setRows([]);
         setLoading(false);
         return;
       }
 
-      setRows((data ?? []) as any);
+      // data already ordered + limited server-side
+      setRows((data ?? []) as LedgerRow[]);
       setLoading(false);
     }
 
@@ -336,8 +321,7 @@ export default function ArchiveLedgerLifecyclePage() {
                   <div className="mt-4 text-xs text-slate-400">{loading ? "Loading…" : `${filtered.length} result(s)`}</div>
 
                   <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-400">
-                    Lane-safe: filters by <span className="text-slate-200">is_test</span> and{" "}
-                    <span className="text-slate-200">entity_id</span>. RoT includes legacy NULL (treated as RoT).
+                    Lane-safe: fetched server-side via <span className="text-slate-200">ledger_scoped_v3</span> RPC (SECURITY DEFINER).
                   </div>
                 </div>
               </section>
