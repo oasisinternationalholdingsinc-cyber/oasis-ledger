@@ -72,7 +72,9 @@ function safeCopy(text: string) {
 export default function ArchiveLedgerLifecyclePage() {
   const { activeEntity } = useEntity(); // slug/key string
   const { env } = useOsEnv();
-  const laneIsTest = env === "SANDBOX";
+
+  // ✅ defensive (prevents env casing mismatch from breaking RoT vs SANDBOX)
+  const laneIsTest = String(env).toUpperCase() === "SANDBOX";
 
   const [entityId, setEntityId] = useState<string | null>(null);
 
@@ -96,22 +98,45 @@ export default function ArchiveLedgerLifecyclePage() {
         return;
       }
 
-      const { data, error } = await supabase
+      // ✅ robust: some contexts may pass slug or an enum-like key; try slug first, then key (if present)
+      const ae = String(activeEntity);
+
+      const { data: bySlug, error: slugErr } = await supabase
         .from("entities")
         .select("id")
-        .eq("slug", String(activeEntity))
+        .eq("slug", ae)
         .limit(1)
         .maybeSingle();
 
       if (!alive) return;
 
-      if (error) {
-        console.error("resolveEntity error", error);
-        setEntityId(null);
+      if (!slugErr && bySlug?.id) {
+        setEntityId(bySlug.id ?? null);
         return;
       }
 
-      setEntityId(data?.id ?? null);
+      // fallback: try key if your entities table has it (safe: if column missing, we catch and null out)
+      try {
+        const { data: byKey, error: keyErr } = await supabase
+          .from("entities")
+          .select("id")
+          .eq("key" as any, ae as any)
+          .limit(1)
+          .maybeSingle();
+
+        if (!alive) return;
+
+        if (keyErr) {
+          console.error("resolveEntity key fallback error", keyErr);
+          setEntityId(null);
+          return;
+        }
+
+        setEntityId(byKey?.id ?? null);
+      } catch (e) {
+        console.error("resolveEntity fallback threw", e);
+        setEntityId(null);
+      }
     }
 
     resolveEntity();
@@ -148,9 +173,7 @@ export default function ArchiveLedgerLifecyclePage() {
         query = query.or("is_test.eq.false,is_test.is.null");
       }
 
-      const { data, error } = await query
-        .order("created_at", { ascending: false })
-        .limit(400);
+      const { data, error } = await query.order("created_at", { ascending: false }).limit(400);
 
       if (!alive) return;
 
@@ -391,7 +414,9 @@ export default function ArchiveLedgerLifecyclePage() {
                                   <span
                                     className={cx(
                                       "rounded-full border px-2 py-1 text-[10px] tracking-[0.18em] uppercase",
-                                      canGoCouncil ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-black/20 text-slate-500"
+                                      canGoCouncil
+                                        ? "border-white/10 bg-white/5 text-slate-200"
+                                        : "border-white/10 bg-black/20 text-slate-500"
                                     )}
                                   >
                                     Council
@@ -399,7 +424,9 @@ export default function ArchiveLedgerLifecyclePage() {
                                   <span
                                     className={cx(
                                       "rounded-full border px-2 py-1 text-[10px] tracking-[0.18em] uppercase",
-                                      canGoForge ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-black/20 text-slate-500"
+                                      canGoForge
+                                        ? "border-white/10 bg-white/5 text-slate-200"
+                                        : "border-white/10 bg-black/20 text-slate-500"
                                     )}
                                   >
                                     Forge
@@ -407,7 +434,9 @@ export default function ArchiveLedgerLifecyclePage() {
                                   <span
                                     className={cx(
                                       "rounded-full border px-2 py-1 text-[10px] tracking-[0.18em] uppercase",
-                                      canGoArchive ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-black/20 text-slate-500"
+                                      canGoArchive
+                                        ? "border-white/10 bg-white/5 text-slate-200"
+                                        : "border-white/10 bg-black/20 text-slate-500"
                                     )}
                                   >
                                     Archive
