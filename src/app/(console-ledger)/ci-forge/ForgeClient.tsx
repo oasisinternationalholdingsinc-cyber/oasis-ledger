@@ -1350,7 +1350,7 @@ async function doBackfillIntentArtifacts() {
     setAxiomInfo(null);
 
     try {
-      const { data, error } = await supabase.functions.invoke("axiom-review-record", {
+      const { data, error } = await supabase.functions.invoke("axiom-pre-signature-review", {
         body: { record_id: selected.ledger_id, is_test: isTest, entity_slug: activeEntity },
       });
 
