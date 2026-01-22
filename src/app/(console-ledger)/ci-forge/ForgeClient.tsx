@@ -943,7 +943,7 @@ async function loadIntentSidecarForLedger(ledgerId: string) {
   setIntentError(null);
 
   try {
-    // Step 1: resolve intent_id from ledger artifact (RPC is canonical)
+    // Step 1: resolve intent_id from artifact (RPC is canonical)
     let intentId: string | null = null;
 
     const rr = await supabase.rpc(
@@ -963,7 +963,7 @@ async function loadIntentSidecarForLedger(ledgerId: string) {
         row?.intent?.id ??
         (typeof d === "string" ? d : null);
     } else {
-      // Fallback: direct table read (only if exposed). Still lane-safe because artifact link is explicit.
+      // Fallback: direct table read (only if exposed)
       const gi = await supabase
         .from("governance_intent_artifacts" as any)
         .select("intent_id, created_at")
@@ -982,8 +982,7 @@ async function loadIntentSidecarForLedger(ledgerId: string) {
       return;
     }
 
-    // Step 2: intent header (best effort)
-    // NOTE: governance_intents has `summary` (NOT reason, NOT intent_text)
+    // Step 2: header (best effort) — ✅ summary exists on governance_intents
     let header: IntentHeader | null = null;
 
     const ih = await supabase
@@ -992,8 +991,11 @@ async function loadIntentSidecarForLedger(ledgerId: string) {
       .eq("id", intentId)
       .maybeSingle();
 
-    if (!ih.error && ih.data) header = ih.data as any;
-    else header = { id: intentId, title: null, summary: null, created_at: null };
+    if (!ih.error && ih.data) {
+      header = ih.data as any;
+    } else {
+      header = { id: intentId, title: null, summary: null, created_at: null };
+    }
 
     setIntentHeader(header);
 
@@ -1026,7 +1028,7 @@ async function doCreateIntentAndLink() {
   if (!selected?.ledger_id) return;
 
   const title = intentTitle.trim();
-  const reason = intentReason.trim(); // UI label stays "Reason" — stored as `summary` in DB
+  const reason = intentReason.trim(); // UI label can say "Reason" — DB stores it as summary
 
   if (!title) return flashIntentError("Title is required.");
   if (!reason) return flashIntentError("Reason is required.");
@@ -1038,22 +1040,21 @@ async function doCreateIntentAndLink() {
   try {
     const actorId = await getActorId(); // for guarded backfill helper
 
-    // HARD RULES: lane-safe + entity-safe (no guessing)
+    // HARD RULES: lane-safe + entity-safe
     const entityId = (selected as any)?.entity_id as string | undefined;
     if (!entityId) {
       flashIntentError("Cannot create intent: entity_id missing on selected record.");
       return;
     }
 
-    // 1) create intent (canonical signature in your schema)
-    // DB table uses `summary` — function maps p_intent_text -> summary
+    // 1) create intent (canonical signature you granted execute on)
     const cr = await supabase.rpc(
       "governance_create_intent" as any,
       {
         p_entity_id: entityId,
         p_is_test: !!isTest,
         p_title: title,
-        p_intent_text: reason,
+        p_intent_text: reason, // ✅ function expects intent_text; table stores summary
         p_intent_kind: "forge",
         p_slots: {
           source: "ci-forge",
@@ -1074,7 +1075,6 @@ async function doCreateIntentAndLink() {
     const cd: any = cr.data;
     const cRow = Array.isArray(cd) ? cd[0] : cd;
 
-    // tolerate different return shapes (uuid, {id}, {intent_id}, {intent:{id}})
     const intentId =
       cRow?.intent_id ??
       cRow?.id ??
@@ -1085,7 +1085,7 @@ async function doCreateIntentAndLink() {
 
     if (!intentId) throw new Error("Intent created but id could not be resolved.");
 
-    // 2) explicitly link ledger artifact
+    // 2) explicitly link ledger artifact (operator-driven)
     const ar = await supabase.rpc(
       "governance_attach_intent_artifact" as any,
       {
@@ -1104,9 +1104,7 @@ async function doCreateIntentAndLink() {
     // 3) Optional backfill (guarded helper; only works AFTER link exists)
     if (intentBackfillAfterCreate) {
       if (!actorId) {
-        flashIntentError(
-          "Intent created; cannot backfill because actor could not be resolved (auth)."
-        );
+        flashIntentError("Intent created; cannot backfill because actor could not be resolved (auth).");
       } else {
         setIntentBackfilling(true);
 
@@ -1120,9 +1118,7 @@ async function doCreateIntentAndLink() {
 
         if (br?.error) {
           console.warn("attach_intent_artifacts_from_ledger error:", br.error);
-          flashIntentError(
-            "Intent created; backfill blocked by guard (expected if artifacts/link not eligible)."
-          );
+          flashIntentError("Intent created; backfill blocked by guard (expected if artifacts/link not eligible).");
         } else {
           flashIntentInfo("Intent created + Forge artifacts attached.");
         }
@@ -1131,6 +1127,7 @@ async function doCreateIntentAndLink() {
       flashIntentInfo("Intent created (no backfill).");
     }
 
+    // reset + reload sidecar
     setIntentCreateOpen(false);
     setIntentTitle("");
     setIntentReason("");
@@ -1149,6 +1146,7 @@ async function doCreateIntentAndLink() {
 
 async function doBackfillIntentArtifacts() {
   if (!selected?.ledger_id) return;
+
   if (!intentHeader?.id) {
     flashIntentError("No intent is linked (by design). Create an intent first.");
     return;
@@ -2102,7 +2100,7 @@ async function doBackfillIntentArtifacts() {
                             {intentHeader.title ?? "Untitled Intent"}
                           </div>
                           <div className="mt-1 text-[11px] text-white/50 break-all">{intentHeader.id}</div>
-                          <div className="mt-2 text-[12px] text-white/70 whitespace-pre-wrap">{intentHeader.reason ?? "—"}</div>
+                          <div className="mt-2 text-[12px] text-white/70 whitespace-pre-wrap">{intentHeader.summary ?? "—"}</div>
                         </div>
 
                         <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
