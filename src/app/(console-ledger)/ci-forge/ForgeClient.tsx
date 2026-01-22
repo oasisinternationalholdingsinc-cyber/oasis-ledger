@@ -1,13 +1,13 @@
 "use client";
 export const dynamic = "force-dynamic";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
-import { ShieldCheck, Search, ArrowLeft } from "lucide-react";
+import { Search, ArrowLeft } from "lucide-react";
 
 type ForgeQueueItem = {
   ledger_id: string;
@@ -79,7 +79,9 @@ type RiskLevel = "GREEN" | "AMBER" | "RED" | "IDLE";
 type TabKey = "active" | "completed" | "archived";
 
 type AxiomTab = "advisory" | "summary" | "analysis" | "advice";
-type RightTab = "evidence" | "axiom" | "portal" | "notes";
+
+// ✅ add Intent sidecar tab (same tier as Evidence / AXIOM / Portal)
+type RightTab = "evidence" | "axiom" | "portal" | "intent" | "notes";
 
 type AxiomLatest = {
   summary?: { id: string; summary: string | null; generated_at: string | null; model: string | null } | null;
@@ -124,6 +126,24 @@ type ArchiveEvidence = {
   };
 };
 
+/* ---------------- Intent (sidecar) types ---------------- */
+
+type IntentHeader = {
+  id: string;
+  title: string | null;
+  reason: string | null;
+  created_at: string | null;
+  created_by?: string | null;
+};
+
+type IntentArtifactRow = {
+  id: string;
+  intent_id: string;
+  artifact_type: string;
+  artifact_id: string;
+  created_at: string | null;
+};
+
 function fmt(iso: string | null | undefined) {
   if (!iso) return "—";
   try {
@@ -161,6 +181,15 @@ function inferStep(item: ForgeQueueItem | null) {
   if (!item.envelope_id) return 0;
   if (item.envelope_status === "completed") return 3;
   return 2;
+}
+
+async function getActorId(): Promise<string | null> {
+  try {
+    const { data } = await supabase.auth.getUser();
+    return data?.user?.id ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function Modal({
@@ -294,6 +323,23 @@ export default function ForgeClient() {
     verified_document: null,
   });
 
+  // ============================
+  // Intent sidecar state
+  // ============================
+  const [intentLoading, setIntentLoading] = useState(false);
+  const [intentError, setIntentError] = useState<string | null>(null);
+  const [intentInfo, setIntentInfo] = useState<string | null>(null);
+  const [intentHeader, setIntentHeader] = useState<IntentHeader | null>(null);
+  const [intentArtifacts, setIntentArtifacts] = useState<IntentArtifactRow[]>([]);
+
+  // Create Intent modal
+  const [intentCreateOpen, setIntentCreateOpen] = useState(false);
+  const [intentTitle, setIntentTitle] = useState("");
+  const [intentReason, setIntentReason] = useState("");
+  const [intentBackfillAfterCreate, setIntentBackfillAfterCreate] = useState(true);
+  const [intentCreating, setIntentCreating] = useState(false);
+  const [intentBackfilling, setIntentBackfilling] = useState(false);
+
   const [startModalOpen, setStartModalOpen] = useState(false);
   const [inviteModalOpen, setInviteModalOpen] = useState(false);
   const [archiveModalOpen, setArchiveModalOpen] = useState(false);
@@ -338,7 +384,6 @@ export default function ForgeClient() {
     setInfo(null);
 
     try {
-      // ✅ Active + Completed: latest view
       const latestP = supabase
         .from("v_forge_queue_latest")
         .select(selectCols)
@@ -346,7 +391,6 @@ export default function ForgeClient() {
         .eq("is_test", isTest)
         .order("created_at", { ascending: false });
 
-      // ✅ Archived tab: archived view (SQL-backed)
       const archivedP = supabase
         .from("v_forge_queue_archived")
         .select(selectCols)
@@ -365,7 +409,6 @@ export default function ForgeClient() {
       }
 
       if (archivedR.error) {
-        // Non-fatal: keep Forge functional even if archived view is temporarily unavailable
         console.warn("CI-Forge archived queue error:", archivedR.error);
         setQueueArchived([]);
       } else {
@@ -374,8 +417,6 @@ export default function ForgeClient() {
 
       const latestRows = ((((latestR.data ?? []) as unknown) as ForgeQueueItem[]) ?? []);
       setQueueLatest(latestRows);
-
-      // Default selection: first item in current tab (after memo below runs)
       setSelectedId((prev) => prev ?? latestRows[0]?.ledger_id ?? null);
     } catch (err) {
       console.error("CI-Forge fetchQueues exception:", err);
@@ -415,7 +456,7 @@ export default function ForgeClient() {
     if (pinned.is_test !== isTest) return base;
     if (pinned.entity_slug !== activeEntity) return base;
     if (base.some((x) => x.ledger_id === pinned.ledger_id)) return base;
-    if (isArchived(pinned)) return base; // don't pin archived into Completed
+    if (isArchived(pinned)) return base;
     return [pinned, ...base];
   }, [completedQueueRaw, pinned, isTest, activeEntity]);
 
@@ -442,6 +483,14 @@ export default function ForgeClient() {
     setPortal({});
     setPortalError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.ledger_id]);
+
+  // Reset intent when selection changes
+  useEffect(() => {
+    setIntentHeader(null);
+    setIntentArtifacts([]);
+    setIntentError(null);
+    setIntentInfo(null);
   }, [selected?.ledger_id]);
 
   const envelopeLocked =
@@ -527,6 +576,17 @@ export default function ForgeClient() {
     setTimeout(() => setAxiomInfo(null), 5000);
   }
 
+  function flashIntentError(msg: string) {
+    console.error(msg);
+    setIntentError(msg);
+    setTimeout(() => setIntentError(null), 6500);
+  }
+
+  function flashIntentInfo(msg: string) {
+    setIntentInfo(msg);
+    setTimeout(() => setIntentInfo(null), 5200);
+  }
+
   async function refreshQueuesKeepSelection(keepLedgerId?: string | null) {
     try {
       const latestP = supabase
@@ -576,7 +636,6 @@ export default function ForgeClient() {
           return;
         }
 
-        // else: it’s in latest — choose tab based on status
         const row = latestRows.find((x) => x.ledger_id === keepLedgerId) ?? null;
         if (row) {
           if (!isCompleted(row)) setTab("active");
@@ -586,7 +645,6 @@ export default function ForgeClient() {
         }
       }
 
-      // fallback selection by current tab
       const latestRows = (((latestR.data ?? []) as unknown) as ForgeQueueItem[]) ?? [];
       const archivedRows = (((archivedR.data ?? []) as unknown) as ForgeQueueItem[]) ?? [];
 
@@ -877,44 +935,253 @@ export default function ForgeClient() {
   }
 
   // ============================
-  // ACTIONS (NO WIRING CHANGES)
+  // Intent loaders + actions
   // ============================
-  async function doStartEnvelope() {
+
+  async function loadIntentSidecarForLedger(ledgerId: string) {
+    setIntentLoading(true);
+    setIntentError(null);
+
+    try {
+      // Step 1: resolve intent_id from ledger artifact (prefer RPC; fallback to table select if present)
+      let intentId: string | null = null;
+
+      const tryRpc = async (fn: string, args: any) => supabase.rpc(fn as any, args as any);
+
+      // Try resolve_intent_from_artifact variants (we don't assume arg names)
+      let rr =
+        (await tryRpc("resolve_intent_from_artifact", { p_artifact_id: ledgerId })) ||
+        (await tryRpc("resolve_intent_from_artifact", { artifact_id: ledgerId })) ||
+        (await tryRpc("resolve_intent_from_artifact", { p_ledger_id: ledgerId })) ||
+        (await tryRpc("resolve_intent_from_artifact", { ledger_id: ledgerId })) ||
+        null;
+
+      if (rr && !rr.error) {
+        const d: any = rr.data;
+        const row = Array.isArray(d) ? d[0] : d;
+        intentId = row?.intent_id ?? row?.id ?? (typeof d === "string" ? d : null);
+      } else {
+        // Fallback: try read from governance_intent_artifacts if accessible
+        const gi = await supabase
+          .from("governance_intent_artifacts" as any)
+          .select("intent_id, created_at")
+          .eq("artifact_id", ledgerId)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (!gi.error) intentId = (gi.data as any)?.intent_id ?? null;
+      }
+
+      if (!intentId) {
+        setIntentHeader(null);
+        setIntentArtifacts([]);
+        return;
+      }
+
+      // Step 2: load intent header (best effort)
+      let header: IntentHeader | null = null;
+
+      const ih = await supabase
+        .from("governance_intents" as any)
+        .select("id, title, reason, created_at, created_by")
+        .eq("id", intentId)
+        .maybeSingle();
+
+      if (!ih.error && ih.data) header = ih.data as any;
+      else {
+        // If governance_intents table isn't exposed, still show minimal header
+        header = { id: intentId, title: null, reason: null, created_at: null };
+      }
+
+      setIntentHeader(header);
+
+      // Step 3: load intent artifacts (best effort)
+      const ia = await supabase
+        .from("governance_intent_artifacts" as any)
+        .select("id, intent_id, artifact_type, artifact_id, created_at")
+        .eq("intent_id", intentId)
+        .order("created_at", { ascending: false });
+
+      if (!ia.error) setIntentArtifacts(((ia.data ?? []) as any) ?? []);
+      else setIntentArtifacts([]);
+    } catch (e) {
+      console.warn("loadIntentSidecarForLedger exception", e);
+      // Keep Forge stable; intent is sidecar
+      setIntentHeader(null);
+      setIntentArtifacts([]);
+    } finally {
+      setIntentLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!selected?.ledger_id) return;
+    loadIntentSidecarForLedger(selected.ledger_id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.ledger_id, isTest]);
+
+  async function doCreateIntentAndLink() {
+    if (!selected?.ledger_id) return;
+
+    const title = intentTitle.trim();
+    const reason = intentReason.trim();
+
+    if (!title) return flashIntentError("Title is required.");
+    if (!reason) return flashIntentError("Reason is required.");
+
+    setIntentCreating(true);
+    setIntentError(null);
+    setIntentInfo(null);
+
+    try {
+      const actorId = await getActorId(); // used for backfill helper
+      const tryRpc = async (fn: string, args: any) => supabase.rpc(fn as any, args as any);
+
+      // 1) create intent (arg names unknown — try common variants)
+      let cr =
+        (await tryRpc("governance_create_intent", { p_title: title, p_reason: reason })) ||
+        (await tryRpc("governance_create_intent", { title, reason })) ||
+        (await tryRpc("governance_create_intent", { p_intent_title: title, p_intent_reason: reason })) ||
+        null;
+
+      if (!cr || cr.error) {
+        console.warn("governance_create_intent error:", cr?.error);
+        throw new Error(cr?.error?.message || "Unable to create intent (RPC).");
+      }
+
+      const cd: any = cr.data;
+      const cRow = Array.isArray(cd) ? cd[0] : cd;
+      const intentId = cRow?.intent_id ?? cRow?.id ?? (typeof cd === "string" ? cd : null);
+
+      if (!intentId) throw new Error("Intent created but id could not be resolved.");
+
+      // 2) attach the ledger artifact to the intent (explicit, operator-driven)
+      let ar =
+        (await tryRpc("governance_attach_intent_artifact", {
+          p_intent_id: intentId,
+          p_artifact_type: "ledger",
+          p_artifact_id: selected.ledger_id,
+        })) ||
+        (await tryRpc("governance_attach_intent_artifact", {
+          intent_id: intentId,
+          artifact_type: "ledger",
+          artifact_id: selected.ledger_id,
+        })) ||
+        null;
+
+      if (ar?.error) {
+        console.warn("governance_attach_intent_artifact error:", ar.error);
+        // Still proceed; intent exists. But we should inform the operator.
+        flashIntentError("Intent created, but linking the ledger artifact failed.");
+      }
+
+      // 3) Optional backfill (guarded helper — only works because link now exists)
+      if (intentBackfillAfterCreate) {
+        if (!actorId) {
+          flashIntentError("Intent created; cannot backfill because actor could not be resolved (auth).");
+        } else {
+          setIntentBackfilling(true);
+          let br =
+            (await tryRpc("attach_intent_artifacts_from_ledger", { p_ledger_id: selected.ledger_id, p_actor_id: actorId })) ||
+            (await tryRpc("attach_intent_artifacts_from_ledger", { ledger_id: selected.ledger_id, actor_id: actorId })) ||
+            (await tryRpc("attach_intent_artifacts_from_ledger", { p_ledger_id: selected.ledger_id, actor_id: actorId })) ||
+            (await tryRpc("attach_intent_artifacts_from_ledger", { ledger_id: selected.ledger_id, p_actor_id: actorId })) ||
+            null;
+
+          if (br?.error) {
+            console.warn("attach_intent_artifacts_from_ledger error:", br.error);
+            flashIntentError("Intent created; backfill blocked by guard (expected if link not recognized yet).");
+          } else {
+            flashIntentInfo("Intent created + Forge artifacts attached.");
+          }
+        }
+      } else {
+        flashIntentInfo("Intent created (no backfill).");
+      }
+
+      setIntentCreateOpen(false);
+      setIntentTitle("");
+      setIntentReason("");
+      setIntentBackfillAfterCreate(true);
+
+      // reload intent sidecar
+      await loadIntentSidecarForLedger(selected.ledger_id);
+      setRightTab("intent");
+    } catch (e: any) {
+      console.error("doCreateIntentAndLink error", e);
+      flashIntentError(e?.message || "Unable to create intent.");
+    } finally {
+      setIntentBackfilling(false);
+      setIntentCreating(false);
+    }
+  }
+
+  async function doBackfillIntentArtifacts() {
+    if (!selected?.ledger_id) return;
+    if (!intentHeader?.id) {
+      flashIntentError("No intent is linked (by design). Create an intent first.");
+      return;
+    }
+
+    setIntentBackfilling(true);
+    setIntentError(null);
+    setIntentInfo(null);
+
+    try {
+      const actorId = await getActorId();
+      if (!actorId) {
+        flashIntentError("Actor could not be resolved (auth).");
+        return;
+      }
+
+      const tryRpc = async (fn: string, args: any) => supabase.rpc(fn as any, args as any);
+
+      let r =
+        (await tryRpc("attach_intent_artifacts_from_ledger", { p_ledger_id: selected.ledger_id, p_actor_id: actorId })) ||
+        (await tryRpc("attach_intent_artifacts_from_ledger", { ledger_id: selected.ledger_id, actor_id: actorId })) ||
+        (await tryRpc("attach_intent_artifacts_from_ledger", { ledger_id: selected.ledger_id, p_actor_id: actorId })) ||
+        (await tryRpc("attach_intent_artifacts_from_ledger", { p_ledger_id: selected.ledger_id, actor_id: actorId })) ||
+        null;
+
+      if (!r || r.error) {
+        console.warn("attach_intent_artifacts_from_ledger error:", r?.error);
+        flashIntentError("Backfill blocked by guard (expected if link is missing).");
+        return;
+      }
+
+      flashIntentInfo("Forge artifacts attached to intent.");
+      await loadIntentSidecarForLedger(selected.ledger_id);
+    } catch (e: any) {
+      console.error("doBackfillIntentArtifacts error", e);
+      flashIntentError(e?.message || "Backfill failed.");
+    } finally {
+      setIntentBackfilling(false);
+    }
+  }
+  // --------------------------
+  // Start Signature
+  // --------------------------
+  async function onStartSignature() {
     setError(null);
     setInfo(null);
 
-    if (!selected) return;
-    if (envelopeLocked) {
-      flashInfo("Envelope already exists for this record.");
-      return;
-    }
-    if (!primarySignerEmail.trim() || !primarySignerName.trim()) {
-      flashError("Signer name + email are required.");
-      return;
-    }
+    if (!selected?.ledger_id) return;
 
     setIsStarting(true);
     try {
-      const parties = [
-        {
-          signer_name: primarySignerName.trim(),
-          signer_email: primarySignerEmail.trim(),
-          role: "signer",
-          signing_order: 1,
-        },
-      ];
+      const actorId = await getActorId();
+      if (!actorId) {
+        flashError("You must be signed in to start a signature envelope.");
+        return;
+      }
 
-      const { data, error } = await supabase.functions.invoke("start-signature", {
+      const { data, error } = await supabase.functions.invoke("start-signature-envelope", {
         body: {
           record_id: selected.ledger_id,
-          entity_slug: selected.entity_slug,
-          parties,
-          entity_id: selected.entity_id,
+          entity_slug: activeEntity,
           is_test: isTest,
-          cc_emails: ccEmails
-            .split(",")
-            .map((x) => x.trim())
-            .filter(Boolean),
+          actor_id: actorId,
         },
       });
 
@@ -925,35 +1192,56 @@ export default function ForgeClient() {
 
       const res = data as StartSignatureResponse;
       if (!res?.ok) {
-        flashError(res?.error ?? "Unable to start envelope.");
+        flashError(res?.error ?? "Start signature failed.");
         return;
       }
 
-      flashInfo(res.reused ? "Existing envelope reused." : "Envelope started.");
+      flashInfo(res.reused ? "Envelope already existed — reopened." : "Signature envelope created.");
       await refreshQueuesKeepSelection(selected.ledger_id);
-      setStartModalOpen(false);
-      setRightTab("portal");
-    } catch (err: any) {
-      console.error("start-signature error", err);
-      flashError(err?.message || "Unable to start envelope.");
+    } catch (e: any) {
+      console.error("onStartSignature error", e);
+      flashError(e?.message || "Start signature failed.");
     } finally {
       setIsStarting(false);
     }
   }
 
-  async function doSendInvite() {
+  // --------------------------
+  // Send Invite
+  // --------------------------
+  async function onSendInvite() {
     setError(null);
     setInfo(null);
 
+    if (!selected?.ledger_id) return;
     if (!selected?.envelope_id) {
-      flashError("No envelope found for this record.");
+      flashError("No envelope yet — start signature first.");
+      return;
+    }
+
+    const name = primarySignerName.trim();
+    const email = primarySignerEmail.trim();
+
+    if (!email || !email.includes("@")) {
+      flashError("Signer email is required.");
       return;
     }
 
     setIsSendingInvite(true);
     try {
       const { data, error } = await supabase.functions.invoke("send-signature-invite", {
-        body: { envelope_id: selected.envelope_id, is_test: isTest },
+        body: {
+          envelope_id: selected.envelope_id,
+          signer_name: name || null,
+          signer_email: email,
+          cc_emails: ccEmails
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .slice(0, 10),
+          is_test: isTest,
+          entity_slug: activeEntity,
+        },
       });
 
       if (error) {
@@ -963,45 +1251,40 @@ export default function ForgeClient() {
 
       const res = data as SendInviteResponse;
       if (!res?.ok) {
-        flashError(res?.error ?? "Unable to send invite.");
+        flashError(res?.error ?? "Invite failed.");
         return;
       }
 
-      flashInfo(res.message ?? "Invite sent.");
+      flashInfo(res?.message ?? "Invite sent.");
       await refreshQueuesKeepSelection(selected.ledger_id);
-      setInviteModalOpen(false);
-      setRightTab("portal");
-    } catch (err: any) {
-      console.error("send-signature-invite error", err);
-      flashError(err?.message || "Unable to send invite.");
+    } catch (e: any) {
+      console.error("onSendInvite error", e);
+      flashError(e?.message || "Invite failed.");
     } finally {
       setIsSendingInvite(false);
     }
   }
 
-  async function doArchiveSigned() {
+  // --------------------------
+  // Archive Now (completed envelopes only)
+  // --------------------------
+  async function onArchiveNow() {
     setError(null);
     setInfo(null);
 
-    if (!selected?.envelope_id) {
-      flashError("No envelope found for this record.");
-      return;
-    }
-    if (!selected || selected.envelope_status !== "completed") {
-      flashError("Envelope is not completed yet.");
-      return;
-    }
-
-    if (archiveLocked) {
-      flashInfo("Record already archived — no action required.");
-      setArchiveModalOpen(false);
+    if (!selected?.ledger_id) return;
+    if (selected.envelope_status !== "completed") {
+      flashError("Archive requires a completed envelope.");
       return;
     }
 
     setIsArchiving(true);
     try {
-      const { data, error } = await supabase.functions.invoke("archive-signed-resolution", {
-        body: { envelope_id: selected.envelope_id, is_test: isTest },
+      setPinned(selected);
+
+      // Canonical: archive-save-document is the stable wrapper calling seal RPC
+      const { data, error } = await supabase.functions.invoke("archive-save-document", {
+        body: { record_id: selected.ledger_id, is_test: isTest, trigger: "forge-archive" },
       });
 
       if (error) {
@@ -1009,49 +1292,38 @@ export default function ForgeClient() {
         throw new Error(msg);
       }
 
-      const res = data as ArchiveSignedResolutionResponse;
+      const res = data as ArchiveSaveDocumentResponse;
       if (!res?.ok) {
-        flashError(res?.error ?? "Unable to archive signed resolution.");
+        flashError(res?.error ?? "Archive failed.");
         return;
       }
 
-      flashInfo(res.already_archived ? "Already archived." : "Archived into CI-Archive Minute Book.");
+      if (res.already_archived) flashInfo("Record already archived — no action required.");
+      else flashInfo(res.repaired ? "Archived (repaired pointers)." : "Archived successfully.");
 
-      // ✅ keep it visible if views lag
-      setPinned(selected);
-
-      // ✅ refresh BOTH SQL queues (latest + archived)
-      await refreshQueuesKeepSelection(selected.ledger_id);
       await loadArchiveEvidence(selected.ledger_id);
-
-      setArchiveModalOpen(false);
-      setRightTab("evidence");
-      setTab("archived"); // ✅ goes to SQL-backed Archived tab after Archive
-    } catch (err: any) {
-      console.error("archive-signed-resolution error", err);
-      flashError(err?.message || "Unable to archive signed resolution.");
+      await refreshQueuesKeepSelection(selected.ledger_id);
+    } catch (e: any) {
+      console.error("onArchiveNow error", e);
+      flashError(e?.message || "Archive failed.");
     } finally {
       setIsArchiving(false);
     }
   }
 
-  async function onRunAxiomReview() {
-    if (!selected) return;
+  // --------------------------
+  // AXIOM run (optional sidecar)
+  // --------------------------
+  async function onRunAxiom() {
+    if (!selected?.ledger_id) return;
 
+    setAxiomLoading(true);
     setAxiomError(null);
     setAxiomInfo(null);
-    setAxiomLoading(true);
 
     try {
-      const { data, error } = await supabase.functions.invoke("axiom-pre-signature-review", {
-        body: {
-          record_id: selected.ledger_id,
-          entity_slug: selected.entity_slug,
-          entity_id: selected.entity_id,
-          is_test: isTest,
-          envelope_id: selected.envelope_id ?? null,
-          trigger: "forge-pre-signature",
-        },
+      const { data, error } = await supabase.functions.invoke("axiom-review-record", {
+        body: { record_id: selected.ledger_id, is_test: isTest, entity_slug: activeEntity },
       });
 
       if (error) {
@@ -1061,945 +1333,847 @@ export default function ForgeClient() {
 
       const res = data as AxiomReviewResponse;
       if (!res?.ok) {
-        flashAxiomError(res?.error ?? "AXIOM review failed.");
+        flashAxiomError(res?.error ?? "AXIOM failed.");
         return;
       }
 
-      flashAxiomInfo(res.message ?? "AXIOM review completed.");
+      flashAxiomInfo(res?.message ?? "AXIOM complete.");
       await loadAxiomLatest(selected.ledger_id);
-      setAxiomTab("summary");
-      setRightTab("axiom");
     } catch (e: any) {
-      console.error("axiom-pre-signature-review error", e);
-      flashAxiomError(e?.message || "Unable to run AXIOM review.");
+      console.error("onRunAxiom error", e);
+      flashAxiomError(e?.message || "AXIOM failed.");
     } finally {
       setAxiomLoading(false);
     }
   }
 
-  const axiomAdvisory = useMemo(() => {
-    if (!selected) {
-      return { severity: "IDLE" as RiskLevel, bullets: ["Select an execution record to view intelligence."] };
-    }
-
-    const risk = computeRiskLevel(selected);
-    const bullets: string[] = [];
-
-    if (!selected.envelope_id) bullets.push("No envelope exists yet. Start the envelope to begin signing.");
-    if (selected.envelope_id && selected.envelope_status !== "completed")
-      bullets.push("Envelope is active. Monitor progress; resend invite if stalled.");
-    if (selected.envelope_status === "completed" && !isArchived(selected))
-      bullets.push("Envelope completed. Next action is Archive Now to generate archive-grade artifacts + registry entry.");
-    if (selected.envelope_status === "completed" && isArchived(selected))
-      bullets.push("Record archived. Use Re-seal/Repair anytime to regenerate pointers (idempotent).");
-
-    if (archiveMissing)
-      bullets.push("Archive pointers appear missing. Use Re-seal/Repair to regenerate registry pointers (idempotent).");
-
-    bullets.push("AXIOM Review generates advisory intelligence (side-car).");
-    bullets.push("AXIOM is advisory-only. It never blocks authority.");
-
-    return { severity: risk, bullets };
-  }, [selected, archiveMissing]);
-
-  const tabBtn = (k: TabKey, label: string, count: number) => (
-    <button
-      type="button"
-      onClick={() => setTab(k)}
-      className={cx(
-        "rounded-full px-3 py-1.5 text-[11px] font-semibold transition border",
-        tab === k
-          ? "bg-slate-100 text-slate-950 border-white/20 shadow-md shadow-white/10"
-          : "bg-slate-950/40 text-slate-300 border-slate-800 hover:border-slate-700 hover:text-slate-100"
-      )}
-    >
-      {label} <span className="ml-1 text-[10px] opacity-70">({count})</span>
-    </button>
-  );
-
-  const rightTabBtn = (k: RightTab, label: string, hint?: string) => (
-    <button
-      type="button"
-      onClick={() => setRightTab(k)}
-      className={cx(
-        "rounded-full px-3 py-1.5 text-[11px] font-semibold transition border",
-        rightTab === k
-          ? "bg-slate-100 text-slate-950 border-white/20 shadow-md shadow-white/10"
-          : "bg-slate-950/40 text-slate-300 border-slate-800 hover:border-slate-700 hover:text-slate-100"
-      )}
-      title={hint}
-    >
-      {label}
-    </button>
-  );
-
-  const portalBtn = (href: string, label: string) => (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer"
-      className="group flex-1 rounded-2xl border border-slate-800/80 bg-slate-950/40 px-3 py-2 text-[11px] font-semibold text-slate-200 transition
-                 hover:border-amber-500/55 hover:bg-slate-950/55 hover:text-slate-50
-                 hover:shadow-[0_0_0_1px_rgba(251,191,36,0.14),0_0_18px_rgba(251,191,36,0.18)]
-                 focus:outline-none focus:ring-2 focus:ring-amber-400/30"
-    >
-      <span className="flex items-center justify-center gap-2">
-        <span className="h-1.5 w-1.5 rounded-full bg-amber-300/90 shadow-[0_0_10px_rgba(251,191,36,0.85)]" />
-        <span className="text-center">{label}</span>
-        <span className="opacity-0 transition group-hover:opacity-100 text-[10px] text-amber-200">↗</span>
-      </span>
-    </a>
-  );
-
-  const axiomTabBtn = (k: AxiomTab, label: string) => (
-    <button
-      type="button"
-      onClick={() => setAxiomTab(k)}
-      className={cx(
-        "rounded-full px-3 py-1.5 text-[11px] font-semibold transition border",
-        axiomTab === k
-          ? "bg-cyan-500/15 text-cyan-100 border-cyan-500/40"
-          : "bg-slate-950/40 text-slate-300 border-slate-800 hover:border-slate-700 hover:text-slate-100"
-      )}
-    >
-      {label}
-    </button>
-  );
-
-  const laneBadge = () => (
-    <div className="mt-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3">
-      <div className="text-[10px] uppercase tracking-[0.22em] text-amber-200">Lane Clarification</div>
-      <div className="mt-2 text-[11px] text-slate-200">
-        <span className="font-semibold text-amber-200">Signed ≠ Archived.</span> Signing completes the envelope.
-        Archiving creates the registry pointers (Minute Book + Verified). If pointers ever go missing, use{" "}
-        <span className="font-semibold text-amber-200">Re-seal/Repair</span> (idempotent).
-      </div>
-    </div>
-  );
-
-  const archiveBanner = () => {
-    if (!selected) return null;
-
-    if (archiveMissing) {
-      return (
-        <div className="mt-2 text-[11px] text-amber-200 bg-amber-950/30 border border-amber-700/40 rounded-xl px-3 py-2">
-          Archive pointers missing — use Re-seal/Repair (idempotent).
-        </div>
-      );
-    }
-
-    if (!archiveLocked) return null;
-
-    return (
-      <div className="mt-2 text-[11px] text-amber-200 bg-amber-950/30 border border-amber-700/40 rounded-xl px-3 py-2">
-        Record already archived — no action required.
-      </div>
-    );
-  };
-
-  const primaryAction = useMemo(() => {
-    if (!selected) return { key: "none" as const, label: "Select a record", disabled: true };
-    if (!selected.envelope_id) return { key: "start" as const, label: "Start envelope", disabled: false };
-    if (selected.envelope_status !== "completed") return { key: "invite" as const, label: "Send invite", disabled: false };
-    if (archiveLocked) return { key: "view" as const, label: "View archive PDF", disabled: false };
-    return { key: "archive" as const, label: "Archive now", disabled: false };
-  }, [selected, archiveLocked]);
-
   const step = inferStep(selected);
-  const stepDot = (i: number) => {
-    const on = step >= i;
-    const done = step > i;
-    const cls = done
-      ? "bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.9)]"
-      : on
-      ? "bg-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.85)]"
-      : "bg-slate-600 shadow-[0_0_8px_rgba(148,163,184,0.35)]";
-    return <span className={cx("h-2.5 w-2.5 rounded-full", cls)} />;
+
+  const statusPill = (item: ForgeQueueItem) => {
+    const s = (item.envelope_status ?? "").toLowerCase();
+    const base =
+      "rounded-full px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase border whitespace-nowrap";
+    if (!item.envelope_id)
+      return <span className={cx(base, "border-slate-700 bg-slate-950/40 text-slate-300")}>No Envelope</span>;
+    if (s === "completed")
+      return <span className={cx(base, "border-emerald-500/40 bg-emerald-500/10 text-emerald-200")}>Completed</span>;
+    if (s === "sent" || s === "pending")
+      return <span className={cx(base, "border-amber-500/40 bg-amber-500/10 text-amber-200")}>In Progress</span>;
+    if (s === "cancelled" || s === "expired")
+      return <span className={cx(base, "border-slate-600 bg-slate-900/40 text-slate-300")}>{s}</span>;
+    return <span className={cx(base, "border-slate-600 bg-slate-900/40 text-slate-300")}>{s || "draft"}</span>;
   };
 
-  // ============================
-  // UI SEARCH (Verified-style)
-  // ============================
-  const [q, setQ] = useState("");
-  const filteredQueue = useMemo(() => {
-    const qq = q.trim().toLowerCase();
-    if (!qq) return visibleQueue;
-    return visibleQueue.filter((r) =>
-      `${r.title} ${r.ledger_status} ${r.envelope_status ?? ""}`.toLowerCase().includes(qq)
-    );
-  }, [q, visibleQueue]);
-  // ============================
-  // RENDER
-  // ============================
+  const ledgerPill = (item: ForgeQueueItem) => {
+    const ls = (item.ledger_status ?? "").toUpperCase() || "—";
+    const base =
+      "rounded-full px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase border whitespace-nowrap";
+    if (ls === "ARCHIVED")
+      return <span className={cx(base, "border-cyan-500/40 bg-cyan-500/10 text-cyan-200")}>ARCHIVED</span>;
+    if (ls === "APPROVED")
+      return <span className={cx(base, "border-sky-500/40 bg-sky-500/10 text-sky-200")}>APPROVED</span>;
+    if (ls === "PENDING")
+      return <span className={cx(base, "border-amber-500/40 bg-amber-500/10 text-amber-200")}>PENDING</span>;
+    return <span className={cx(base, "border-slate-700 bg-slate-950/40 text-slate-300")}>{ls}</span>;
+  };
+
+  const queueCountLabel =
+    tab === "active" ? `${activeQueue.length} Active` : tab === "archived" ? `${archivedQueue.length} Archived` : `${completedQueue.length} Completed`;
+
   return (
-    <div className="px-3 sm:px-6 py-6">
-      <div className="mb-4 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <Link
-            href="/"
-            className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-1.5 text-[11px] font-semibold text-slate-200 hover:bg-black/30 hover:border-white/15 transition"
-          >
-            <ArrowLeft className="h-4 w-4" />
-            Dashboard
-          </Link>
+    <div className={shell}>
+      <div className={header}>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <Link
+                href="/ci-forge"
+                className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] font-semibold text-white/85 hover:bg-black/30 hover:border-white/20 transition"
+              >
+                <ArrowLeft className="h-4 w-4" />
+                Back
+              </Link>
+
+              <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">CI • Forge</div>
+              {envPill()}
+            </div>
+
+            <div className="mt-2 text-lg sm:text-xl font-semibold text-white/92">
+              Execution Console <span className="text-white/35">—</span>{" "}
+              <span className="text-white/70">{activeEntity}</span>
+            </div>
+            <div className="mt-1 text-[12px] text-white/45">{queueCountLabel}</div>
+          </div>
 
           <div className="flex items-center gap-2">
-            <span className="text-[11px] uppercase tracking-[0.22em] text-slate-500">CI-Forge</span>
-            {envPill()}
+            <button
+              type="button"
+              onClick={() => setHideEnvelopes((v) => !v)}
+              className={cx(
+                "rounded-xl border px-3 py-2 text-[12px] font-semibold transition",
+                hideEnvelopes
+                  ? "border-amber-500/40 bg-amber-500/10 text-amber-100 hover:bg-amber-500/15"
+                  : "border-white/10 bg-black/20 text-white/80 hover:bg-black/30 hover:border-white/20"
+              )}
+              title="Filter out items that already have an envelope (Active tab only)."
+            >
+              {hideEnvelopes ? "Showing Draft-only" : "Show All"}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => fetchQueues()}
+              className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] font-semibold text-white/80 hover:bg-black/30 hover:border-white/20 transition"
+              disabled={loadingQueue}
+            >
+              {loadingQueue ? "Refreshing…" : "Refresh"}
+            </button>
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={() => fetchQueues()}
-          className="rounded-full border border-white/10 bg-black/20 px-3 py-1.5 text-[11px] font-semibold text-slate-200 hover:bg-black/30 hover:border-white/15 transition"
-        >
-          Refresh
-        </button>
-      </div>
+        {/* Tabs */}
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setTab("active")}
+            className={cx(
+              "rounded-full px-3 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase border transition",
+              tab === "active"
+                ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
+                : "border-white/10 bg-black/10 text-white/60 hover:border-white/20 hover:text-white/80"
+            )}
+          >
+            Active
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("completed")}
+            className={cx(
+              "rounded-full px-3 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase border transition",
+              tab === "completed"
+                ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
+                : "border-white/10 bg-black/10 text-white/60 hover:border-white/20 hover:text-white/80"
+            )}
+          >
+            Completed
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("archived")}
+            className={cx(
+              "rounded-full px-3 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase border transition",
+              tab === "archived"
+                ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
+                : "border-white/10 bg-black/10 text-white/60 hover:border-white/20 hover:text-white/80"
+            )}
+          >
+            Archived
+          </button>
+        </div>
 
-      <div className={shell}>
-        {/* Header */}
-        <div className={header}>
-          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-            <div>
-              <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">
-                Execution Queue • {activeEntity}
-              </div>
-              <div className="mt-1 text-base sm:text-lg font-semibold text-slate-100">
-                Sign → Verify → Archive
-              </div>
-              <div className="mt-1 text-[12px] text-slate-400">
-                SQL-backed lifecycle: Active (latest) • Completed (signed) • Archived (sealed)
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              {tabBtn("active", "Active", activeQueue.length)}
-              {tabBtn("completed", "Completed", completedQueue.length)}
-              {tabBtn("archived", "Archived", archivedQueue.length)}
-            </div>
-          </div>
-
-          <div className="mt-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <div className="relative w-full sm:w-[360px]">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
-                <input
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
-                  placeholder="Search queue (title, status, envelope)…"
-                  className="w-full rounded-2xl border border-white/10 bg-black/20 pl-10 pr-3 py-2 text-[12px] text-slate-100 placeholder:text-slate-500 outline-none
-                             focus:border-amber-500/40 focus:ring-2 focus:ring-amber-400/15"
-                />
-              </div>
-
-              {tab === "active" ? (
-                <label className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-semibold text-slate-200">
-                  <input
-                    type="checkbox"
-                    checked={hideEnvelopes}
-                    onChange={(e) => setHideEnvelopes(e.target.checked)}
-                    className="h-4 w-4 accent-amber-300"
-                  />
-                  Hide envelopes
-                </label>
-              ) : null}
-            </div>
-
-            <div className="flex items-center gap-2">
-              <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-semibold text-slate-200">
-                <span className="h-1.5 w-1.5 rounded-full bg-amber-300/90 shadow-[0_0_10px_rgba(251,191,36,0.85)]" />
-                Lane-safe: <span className="text-slate-100">{isTest ? "SANDBOX" : "RoT"}</span>
-              </div>
-            </div>
-          </div>
-
+        {/* Alerts */}
+        <div className="mt-4 space-y-2">
           {error ? (
-            <div className="mt-4 rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-200">
+            <div className="rounded-2xl border border-rose-500/25 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-100">
               {error}
             </div>
           ) : null}
+
           {info ? (
-            <div className="mt-4 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-[12px] text-emerald-200">
+            <div className="rounded-2xl border border-emerald-500/25 bg-emerald-500/10 px-4 py-3 text-[12px] text-emerald-100">
               {info}
             </div>
           ) : null}
         </div>
+      </div>
 
-        {/* Body */}
-        <div className={body}>
-          <div className="grid grid-cols-12 gap-4 lg:gap-6">
-            {/* Left: Queue */}
-            <div className="col-span-12 lg:col-span-4">
-              <div className="rounded-3xl border border-white/10 bg-black/20 overflow-hidden">
-                <div className="px-4 py-3 border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent">
-                  <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">
-                    {tab === "active" ? "Active queue" : tab === "archived" ? "Archived queue" : "Completed queue"}
-                  </div>
-                  <div className="mt-1 text-[12px] text-slate-300">
-                    {loadingQueue ? "Loading…" : `${filteredQueue.length} record(s)`}
-                  </div>
-                </div>
-
-                <div className="max-h-[64vh] lg:max-h-[calc(100vh-330px)] overflow-auto">
-                  {filteredQueue.length === 0 ? (
-                    <div className="p-4 text-[12px] text-slate-400">No items.</div>
-                  ) : (
-                    <div className="p-2">
-                      {filteredQueue.map((item) => {
-                        const risk = computeRiskLevel(item);
-                        const isSel = item.ledger_id === selectedId;
-                        const archived = isArchived(item);
-                        const completed = isCompleted(item);
-
-                        return (
-                          <button
-                            key={item.ledger_id}
-                            type="button"
-                            onClick={() => {
-                              setSelectedId(item.ledger_id);
-                              setRightTab("evidence");
-                            }}
-                            className={cx(
-                              "w-full text-left rounded-2xl border px-3 py-3 mb-2 transition",
-                              isSel
-                                ? "border-amber-500/40 bg-amber-500/10 shadow-[0_0_0_1px_rgba(251,191,36,0.18),0_0_20px_rgba(251,191,36,0.08)]"
-                                : "border-white/10 bg-black/10 hover:bg-black/20 hover:border-white/15"
-                            )}
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="min-w-0">
-                                <div className="text-[12px] font-semibold text-slate-100">
-                                  {clamp(item.title ?? "Untitled", 90)}
-                                </div>
-                                <div className="mt-1 text-[11px] text-slate-400">
-                                  <span className="uppercase tracking-[0.18em]">{item.ledger_status ?? "—"}</span>
-                                  <span className="mx-2 text-slate-700">•</span>
-                                  <span className="text-slate-300">{fmt(item.created_at)}</span>
-                                </div>
-                              </div>
-
-                              <div className="flex flex-col items-end gap-2 shrink-0">
-                                <span className={cx("h-2.5 w-2.5 rounded-full", riskLightClasses(risk))} />
-                                <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">
-                                  {riskLabel(risk)}
-                                </div>
-                              </div>
-                            </div>
-
-                            <div className="mt-3 flex flex-wrap items-center gap-2">
-                              {completed ? (
-                                <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase text-emerald-200">
-                                  signed
-                                </span>
-                              ) : null}
-
-                              {archived ? (
-                                <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase text-amber-200">
-                                  archived
-                                </span>
-                              ) : null}
-
-                              {item.envelope_id ? (
-                                <span className="rounded-full border border-white/10 bg-black/20 px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-300">
-                                  envelope
-                                </span>
-                              ) : (
-                                <span className="rounded-full border border-white/10 bg-black/20 px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-400">
-                                  no envelope
-                                </span>
-                              )}
-
-                              {item.parties_total != null ? (
-                                <span className="rounded-full border border-white/10 bg-black/20 px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-300">
-                                  {item.parties_signed ?? 0}/{item.parties_total} signed
-                                </span>
-                              ) : null}
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
+      <div className={body}>
+        <div className="grid grid-cols-12 gap-4 lg:gap-6">
+          {/* LEFT: Queue */}
+          <div className="col-span-12 lg:col-span-4">
+            <div className="rounded-3xl border border-white/10 bg-black/20 overflow-hidden">
+              <div className="px-4 py-3 border-b border-white/10 bg-gradient-to-b from-white/[0.05] to-transparent">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[11px] uppercase tracking-[0.22em] text-white/50">Queue</div>
+                  <div className="text-[11px] text-white/35">{visibleQueue.length} items</div>
                 </div>
               </div>
 
-              {laneBadge()}
-            </div>
+              <div className="max-h-[56vh] lg:max-h-[64vh] overflow-auto">
+                {visibleQueue.length === 0 ? (
+                  <div className="px-4 py-8 text-center text-[12px] text-white/45">No items.</div>
+                ) : (
+                  <div className="p-2 space-y-2">
+                    {visibleQueue.map((item) => {
+                      const risk = computeRiskLevel(item);
+                      const isSel = item.ledger_id === (selected?.ledger_id ?? "");
+                      return (
+                        <button
+                          key={item.ledger_id}
+                          type="button"
+                          onClick={() => setSelectedId(item.ledger_id)}
+                          className={cx(
+                            "w-full text-left rounded-2xl border px-3 py-3 transition",
+                            isSel
+                              ? "border-amber-500/35 bg-amber-500/10"
+                              : "border-white/10 bg-black/10 hover:bg-black/20 hover:border-white/20"
+                          )}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="text-[12px] font-semibold text-white/90 truncate">{item.title}</div>
+                              <div className="mt-1 text-[11px] text-white/45">
+                                Created: <span className="text-white/60">{fmt(item.created_at)}</span>
+                              </div>
+                            </div>
 
-            {/* Middle: Details */}
-            <div className="col-span-12 lg:col-span-4">
-              <div className="rounded-3xl border border-white/10 bg-black/20 overflow-hidden">
-                <div className="px-4 py-3 border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent">
-                  <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Record</div>
-                  <div className="mt-1 text-[12px] text-slate-300">
-                    {selected ? "Selected" : "None selected"}
+                            <div className="flex items-center gap-2 shrink-0">
+                              <span className={cx("h-2 w-2 rounded-full", riskLightClasses(risk))} />
+                              <span className="text-[10px] tracking-[0.18em] uppercase text-white/45">
+                                {riskLabel(risk)}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="mt-3 flex flex-wrap items-center gap-2">
+                            {ledgerPill(item)}
+                            {statusPill(item)}
+                          </div>
+                        </button>
+                      );
+                    })}
                   </div>
-                </div>
-
-                <div className="p-4">
-                  {!selected ? (
-                    <div className="text-[12px] text-slate-400">Select a record from the queue.</div>
-                  ) : (
-                    <>
-                      <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Title</div>
-                      <div className="mt-1 text-base font-semibold text-slate-100">{selected.title ?? "Untitled"}</div>
-
-                      <div className="mt-4 grid grid-cols-2 gap-3">
-                        <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
-                          <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Ledger</div>
-                          <div className="mt-1 text-[12px] font-semibold text-slate-200">
-                            {(selected.ledger_status ?? "—").toUpperCase()}
-                          </div>
-                        </div>
-
-                        <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
-                          <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Envelope</div>
-                          <div className="mt-1 text-[12px] font-semibold text-slate-200">
-                            {selected.envelope_status ? selected.envelope_status.toUpperCase() : "—"}
-                          </div>
-                        </div>
-
-                        <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
-                          <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Created</div>
-                          <div className="mt-1 text-[12px] font-semibold text-slate-200">{fmt(selected.created_at)}</div>
-                        </div>
-
-                        <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
-                          <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Step</div>
-                          <div className="mt-1 flex items-center gap-2">
-                            {stepDot(1)}
-                            {stepDot(2)}
-                            {stepDot(3)}
-                            <span className="ml-2 text-[12px] font-semibold text-slate-200">
-                              {step === 0 ? "Draft" : step === 2 ? "Signing" : "Signed"}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-
-                      {archiveBanner()}
-
-                      <div className="mt-5 rounded-2xl border border-white/10 bg-black/10 p-3">
-                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Primary action</div>
-                        <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                          <button
-                            type="button"
-                            disabled={primaryAction.disabled}
-                            onClick={() => {
-                              if (primaryAction.key === "start") setStartModalOpen(true);
-                              if (primaryAction.key === "invite") setInviteModalOpen(true);
-                              if (primaryAction.key === "archive") setArchiveModalOpen(true);
-                              if (primaryAction.key === "view") onViewArchivePdf();
-                            }}
-                            className={cx(
-                              "rounded-2xl px-4 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase transition border",
-                              "border-amber-500/40 bg-amber-500/10 text-amber-100 hover:bg-amber-500/15",
-                              primaryAction.disabled ? "opacity-60 cursor-not-allowed" : ""
-                            )}
-                          >
-                            {primaryAction.label}
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => setResealModalOpen(true)}
-                            disabled={!selected?.ledger_id || selected?.envelope_status !== "completed" || isResealing}
-                            className={cx(
-                              "rounded-2xl px-4 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase transition border",
-                              "border-slate-800 bg-slate-950/40 text-slate-200 hover:border-slate-700 hover:bg-slate-950/55",
-                              !selected?.ledger_id || selected?.envelope_status !== "completed" || isResealing
-                                ? "opacity-60 cursor-not-allowed"
-                                : ""
-                            )}
-                          >
-                            {isResealing ? "Working…" : "Re-seal/Repair"}
-                          </button>
-                        </div>
-
-                        <div className="mt-2 text-[11px] text-slate-400">
-                          Archive Now seals + registers. Re-seal/Repair regenerates pointers (idempotent).
-                        </div>
-                      </div>
-
-                      <div className="mt-4 rounded-2xl border border-white/10 bg-black/10 p-3">
-                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Quick tabs</div>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {rightTabBtn("evidence", "Evidence")}
-                          {rightTabBtn("axiom", "AXIOM")}
-                          {rightTabBtn("portal", "Portal")}
-                          {rightTabBtn("notes", "Notes", "Reserved")}
-                        </div>
-                      </div>
-                    </>
-                  )}
-                </div>
+                )}
               </div>
             </div>
+          </div>
 
-            {/* Right: Panels */}
-            <div className="col-span-12 lg:col-span-4">
-              <div className="rounded-3xl border border-white/10 bg-black/20 overflow-hidden">
-                <div className="px-4 py-3 border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Authority panel</div>
-                      <div className="mt-1 text-[12px] text-slate-300">
-                        {rightTab === "evidence"
-                          ? "Archive evidence + pointers"
-                          : rightTab === "portal"
-                          ? "Signer / Verify / Certificate"
-                          : rightTab === "axiom"
-                          ? "AXIOM intelligence"
-                          : "Notes"}
-                      </div>
+          {/* MIDDLE: Details + Actions */}
+          <div className="col-span-12 lg:col-span-5">
+            <div className="rounded-3xl border border-white/10 bg-black/20 overflow-hidden">
+              <div className="px-4 py-3 border-b border-white/10 bg-gradient-to-b from-white/[0.05] to-transparent">
+                <div className="text-[11px] uppercase tracking-[0.22em] text-white/50">Record</div>
+              </div>
+
+              {!selected ? (
+                <div className="px-4 py-10 text-center text-[12px] text-white/45">Select a record.</div>
+              ) : (
+                <div className="p-4 space-y-4">
+                  <div>
+                    <div className="text-base font-semibold text-white/90">{selected.title}</div>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      {ledgerPill(selected)}
+                      {statusPill(selected)}
+                      <span className="rounded-full border border-white/10 bg-black/10 px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase text-white/60">
+                        Step {step}/3
+                      </span>
                     </div>
 
-                    <div className="flex items-center gap-2">
+                    {/* Archive locked banner (frontend-only UX hardening) */}
+                    {archiveLocked ? (
+                      <div className="mt-3 rounded-2xl border border-cyan-500/25 bg-cyan-500/10 px-4 py-3 text-[12px] text-cyan-100">
+                        Record already archived — no action required.
+                      </div>
+                    ) : null}
+
+                    {archiveMissing ? (
+                      <div className="mt-3 rounded-2xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-[12px] text-amber-100">
+                        Signed but missing archive evidence. Use <span className="font-semibold">Re-seal/Repair</span>.
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="rounded-2xl border border-white/10 bg-black/10 p-4">
+                    <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">Key</div>
+                    <div className="mt-2 grid grid-cols-2 gap-3 text-[12px]">
+                      <div>
+                        <div className="text-white/40">Ledger ID</div>
+                        <div className="text-white/80 break-all">{selected.ledger_id}</div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Envelope</div>
+                        <div className="text-white/80 break-all">{selected.envelope_id ?? "—"}</div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Parties</div>
+                        <div className="text-white/80">
+                          {(selected.parties_signed ?? 0).toString()}/{(selected.parties_total ?? 0).toString()}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Last Signed</div>
+                        <div className="text-white/80">{fmt(selected.last_signed_at)}</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Actions */}
+                  <div className="space-y-2">
+                    <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">Actions</div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       <button
                         type="button"
-                        onClick={() => selected?.ledger_id && loadArchiveEvidence(selected.ledger_id)}
-                        className="rounded-full border border-white/10 bg-black/20 px-3 py-1.5 text-[11px] font-semibold text-slate-200 hover:bg-black/30 hover:border-white/15 transition"
+                        onClick={() => setStartModalOpen(true)}
+                        className="rounded-2xl border border-white/10 bg-black/15 px-4 py-3 text-[12px] font-semibold text-white/85 hover:bg-black/25 hover:border-white/20 transition"
+                        disabled={isStarting}
                       >
-                        Refresh
+                        {selected.envelope_id ? "Open Envelope" : "Start Signature"}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setInviteModalOpen(true)}
+                        className="rounded-2xl border border-white/10 bg-black/15 px-4 py-3 text-[12px] font-semibold text-white/85 hover:bg-black/25 hover:border-white/20 transition"
+                        disabled={!selected.envelope_id || isSendingInvite}
+                        title={!selected.envelope_id ? "Start signature first." : "Send invite to signer."}
+                      >
+                        Send Invite
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setResealModalOpen(true)}
+                        className="rounded-2xl border border-amber-500/35 bg-amber-500/10 px-4 py-3 text-[12px] font-semibold text-amber-100 hover:bg-amber-500/15 transition"
+                        disabled={selected.envelope_status !== "completed" || isResealing}
+                        title={selected.envelope_status !== "completed" ? "Requires completed envelope." : "Repair archive pointers safely."}
+                      >
+                        Re-seal / Repair
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setArchiveModalOpen(true)}
+                        className={cx(
+                          "rounded-2xl px-4 py-3 text-[12px] font-semibold transition border",
+                          archiveLocked
+                            ? "border-slate-700 bg-slate-950/40 text-slate-400 cursor-not-allowed"
+                            : "border-emerald-500/35 bg-emerald-500/10 text-emerald-100 hover:bg-emerald-500/15"
+                        )}
+                        disabled={archiveLocked || selected.envelope_status !== "completed" || isArchiving}
+                        title={
+                          archiveLocked
+                            ? "Already archived."
+                            : selected.envelope_status !== "completed"
+                            ? "Requires completed envelope."
+                            : "Archive now (idempotent)."
+                        }
+                      >
+                        Archive Now
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => onViewArchivePdf()}
+                        className="rounded-2xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-3 text-[12px] font-semibold text-cyan-100 hover:bg-cyan-500/15 transition"
+                        disabled={isOpeningArchive}
+                      >
+                        {isOpeningArchive ? "Opening…" : "View Archive PDF"}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => onRunAxiom()}
+                        className="rounded-2xl border border-white/10 bg-black/15 px-4 py-3 text-[12px] font-semibold text-white/85 hover:bg-black/25 hover:border-white/20 transition"
+                        disabled={axiomLoading}
+                      >
+                        {axiomLoading ? "Running…" : "Run AXIOM"}
                       </button>
                     </div>
                   </div>
+
+                  {/* Modals */}
+                  <Modal
+                    open={startModalOpen}
+                    title={selected?.envelope_id ? "Open / Reuse Envelope" : "Start Signature Envelope"}
+                    description="Creates (or reuses) the signature envelope for this ledger record."
+                    confirmLabel={isStarting ? "Working…" : "Start"}
+                    confirmTone="emerald"
+                    confirmDisabled={isStarting}
+                    onConfirm={async () => {
+                      setStartModalOpen(false);
+                      await onStartSignature();
+                    }}
+                    onClose={() => setStartModalOpen(false)}
+                  >
+                    <div className="text-[12px] text-slate-300">
+                      This action is lane-safe (<span className="text-slate-100 font-semibold">{isTest ? "SANDBOX" : "RoT"}</span>) and entity-scoped.
+                    </div>
+                  </Modal>
+
+                  <Modal
+                    open={inviteModalOpen}
+                    title="Send Signature Invite"
+                    description="Invite the signer to complete the envelope. (No wiring changes — uses existing Edge Function.)"
+                    confirmLabel={isSendingInvite ? "Sending…" : "Send"}
+                    confirmTone="amber"
+                    confirmDisabled={isSendingInvite}
+                    onConfirm={async () => {
+                      setInviteModalOpen(false);
+                      await onSendInvite();
+                    }}
+                    onClose={() => setInviteModalOpen(false)}
+                  >
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <label className="block">
+                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Signer Name</div>
+                        <input
+                          value={primarySignerName}
+                          onChange={(e) => setPrimarySignerName(e.target.value)}
+                          className="mt-1 w-full rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-amber-500/40"
+                          placeholder="Optional"
+                        />
+                      </label>
+                      <label className="block">
+                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Signer Email *</div>
+                        <input
+                          value={primarySignerEmail}
+                          onChange={(e) => setPrimarySignerEmail(e.target.value)}
+                          className="mt-1 w-full rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-amber-500/40"
+                          placeholder="name@email.com"
+                        />
+                      </label>
+                      <label className="block sm:col-span-2">
+                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">CC Emails</div>
+                        <input
+                          value={ccEmails}
+                          onChange={(e) => setCcEmails(e.target.value)}
+                          className="mt-1 w-full rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-amber-500/40"
+                          placeholder="comma-separated (optional)"
+                        />
+                      </label>
+                    </div>
+                  </Modal>
+
+                  <Modal
+                    open={archiveModalOpen}
+                    title="Archive Now"
+                    description="Archives the signed record into Minute Book + Verified Registry (idempotent)."
+                    confirmLabel={isArchiving ? "Archiving…" : "Archive"}
+                    confirmTone="emerald"
+                    confirmDisabled={isArchiving || archiveLocked || selected?.envelope_status !== "completed"}
+                    onConfirm={async () => {
+                      setArchiveModalOpen(false);
+                      await onArchiveNow();
+                    }}
+                    onClose={() => setArchiveModalOpen(false)}
+                  >
+                    <div className="text-[12px] text-slate-300">
+                      If this record is already archived, the system will return{" "}
+                      <span className="text-slate-100 font-semibold">already_archived</span> and do nothing else.
+                    </div>
+                  </Modal>
+
+                  <Modal
+                    open={resealModalOpen}
+                    title="Re-seal / Repair"
+                    description="Repairs missing archive pointers safely (no rewiring; lane-safe)."
+                    confirmLabel={isResealing ? "Working…" : "Re-seal"}
+                    confirmTone="amber"
+                    confirmDisabled={isResealing || selected?.envelope_status !== "completed"}
+                    onConfirm={async () => {
+                      setResealModalOpen(false);
+                      await onRepairReseal();
+                    }}
+                    onClose={() => setResealModalOpen(false)}
+                  >
+                    <div className="text-[12px] text-slate-300">
+                      Intended for: “Signed but missing archive evidence” or “Object not found” pointer drift.
+                    </div>
+                  </Modal>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* RIGHT: Sidecar */}
+          <div className="col-span-12 lg:col-span-3">
+            <div className="rounded-3xl border border-white/10 bg-black/20 overflow-hidden">
+              <div className="px-4 py-3 border-b border-white/10 bg-gradient-to-b from-white/[0.05] to-transparent">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[11px] uppercase tracking-[0.22em] text-white/50">Sidecar</div>
+                  <div className="text-[11px] text-white/35">Read-only</div>
                 </div>
 
-                <div className="p-4">
-                  {!selected ? (
-                    <div className="text-[12px] text-slate-400">Select a record to view authority data.</div>
-                  ) : rightTab === "portal" ? (
-                    <>
-                      <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Portal terminals</div>
-                      <div className="mt-3 grid grid-cols-2 gap-2">
-                        {portal.signer_url ? portalBtn(portal.signer_url, "Signer") : null}
-                        {portal.viewer_url ? portalBtn(portal.viewer_url, "Viewer") : null}
-                        {portal.verify_url ? portalBtn(portal.verify_url, "Verify") : null}
-                        {portal.certificate_url ? portalBtn(portal.certificate_url, "Certificate") : null}
-                      </div>
-
-                      {portalError ? (
-                        <div className="mt-3 rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-200">
-                          {portalError}
-                        </div>
-                      ) : null}
-
-                      <div className="mt-4 rounded-2xl border border-white/10 bg-black/10 p-3">
-                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Envelope</div>
-                        <div className="mt-2 text-[12px] text-slate-200">
-                          <span className="text-slate-400">ID:</span>{" "}
-                          <span className="font-semibold">{selected.envelope_id ?? "—"}</span>
-                        </div>
-                        <div className="mt-1 text-[12px] text-slate-200">
-                          <span className="text-slate-400">Status:</span>{" "}
-                          <span className="font-semibold">{selected.envelope_status ?? "—"}</span>
-                        </div>
-                      </div>
-                    </>
-                  ) : rightTab === "axiom" ? (
-                    <>
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">AXIOM</div>
-                          <div className="mt-1 text-[12px] text-slate-300">
-                            Advisory-only intelligence sidecar (record-scoped)
-                          </div>
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={() => onRunAxiomReview()}
-                          disabled={axiomLoading || !selected?.ledger_id}
-                          className={cx(
-                            "rounded-full border border-cyan-500/40 bg-cyan-500/15 px-3 py-1.5 text-[11px] font-semibold text-cyan-100 hover:bg-cyan-500/20 transition",
-                            axiomLoading || !selected?.ledger_id ? "opacity-60 cursor-not-allowed" : ""
-                          )}
-                        >
-                          {axiomLoading ? "Running…" : "Run review"}
-                        </button>
-                      </div>
-
-                      {axiomError ? (
-                        <div className="mt-3 rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-200">
-                          {axiomError}
-                        </div>
-                      ) : null}
-                      {axiomInfo ? (
-                        <div className="mt-3 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-[12px] text-emerald-200">
-                          {axiomInfo}
-                        </div>
-                      ) : null}
-
-                      <div className="mt-4 flex flex-wrap gap-2">
-                        {axiomTabBtn("advisory", "Advisory")}
-                        {axiomTabBtn("summary", "Summary")}
-                        {axiomTabBtn("analysis", "Analysis")}
-                        {axiomTabBtn("advice", "Advice")}
-                      </div>
-
-                      <div className="mt-4 rounded-2xl border border-white/10 bg-black/10 p-4">
-                        {axiomTab === "advisory" ? (
-                          <>
-                            <div className="flex items-center justify-between">
-                              <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">
-                                Advisory signal
-                              </div>
-                              <span
-                                className={cx("h-2.5 w-2.5 rounded-full", riskLightClasses(axiomAdvisory.severity))}
-                                title={riskLabel(axiomAdvisory.severity)}
-                              />
-                            </div>
-                            <ul className="mt-3 space-y-2">
-                              {axiomAdvisory.bullets.map((b, i) => (
-                                <li key={i} className="text-[12px] text-slate-200">
-                                  <span className="text-amber-200">•</span> {b}
-                                </li>
-                              ))}
-                            </ul>
-                          </>
-                        ) : axiomTab === "summary" ? (
-                          <>
-                            <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Latest summary</div>
-                            <div className="mt-2 text-[11px] text-slate-400">
-                              {axiomLatest.summary?.generated_at ? fmt(axiomLatest.summary.generated_at) : "—"}{" "}
-                              {axiomLatest.summary?.model ? `• ${axiomLatest.summary.model}` : ""}
-                            </div>
-                            <div className="mt-3 whitespace-pre-wrap text-[12px] text-slate-200">
-                              {axiomLatest.summary?.summary ?? "—"}
-                            </div>
-                          </>
-                        ) : axiomTab === "analysis" ? (
-                          <>
-                            <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Latest analysis</div>
-                            <div className="mt-2 text-[11px] text-slate-400">
-                              {axiomLatest.analysis?.generated_at ? fmt(axiomLatest.analysis.generated_at) : "—"}{" "}
-                              {axiomLatest.analysis?.model ? `• ${axiomLatest.analysis.model}` : ""}
-                            </div>
-                            <div className="mt-3 whitespace-pre-wrap text-[12px] text-slate-200">
-                              {axiomLatest.analysis?.analysis ?? "—"}
-                            </div>
-                          </>
-                        ) : (
-                          <>
-                            <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Latest advice</div>
-                            <div className="mt-2 text-[11px] text-slate-400">
-                              {axiomLatest.advice?.generated_at ? fmt(axiomLatest.advice.generated_at) : "—"}{" "}
-                              {axiomLatest.advice?.model ? `• ${axiomLatest.advice.model}` : ""}
-                            </div>
-                            <div className="mt-3 whitespace-pre-wrap text-[12px] text-slate-200">
-                              {axiomLatest.advice?.advice ?? "—"}
-                            </div>
-                            {axiomLatest.advice?.recommendation ? (
-                              <div className="mt-3 rounded-2xl border border-cyan-500/30 bg-cyan-500/10 p-3 text-[12px] text-cyan-100">
-                                <div className="text-[10px] uppercase tracking-[0.22em] text-cyan-200">Recommendation</div>
-                                <div className="mt-2 whitespace-pre-wrap">{axiomLatest.advice.recommendation}</div>
-                              </div>
-                            ) : null}
-                          </>
-                        )}
-                      </div>
-                    </>
-                  ) : rightTab === "evidence" ? (
-                    <>
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Evidence</div>
-                          <div className="mt-1 text-[12px] text-slate-300">
-                            Minute Book + Verified pointers (lane-safe)
-                          </div>
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={() => onViewArchivePdf()}
-                          disabled={isOpeningArchive}
-                          className={cx(
-                            "rounded-full border border-amber-500/40 bg-amber-500/15 px-3 py-1.5 text-[11px] font-semibold text-amber-100 hover:bg-amber-500/20 transition",
-                            isOpeningArchive ? "opacity-60 cursor-not-allowed" : ""
-                          )}
-                        >
-                          {isOpeningArchive ? "Opening…" : "View PDF"}
-                        </button>
-                      </div>
-
-                      {evidenceError ? (
-                        <div className="mt-3 rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-200">
-                          {evidenceError}
-                        </div>
-                      ) : null}
-
-                      <div className="mt-4 rounded-2xl border border-white/10 bg-black/10 p-4">
-                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Minute Book entry</div>
-                        <div className="mt-2 text-[12px] text-slate-200">
-                          <span className="text-slate-400">ID:</span>{" "}
-                          <span className="font-semibold">{evidence.minute_book_entry_id ?? "—"}</span>
-                        </div>
-                        <div className="mt-1 text-[12px] text-slate-200">
-                          <span className="text-slate-400">Title:</span>{" "}
-                          <span className="font-semibold">{evidence.minute_book_title ?? "—"}</span>
-                        </div>
-                        <div className="mt-1 text-[12px] text-slate-200">
-                          <span className="text-slate-400">Storage:</span>{" "}
-                          <span className="font-semibold">{evidence.minute_book_storage_path ?? "—"}</span>
-                        </div>
-                      </div>
-
-                      <div className="mt-3 rounded-2xl border border-white/10 bg-black/10 p-4">
-                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Verified document</div>
-                        <div className="mt-2 text-[12px] text-slate-200">
-                          <span className="text-slate-400">ID:</span>{" "}
-                          <span className="font-semibold">{evidence.verified_document?.id ?? "—"}</span>
-                        </div>
-                        <div className="mt-1 text-[12px] text-slate-200">
-                          <span className="text-slate-400">Bucket:</span>{" "}
-                          <span className="font-semibold">{evidence.verified_document?.storage_bucket ?? "—"}</span>
-                        </div>
-                        <div className="mt-1 text-[12px] text-slate-200">
-                          <span className="text-slate-400">Path:</span>{" "}
-                          <span className="font-semibold">{evidence.verified_document?.storage_path ?? "—"}</span>
-                        </div>
-                        <div className="mt-1 text-[12px] text-slate-200">
-                          <span className="text-slate-400">Hash:</span>{" "}
-                          <span className="font-semibold">{evidence.verified_document?.file_hash ?? "—"}</span>
-                        </div>
-                      </div>
-
-                      <div className="mt-3 rounded-2xl border border-white/10 bg-black/10 p-4">
-                        <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Supporting documents</div>
-
-                        {evidenceLoading ? (
-                          <div className="mt-3 text-[12px] text-slate-400">Loading…</div>
-                        ) : evidence.supporting_docs.length === 0 ? (
-                          <div className="mt-3 text-[12px] text-slate-400">No supporting docs.</div>
-                        ) : (
-                          <div className="mt-3 space-y-2">
-                            {evidence.supporting_docs.map((d) => (
-                              <div
-                                key={d.id}
-                                className="rounded-2xl border border-white/10 bg-black/10 px-3 py-2"
-                              >
-                                <div className="flex items-center justify-between gap-3">
-                                  <div className="min-w-0">
-                                    <div className="text-[12px] font-semibold text-slate-200">
-                                      {d.file_name ?? d.doc_type ?? "Document"}
-                                    </div>
-                                    <div className="mt-1 text-[11px] text-slate-400">
-                                      {d.doc_type ?? "—"} • {d.mime_type ?? "—"}
-                                    </div>
-                                  </div>
-
-                                  {d.file_path ? (
-                                    <button
-                                      type="button"
-                                      onClick={() => openStorageObject("minute_book", d.file_path!)}
-                                      className="rounded-full border border-white/10 bg-black/20 px-3 py-1.5 text-[11px] font-semibold text-slate-200 hover:bg-black/30 hover:border-white/15 transition"
-                                    >
-                                      Open
-                                    </button>
-                                  ) : (
-                                    <span className="text-[11px] text-slate-500">No path</span>
-                                  )}
-                                </div>
-
-                                <div className="mt-2 text-[11px] text-slate-400 break-all">
-                                  {d.file_path ?? "—"}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    </>
-                  ) : (
-                    <div className="text-[12px] text-slate-400">Notes panel reserved.</div>
-                  )}
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {(["evidence", "portal", "axiom", "intent", "notes"] as RightTab[]).map((k) => (
+                    <button
+                      key={k}
+                      type="button"
+                      onClick={() => setRightTab(k)}
+                      className={cx(
+                        "rounded-full px-3 py-1.5 text-[10px] font-semibold tracking-[0.18em] uppercase border transition",
+                        rightTab === k
+                          ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
+                          : "border-white/10 bg-black/10 text-white/60 hover:border-white/20 hover:text-white/80"
+                      )}
+                    >
+                      {k}
+                    </button>
+                  ))}
                 </div>
               </div>
 
-              {/* Actions footer */}
-              {selected ? (
-                <div className="mt-4 rounded-3xl border border-white/10 bg-black/20 overflow-hidden">
-                  <div className="px-4 py-3 border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent">
-                    <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Actions</div>
-                    <div className="mt-1 text-[12px] text-slate-300">Authority operations (no wiring changes)</div>
+              <div className="p-4 space-y-3 max-h-[56vh] lg:max-h-[64vh] overflow-auto">
+                {/* Evidence */}
+                {rightTab === "evidence" ? (
+                  <div className="space-y-3">
+                    <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">Archive Evidence</div>
+
+                    {evidenceError ? (
+                      <div className="rounded-2xl border border-rose-500/25 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-100">
+                        {evidenceError}
+                      </div>
+                    ) : null}
+
+                    {evidenceLoading ? (
+                      <div className="text-[12px] text-white/50">Loading…</div>
+                    ) : (
+                      <>
+                        <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                          <div className="text-[11px] text-white/45">Minute Book</div>
+                          <div className="mt-1 text-[12px] text-white/85">
+                            {evidence.minute_book_entry_id ? (
+                              <>
+                                <div className="font-semibold text-white/90">{evidence.minute_book_title ?? "—"}</div>
+                                <div className="text-white/45 break-all">{evidence.minute_book_entry_id}</div>
+                              </>
+                            ) : (
+                              "—"
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                          <div className="text-[11px] text-white/45">Verified Registry</div>
+                          <div className="mt-1 text-[12px] text-white/85">
+                            {evidence.verified_document?.id ? (
+                              <>
+                                <div className="text-white/90 font-semibold">{evidence.verified_document.verification_level ?? "verified"}</div>
+                                <div className="text-white/45 break-all">{evidence.verified_document.id}</div>
+                              </>
+                            ) : (
+                              "—"
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                          <div className="text-[11px] text-white/45">Supporting Documents</div>
+                          {evidence.supporting_docs.length === 0 ? (
+                            <div className="mt-1 text-[12px] text-white/50">—</div>
+                          ) : (
+                            <div className="mt-2 space-y-2">
+                              {evidence.supporting_docs.slice(0, 6).map((d) => (
+                                <div key={d.id} className="rounded-xl border border-white/10 bg-black/10 p-2">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <div className="min-w-0">
+                                      <div className="text-[12px] font-semibold text-white/85 truncate">
+                                        {d.file_name ?? d.doc_type ?? "Document"}
+                                      </div>
+                                      <div className="text-[11px] text-white/45">{d.doc_type ?? "—"}</div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      className="rounded-xl border border-white/10 bg-black/15 px-2 py-1 text-[11px] font-semibold text-white/75 hover:bg-black/25 hover:border-white/20 transition"
+                                      disabled={!d.file_path}
+                                      onClick={async () => {
+                                        try {
+                                          if (!d.file_path) return;
+                                          await openStorageObject("minute_book", d.file_path);
+                                        } catch (e: any) {
+                                          flashError(e?.message || "Unable to open document.");
+                                        }
+                                      }}
+                                    >
+                                      Open
+                                    </button>
+                                  </div>
+                                </div>
+                              ))}
+                              {evidence.supporting_docs.length > 6 ? (
+                                <div className="text-[11px] text-white/40">+ {evidence.supporting_docs.length - 6} more</div>
+                              ) : null}
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    )}
                   </div>
+                ) : null}
 
-                  <div className="p-4 space-y-2">
-                    <button
-                      type="button"
-                      onClick={() => setStartModalOpen(true)}
-                      disabled={!!selected.envelope_id}
-                      className={cx(
-                        "w-full rounded-2xl border px-4 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase transition",
-                        "border-slate-800 bg-slate-950/40 text-slate-200 hover:border-slate-700 hover:bg-slate-950/55",
-                        !!selected.envelope_id ? "opacity-60 cursor-not-allowed" : ""
-                      )}
-                    >
-                      Start envelope
-                    </button>
+                {/* Portal */}
+                {rightTab === "portal" ? (
+                  <div className="space-y-3">
+                    <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">Portal URLs</div>
+                    {portalError ? (
+                      <div className="rounded-2xl border border-rose-500/25 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-100">
+                        {portalError}
+                      </div>
+                    ) : null}
 
-                    <button
-                      type="button"
-                      onClick={() => setInviteModalOpen(true)}
-                      disabled={!selected.envelope_id}
-                      className={cx(
-                        "w-full rounded-2xl border px-4 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase transition",
-                        "border-slate-800 bg-slate-950/40 text-slate-200 hover:border-slate-700 hover:bg-slate-950/55",
-                        !selected.envelope_id ? "opacity-60 cursor-not-allowed" : ""
-                      )}
-                    >
-                      Send invite
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setArchiveModalOpen(true)}
-                      disabled={!selected.envelope_id || selected.envelope_status !== "completed" || archiveLocked}
-                      className={cx(
-                        "w-full rounded-2xl border px-4 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase transition",
-                        "border-amber-500/40 bg-amber-500/10 text-amber-100 hover:bg-amber-500/15",
-                        !selected.envelope_id || selected.envelope_status !== "completed" || archiveLocked
-                          ? "opacity-60 cursor-not-allowed"
-                          : ""
-                      )}
-                    >
-                      Archive now
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setResealModalOpen(true)}
-                      disabled={selected.envelope_status !== "completed"}
-                      className={cx(
-                        "w-full rounded-2xl border px-4 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase transition",
-                        "border-slate-800 bg-slate-950/40 text-slate-200 hover:border-slate-700 hover:bg-slate-950/55",
-                        selected.envelope_status !== "completed" ? "opacity-60 cursor-not-allowed" : ""
-                      )}
-                    >
-                      Re-seal/Repair
-                    </button>
+                    {!selected?.envelope_id ? (
+                      <div className="text-[12px] text-white/50">Start signature to generate portal URLs.</div>
+                    ) : (
+                      <div className="space-y-2">
+                        {(["signer_url", "viewer_url", "verify_url", "certificate_url"] as Array<keyof PortalUrls>).map((k) => (
+                          <div key={k} className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                            <div className="text-[11px] text-white/45">{k.replace("_", " ")}</div>
+                            <div className="mt-1 flex items-center justify-between gap-2">
+                              <div className="text-[11px] text-white/70 break-all">{portal[k] ?? "—"}</div>
+                              <button
+                                type="button"
+                                className="rounded-xl border border-white/10 bg-black/15 px-2 py-1 text-[11px] font-semibold text-white/75 hover:bg-black/25 hover:border-white/20 transition"
+                                disabled={!portal[k]}
+                                onClick={() => {
+                                  const u = portal[k];
+                                  if (!u) return;
+                                  window.open(u, "_blank", "noopener,noreferrer");
+                                }}
+                              >
+                                Open
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                </div>
-              ) : null}
+                ) : null}
+
+                {/* AXIOM */}
+                {rightTab === "axiom" ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">AXIOM</div>
+                      <button
+                        type="button"
+                        className="rounded-xl border border-white/10 bg-black/15 px-2 py-1 text-[11px] font-semibold text-white/75 hover:bg-black/25 hover:border-white/20 transition"
+                        disabled={axiomLoading}
+                        onClick={() => onRunAxiom()}
+                      >
+                        Run
+                      </button>
+                    </div>
+
+                    {axiomError ? (
+                      <div className="rounded-2xl border border-rose-500/25 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-100">
+                        {axiomError}
+                      </div>
+                    ) : null}
+                    {axiomInfo ? (
+                      <div className="rounded-2xl border border-emerald-500/25 bg-emerald-500/10 px-4 py-3 text-[12px] text-emerald-100">
+                        {axiomInfo}
+                      </div>
+                    ) : null}
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      {(["advisory", "summary", "analysis", "advice"] as AxiomTab[]).map((k) => (
+                        <button
+                          key={k}
+                          type="button"
+                          onClick={() => setAxiomTab(k)}
+                          className={cx(
+                            "rounded-full px-3 py-1.5 text-[10px] font-semibold tracking-[0.18em] uppercase border transition",
+                            axiomTab === k
+                              ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
+                              : "border-white/10 bg-black/10 text-white/60 hover:border-white/20 hover:text-white/80"
+                          )}
+                        >
+                          {k}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                      {axiomTab === "advisory" ? (
+                        <div className="text-[12px] text-white/70">
+                          AXIOM is advisory-only. It never blocks Forge workflows.
+                          <div className="mt-2 text-white/45">
+                            Latest Summary: <span className="text-white/70">{fmt(axiomLatest.summary?.generated_at ?? null)}</span>
+                          </div>
+                        </div>
+                      ) : null}
+
+                      {axiomTab === "summary" ? (
+                        <div className="text-[12px] text-white/75 whitespace-pre-wrap">
+                          {axiomLatest.summary?.summary ?? "—"}
+                        </div>
+                      ) : null}
+
+                      {axiomTab === "analysis" ? (
+                        <div className="text-[12px] text-white/75 whitespace-pre-wrap">
+                          {axiomLatest.analysis?.analysis ?? "—"}
+                        </div>
+                      ) : null}
+
+                      {axiomTab === "advice" ? (
+                        <div className="text-[12px] text-white/75 whitespace-pre-wrap">
+                          {axiomLatest.advice?.advice ?? "—"}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+
+                {/* INTENT (explicit, operator-driven) */}
+                {rightTab === "intent" ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">Intent</div>
+
+                      {!intentHeader ? (
+                        <button
+                          type="button"
+                          onClick={() => setIntentCreateOpen(true)}
+                          className="rounded-xl border border-amber-500/35 bg-amber-500/10 px-2 py-1 text-[11px] font-semibold text-amber-100 hover:bg-amber-500/15 transition"
+                        >
+                          Create
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => doBackfillIntentArtifacts()}
+                          disabled={intentBackfilling}
+                          className={cx(
+                            "rounded-xl border px-2 py-1 text-[11px] font-semibold transition",
+                            intentBackfilling
+                              ? "border-slate-700 bg-slate-950/40 text-slate-400 cursor-not-allowed"
+                              : "border-amber-500/35 bg-amber-500/10 text-amber-100 hover:bg-amber-500/15"
+                          )}
+                        >
+                          {intentBackfilling ? "Working…" : "Backfill"}
+                        </button>
+                      )}
+                    </div>
+
+                    {intentError ? (
+                      <div className="rounded-2xl border border-rose-500/25 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-100">
+                        {intentError}
+                      </div>
+                    ) : null}
+                    {intentInfo ? (
+                      <div className="rounded-2xl border border-emerald-500/25 bg-emerald-500/10 px-4 py-3 text-[12px] text-emerald-100">
+                        {intentInfo}
+                      </div>
+                    ) : null}
+
+                    {intentLoading ? (
+                      <div className="text-[12px] text-white/50">Loading…</div>
+                    ) : !intentHeader ? (
+                      <div className="rounded-2xl border border-white/10 bg-black/10 p-3 text-[12px] text-white/70">
+                        No Intent linked (by design). Use <span className="font-semibold text-white/85">Create Intent</span> to establish an explicit governance link.
+                      </div>
+                    ) : (
+                      <>
+                        <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                          <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">Intent</div>
+                          <div className="mt-1 text-[12px] text-white/85 font-semibold">
+                            {intentHeader.title ?? "Untitled Intent"}
+                          </div>
+                          <div className="mt-1 text-[11px] text-white/50 break-all">{intentHeader.id}</div>
+                          <div className="mt-2 text-[12px] text-white/70 whitespace-pre-wrap">{intentHeader.reason ?? "—"}</div>
+                        </div>
+
+                        <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                          <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">Artifacts</div>
+                          {intentArtifacts.length === 0 ? (
+                            <div className="mt-2 text-[12px] text-white/55">
+                              Link exists but attachments are missing. Use <span className="font-semibold">Backfill</span>.
+                            </div>
+                          ) : (
+                            <div className="mt-2 space-y-2">
+                              {intentArtifacts.slice(0, 8).map((a) => (
+                                <div key={a.id} className="rounded-xl border border-white/10 bg-black/10 p-2">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <div className="min-w-0">
+                                      <div className="text-[11px] uppercase tracking-[0.18em] text-white/45">{a.artifact_type}</div>
+                                      <div className="mt-1 text-[12px] text-white/80 break-all">{a.artifact_id}</div>
+                                    </div>
+                                    <div className="text-[11px] text-white/40">{fmt(a.created_at)}</div>
+                                  </div>
+                                </div>
+                              ))}
+                              {intentArtifacts.length > 8 ? (
+                                <div className="text-[11px] text-white/40">+ {intentArtifacts.length - 8} more</div>
+                              ) : null}
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    )}
+
+                    <Modal
+                      open={intentCreateOpen}
+                      title="Create Intent"
+                      description="Explicit, operator-driven governance link (never automatic)."
+                      confirmLabel={intentCreating ? "Creating…" : "Create"}
+                      confirmTone="amber"
+                      confirmDisabled={intentCreating}
+                      onConfirm={async () => {
+                        await doCreateIntentAndLink();
+                      }}
+                      onClose={() => setIntentCreateOpen(false)}
+                    >
+                      <div className="space-y-3">
+                        <label className="block">
+                          <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Title *</div>
+                          <input
+                            value={intentTitle}
+                            onChange={(e) => setIntentTitle(e.target.value)}
+                            className="mt-1 w-full rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-amber-500/40"
+                            placeholder="Intent title"
+                          />
+                        </label>
+
+                        <label className="block">
+                          <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Reason *</div>
+                          <textarea
+                            value={intentReason}
+                            onChange={(e) => setIntentReason(e.target.value)}
+                            className="mt-1 w-full min-h-[90px] rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-amber-500/40"
+                            placeholder="Why are you creating this intent? (required)"
+                          />
+                        </label>
+
+                        <label className="flex items-center gap-2 text-[12px] text-slate-200">
+                          <input
+                            type="checkbox"
+                            checked={intentBackfillAfterCreate}
+                            onChange={(e) => setIntentBackfillAfterCreate(e.target.checked)}
+                          />
+                          Backfill Forge artifacts after create (default ON)
+                        </label>
+
+                        <div className="text-[12px] text-slate-400">
+                          Backfill calls the guarded helper{" "}
+                          <span className="text-slate-200 font-semibold">attach_intent_artifacts_from_ledger</span> after the link exists.
+                        </div>
+                      </div>
+                    </Modal>
+                  </div>
+                ) : null}
+
+                {/* Notes (placeholder, stays stable) */}
+                {rightTab === "notes" ? (
+                  <div className="space-y-3">
+                    <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">Notes</div>
+                    <div className="rounded-2xl border border-white/10 bg-black/10 p-3 text-[12px] text-white/60">
+                      Operator notes panel (optional). No wiring changes.
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             </div>
           </div>
         </div>
+
+        {/* Footer hint */}
+        <div className="mt-5 text-[11px] text-white/35">
+          Lane-safe via <span className="text-white/55 font-semibold">is_test</span>, entity-safe via{" "}
+          <span className="text-white/55 font-semibold">OsEntityContext</span>. Intent is explicit + operator-driven.
+        </div>
       </div>
-
-      {/* ============================
-          MODALS
-          ============================ */}
-
-      <Modal
-        open={startModalOpen}
-        title="Start envelope"
-        description="Create a signature envelope for this record (no wiring changes)."
-        confirmLabel={isStarting ? "Starting…" : "Start"}
-        confirmTone="amber"
-        confirmDisabled={isStarting}
-        onConfirm={doStartEnvelope}
-        onClose={() => setStartModalOpen(false)}
-      >
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div>
-            <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Signer name</div>
-            <input
-              value={primarySignerName}
-              onChange={(e) => setPrimarySignerName(e.target.value)}
-              placeholder="Full name"
-              className="mt-2 w-full rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100 placeholder:text-slate-500 outline-none
-                         focus:border-amber-500/40 focus:ring-2 focus:ring-amber-400/15"
-            />
-          </div>
-          <div>
-            <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Signer email</div>
-            <input
-              value={primarySignerEmail}
-              onChange={(e) => setPrimarySignerEmail(e.target.value)}
-              placeholder="name@domain.com"
-              className="mt-2 w-full rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100 placeholder:text-slate-500 outline-none
-                         focus:border-amber-500/40 focus:ring-2 focus:ring-amber-400/15"
-            />
-          </div>
-        </div>
-
-        <div className="mt-3">
-          <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">CC emails (optional)</div>
-          <input
-            value={ccEmails}
-            onChange={(e) => setCcEmails(e.target.value)}
-            placeholder="comma,separated,emails@domain.com"
-            className="mt-2 w-full rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100 placeholder:text-slate-500 outline-none
-                       focus:border-amber-500/40 focus:ring-2 focus:ring-amber-400/15"
-          />
-        </div>
-
-        <div className="mt-3 text-[11px] text-slate-400">
-          This uses <span className="text-slate-200 font-semibold">start-signature</span> and preserves existing contracts.
-        </div>
-      </Modal>
-
-      <Modal
-        open={inviteModalOpen}
-        title="Send signature invite"
-        description="Send the signature invite for the current envelope (no wiring changes)."
-        confirmLabel={isSendingInvite ? "Sending…" : "Send"}
-        confirmTone="amber"
-        confirmDisabled={isSendingInvite}
-        onConfirm={doSendInvite}
-        onClose={() => setInviteModalOpen(false)}
-      >
-        <div className="text-[12px] text-slate-200">
-          Envelope: <span className="font-semibold">{selected?.envelope_id ?? "—"}</span>
-        </div>
-        <div className="mt-2 text-[11px] text-slate-400">
-          This uses <span className="text-slate-200 font-semibold">send-signature-invite</span>.
-        </div>
-      </Modal>
-
-      <Modal
-        open={archiveModalOpen}
-        title="Archive now"
-        description="Seal and register the signed record (Minute Book + Verified)."
-        confirmLabel={isArchiving ? "Archiving…" : "Archive"}
-        confirmTone="amber"
-        confirmDisabled={isArchiving}
-        onConfirm={doArchiveSigned}
-        onClose={() => setArchiveModalOpen(false)}
-      >
-        <div className="text-[12px] text-slate-200">
-          Envelope: <span className="font-semibold">{selected?.envelope_id ?? "—"}</span>
-        </div>
-        <div className="mt-2 text-[11px] text-slate-400">
-          This uses <span className="text-slate-200 font-semibold">archive-signed-resolution</span> (idempotent).
-        </div>
-        {archiveLocked ? (
-          <div className="mt-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[12px] text-amber-200">
-            Already archived — no action required.
-          </div>
-        ) : null}
-      </Modal>
-
-      <Modal
-        open={resealModalOpen}
-        title="Re-seal / Repair"
-        description="Idempotent repair: regenerate archive pointers and registry artifacts."
-        confirmLabel={isResealing ? "Working…" : "Run"}
-        confirmTone="slate"
-        confirmDisabled={isResealing}
-        onConfirm={onRepairReseal}
-        onClose={() => setResealModalOpen(false)}
-      >
-        <div className="text-[12px] text-slate-200">
-          Record: <span className="font-semibold">{selected?.ledger_id ?? "—"}</span>
-        </div>
-        <div className="mt-2 text-[11px] text-slate-400">
-          This uses <span className="text-slate-200 font-semibold">archive-save-document</span> (repair mode).
-        </div>
-      </Modal>
     </div>
   );
 }
