@@ -107,8 +107,7 @@ function parseAdvisory(md: string) {
 
   let section: Key = "other";
 
-  const norm = (h: string) =>
-    h.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const norm = (h: string) => h.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
   const pickSection = (heading: string): Key => {
     const h = norm(heading);
@@ -144,6 +143,28 @@ function parseAdvisory(md: string) {
 }
 
 /**
+ * Remove “header leakage” that sometimes shows up as a first bullet after parsing.
+ * This is a presentation-only hygiene guard (NO wiring changes).
+ */
+function cleanHeaderLeak(s: string) {
+  let t = safeStr(s);
+  if (!t) return "";
+
+  // Drop memo/advisory banner fragments that can sneak into the first bullet
+  // (case-insensitive, resilient to punctuation/spacing)
+  t = t.replace(/^\s*(axiom\s+council\s+advisory|council\s+advisory)[\s\S]{0,400}?\b(executive\s+summary)\b\s*/i, "");
+  t = t.replace(/^\s*(record|source\s+record|ledger\s+status|status|lane)\s*:\s*.*$/gim, "").trim();
+
+  // If the first line still looks like an orphaned heading fragment, remove it
+  const lines = t.split("\n").map((x) => x.trim()).filter(Boolean);
+  if (lines.length && /^(council\s+advisory|axiom\s+council\s+advisory)$/i.test(lines[0])) {
+    lines.shift();
+  }
+
+  return lines.join("\n").trim();
+}
+
+/**
  * Wrap text into lines by measuring font width (real PDF wrapping, not char-count guessing).
  */
 function wrapByWidth(text: string, font: any, size: number, maxWidth: number) {
@@ -168,8 +189,7 @@ function wrapByWidth(text: string, font: any, size: number, maxWidth: number) {
 
 Deno.serve(async (req) => {
   try {
-    if (req.method === "OPTIONS")
-      return new Response(null, { status: 204, headers: corsHeaders });
+    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
     if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);
 
     const body = (await req.json().catch(() => ({}))) as ReqBody;
@@ -230,8 +250,7 @@ Deno.serve(async (req) => {
         (clientMemo.findings?.length ?? 0) > 0 ||
         !isEmptyText(clientMemo.notes));
 
-    let memoTitle =
-      safeStr(clientMemo?.title) || "Council Advisory — Evidence-based Analysis";
+    let memoTitle = safeStr(clientMemo?.title) || "Council Advisory — Evidence-based Analysis";
 
     let executive_summary = safeStr(clientMemo?.executive_summary);
     let risks = safeStr(clientMemo?.risks);
@@ -244,6 +263,7 @@ Deno.serve(async (req) => {
     let sourceModel: string | null = null;
 
     if (!hasClientContent) {
+      // Pull latest Council advisory from ai_notes
       const { data: note } = await supabase
         .from("ai_notes")
         .select("id, title, content, model, created_at")
@@ -260,17 +280,22 @@ Deno.serve(async (req) => {
         memoTitle = "Council Advisory — Evidence-based Analysis";
 
         const parsed = parseAdvisory(note.content);
-        executive_summary = parsed.executive_summary || "";
-        risks = parsed.risks || "";
-        recommendations = parsed.recommendations || "";
-        questions = parsed.questions || "";
+
+        // ✅ critical hygiene guard (fixes your screenshot, no wiring change)
+        executive_summary = cleanHeaderLeak(parsed.executive_summary || "");
+        risks = cleanHeaderLeak(parsed.risks || "");
+        recommendations = cleanHeaderLeak(parsed.recommendations || "");
+        questions = cleanHeaderLeak(parsed.questions || "");
+
         notes = ""; // reserved for provenance line below
       } else {
+        // hard fallback (never blank)
         executive_summary =
           "No advisory content was available at generation time. Generate an advisory in Council and retry.";
       }
     }
 
+    // Final safety: never blank body
     if (
       isEmptyText(executive_summary) &&
       isEmptyText(risks) &&
@@ -290,7 +315,7 @@ Deno.serve(async (req) => {
 
     const pageSize: [number, number] = [612, 792]; // US Letter
 
-    const marginX = 54;
+    const marginX = 54; // court memo margins
     const marginTop = 62;
     const marginBottom = 54;
 
@@ -326,13 +351,7 @@ Deno.serve(async (req) => {
       y -= gapBottom;
     };
 
-    const drawTextLines = (
-      lines: string[],
-      size: number,
-      font: any,
-      color = black,
-      lineGap = 3,
-    ) => {
+    const drawTextLines = (lines: string[], size: number, font: any, color = black, lineGap = 3) => {
       for (const ln of lines) {
         ensureSpace(size + lineGap + 1);
         page.drawText(ln, { x: marginX, y, size, font, color });
@@ -354,6 +373,7 @@ Deno.serve(async (req) => {
 
       const rawLines = t.split("\n").map((l) => l.trim()).filter(Boolean);
 
+      // Normalize bullets: keep "-" and "•", otherwise treat as paragraph
       const bulletLines: string[] = [];
       let buffer: string[] = [];
 
@@ -375,6 +395,7 @@ Deno.serve(async (req) => {
       }
       flushBuffer();
 
+      // Render each as bullet if multiple, else paragraph
       if (bulletLines.length <= 1) {
         drawParagraph(bulletLines[0] ?? t, size);
         return;
@@ -383,6 +404,7 @@ Deno.serve(async (req) => {
       for (const item of bulletLines) {
         const lines = wrapByWidth(item, fontRegular, size, maxWidth - 14);
         ensureSpace(size + 4);
+
         page.drawText("•", { x: marginX, y, size, font: fontBold, color: black });
 
         for (const l of lines) {
@@ -413,18 +435,14 @@ Deno.serve(async (req) => {
       y -= 14;
     };
 
-    // ---- Header (FIXED: no overlap, no authority fight) ----
-    const headerTitle = memoTitle;
-    page.drawText(headerTitle, { x: marginX, y, size: 18, font: fontBold, color: black });
+    // ---- Header (no overlap, wrapped values, authority-safe labels) ----
+    page.drawText(memoTitle, { x: marginX, y, size: 18, font: fontBold, color: black });
     y -= 22;
 
     const recordTitle = safeStr(ledger.title) || record_id;
     const laneLabel = is_test ? "SANDBOX" : "RoT";
     const ledgerStatus = safeStr(ledger.status) || "—";
 
-    // Labels are explicit about authority boundaries:
-    // - "Ledger status" is what governance says
-    // - This memo stays "Advisory only" (disclaimer below)
     const metaLeft: Array<[string, string]> = [
       ["Source record", recordTitle],
       ["Ledger status", ledgerStatus],
@@ -439,9 +457,6 @@ Deno.serve(async (req) => {
     const rowFontSize = 10.5;
     const colGap = 18;
     const colWidth = (maxWidth - colGap) / 2;
-
-    const labelColor = gray;
-    const valueColor = black;
 
     const labelMaxWidth = (rows: Array<[string, string]>) => {
       let w = 0;
@@ -468,42 +483,34 @@ Deno.serve(async (req) => {
       const valueW = blockWidth - (labelW + pad);
 
       for (const [label, value] of rows) {
-        // label
         page.drawText(`${label}:`, {
           x,
           y: yy,
           size: rowFontSize,
           font: fontBold,
-          color: labelColor,
+          color: gray,
         });
 
-        // value wraps within its column (THIS prevents overlap)
         const vLines = wrapByWidth(value, fontRegular, rowFontSize, valueW);
-        for (let i = 0; i < vLines.length; i++) {
-          page.drawText(vLines[i], {
+        for (const ln of vLines) {
+          page.drawText(ln, {
             x: valueX,
             y: yy,
             size: rowFontSize,
             font: fontRegular,
-            color: valueColor,
+            color: black,
           });
           yy -= 14;
         }
-
-        // extra spacing between meta rows
         yy -= 2;
       }
       return yy;
     };
 
-    ensureSpace(80);
+    ensureSpace(84);
     const startY = y;
-
     const leftBottom = drawMetaBlock(marginX, metaLeft, leftLabelW, colWidth, startY);
-    const rightX = marginX + colWidth + colGap;
-    const rightBottom = drawMetaBlock(rightX, metaRight, rightLabelW, colWidth, startY);
-
-    // header ends after whichever column is taller
+    const rightBottom = drawMetaBlock(marginX + colWidth + colGap, metaRight, rightLabelW, colWidth, startY);
     y = Math.min(leftBottom, rightBottom) - 2;
 
     // Disclaimer line (strong boundary)
