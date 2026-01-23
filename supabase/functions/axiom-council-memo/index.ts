@@ -35,25 +35,48 @@ function json(resBody: unknown, status = 200) {
   });
 }
 
-function wrapText(text: string, maxChars: number) {
-  const words = (text || "").replace(/\r/g, "").split(/\s+/).filter(Boolean);
+function safeStr(s?: string) {
+  return (s ?? "").toString().trim();
+}
+
+// Presentation-only cleanup (keeps logic unchanged; just makes the PDF look court/enterprise)
+function cleanForPdf(input?: string) {
+  let t = safeStr(input);
+  if (!t) return t;
+
+  // strip some common markdown noise without changing meaning
+  t = t.replace(/\r/g, "");
+  t = t.replace(/```[\s\S]*?```/g, ""); // remove fenced blocks if present
+  t = t.replace(/^#{1,6}\s+/gm, ""); // headings
+  t = t.replace(/\*\*(.*?)\*\*/g, "$1"); // bold
+  t = t.replace(/\*(.*?)\*/g, "$1"); // italic
+  t = t.replace(/^\s*[-•]\s+/gm, "• "); // bullets
+  t = t.replace(/\n{3,}/g, "\n\n"); // collapse huge gaps
+  return t.trim();
+}
+
+function wrapTextToWidth(
+  text: string,
+  maxWidth: number,
+  font: any,
+  fontSize: number
+) {
+  const words = (text || "").split(/\s+/).filter(Boolean);
   const lines: string[] = [];
   let line = "";
+
   for (const w of words) {
-    const next = line ? `${line} ${w}` : w;
-    if (next.length > maxChars) {
+    const candidate = line ? `${line} ${w}` : w;
+    const width = font.widthOfTextAtSize(candidate, fontSize);
+    if (width > maxWidth) {
       if (line) lines.push(line);
       line = w;
     } else {
-      line = next;
+      line = candidate;
     }
   }
   if (line) lines.push(line);
   return lines;
-}
-
-function safeStr(s?: string) {
-  return (s ?? "").toString().trim();
 }
 
 async function sha256Hex(bytes: Uint8Array) {
@@ -94,102 +117,203 @@ Deno.serve(async (req) => {
     const is_test = !!ledger.is_test;
 
     const memo = body.memo ?? {
-      title: "AXIOM Council Memo",
+      title: "Council Advisory — AXIOM Evidence-based Analysis",
       executive_summary:
         "No memo payload was provided by the client. This memo was generated as a placeholder attachment.",
       findings: [],
       notes: "",
     };
 
-    // ==== PDF RENDER ====
+    // ==== PDF RENDER (layout polish only) ====
     const pdf = await PDFDocument.create();
     const fontRegular = await pdf.embedFont(StandardFonts.Helvetica);
     const fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
 
-    const page = pdf.addPage([612, 792]);
+    const page = pdf.addPage([612, 792]); // US Letter
     const { width, height } = page.getSize();
 
-    const marginX = 48;
-    let y = height - 56;
+    // Typographic system (neutral, court-friendly)
+    const marginX = 54;
+    const topY = height - 56;
+    const bodyWidth = width - marginX * 2;
 
-    const drawLine = () => {
+    const cText = rgb(0.08, 0.08, 0.08);
+    const cMuted = rgb(0.35, 0.35, 0.35);
+    const cRule = rgb(0.82, 0.82, 0.82);
+    const cShade = rgb(0.96, 0.96, 0.96);
+
+    const sTitle = 18;
+    const sSub = 10.5;
+    const sH = 12.5;
+    const sLabel = 10.5;
+    const sBody = 10.5;
+    const lh = 13.5; // line height for body
+
+    let y = topY;
+
+    const requireSpace = (need: number) => {
+      if (y < 72 + need) throw new Error("Memo too long (pagination not enabled).");
+    };
+
+    const hr = (gapBefore = 10, gapAfter = 12) => {
+      y -= gapBefore;
       page.drawLine({
         start: { x: marginX, y },
         end: { x: width - marginX, y },
         thickness: 1,
-        color: rgb(0.85, 0.85, 0.85),
+        color: cRule,
+      });
+      y -= gapAfter;
+    };
+
+    const drawKVPairs = (pairs: Array<[string, string]>) => {
+      const colGap = 18;
+      const colW = (bodyWidth - colGap) / 2;
+      const leftX = marginX;
+      const rightX = marginX + colW + colGap;
+
+      let rowY = y;
+
+      for (let i = 0; i < pairs.length; i += 2) {
+        requireSpace(18);
+
+        const [k1, v1] = pairs[i] ?? ["", ""];
+        const [k2, v2] = pairs[i + 1] ?? ["", ""];
+
+        // subtle row banding (very light)
+        page.drawRectangle({
+          x: marginX,
+          y: rowY - 14,
+          width: bodyWidth,
+          height: 18,
+          color: i % 4 === 0 ? cShade : rgb(1, 1, 1),
+        });
+
+        page.drawText(`${k1}:`, { x: leftX, y: rowY, size: 9.5, font: fontBold, color: cMuted });
+        page.drawText(v1, { x: leftX + 54, y: rowY, size: 9.5, font: fontRegular, color: cText });
+
+        if (k2) {
+          page.drawText(`${k2}:`, { x: rightX, y: rowY, size: 9.5, font: fontBold, color: cMuted });
+          page.drawText(v2, { x: rightX + 54, y: rowY, size: 9.5, font: fontRegular, color: cText });
+        }
+
+        rowY -= 20;
+      }
+
+      y = rowY + 2;
+    };
+
+    const heading = (text: string) => {
+      requireSpace(22);
+      page.drawText(text, { x: marginX, y, size: sH, font: fontBold, color: cText });
+      y -= 10;
+      page.drawLine({
+        start: { x: marginX, y },
+        end: { x: width - marginX, y },
+        thickness: 1,
+        color: cRule,
       });
       y -= 14;
     };
 
-    const drawTextBlock = (label: string, text: string, maxChars = 92) => {
-      const val = safeStr(text);
+    const paragraph = (text: string) => {
+      const val = cleanForPdf(text);
       if (!val) return;
-
-      page.drawText(label, { x: marginX, y, size: 11, font: fontBold });
-      y -= 14;
-
-      for (const line of wrapText(val, maxChars)) {
-        if (y < 70) throw new Error("Memo too long (pagination not enabled).");
-        page.drawText(line, { x: marginX, y, size: 10.5, font: fontRegular });
-        y -= 13;
+      const lines = wrapTextToWidth(val, bodyWidth, fontRegular, sBody);
+      for (const line of lines) {
+        requireSpace(lh + 2);
+        page.drawText(line, { x: marginX, y, size: sBody, font: fontRegular, color: cText });
+        y -= lh;
       }
       y -= 6;
     };
 
-    page.drawText(safeStr(memo.title) || "AXIOM Council Memo", {
-      x: marginX,
-      y,
-      size: 18,
-      font: fontBold,
-    });
-    y -= 20;
+    const labelBlock = (label: string, text: string) => {
+      const val = cleanForPdf(text);
+      if (!val) return;
+      requireSpace(18);
+      page.drawText(label, { x: marginX, y, size: sLabel, font: fontBold, color: cText });
+      y -= 14;
+      paragraph(val);
+    };
 
-    page.drawText(`Record: ${ledger.title ?? record_id}`, {
-      x: marginX,
-      y,
-      size: 10.5,
-      font: fontRegular,
-    });
-    y -= 14;
+    // ---- Title ----
+    const title = safeStr(memo.title) || "Council Advisory — AXIOM Evidence-based Analysis";
+    page.drawText(title, { x: marginX, y, size: sTitle, font: fontBold, color: cText });
+    y -= 24;
 
-    page.drawText(`Status: ${ledger.status ?? ""}   Lane: ${is_test ? "SANDBOX" : "RoT"}`, {
-      x: marginX,
-      y,
-      size: 10.5,
-      font: fontRegular,
-    });
-    y -= 10;
+    // ---- Metadata block ----
+    const recordTitle = safeStr(ledger.title) || record_id;
+    const laneLabel = is_test ? "SANDBOX" : "RoT";
+    const statusLabel = safeStr(ledger.status) || "—";
 
-    drawLine();
-    drawTextBlock("Executive summary", memo.executive_summary || "", 98);
+    drawKVPairs([
+      ["Record", recordTitle],
+      ["Record ID", record_id],
+      ["Status", statusLabel],
+      ["Lane", laneLabel],
+    ]);
 
-    if (memo.findings?.length) {
-      page.drawText("Findings", { x: marginX, y, size: 12.5, font: fontBold });
-      y -= 16;
+    // Disclaimer (small, muted)
+    requireSpace(20);
+    page.drawText(
+      "Advisory only. Evidence-based analysis to support Council review; not an approval or decision.",
+      { x: marginX, y, size: 9.5, font: fontRegular, color: cMuted }
+    );
+    y -= 12;
+
+    hr(10, 14);
+
+    // ---- Sections ----
+    heading("Executive Summary");
+    paragraph(memo.executive_summary || "");
+
+    const findings = memo.findings ?? [];
+    if (findings.length) {
+      heading("Risk & Clarity Assessment");
 
       let i = 1;
-      for (const f of memo.findings) {
-        const hdr =
-          `${i}. ${f.severity ? `(${f.severity}) ` : ""}${safeStr(f.title)}` +
-          `${f.blocking ? " [BLOCKING]" : ""}` +
-          `${f.category ? ` — ${f.category}` : ""}`;
+      for (const f of findings) {
+        const sev = f.severity ? `${f.severity}` : "";
+        const blk = f.blocking ? " • BLOCKING" : "";
+        const cat = f.category ? ` • ${safeStr(f.category)}` : "";
 
-        drawTextBlock(hdr, "", 98);
-        drawTextBlock("Evidence", f.evidence || "", 98);
-        drawTextBlock("Recommendation", f.recommendation || "", 98);
-        y -= 4;
+        const header = `${i}. ${safeStr(f.title)}${sev ? ` (${sev})` : ""}${blk}${cat}`;
+        requireSpace(20);
+        page.drawText(header, { x: marginX, y, size: 10.75, font: fontBold, color: cText });
+        y -= 14;
+
+        if (safeStr(f.evidence)) labelBlock("Evidence", f.evidence || "");
+        if (safeStr(f.recommendation)) labelBlock("Recommendation", f.recommendation || "");
+
+        // item divider
+        hr(6, 10);
         i++;
       }
     }
 
-    drawTextBlock("Additional notes", memo.notes || "", 98);
+    if (safeStr(memo.notes)) {
+      heading("Additional Notes");
+      paragraph(memo.notes || "");
+    }
 
-    page.drawText(`Generated ${new Date().toISOString()}`, {
+    // ---- Footer ----
+    const generatedAt = new Date().toISOString();
+    const footerY = 34;
+
+    page.drawLine({
+      start: { x: marginX, y: footerY + 18 },
+      end: { x: width - marginX, y: footerY + 18 },
+      thickness: 1,
+      color: cRule,
+    });
+
+    page.drawText(`Generated: ${generatedAt}`, {
       x: marginX,
-      y: 32,
+      y: footerY,
       size: 9,
       font: fontRegular,
+      color: cMuted,
     });
 
     const pdfBytes = await pdf.save();
