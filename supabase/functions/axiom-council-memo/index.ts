@@ -171,11 +171,40 @@ function wrapByWidth(text: string, font: any, size: number, maxWidth: number) {
   return lines;
 }
 
+/**
+ * Split a bullet into an Apple-style lead clause:
+ * - boldLead: first clause up to first period, otherwise first ~72 chars up to a word boundary
+ * - rest: remainder (regular)
+ * We keep this deterministic and minimal so it never "drifts".
+ */
+function splitBulletLead(text: string) {
+  const s = safeStr(text);
+  if (!s) return { boldLead: "", rest: "" };
+
+  const periodIdx = s.indexOf(".");
+  if (periodIdx > 0 && periodIdx < 160) {
+    const lead = s.slice(0, periodIdx + 1).trim();
+    const rest = s.slice(periodIdx + 1).trim();
+    return { boldLead: lead, rest };
+  }
+
+  // Fallback: bold a short first clause (word-safe) without forcing a fake heading
+  const max = 72;
+  if (s.length <= max) return { boldLead: s, rest: "" };
+
+  let cut = max;
+  while (cut > 28 && cut < s.length && s[cut] !== " ") cut--;
+  const lead = s.slice(0, cut).trim();
+  const rest = s.slice(cut).trim();
+  return { boldLead: lead, rest };
+}
+
 Deno.serve(async (req) => {
   try {
     if (req.method === "OPTIONS")
       return new Response(null, { status: 204, headers: corsHeaders });
-    if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);
+    if (req.method !== "POST")
+      return json({ ok: false, error: "POST only" }, 405);
 
     const body = (await req.json().catch(() => ({}))) as ReqBody;
     const record_id = safeStr(body?.record_id);
@@ -184,7 +213,10 @@ Deno.serve(async (req) => {
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
     if (!supabaseUrl || !serviceKey) {
-      return json({ ok: false, error: "Missing SUPABASE_URL or SERVICE_ROLE key" }, 500);
+      return json(
+        { ok: false, error: "Missing SUPABASE_URL or SERVICE_ROLE key" },
+        500,
+      );
     }
 
     const supabase = createClient(supabaseUrl, serviceKey, {
@@ -200,7 +232,10 @@ Deno.serve(async (req) => {
 
     if (ledgerErr || !ledger) {
       return json(
-        { ok: false, error: `Ledger fetch failed: ${ledgerErr?.message ?? "not found"}` },
+        {
+          ok: false,
+          error: `Ledger fetch failed: ${ledgerErr?.message ?? "not found"}`,
+        },
         400,
       );
     }
@@ -353,19 +388,25 @@ Deno.serve(async (req) => {
       y -= 6;
     };
 
+    /**
+     * Apple-style bullets:
+     * - Bold lead clause (first sentence or short lead)
+     * - Rest regular
+     * - No markdown reliance, no headings injected
+     */
     const drawBullets = (text: string, size = 11) => {
       const t = safeStr(text);
       if (!t) return;
 
       const rawLines = t.split("\n").map((l) => l.trim()).filter(Boolean);
 
-      const bulletLines: string[] = [];
+      const bulletItems: string[] = [];
       let buffer: string[] = [];
 
       const flushBuffer = () => {
         if (buffer.length) {
           const paragraph = buffer.join(" ").trim();
-          if (paragraph) bulletLines.push(paragraph);
+          if (paragraph) bulletItems.push(paragraph);
           buffer = [];
         }
       };
@@ -373,27 +414,65 @@ Deno.serve(async (req) => {
       for (const ln of rawLines) {
         if (/^[-•]\s+/.test(ln)) {
           flushBuffer();
-          bulletLines.push(ln.replace(/^[-•]\s+/, ""));
+          bulletItems.push(ln.replace(/^[-•]\s+/, ""));
         } else {
           buffer.push(ln);
         }
       }
       flushBuffer();
 
-      if (bulletLines.length <= 1) {
-        drawParagraph(bulletLines[0] ?? t, size);
+      // If it's basically a paragraph, keep previous behavior
+      if (bulletItems.length <= 1) {
+        drawParagraph(bulletItems[0] ?? t, size);
         return;
       }
 
-      for (const item of bulletLines) {
-        const lines = wrapByWidth(item, fontRegular, size, maxWidth - 14);
-        ensureSpace(size + 4);
-        page.drawText("•", { x: marginX, y, size, font: fontBold, color: black });
+      const bulletX = marginX;
+      const textX = marginX + 14;
+      const innerWidth = maxWidth - 14;
 
-        for (const l of lines) {
+      for (const item of bulletItems) {
+        const { boldLead, rest } = splitBulletLead(item);
+
+        // Wrap the bold lead first (so the first line(s) are bold)
+        const leadLines = boldLead
+          ? wrapByWidth(boldLead, fontBold, size, innerWidth)
+          : [];
+
+        // For remainder, we wrap with regular font and append after lead.
+        // If lead ends mid-line (rare), we keep it simple: remainder starts on next line.
+        const restLines = rest
+          ? wrapByWidth(rest, fontRegular, size, innerWidth)
+          : [];
+
+        // Draw bullet dot aligned to first line
+        ensureSpace(size + 4);
+        page.drawText("•", {
+          x: bulletX,
+          y,
+          size,
+          font: fontBold,
+          color: black,
+        });
+
+        // Draw lead lines (bold)
+        for (const l of leadLines) {
           ensureSpace(size + 4);
           page.drawText(l, {
-            x: marginX + 14,
+            x: textX,
+            y,
+            size,
+            font: fontBold,
+            color: black,
+          });
+          y -= size + 3;
+        }
+
+        // Draw rest lines (regular)
+        for (const l of restLines) {
+          ensureSpace(size + 4);
+          page.drawText(l, {
+            x: textX,
             y,
             size,
             font: fontRegular,
@@ -401,13 +480,20 @@ Deno.serve(async (req) => {
           });
           y -= size + 3;
         }
-        y -= 4;
+
+        y -= 4; // item gap
       }
     };
 
     const drawSection = (title: string) => {
       ensureSpace(28);
-      page.drawText(title, { x: marginX, y, size: 13, font: fontBold, color: black });
+      page.drawText(title, {
+        x: marginX,
+        y,
+        size: 13,
+        font: fontBold,
+        color: black,
+      });
       y -= 8;
       page.drawLine({
         start: { x: marginX, y },
@@ -420,7 +506,13 @@ Deno.serve(async (req) => {
 
     // ---- Header (authoritative meta lives here) ----
     const headerTitle = memoTitle;
-    page.drawText(headerTitle, { x: marginX, y, size: 18, font: fontBold, color: black });
+    page.drawText(headerTitle, {
+      x: marginX,
+      y,
+      size: 18,
+      font: fontBold,
+      color: black,
+    });
     y -= 22;
 
     const recordTitle = safeStr(ledger.title) || record_id;
@@ -498,9 +590,21 @@ Deno.serve(async (req) => {
     ensureSpace(80);
     const startY = y;
 
-    const leftBottom = drawMetaBlock(marginX, metaLeft, leftLabelW, colWidth, startY);
+    const leftBottom = drawMetaBlock(
+      marginX,
+      metaLeft,
+      leftLabelW,
+      colWidth,
+      startY,
+    );
     const rightX = marginX + colWidth + colGap;
-    const rightBottom = drawMetaBlock(rightX, metaRight, rightLabelW, colWidth, startY);
+    const rightBottom = drawMetaBlock(
+      rightX,
+      metaRight,
+      rightLabelW,
+      colWidth,
+      startY,
+    );
 
     y = Math.min(leftBottom, rightBottom) - 2;
 
@@ -508,7 +612,13 @@ Deno.serve(async (req) => {
     const disclaimer =
       "Advisory only. Evidence-based analysis to support Council review; not an approval or decision.";
     ensureSpace(20);
-    page.drawText(disclaimer, { x: marginX, y, size: 9.5, font: fontRegular, color: gray });
+    page.drawText(disclaimer, {
+      x: marginX,
+      y,
+      size: 9.5,
+      font: fontRegular,
+      color: gray,
+    });
     y -= 6;
 
     drawHLine(10, 12);
@@ -544,11 +654,23 @@ Deno.serve(async (req) => {
           `${f.category ? ` — ${safeStr(f.category)}` : ""}`;
 
         ensureSpace(18);
-        page.drawText(head, { x: marginX, y, size: 11, font: fontBold, color: black });
+        page.drawText(head, {
+          x: marginX,
+          y,
+          size: 11,
+          font: fontBold,
+          color: black,
+        });
         y -= 14;
 
         if (!isEmptyText(f.evidence)) {
-          page.drawText("Evidence:", { x: marginX, y, size: 10.5, font: fontBold, color: gray });
+          page.drawText("Evidence:", {
+            x: marginX,
+            y,
+            size: 10.5,
+            font: fontBold,
+            color: gray,
+          });
           y -= 12;
           drawParagraph(stripMarkdown(safeStr(f.evidence)), 10.5, black);
         }
