@@ -55,7 +55,7 @@ async function sha256Hex(bytes: Uint8Array) {
 
 /**
  * Remove markdown artifacts so the PDF reads like a professional memo.
- * (We keep bullets/newlines but strip # headings and **bold** markers etc.)
+ * We keep bullets/newlines but strip headings and emphasis markers.
  */
 function stripMarkdown(md: string) {
   let s = (md ?? "").replace(/\r/g, "");
@@ -149,7 +149,7 @@ function parseAdvisory(md: string) {
 }
 
 /**
- * Wrap text into lines by measuring font width (real PDF wrapping, not char-count guessing).
+ * Wrap text into lines by measuring font width (real PDF wrapping).
  */
 function wrapByWidth(text: string, font: any, size: number, maxWidth: number) {
   const words = (text ?? "").replace(/\r/g, "").split(/\s+/).filter(Boolean);
@@ -172,78 +172,54 @@ function wrapByWidth(text: string, font: any, size: number, maxWidth: number) {
 }
 
 /**
- * Split a bullet into an Apple-style lead clause:
- * - boldLead: first clause up to first period, otherwise first ~72 chars up to a word boundary
- * - rest: remainder (regular)
- * We keep this deterministic and minimal so it never "drifts".
+ * Normalize bullets while keeping governance-safe typography:
+ * - NO bold in body bullets (regulator/lawyer safe)
+ * - Removes markdown headings that accidentally appear as bullet content
  */
-function splitBulletLead(text: string) {
-  const s = safeStr(text);
-  if (!s) return { boldLead: "", rest: "" };
+function normalizeBulletItems(text: string) {
+  const t = safeStr(text);
+  if (!t) return [];
 
-  const periodIdx = s.indexOf(".");
-  if (periodIdx > 0 && periodIdx < 160) {
-    const lead = s.slice(0, periodIdx + 1).trim();
-    const rest = s.slice(periodIdx + 1).trim();
-    return { boldLead: lead, rest };
-  }
+  const rawLines = t.split("\n").map((l) => l.trim()).filter(Boolean);
 
-  // Fallback: bold a short first clause (word-safe) without forcing a fake heading
-  const max = 72;
-  if (s.length <= max) return { boldLead: s, rest: "" };
+  const items: string[] = [];
+  let buffer: string[] = [];
 
-  let cut = max;
-  while (cut > 28 && cut < s.length && s[cut] !== " ") cut--;
-  const lead = s.slice(0, cut).trim();
-  const rest = s.slice(cut).trim();
-  return { boldLead: lead, rest };
-}
-
-/**
- * Enterprise-safe: bold ONLY what fits on the FIRST rendered line.
- * Returns:
- * - boldLine: the bold first line text (fits width in bold font)
- * - restText: remaining text (regular, wraps normally)
- */
-function fitBoldFirstLine(
-  text: string,
-  fontBold: any,
-  size: number,
-  maxWidth: number,
-) {
-  const s = safeStr(text);
-  if (!s) return { boldLine: "", restText: "" };
-
-  const words = s.split(/\s+/).filter(Boolean);
-  let boldWords: string[] = [];
-  let i = 0;
-
-  const widthOf = (t: string) => fontBold.widthOfTextAtSize(t, size);
-
-  while (i < words.length) {
-    const candidate = boldWords.length
-      ? `${boldWords.join(" ")} ${words[i]}`
-      : words[i];
-    if (widthOf(candidate) > maxWidth) break;
-    boldWords.push(words[i]);
-    i++;
-  }
-
-  // If nothing fits (ultra edge case), do not bold at all.
-  if (boldWords.length === 0) return { boldLine: "", restText: s };
-
-  return {
-    boldLine: boldWords.join(" "),
-    restText: words.slice(i).join(" ").trim(),
+  const flushBuffer = () => {
+    if (buffer.length) {
+      const paragraph = buffer.join(" ").trim();
+      if (paragraph) items.push(paragraph);
+      buffer = [];
+    }
   };
+
+  for (const ln of rawLines) {
+    if (/^[-•]\s+/.test(ln)) {
+      flushBuffer();
+      items.push(ln.replace(/^[-•]\s+/, ""));
+      continue;
+    }
+    buffer.push(ln);
+  }
+  flushBuffer();
+
+  // Clean, drop heading artifacts (e.g. "## Recommendations") if they leaked in
+  const cleaned = items
+    .map((s) => stripMarkdown(safeStr(s)))
+    .map((s) => s.replace(/^\s*#{1,6}\s+/, "").trim())
+    .filter((s) => s.length > 0);
+
+  return cleaned;
 }
 
 Deno.serve(async (req) => {
   try {
-    if (req.method === "OPTIONS")
+    if (req.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders });
-    if (req.method !== "POST")
+    }
+    if (req.method !== "POST") {
       return json({ ok: false, error: "POST only" }, 405);
+    }
 
     const body = (await req.json().catch(() => ({}))) as ReqBody;
     const record_id = safeStr(body?.record_id);
@@ -271,10 +247,7 @@ Deno.serve(async (req) => {
 
     if (ledgerErr || !ledger) {
       return json(
-        {
-          ok: false,
-          error: `Ledger fetch failed: ${ledgerErr?.message ?? "not found"}`,
-        },
+        { ok: false, error: `Ledger fetch failed: ${ledgerErr?.message ?? "not found"}` },
         400,
       );
     }
@@ -297,7 +270,7 @@ Deno.serve(async (req) => {
     // ---- Determine memo content source ----
     // Priority:
     // 1) body.memo (if provided and has meaningful content)
-    // 2) latest ai_notes advisory for this record (OPTION A: content-only)
+    // 2) latest ai_notes advisory for this record
     const clientMemo = body.memo ?? null;
 
     const hasClientContent =
@@ -428,41 +401,17 @@ Deno.serve(async (req) => {
     };
 
     /**
-     * Apple-style bullets (enterprise-safe):
-     * - Bold ONLY the first rendered line (never bold wraps)
-     * - Rest regular
-     * - Filters out markdown heading artifacts that may appear as bullet items (e.g. "- ## Executive summary")
+     * Governance-safe bullets:
+     * - NO bold in body bullets
+     * - Bullet dot bold is fine (tiny typographic anchor)
      */
     const drawBullets = (text: string, size = 11) => {
-      const t = safeStr(text);
-      if (!t) return;
+      const items = normalizeBulletItems(text);
+      if (items.length === 0) return;
 
-      const rawLines = t.split("\n").map((l) => l.trim()).filter(Boolean);
-
-      const bulletItems: string[] = [];
-      let buffer: string[] = [];
-
-      const flushBuffer = () => {
-        if (buffer.length) {
-          const paragraph = buffer.join(" ").trim();
-          if (paragraph) bulletItems.push(paragraph);
-          buffer = [];
-        }
-      };
-
-      for (const ln of rawLines) {
-        if (/^[-•]\s+/.test(ln)) {
-          flushBuffer();
-          bulletItems.push(ln.replace(/^[-•]\s+/, ""));
-        } else {
-          buffer.push(ln);
-        }
-      }
-      flushBuffer();
-
-      // If it's basically a paragraph, keep previous behavior
-      if (bulletItems.length <= 1) {
-        drawParagraph(bulletItems[0] ?? t, size);
+      // If it reads like a single paragraph, render as paragraph
+      if (items.length === 1 && items[0].length > 180) {
+        drawParagraph(items[0], size, black);
         return;
       }
 
@@ -470,26 +419,8 @@ Deno.serve(async (req) => {
       const textX = marginX + 14;
       const innerWidth = maxWidth - 14;
 
-      for (const itemRaw of bulletItems) {
-        // Drop markdown-heading artifacts that sometimes appear as list items
-        const trimmed = safeStr(itemRaw);
-        if (/^\s*#{1,6}\s+/.test(trimmed)) continue;
-        if (/^\s*#{1,6}\s*$/.test(trimmed)) continue;
-        if (/^\s*(?:[-•]\s*)?#{1,6}\s+/.test(trimmed)) continue;
-
-        const { boldLead, rest } = splitBulletLead(trimmed);
-        const combined = safeStr(`${boldLead}${rest ? ` ${rest}` : ""}`);
-
-        const { boldLine, restText } = fitBoldFirstLine(
-          combined,
-          fontBold,
-          size,
-          innerWidth,
-        );
-
-        const restLines = restText
-          ? wrapByWidth(restText, fontRegular, size, innerWidth)
-          : [];
+      for (const item of items) {
+        const lines = wrapByWidth(item, fontRegular, size, innerWidth);
 
         ensureSpace(size + 4);
         page.drawText("•", {
@@ -500,18 +431,7 @@ Deno.serve(async (req) => {
           color: black,
         });
 
-        if (boldLine) {
-          page.drawText(boldLine, {
-            x: textX,
-            y,
-            size,
-            font: fontBold,
-            color: black,
-          });
-          y -= size + 3;
-        }
-
-        for (const l of restLines) {
+        for (const l of lines) {
           ensureSpace(size + 4);
           page.drawText(l, {
             x: textX,
@@ -529,13 +449,7 @@ Deno.serve(async (req) => {
 
     const drawSection = (title: string) => {
       ensureSpace(28);
-      page.drawText(title, {
-        x: marginX,
-        y,
-        size: 13,
-        font: fontBold,
-        color: black,
-      });
+      page.drawText(title, { x: marginX, y, size: 13, font: fontBold, color: black });
       y -= 8;
       page.drawLine({
         start: { x: marginX, y },
@@ -546,15 +460,8 @@ Deno.serve(async (req) => {
       y -= 14;
     };
 
-    // ---- Header (authoritative meta lives here) ----
-    const headerTitle = memoTitle;
-    page.drawText(headerTitle, {
-      x: marginX,
-      y,
-      size: 18,
-      font: fontBold,
-      color: black,
-    });
+    // ---- Header ----
+    page.drawText(memoTitle, { x: marginX, y, size: 18, font: fontBold, color: black });
     y -= 22;
 
     const recordTitle = safeStr(ledger.title) || record_id;
@@ -613,8 +520,8 @@ Deno.serve(async (req) => {
         });
 
         const vLines = wrapByWidth(value, fontRegular, rowFontSize, valueW);
-        for (let i = 0; i < vLines.length; i++) {
-          page.drawText(vLines[i], {
+        for (const v of vLines) {
+          page.drawText(v, {
             x: valueX,
             y: yy,
             size: rowFontSize,
@@ -623,7 +530,6 @@ Deno.serve(async (req) => {
           });
           yy -= 14;
         }
-
         yy -= 2;
       }
       return yy;
@@ -632,35 +538,16 @@ Deno.serve(async (req) => {
     ensureSpace(80);
     const startY = y;
 
-    const leftBottom = drawMetaBlock(
-      marginX,
-      metaLeft,
-      leftLabelW,
-      colWidth,
-      startY,
-    );
+    const leftBottom = drawMetaBlock(marginX, metaLeft, leftLabelW, colWidth, startY);
     const rightX = marginX + colWidth + colGap;
-    const rightBottom = drawMetaBlock(
-      rightX,
-      metaRight,
-      rightLabelW,
-      colWidth,
-      startY,
-    );
+    const rightBottom = drawMetaBlock(rightX, metaRight, rightLabelW, colWidth, startY);
 
     y = Math.min(leftBottom, rightBottom) - 2;
 
-    // Disclaimer line (strong boundary)
     const disclaimer =
       "Advisory only. Evidence-based analysis to support Council review; not an approval or decision.";
     ensureSpace(20);
-    page.drawText(disclaimer, {
-      x: marginX,
-      y,
-      size: 9.5,
-      font: fontRegular,
-      color: gray,
-    });
+    page.drawText(disclaimer, { x: marginX, y, size: 9.5, font: fontRegular, color: gray });
     y -= 6;
 
     drawHLine(10, 12);
@@ -696,23 +583,11 @@ Deno.serve(async (req) => {
           `${f.category ? ` — ${safeStr(f.category)}` : ""}`;
 
         ensureSpace(18);
-        page.drawText(head, {
-          x: marginX,
-          y,
-          size: 11,
-          font: fontBold,
-          color: black,
-        });
+        page.drawText(head, { x: marginX, y, size: 11, font: fontBold, color: black });
         y -= 14;
 
         if (!isEmptyText(f.evidence)) {
-          page.drawText("Evidence:", {
-            x: marginX,
-            y,
-            size: 10.5,
-            font: fontBold,
-            color: gray,
-          });
+          page.drawText("Evidence:", { x: marginX, y, size: 10.5, font: fontBold, color: gray });
           y -= 12;
           drawParagraph(stripMarkdown(safeStr(f.evidence)), 10.5, black);
         }
@@ -817,9 +692,6 @@ Deno.serve(async (req) => {
       source_model: sourceModel,
     });
   } catch (e) {
-    return json({
-      ok: false,
-      error: e instanceof Error ? e.message : String(e),
-    }, 500);
+    return json({ ok: false, error: e instanceof Error ? e.message : String(e) }, 500);
   }
 });
