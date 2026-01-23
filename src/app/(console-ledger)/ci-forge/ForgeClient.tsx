@@ -7,7 +7,7 @@ import Link from "next/link";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
-import { Search, ArrowLeft } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 
 type ForgeQueueItem = {
   ledger_id: string;
@@ -151,12 +151,6 @@ function fmt(iso: string | null | undefined) {
   } catch {
     return iso;
   }
-}
-
-function clamp(s: string, n: number) {
-  const t = (s ?? "").trim();
-  if (!t) return "";
-  return t.length > n ? `${t.slice(0, n)}…` : t;
 }
 
 function cx(...xs: Array<string | false | null | undefined>) {
@@ -492,11 +486,6 @@ export default function ForgeClient() {
     setIntentError(null);
     setIntentInfo(null);
   }, [selected?.ledger_id]);
-
-  const envelopeLocked =
-    !!selected?.envelope_status &&
-    selected.envelope_status !== "cancelled" &&
-    selected.envelope_status !== "expired";
 
   const computeRiskLevel = (item: ForgeQueueItem): RiskLevel => {
     const days = item.days_since_last_signature ?? null;
@@ -934,258 +923,249 @@ export default function ForgeClient() {
     }
   }
 
-// ============================
-// Intent loaders + actions
-// ============================
+  // ============================
+  // Intent loaders + actions
+  // ============================
 
-async function loadIntentSidecarForLedger(ledgerId: string) {
-  setIntentLoading(true);
-  setIntentError(null);
+  async function loadIntentSidecarForLedger(ledgerId: string) {
+    setIntentLoading(true);
+    setIntentError(null);
 
-  try {
-    // Step 1: resolve intent_id from artifact (RPC is canonical)
-    let intentId: string | null = null;
+    try {
+      // Step 1: resolve intent_id from artifact (RPC is canonical)
+      let intentId: string | null = null;
 
-    const rr = await supabase.rpc(
-      "resolve_intent_from_artifact" as any,
-      {
-        p_artifact_type: "ledger",
-        p_artifact_id: ledgerId,
-      } as any
-    );
+      const rr = await supabase.rpc(
+        "resolve_intent_from_artifact" as any,
+        {
+          p_artifact_type: "ledger",
+          p_artifact_id: ledgerId,
+        } as any
+      );
 
-    if (rr && !rr.error) {
-      const d: any = rr.data;
-      const row = Array.isArray(d) ? d[0] : d;
-      intentId =
-        row?.intent_id ??
-        row?.id ??
-        row?.intent?.id ??
-        (typeof d === "string" ? d : null);
-    } else {
-      // Fallback: direct table read (only if exposed)
-      const gi = await supabase
-        .from("governance_intent_artifacts" as any)
-        .select("intent_id, created_at")
-        .eq("artifact_type", "ledger")
-        .eq("artifact_id", ledgerId)
-        .order("created_at", { ascending: false })
-        .limit(1)
+      if (rr && !rr.error) {
+        const d: any = rr.data;
+        const row = Array.isArray(d) ? d[0] : d;
+        intentId = row?.intent_id ?? row?.id ?? row?.intent?.id ?? (typeof d === "string" ? d : null);
+      } else {
+        // Fallback: direct table read (only if exposed)
+        const gi = await supabase
+          .from("governance_intent_artifacts" as any)
+          .select("intent_id, created_at")
+          .eq("artifact_type", "ledger")
+          .eq("artifact_id", ledgerId)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (!gi.error) intentId = (gi.data as any)?.intent_id ?? null;
+      }
+
+      if (!intentId) {
+        setIntentHeader(null);
+        setIntentArtifacts([]);
+        return;
+      }
+
+      // Step 2: header (best effort) — ✅ summary exists on governance_intents
+      let header: IntentHeader | null = null;
+
+      const ih = await supabase
+        .from("governance_intents" as any)
+        .select("id, title, summary, created_at, created_by")
+        .eq("id", intentId)
         .maybeSingle();
 
-      if (!gi.error) intentId = (gi.data as any)?.intent_id ?? null;
-    }
+      if (!ih.error && ih.data) {
+        header = ih.data as any;
+      } else {
+        header = { id: intentId, title: null, summary: null, created_at: null };
+      }
 
-    if (!intentId) {
+      setIntentHeader(header);
+
+      // Step 3: artifacts (best effort)
+      const ia = await supabase
+        .from("governance_intent_artifacts" as any)
+        .select("id, intent_id, artifact_type, artifact_id, created_at")
+        .eq("intent_id", intentId)
+        .order("created_at", { ascending: false });
+
+      if (!ia.error) setIntentArtifacts(((ia.data ?? []) as any) ?? []);
+      else setIntentArtifacts([]);
+    } catch (e) {
+      console.warn("loadIntentSidecarForLedger exception", e);
+      // Sidecar must never destabilize Forge
       setIntentHeader(null);
       setIntentArtifacts([]);
-      return;
+    } finally {
+      setIntentLoading(false);
     }
-
-    // Step 2: header (best effort) — ✅ summary exists on governance_intents
-    let header: IntentHeader | null = null;
-
-    const ih = await supabase
-      .from("governance_intents" as any)
-      .select("id, title, summary, created_at, created_by")
-      .eq("id", intentId)
-      .maybeSingle();
-
-    if (!ih.error && ih.data) {
-      header = ih.data as any;
-    } else {
-      header = { id: intentId, title: null, summary: null, created_at: null };
-    }
-
-    setIntentHeader(header);
-
-    // Step 3: artifacts (best effort)
-    const ia = await supabase
-      .from("governance_intent_artifacts" as any)
-      .select("id, intent_id, artifact_type, artifact_id, created_at")
-      .eq("intent_id", intentId)
-      .order("created_at", { ascending: false });
-
-    if (!ia.error) setIntentArtifacts(((ia.data ?? []) as any) ?? []);
-    else setIntentArtifacts([]);
-  } catch (e) {
-    console.warn("loadIntentSidecarForLedger exception", e);
-    // Sidecar must never destabilize Forge
-    setIntentHeader(null);
-    setIntentArtifacts([]);
-  } finally {
-    setIntentLoading(false);
   }
-}
 
-useEffect(() => {
-  if (!selected?.ledger_id) return;
-  loadIntentSidecarForLedger(selected.ledger_id);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [selected?.ledger_id, isTest]);
+  useEffect(() => {
+    if (!selected?.ledger_id) return;
+    loadIntentSidecarForLedger(selected.ledger_id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.ledger_id, isTest]);
 
-async function doCreateIntentAndLink() {
-  if (!selected?.ledger_id) return;
+  async function doCreateIntentAndLink() {
+    if (!selected?.ledger_id) return;
 
-  const title = intentTitle.trim();
-  const reason = intentReason.trim(); // UI label can say "Reason" — DB stores it as summary
+    const title = intentTitle.trim();
+    const reason = intentReason.trim(); // UI label can say "Reason" — DB stores it as summary
 
-  if (!title) return flashIntentError("Title is required.");
-  if (!reason) return flashIntentError("Reason is required.");
+    if (!title) return flashIntentError("Title is required.");
+    if (!reason) return flashIntentError("Reason is required.");
 
-  setIntentCreating(true);
-  setIntentError(null);
-  setIntentInfo(null);
+    setIntentCreating(true);
+    setIntentError(null);
+    setIntentInfo(null);
 
-  try {
-    const actorId = await getActorId(); // for guarded backfill helper
+    try {
+      const actorId = await getActorId(); // for guarded backfill helper
 
-    // HARD RULES: lane-safe + entity-safe
-    const entityId = (selected as any)?.entity_id as string | undefined;
-    if (!entityId) {
-      flashIntentError("Cannot create intent: entity_id missing on selected record.");
-      return;
-    }
-
-    // 1) create intent (canonical signature you granted execute on)
-    const cr = await supabase.rpc(
-      "governance_create_intent" as any,
-      {
-        p_entity_id: entityId,
-        p_is_test: !!isTest,
-        p_title: title,
-        p_intent_text: reason, // ✅ function expects intent_text; table stores summary
-        p_intent_kind: "forge",
-        p_slots: {
-          source: "ci-forge",
-          ledger_id: selected.ledger_id,
-          envelope_id: (selected as any)?.envelope_id ?? null,
-          entity_id: entityId,
-          entity_slug: (selected as any)?.entity_slug ?? null,
-          lane: isTest ? "SANDBOX" : "ROT",
-        },
-      } as any
-    );
-
-    if (!cr || cr.error) {
-      console.warn("governance_create_intent error:", cr?.error);
-      throw new Error(cr?.error?.message || "Unable to create intent (RPC).");
-    }
-
-    const cd: any = cr.data;
-    const cRow = Array.isArray(cd) ? cd[0] : cd;
-
-    const intentId =
-      cRow?.intent_id ??
-      cRow?.id ??
-      cRow?.intent?.id ??
-      cd?.intent_id ??
-      cd?.id ??
-      (typeof cd === "string" ? cd : null);
-
-    if (!intentId) throw new Error("Intent created but id could not be resolved.");
-
-    // 2) explicitly link ledger artifact (operator-driven)
-    const ar = await supabase.rpc(
-      "governance_attach_intent_artifact" as any,
-      {
-        p_intent_id: intentId,
-        p_artifact_type: "ledger",
-        p_artifact_id: selected.ledger_id,
-        p_role: "primary",
-      } as any
-    );
-
-    if (ar?.error) {
-      console.warn("governance_attach_intent_artifact error:", ar.error);
-      flashIntentError("Intent created, but linking the ledger artifact failed.");
-    }
-
-    // 3) Optional backfill (guarded helper; only works AFTER link exists)
-    if (intentBackfillAfterCreate) {
-      if (!actorId) {
-        flashIntentError("Intent created; cannot backfill because actor could not be resolved (auth).");
-      } else {
-        setIntentBackfilling(true);
-
-        const br = await supabase.rpc(
-          "attach_intent_artifacts_from_ledger" as any,
-          {
-            p_ledger_id: selected.ledger_id,
-            p_actor_id: actorId,
-          } as any
-        );
-
-        if (br?.error) {
-          console.warn("attach_intent_artifacts_from_ledger error:", br.error);
-          flashIntentError("Intent created; backfill blocked by guard (expected if artifacts/link not eligible).");
-        } else {
-          flashIntentInfo("Intent created + Forge artifacts attached.");
-        }
+      // HARD RULES: lane-safe + entity-safe
+      const entityId = (selected as any)?.entity_id as string | undefined;
+      if (!entityId) {
+        flashIntentError("Cannot create intent: entity_id missing on selected record.");
+        return;
       }
-    } else {
-      flashIntentInfo("Intent created (no backfill).");
+
+      // 1) create intent (canonical signature you granted execute on)
+      const cr = await supabase.rpc(
+        "governance_create_intent" as any,
+        {
+          p_entity_id: entityId,
+          p_is_test: !!isTest,
+          p_title: title,
+          p_intent_text: reason, // ✅ function expects intent_text; table stores summary
+          p_intent_kind: "forge",
+          p_slots: {
+            source: "ci-forge",
+            ledger_id: selected.ledger_id,
+            envelope_id: (selected as any)?.envelope_id ?? null,
+            entity_id: entityId,
+            entity_slug: (selected as any)?.entity_slug ?? null,
+            lane: isTest ? "SANDBOX" : "ROT",
+          },
+        } as any
+      );
+
+      if (!cr || cr.error) {
+        console.warn("governance_create_intent error:", cr?.error);
+        throw new Error(cr?.error?.message || "Unable to create intent (RPC).");
+      }
+
+      const cd: any = cr.data;
+      const cRow = Array.isArray(cd) ? cd[0] : cd;
+
+      const intentId =
+        cRow?.intent_id ?? cRow?.id ?? cRow?.intent?.id ?? cd?.intent_id ?? cd?.id ?? (typeof cd === "string" ? cd : null);
+
+      if (!intentId) throw new Error("Intent created but id could not be resolved.");
+
+      // 2) explicitly link ledger artifact (operator-driven)
+      const ar = await supabase.rpc(
+        "governance_attach_intent_artifact" as any,
+        {
+          p_intent_id: intentId,
+          p_artifact_type: "ledger",
+          p_artifact_id: selected.ledger_id,
+          p_role: "primary",
+        } as any
+      );
+
+      if (ar?.error) {
+        console.warn("governance_attach_intent_artifact error:", ar.error);
+        flashIntentError("Intent created, but linking the ledger artifact failed.");
+      }
+
+      // 3) Optional backfill (guarded helper; only works AFTER link exists)
+      if (intentBackfillAfterCreate) {
+        if (!actorId) {
+          flashIntentError("Intent created; cannot backfill because actor could not be resolved (auth).");
+        } else {
+          setIntentBackfilling(true);
+
+          const br = await supabase.rpc(
+            "attach_intent_artifacts_from_ledger" as any,
+            {
+              p_ledger_id: selected.ledger_id,
+              p_actor_id: actorId,
+            } as any
+          );
+
+          if (br?.error) {
+            console.warn("attach_intent_artifacts_from_ledger error:", br.error);
+            flashIntentError("Intent created; backfill blocked by guard (expected if artifacts/link not eligible).");
+          } else {
+            flashIntentInfo("Intent created + Forge artifacts attached.");
+          }
+        }
+      } else {
+        flashIntentInfo("Intent created (no backfill).");
+      }
+
+      // reset + reload sidecar
+      setIntentCreateOpen(false);
+      setIntentTitle("");
+      setIntentReason("");
+      setIntentBackfillAfterCreate(true);
+
+      await loadIntentSidecarForLedger(selected.ledger_id);
+      setRightTab("intent");
+    } catch (e: any) {
+      console.error("doCreateIntentAndLink error", e);
+      flashIntentError(e?.message || "Unable to create intent.");
+    } finally {
+      setIntentBackfilling(false);
+      setIntentCreating(false);
     }
-
-    // reset + reload sidecar
-    setIntentCreateOpen(false);
-    setIntentTitle("");
-    setIntentReason("");
-    setIntentBackfillAfterCreate(true);
-
-    await loadIntentSidecarForLedger(selected.ledger_id);
-    setRightTab("intent");
-  } catch (e: any) {
-    console.error("doCreateIntentAndLink error", e);
-    flashIntentError(e?.message || "Unable to create intent.");
-  } finally {
-    setIntentBackfilling(false);
-    setIntentCreating(false);
-  }
-}
-
-async function doBackfillIntentArtifacts() {
-  if (!selected?.ledger_id) return;
-
-  if (!intentHeader?.id) {
-    flashIntentError("No intent is linked (by design). Create an intent first.");
-    return;
   }
 
-  setIntentBackfilling(true);
-  setIntentError(null);
-  setIntentInfo(null);
+  async function doBackfillIntentArtifacts() {
+    if (!selected?.ledger_id) return;
 
-  try {
-    const actorId = await getActorId();
-    if (!actorId) {
-      flashIntentError("Actor could not be resolved (auth).");
+    if (!intentHeader?.id) {
+      flashIntentError("No intent is linked (by design). Create an intent first.");
       return;
     }
 
-    const r = await supabase.rpc(
-      "attach_intent_artifacts_from_ledger" as any,
-      {
-        p_ledger_id: selected.ledger_id,
-        p_actor_id: actorId,
-      } as any
-    );
+    setIntentBackfilling(true);
+    setIntentError(null);
+    setIntentInfo(null);
 
-    if (!r || r.error) {
-      console.warn("attach_intent_artifacts_from_ledger error:", r?.error);
-      flashIntentError("Backfill blocked by guard (expected if link/artifacts not eligible).");
-      return;
+    try {
+      const actorId = await getActorId();
+      if (!actorId) {
+        flashIntentError("Actor could not be resolved (auth).");
+        return;
+      }
+
+      const r = await supabase.rpc(
+        "attach_intent_artifacts_from_ledger" as any,
+        {
+          p_ledger_id: selected.ledger_id,
+          p_actor_id: actorId,
+        } as any
+      );
+
+      if (!r || r.error) {
+        console.warn("attach_intent_artifacts_from_ledger error:", r?.error);
+        flashIntentError("Backfill blocked by guard (expected if link/artifacts not eligible).");
+        return;
+      }
+
+      flashIntentInfo("Forge artifacts attached to intent.");
+      await loadIntentSidecarForLedger(selected.ledger_id);
+    } catch (e: any) {
+      console.error("doBackfillIntentArtifacts error", e);
+      flashIntentError(e?.message || "Backfill failed.");
+    } finally {
+      setIntentBackfilling(false);
     }
-
-    flashIntentInfo("Forge artifacts attached to intent.");
-    await loadIntentSidecarForLedger(selected.ledger_id);
-  } catch (e: any) {
-    console.error("doBackfillIntentArtifacts error", e);
-    flashIntentError(e?.message || "Backfill failed.");
-  } finally {
-    setIntentBackfilling(false);
   }
-}
 
   // --------------------------
   // Start Signature
@@ -1389,183 +1369,273 @@ async function doBackfillIntentArtifacts() {
       return <span className={cx(base, "border-amber-500/40 bg-amber-500/10 text-amber-200")}>In Progress</span>;
     if (s === "cancelled" || s === "expired")
       return <span className={cx(base, "border-slate-600 bg-slate-900/40 text-slate-300")}>{s}</span>;
-    return <span className={cx(base, "border-slate-600 bg-slate-900/40 text-slate-300")}>{s || "draft"}</span>;
+    return <span className={
+cx(base, "border-slate-600 bg-slate-900/40 text-slate-300")}>{s || "unknown"}</span>;
   };
 
-  const ledgerPill = (item: ForgeQueueItem) => {
-    const ls = (item.ledger_status ?? "").toUpperCase() || "—";
+  const ledgerStatusPill = (item: ForgeQueueItem) => {
+    const s = (item.ledger_status ?? "").toUpperCase();
     const base =
       "rounded-full px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase border whitespace-nowrap";
-    if (ls === "ARCHIVED")
-      return <span className={cx(base, "border-cyan-500/40 bg-cyan-500/10 text-cyan-200")}>ARCHIVED</span>;
-    if (ls === "APPROVED")
-      return <span className={cx(base, "border-sky-500/40 bg-sky-500/10 text-sky-200")}>APPROVED</span>;
-    if (ls === "PENDING")
-      return <span className={cx(base, "border-amber-500/40 bg-amber-500/10 text-amber-200")}>PENDING</span>;
-    return <span className={cx(base, "border-slate-700 bg-slate-950/40 text-slate-300")}>{ls}</span>;
+    if (s === "ARCHIVED")
+      return <span className={cx(base, "border-emerald-500/40 bg-emerald-500/10 text-emerald-200")}>Archived</span>;
+    if (s === "APPROVED")
+      return <span className={cx(base, "border-sky-500/30 bg-sky-500/10 text-sky-200")}>Approved</span>;
+    if (s === "SIGNING" || s === "SIGNED")
+      return <span className={cx(base, "border-amber-500/40 bg-amber-500/10 text-amber-200")}>{s}</span>;
+    if (s === "PENDING")
+      return <span className={cx(base, "border-slate-700 bg-slate-950/40 text-slate-300")}>Pending</span>;
+    return <span className={cx(base, "border-slate-700 bg-slate-950/40 text-slate-300")}>{s || "—"}</span>;
   };
 
-  const queueCountLabel =
-    tab === "active" ? `${activeQueue.length} Active` : tab === "archived" ? `${archivedQueue.length} Archived` : `${completedQueue.length} Completed`;
+  const stepsUi = (
+    <div className="flex items-center gap-2">
+      <div className={cx("h-2 w-2 rounded-full", step >= 1 ? "bg-slate-200" : "bg-slate-700")} />
+      <div className={cx("h-2 w-2 rounded-full", step >= 2 ? "bg-amber-300" : "bg-slate-700")} />
+      <div className={cx("h-2 w-2 rounded-full", step >= 3 ? "bg-emerald-300" : "bg-slate-700")} />
+      <div className="ml-2 text-[11px] text-slate-400">
+        {step === 0 ? "No envelope" : step === 2 ? "Signing" : step === 3 ? "Completed" : "Ready"}
+      </div>
+    </div>
+  );
 
+  const SectionTitle = ({ label, hint }: { label: string; hint?: string }) => (
+    <div className="flex items-end justify-between gap-4">
+      <div>
+        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">{label}</div>
+        {hint ? <div className="mt-1 text-[12px] text-slate-400">{hint}</div> : null}
+      </div>
+    </div>
+  );
+
+  const EmptyState = ({
+    title,
+    detail,
+    action,
+  }: {
+    title: string;
+    detail?: string;
+    action?: ReactNode;
+  }) => (
+    <div className="rounded-2xl border border-white/10 bg-black/25 p-5">
+      <div className="text-sm font-semibold text-slate-100">{title}</div>
+      {detail ? <div className="mt-1 text-[12px] text-slate-400">{detail}</div> : null}
+      {action ? <div className="mt-4">{action}</div> : null}
+    </div>
+  );
+
+  const ActionButton = ({
+    label,
+    tone = "amber",
+    disabled,
+    onClick,
+  }: {
+    label: string;
+    tone?: "amber" | "emerald" | "cyan" | "slate";
+    disabled?: boolean;
+    onClick: () => void;
+  }) => {
+    const cls =
+      tone === "emerald"
+        ? "bg-emerald-500 text-black hover:bg-emerald-400"
+        : tone === "cyan"
+        ? "bg-cyan-500/15 text-cyan-100 border border-cyan-500/40 hover:bg-cyan-500/20"
+        : tone === "slate"
+        ? "bg-slate-100 text-slate-950 hover:bg-white"
+        : "bg-amber-500/15 text-amber-100 border border-amber-500/40 hover:bg-amber-500/20";
+
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        className={cx(
+          "w-full rounded-2xl px-4 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase transition",
+          tone === "emerald" || tone === "slate" ? cls : cx("border", cls),
+          disabled ? "opacity-60 cursor-not-allowed" : ""
+        )}
+      >
+        {label}
+      </button>
+    );
+  };
+
+  const RightTabButton = ({ k, label }: { k: RightTab; label: string }) => (
+    <button
+      type="button"
+      onClick={() => setRightTab(k)}
+      className={cx(
+        "rounded-full px-3 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase border transition whitespace-nowrap",
+        rightTab === k
+          ? "border-white/20 bg-white/10 text-slate-100"
+          : "border-white/10 bg-black/20 text-slate-300 hover:border-white/20 hover:bg-white/5"
+      )}
+    >
+      {label}
+    </button>
+  );
+
+  const TopTab = ({ k, label, count }: { k: TabKey; label: string; count: number }) => (
+    <button
+      type="button"
+      onClick={() => setTab(k)}
+      className={cx(
+        "rounded-full px-3 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase border transition whitespace-nowrap",
+        tab === k
+          ? "border-white/20 bg-white/10 text-slate-100"
+          : "border-white/10 bg-black/20 text-slate-300 hover:border-white/20 hover:bg-white/5"
+      )}
+    >
+      {label} <span className="ml-2 text-[10px] text-slate-400">{count}</span>
+    </button>
+  );
+
+  // --------------------------
+  // Render
+  // --------------------------
   return (
     <div className={shell}>
       <div className={header}>
         <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="flex items-center gap-2">
-              <Link
-                href="/ci-forge"
-                className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] font-semibold text-white/85 hover:bg-black/30 hover:border-white/20 transition"
-              >
-                <ArrowLeft className="h-4 w-4" />
-                Back
-              </Link>
+          <div className="flex items-center gap-3">
+            <Link
+              href="/"
+              className="rounded-2xl border border-white/10 bg-black/20 p-2.5 text-slate-200 hover:border-white/20 hover:bg-white/5 transition"
+              title="Back"
+            >
+              <ArrowLeft className="h-4 w-4" />
+            </Link>
 
-              <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">CI • Forge</div>
-              {envPill()}
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">
+                CI — Forge <span className="mx-2 text-slate-700">•</span> Execution Console
+              </div>
+              <div className="mt-1 flex items-center gap-2">
+                <div className="text-base font-semibold text-slate-100">Sign → Verify → Archive</div>
+                {envPill()}
+              </div>
+              <div className="mt-1 text-[12px] text-slate-400">
+                Entity-scoped via OS Global Bar • Lane-safe via <span className="font-mono">is_test</span> • No shortcuts
+              </div>
             </div>
+          </div>
 
-            <div className="mt-2 text-lg sm:text-xl font-semibold text-white/92">
-              Execution Console <span className="text-white/35">—</span>{" "}
-              <span className="text-white/70">{activeEntity}</span>
+          <div className="hidden sm:flex items-center gap-2">
+            <div className="rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-300">
+              <span className="text-slate-500">Entity:</span> <span className="font-semibold text-slate-100">{activeEntity}</span>
             </div>
-            <div className="mt-1 text-[12px] text-white/45">{queueCountLabel}</div>
+            <div className="rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-300">
+              <span className="text-slate-500">Lane:</span> <span className="font-semibold text-slate-100">{isTest ? "SANDBOX" : "RoT"}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap gap-2">
+            <TopTab k="active" label="Active" count={activeQueue.length} />
+            <TopTab k="completed" label="Completed" count={completedQueue.length} />
+            <TopTab k="archived" label="Archived" count={archivedQueue.length} />
           </div>
 
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setHideEnvelopes((v) => !v)}
-              className={cx(
-                "rounded-xl border px-3 py-2 text-[12px] font-semibold transition",
-                hideEnvelopes
-                  ? "border-amber-500/40 bg-amber-500/10 text-amber-100 hover:bg-amber-500/15"
-                  : "border-white/10 bg-black/20 text-white/80 hover:bg-black/30 hover:border-white/20"
-              )}
-              title="Filter out items that already have an envelope (Active tab only)."
-            >
-              {hideEnvelopes ? "Showing Draft-only" : "Show All"}
-            </button>
+            <label className="flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-2 text-[11px] text-slate-300">
+              <input
+                type="checkbox"
+                checked={hideEnvelopes}
+                onChange={(e) => setHideEnvelopes(e.target.checked)}
+                className="h-3.5 w-3.5 accent-amber-400"
+              />
+              Hide envelope rows
+            </label>
 
             <button
               type="button"
               onClick={() => fetchQueues()}
-              className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] font-semibold text-white/80 hover:bg-black/30 hover:border-white/20 transition"
               disabled={loadingQueue}
+              className={cx(
+                "rounded-full border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:border-white/20 hover:bg-white/5 transition",
+                loadingQueue ? "opacity-60 cursor-not-allowed" : ""
+              )}
             >
               {loadingQueue ? "Refreshing…" : "Refresh"}
             </button>
           </div>
         </div>
 
-        {/* Tabs */}
-        <div className="mt-4 flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setTab("active")}
-            className={cx(
-              "rounded-full px-3 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase border transition",
-              tab === "active"
-                ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
-                : "border-white/10 bg-black/10 text-white/60 hover:border-white/20 hover:text-white/80"
-            )}
-          >
-            Active
-          </button>
-          <button
-            type="button"
-            onClick={() => setTab("completed")}
-            className={cx(
-              "rounded-full px-3 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase border transition",
-              tab === "completed"
-                ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
-                : "border-white/10 bg-black/10 text-white/60 hover:border-white/20 hover:text-white/80"
-            )}
-          >
-            Completed
-          </button>
-          <button
-            type="button"
-            onClick={() => setTab("archived")}
-            className={cx(
-              "rounded-full px-3 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase border transition",
-              tab === "archived"
-                ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
-                : "border-white/10 bg-black/10 text-white/60 hover:border-white/20 hover:text-white/80"
-            )}
-          >
-            Archived
-          </button>
-        </div>
+        {error ? (
+          <div className="mt-4 rounded-2xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-100">
+            {error}
+          </div>
+        ) : null}
 
-        {/* Alerts */}
-        <div className="mt-4 space-y-2">
-          {error ? (
-            <div className="rounded-2xl border border-rose-500/25 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-100">
-              {error}
-            </div>
-          ) : null}
-
-          {info ? (
-            <div className="rounded-2xl border border-emerald-500/25 bg-emerald-500/10 px-4 py-3 text-[12px] text-emerald-100">
-              {info}
-            </div>
-          ) : null}
-        </div>
+        {info ? (
+          <div className="mt-4 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-[12px] text-emerald-100">
+            {info}
+          </div>
+        ) : null}
       </div>
 
       <div className={body}>
-        <div className="grid grid-cols-12 gap-4 lg:gap-6">
-          {/* LEFT: Queue */}
+        <div className="grid grid-cols-12 gap-4 lg:gap-5">
+          {/* Queue */}
           <div className="col-span-12 lg:col-span-4">
             <div className="rounded-3xl border border-white/10 bg-black/20 overflow-hidden">
-              <div className="px-4 py-3 border-b border-white/10 bg-gradient-to-b from-white/[0.05] to-transparent">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="text-[11px] uppercase tracking-[0.22em] text-white/50">Queue</div>
-                  <div className="text-[11px] text-white/35">{visibleQueue.length} items</div>
+              <div className="px-4 py-3 border-b border-white/10 bg-white/[0.03]">
+                <div className="flex items-center justify-between">
+                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">
+                    Queue <span className="mx-2 text-slate-700">•</span> {tab}
+                  </div>
+                  <div className="text-[11px] text-slate-500">{visibleQueue.length} items</div>
                 </div>
               </div>
 
-              <div className="max-h-[56vh] lg:max-h-[64vh] overflow-auto">
+              <div className="max-h-[62vh] overflow-auto">
                 {visibleQueue.length === 0 ? (
-                  <div className="px-4 py-8 text-center text-[12px] text-white/45">No items.</div>
+                  <div className="p-4">
+                    <EmptyState
+                      title="No items in this tab."
+                      detail={
+                        tab === "active"
+                          ? "Council-approved items will appear here for signing."
+                          : tab === "completed"
+                          ? "Completed envelopes appear here until archived."
+                          : "Archived items appear here (SQL-backed)."
+                      }
+                    />
+                  </div>
                 ) : (
-                  <div className="p-2 space-y-2">
-                    {visibleQueue.map((item) => {
-                      const risk = computeRiskLevel(item);
-                      const isSel = item.ledger_id === (selected?.ledger_id ?? "");
+                  <div className="divide-y divide-white/5">
+                    {visibleQueue.map((q) => {
+                      const risk = computeRiskLevel(q);
+                      const selectedCls = q.ledger_id === selectedId ? "bg-white/[0.06]" : "hover:bg-white/[0.04]";
                       return (
                         <button
-                          key={item.ledger_id}
+                          key={q.ledger_id}
                           type="button"
-                          onClick={() => setSelectedId(item.ledger_id)}
-                          className={cx(
-                            "w-full text-left rounded-2xl border px-3 py-3 transition",
-                            isSel
-                              ? "border-amber-500/35 bg-amber-500/10"
-                              : "border-white/10 bg-black/10 hover:bg-black/20 hover:border-white/20"
-                          )}
+                          onClick={() => setSelectedId(q.ledger_id)}
+                          className={cx("w-full text-left px-4 py-3 transition", selectedCls)}
                         >
-                          <div className="flex items-start justify-between gap-2">
+                          <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
-                              <div className="text-[12px] font-semibold text-white/90 truncate">{item.title}</div>
-                              <div className="mt-1 text-[11px] text-white/45">
-                                Created: <span className="text-white/60">{fmt(item.created_at)}</span>
+                              <div className="truncate text-[13px] font-semibold text-slate-100">{q.title}</div>
+                              <div className="mt-1 flex flex-wrap items-center gap-2">
+                                {statusPill(q)}
+                                {ledgerStatusPill(q)}
+                                <span className="inline-flex items-center gap-2 text-[11px] text-slate-400">
+                                  <span className={cx("h-2 w-2 rounded-full", riskLightClasses(risk))} />
+                                  {riskLabel(risk)}
+                                </span>
+                              </div>
+                              <div className="mt-1 text-[11px] text-slate-500">Created {fmt(q.created_at)}</div>
+                            </div>
+                            <div className="shrink-0 text-right">
+                              <div className="text-[11px] text-slate-400">
+                                {q.parties_signed ?? 0}/{q.parties_total ?? 0}
+                              </div>
+                              <div className="mt-1 text-[10px] text-slate-500">
+                                {q.last_signed_at ? `Last: ${fmt(q.last_signed_at)}` : "—"}
                               </div>
                             </div>
-
-                            <div className="flex items-center gap-2 shrink-0">
-                              <span className={cx("h-2 w-2 rounded-full", riskLightClasses(risk))} />
-                              <span className="text-[10px] tracking-[0.18em] uppercase text-white/45">
-                                {riskLabel(risk)}
-                              </span>
-                            </div>
-                          </div>
-
-                          <div className="mt-3 flex flex-wrap items-center gap-2">
-                            {ledgerPill(item)}
-                            {statusPill(item)}
                           </div>
                         </button>
                       );
@@ -1576,632 +1646,693 @@ async function doBackfillIntentArtifacts() {
             </div>
           </div>
 
-          {/* MIDDLE: Details + Actions */}
+          {/* Details */}
           <div className="col-span-12 lg:col-span-5">
-            <div className="rounded-3xl border border-white/10 bg-black/20 overflow-hidden">
-              <div className="px-4 py-3 border-b border-white/10 bg-gradient-to-b from-white/[0.05] to-transparent">
-                <div className="text-[11px] uppercase tracking-[0.22em] text-white/50">Record</div>
-              </div>
-
-              {!selected ? (
-                <div className="px-4 py-10 text-center text-[12px] text-white/45">Select a record.</div>
-              ) : (
-                <div className="p-4 space-y-4">
-                  <div>
-                    <div className="text-base font-semibold text-white/90">{selected.title}</div>
-                    <div className="mt-2 flex flex-wrap items-center gap-2">
-                      {ledgerPill(selected)}
-                      {statusPill(selected)}
-                      <span className="rounded-full border border-white/10 bg-black/10 px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase text-white/60">
-                        Step {step}/3
-                      </span>
-                    </div>
-
-                    {/* Archive locked banner (frontend-only UX hardening) */}
-                    {archiveLocked ? (
-                      <div className="mt-3 rounded-2xl border border-cyan-500/25 bg-cyan-500/10 px-4 py-3 text-[12px] text-cyan-100">
-                        Record already archived — no action required.
+            {!selected ? (
+              <EmptyState title="Select a record to view details." />
+            ) : (
+              <div className="rounded-3xl border border-white/10 bg-black/20 overflow-hidden">
+                <div className="px-4 sm:px-5 py-4 border-b border-white/10 bg-white/[0.03]">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Record</div>
+                      <div className="mt-1 text-base font-semibold text-slate-100 break-words">{selected.title}</div>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        {statusPill(selected)}
+                        {ledgerStatusPill(selected)}
+                        {stepsUi}
                       </div>
-                    ) : null}
-
-                    {archiveMissing ? (
-                      <div className="mt-3 rounded-2xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-[12px] text-amber-100">
-                        Signed but missing archive evidence. Use <span className="font-semibold">Re-seal/Repair</span>.
-                      </div>
-                    ) : null}
-                  </div>
-
-                  <div className="rounded-2xl border border-white/10 bg-black/10 p-4">
-                    <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">Key</div>
-                    <div className="mt-2 grid grid-cols-2 gap-3 text-[12px]">
-                      <div>
-                        <div className="text-white/40">Ledger ID</div>
-                        <div className="text-white/80 break-all">{selected.ledger_id}</div>
-                      </div>
-                      <div>
-                        <div className="text-white/40">Envelope</div>
-                        <div className="text-white/80 break-all">{selected.envelope_id ?? "—"}</div>
-                      </div>
-                      <div>
-                        <div className="text-white/40">Parties</div>
-                        <div className="text-white/80">
-                          {(selected.parties_signed ?? 0).toString()}/{(selected.parties_total ?? 0).toString()}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-white/40">Last Signed</div>
-                        <div className="text-white/80">{fmt(selected.last_signed_at)}</div>
+                      <div className="mt-2 text-[11px] text-slate-500">
+                        Ledger ID <span className="font-mono text-slate-300">{selected.ledger_id}</span>
                       </div>
                     </div>
-                  </div>
 
-                  {/* Actions */}
-                  <div className="space-y-2">
-                    <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">Actions</div>
+                    <div className="shrink-0 flex flex-col gap-2 w-[180px]">
+                      <ActionButton
+                        label={selected.envelope_id ? "Open Signer" : "Start Signature"}
+                        tone={selected.envelope_id ? "slate" : "amber"}
+                        disabled={isStarting || (selected.envelope_id ? !portal.signer_url : false)}
+                        onClick={() => {
+                          if (selected.envelope_id) {
+                            if (portal.signer_url) window.open(portal.signer_url, "_blank", "noopener,noreferrer");
+                            else flashError("Signer URL not available yet.");
+                            return;
+                          }
+                          setStartModalOpen(true);
+                        }}
+                      />
 
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setStartModalOpen(true)}
-                        className="rounded-2xl border border-white/10 bg-black/15 px-4 py-3 text-[12px] font-semibold text-white/85 hover:bg-black/25 hover:border-white/20 transition"
-                        disabled={isStarting}
-                      >
-                        {selected.envelope_id ? "Open Envelope" : "Start Signature"}
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => setInviteModalOpen(true)}
-                        className="rounded-2xl border border-white/10 bg-black/15 px-4 py-3 text-[12px] font-semibold text-white/85 hover:bg-black/25 hover:border-white/20 transition"
-                        disabled={!selected.envelope_id || isSendingInvite}
-                        title={!selected.envelope_id ? "Start signature first." : "Send invite to signer."}
-                      >
-                        Send Invite
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => setResealModalOpen(true)}
-                        className="rounded-2xl border border-amber-500/35 bg-amber-500/10 px-4 py-3 text-[12px] font-semibold text-amber-100 hover:bg-amber-500/15 transition"
-                        disabled={selected.envelope_status !== "completed" || isResealing}
-                        title={selected.envelope_status !== "completed" ? "Requires completed envelope." : "Repair archive pointers safely."}
-                      >
-                        Re-seal / Repair
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => setArchiveModalOpen(true)}
-                        className={cx(
-                          "rounded-2xl px-4 py-3 text-[12px] font-semibold transition border",
-                          archiveLocked
-                            ? "border-slate-700 bg-slate-950/40 text-slate-400 cursor-not-allowed"
-                            : "border-emerald-500/35 bg-emerald-500/10 text-emerald-100 hover:bg-emerald-500/15"
-                        )}
-                        disabled={archiveLocked || selected.envelope_status !== "completed" || isArchiving}
-                        title={
-                          archiveLocked
-                            ? "Already archived."
-                            : selected.envelope_status !== "completed"
-                            ? "Requires completed envelope."
-                            : "Archive now (idempotent)."
-                        }
-                      >
-                        Archive Now
-                      </button>
-
-                      <button
-                        type="button"
+                      <ActionButton
+                        label="Archive PDF"
+                        tone="slate"
+                        disabled={isOpeningArchive || !selected.ledger_id}
                         onClick={() => onViewArchivePdf()}
-                        className="rounded-2xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-3 text-[12px] font-semibold text-cyan-100 hover:bg-cyan-500/15 transition"
-                        disabled={isOpeningArchive}
-                      >
-                        {isOpeningArchive ? "Opening…" : "View Archive PDF"}
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => onRunAxiom()}
-                        className="rounded-2xl border border-white/10 bg-black/15 px-4 py-3 text-[12px] font-semibold text-white/85 hover:bg-black/25 hover:border-white/20 transition"
-                        disabled={axiomLoading}
-                      >
-                        {axiomLoading ? "Running…" : "Run AXIOM"}
-                      </button>
+                      />
                     </div>
                   </div>
-
-                  {/* Modals */}
-                  <Modal
-                    open={startModalOpen}
-                    title={selected?.envelope_id ? "Open / Reuse Envelope" : "Start Signature Envelope"}
-                    description="Creates (or reuses) the signature envelope for this ledger record."
-                    confirmLabel={isStarting ? "Working…" : "Start"}
-                    confirmTone="emerald"
-                    confirmDisabled={isStarting}
-                    onConfirm={async () => {
-                      setStartModalOpen(false);
-                      await onStartSignature();
-                    }}
-                    onClose={() => setStartModalOpen(false)}
-                  >
-                    <div className="text-[12px] text-slate-300">
-                      This action is lane-safe (<span className="text-slate-100 font-semibold">{isTest ? "SANDBOX" : "RoT"}</span>) and entity-scoped.
-                    </div>
-                  </Modal>
-
-                  <Modal
-                    open={inviteModalOpen}
-                    title="Send Signature Invite"
-                    description="Invite the signer to complete the envelope. (No wiring changes — uses existing Edge Function.)"
-                    confirmLabel={isSendingInvite ? "Sending…" : "Send"}
-                    confirmTone="amber"
-                    confirmDisabled={isSendingInvite}
-                    onConfirm={async () => {
-                      setInviteModalOpen(false);
-                      await onSendInvite();
-                    }}
-                    onClose={() => setInviteModalOpen(false)}
-                  >
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <label className="block">
-                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Signer Name</div>
-                        <input
-                          value={primarySignerName}
-                          onChange={(e) => setPrimarySignerName(e.target.value)}
-                          className="mt-1 w-full rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-amber-500/40"
-                          placeholder="Optional"
-                        />
-                      </label>
-                      <label className="block">
-                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Signer Email *</div>
-                        <input
-                          value={primarySignerEmail}
-                          onChange={(e) => setPrimarySignerEmail(e.target.value)}
-                          className="mt-1 w-full rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-amber-500/40"
-                          placeholder="name@email.com"
-                        />
-                      </label>
-                      <label className="block sm:col-span-2">
-                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">CC Emails</div>
-                        <input
-                          value={ccEmails}
-                          onChange={(e) => setCcEmails(e.target.value)}
-                          className="mt-1 w-full rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-amber-500/40"
-                          placeholder="comma-separated (optional)"
-                        />
-                      </label>
-                    </div>
-                  </Modal>
-
-                  <Modal
-                    open={archiveModalOpen}
-                    title="Archive Now"
-                    description="Archives the signed record into Minute Book + Verified Registry (idempotent)."
-                    confirmLabel={isArchiving ? "Archiving…" : "Archive"}
-                    confirmTone="emerald"
-                    confirmDisabled={isArchiving || archiveLocked || selected?.envelope_status !== "completed"}
-                    onConfirm={async () => {
-                      setArchiveModalOpen(false);
-                      await onArchiveNow();
-                    }}
-                    onClose={() => setArchiveModalOpen(false)}
-                  >
-                    <div className="text-[12px] text-slate-300">
-                      If this record is already archived, the system will return{" "}
-                      <span className="text-slate-100 font-semibold">already_archived</span> and do nothing else.
-                    </div>
-                  </Modal>
-
-                  <Modal
-                    open={resealModalOpen}
-                    title="Re-seal / Repair"
-                    description="Repairs missing archive pointers safely (no rewiring; lane-safe)."
-                    confirmLabel={isResealing ? "Working…" : "Re-seal"}
-                    confirmTone="amber"
-                    confirmDisabled={isResealing || selected?.envelope_status !== "completed"}
-                    onConfirm={async () => {
-                      setResealModalOpen(false);
-                      await onRepairReseal();
-                    }}
-                    onClose={() => setResealModalOpen(false)}
-                  >
-                    <div className="text-[12px] text-slate-300">
-                      Intended for: “Signed but missing archive evidence” or “Object not found” pointer drift.
-                    </div>
-                  </Modal>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* RIGHT: Sidecar */}
-          <div className="col-span-12 lg:col-span-3">
-            <div className="rounded-3xl border border-white/10 bg-black/20 overflow-hidden">
-              <div className="px-4 py-3 border-b border-white/10 bg-gradient-to-b from-white/[0.05] to-transparent">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="text-[11px] uppercase tracking-[0.22em] text-white/50">Sidecar</div>
-                  <div className="text-[11px] text-white/35">Read-only</div>
                 </div>
 
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  {(["evidence", "portal", "axiom", "intent", "notes"] as RightTab[]).map((k) => (
-                    <button
-                      key={k}
-                      type="button"
-                      onClick={() => setRightTab(k)}
-                      className={cx(
-                        "rounded-full px-3 py-1.5 text-[10px] font-semibold tracking-[0.18em] uppercase border transition",
-                        rightTab === k
-                          ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
-                          : "border-white/10 bg-black/10 text-white/60 hover:border-white/20 hover:text-white/80"
-                      )}
-                    >
-                      {k}
-                    </button>
-                  ))}
-                </div>
-              </div>
+                <div className="px-4 sm:px-5 py-5">
+                  <div className="grid grid-cols-12 gap-4">
+                    <div className="col-span-12">
+                      <SectionTitle label="Signature" hint="Create envelope, invite signer, monitor status." />
+                    </div>
 
-              <div className="p-4 space-y-3 max-h-[56vh] lg:max-h-[64vh] overflow-auto">
-                {/* Evidence */}
-                {rightTab === "evidence" ? (
-                  <div className="space-y-3">
-                    <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">Archive Evidence</div>
-
-                    {evidenceError ? (
-                      <div className="rounded-2xl border border-rose-500/25 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-100">
-                        {evidenceError}
-                      </div>
-                    ) : null}
-
-                    {evidenceLoading ? (
-                      <div className="text-[12px] text-white/50">Loading…</div>
-                    ) : (
-                      <>
-                        <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
-                          <div className="text-[11px] text-white/45">Minute Book</div>
-                          <div className="mt-1 text-[12px] text-white/85">
-                            {evidence.minute_book_entry_id ? (
-                              <>
-                                <div className="font-semibold text-white/90">{evidence.minute_book_title ?? "—"}</div>
-                                <div className="text-white/45 break-all">{evidence.minute_book_entry_id}</div>
-                              </>
-                            ) : (
-                              "—"
-                            )}
+                    <div className="col-span-12">
+                      <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
+                        <div className="grid grid-cols-12 gap-3">
+                          <div className="col-span-12 md:col-span-6">
+                            <label className="block text-[11px] uppercase tracking-[0.22em] text-slate-500">
+                              Signer name
+                            </label>
+                            <input
+                              value={primarySignerName}
+                              onChange={(e) => setPrimarySignerName(e.target.value)}
+                              className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-[13px] text-slate-100 outline-none focus:border-white/20"
+                              placeholder="Primary signer (optional)"
+                            />
                           </div>
-                        </div>
-
-                        <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
-                          <div className="text-[11px] text-white/45">Verified Registry</div>
-                          <div className="mt-1 text-[12px] text-white/85">
-                            {evidence.verified_document?.id ? (
-                              <>
-                                <div className="text-white/90 font-semibold">{evidence.verified_document.verification_level ?? "verified"}</div>
-                                <div className="text-white/45 break-all">{evidence.verified_document.id}</div>
-                              </>
-                            ) : (
-                              "—"
-                            )}
+                          <div className="col-span-12 md:col-span-6">
+                            <label className="block text-[11px] uppercase tracking-[0.22em] text-slate-500">
+                              Signer email
+                            </label>
+                            <input
+                              value={primarySignerEmail}
+                              onChange={(e) => setPrimarySignerEmail(e.target.value)}
+                              className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-[13px] text-slate-100 outline-none focus:border-white/20"
+                              placeholder="name@email.com"
+                            />
                           </div>
-                        </div>
 
-                        <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
-                          <div className="text-[11px] text-white/45">Supporting Documents</div>
-                          {evidence.supporting_docs.length === 0 ? (
-                            <div className="mt-1 text-[12px] text-white/50">—</div>
-                          ) : (
-                            <div className="mt-2 space-y-2">
-                              {evidence.supporting_docs.slice(0, 6).map((d) => (
-                                <div key={d.id} className="rounded-xl border border-white/10 bg-black/10 p-2">
-                                  <div className="flex items-center justify-between gap-2">
-                                    <div className="min-w-0">
-                                      <div className="text-[12px] font-semibold text-white/85 truncate">
-                                        {d.file_name ?? d.doc_type ?? "Document"}
-                                      </div>
-                                      <div className="text-[11px] text-white/45">{d.doc_type ?? "—"}</div>
-                                    </div>
-                                    <button
-                                      type="button"
-                                      className="rounded-xl border border-white/10 bg-black/15 px-2 py-1 text-[11px] font-semibold text-white/75 hover:bg-black/25 hover:border-white/20 transition"
-                                      disabled={!d.file_path}
-                                      onClick={async () => {
-                                        try {
-                                          if (!d.file_path) return;
-                                          await openStorageObject("minute_book", d.file_path);
-                                        } catch (e: any) {
-                                          flashError(e?.message || "Unable to open document.");
-                                        }
-                                      }}
-                                    >
-                                      Open
-                                    </button>
-                                  </div>
-                                </div>
-                              ))}
-                              {evidence.supporting_docs.length > 6 ? (
-                                <div className="text-[11px] text-white/40">+ {evidence.supporting_docs.length - 6} more</div>
-                              ) : null}
+                          <div className="col-span-12">
+                            <label className="block text-[11px] uppercase tracking-[0.22em] text-slate-500">
+                              CC emails (comma-separated)
+                            </label>
+                            <input
+                              value={ccEmails}
+                              onChange={(e) => setCcEmails(e.target.value)}
+                              className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-[13px] text-slate-100 outline-none focus:border-white/20"
+                              placeholder="optional@cc.com, another@cc.com"
+                            />
+                          </div>
+
+                          <div className="col-span-12 md:col-span-6">
+                            <ActionButton
+                              label="Send Invite"
+                              tone="amber"
+                              disabled={
+                                isSendingInvite ||
+                                !selected.envelope_id ||
+                                !primarySignerEmail.trim().includes("@") ||
+                                selected.envelope_status === "completed"
+                              }
+                              onClick={() => setInviteModalOpen(true)}
+                            />
+                            <div className="mt-2 text-[11px] text-slate-500">
+                              Requires an envelope. Invite sends to signer + optional CC.
                             </div>
-                          )}
+                          </div>
+
+                          <div className="col-span-12 md:col-span-6">
+                            <ActionButton
+                              label="Re-seal / Repair"
+                              tone="cyan"
+                              disabled={isResealing || selected.envelope_status !== "completed"}
+                              onClick={() => setResealModalOpen(true)}
+                            />
+                            <div className="mt-2 text-[11px] text-slate-500">
+                              Repairs Verified + Minute Book pointers (idempotent). Completed envelope only.
+                            </div>
+                          </div>
+
+                          <div className="col-span-12">
+                            <ActionButton
+                              label={archiveLocked ? "Archive (Already)" : "Archive Now"}
+                              tone="emerald"
+                              disabled={isArchiving || selected.envelope_status !== "completed" || archiveLocked}
+                              onClick={() => setArchiveModalOpen(true)}
+                            />
+                            <div className="mt-2 text-[11px] text-slate-500">
+                              Archive writes Minute Book primary pointer + Verified registry (certified source).
+                            </div>
+                            {archiveMissing ? (
+                              <div className="mt-3 rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-100">
+                                Completed envelope detected, but archive pointers are missing. Use{" "}
+                                <span className="font-semibold">Re-seal / Repair</span>.
+                              </div>
+                            ) : null}
+                          </div>
                         </div>
-                      </>
-                    )}
-                  </div>
-                ) : null}
-
-                {/* Portal */}
-                {rightTab === "portal" ? (
-                  <div className="space-y-3">
-                    <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">Portal URLs</div>
-                    {portalError ? (
-                      <div className="rounded-2xl border border-rose-500/25 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-100">
-                        {portalError}
                       </div>
-                    ) : null}
+                    </div>
 
-                    {!selected?.envelope_id ? (
-                      <div className="text-[12px] text-white/50">Start signature to generate portal URLs.</div>
-                    ) : (
-                      <div className="space-y-2">
-                        {(["signer_url", "viewer_url", "verify_url", "certificate_url"] as Array<keyof PortalUrls>).map((k) => (
-                          <div key={k} className="rounded-2xl border border-white/10 bg-black/10 p-3">
-                            <div className="text-[11px] text-white/45">{k.replace("_", " ")}</div>
-                            <div className="mt-1 flex items-center justify-between gap-2">
-                              <div className="text-[11px] text-white/70 break-all">{portal[k] ?? "—"}</div>
-                              <button
-                                type="button"
-                                className="rounded-xl border border-white/10 bg-black/15 px-2 py-1 text-[11px] font-semibold text-white/75 hover:bg-black/25 hover:border-white/20 transition"
-                                disabled={!portal[k]}
-                                onClick={() => {
-                                  const u = portal[k];
-                                  if (!u) return;
-                                  window.open(u, "_blank", "noopener,noreferrer");
-                                }}
+                    <div className="col-span-12">
+                      <div className="grid grid-cols-12 gap-3">
+                        <div className="col-span-12 md:col-span-6 rounded-2xl border border-white/10 bg-black/25 p-4">
+                          <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Portal</div>
+                          {portalError ? (
+                            <div className="mt-2 text-[12px] text-rose-200">{portalError}</div>
+                          ) : (
+                            <div className="mt-3 flex flex-col gap-2">
+                              <a
+                                className={cx(
+                                  "rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-200 hover:border-white/20 hover:bg-white/5 transition",
+                                  !portal.viewer_url ? "opacity-60 pointer-events-none" : ""
+                                )}
+                                href={portal.viewer_url || "#"}
+                                target="_blank"
+                                rel="noreferrer"
                               >
-                                Open
-                              </button>
+                                Open Viewer
+                              </a>
+                              <a
+                                className={cx(
+                                  "rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-200 hover:border-white/20 hover:bg-white/5 transition",
+                                  !portal.verify_url ? "opacity-60 pointer-events-none" : ""
+                                )}
+                                href={portal.verify_url || "#"}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                Open Verify
+                              </a>
+                              <a
+                                className={cx(
+                                  "rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-200 hover:border-white/20 hover:bg-white/5 transition",
+                                  !portal.certificate_url ? "opacity-60 pointer-events-none" : ""
+                                )}
+                                href={portal.certificate_url || "#"}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                Open Certificate
+                              </a>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="col-span-12 md:col-span-6 rounded-2xl border border-white/10 bg-black/25 p-4">
+                          <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">AXIOM</div>
+                          {axiomError ? (
+                            <div className="mt-2 text-[12px] text-rose-200">{axiomError}</div>
+                          ) : null}
+                          {axiomInfo ? (
+                            <div className="mt-2 text-[12px] text-emerald-200">{axiomInfo}</div>
+                          ) : null}
+
+                          <div className="mt-3 flex gap-2 flex-wrap">
+                            <button
+                              type="button"
+                              onClick={() => setAxiomTab("advisory")}
+                              className={cx(
+                                "rounded-full px-3 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase border transition",
+                                axiomTab === "advisory"
+                                  ? "border-white/20 bg-white/10 text-slate-100"
+                                  : "border-white/10 bg-black/20 text-slate-300 hover:border-white/20 hover:bg-white/5"
+                              )}
+                            >
+                              Advisory
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setAxiomTab("summary")}
+                              className={cx(
+                                "rounded-full px-3 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase border transition",
+                                axiomTab === "summary"
+                                  ? "border-white/20 bg-white/10 text-slate-100"
+                                  : "border-white/10 bg-black/20 text-slate-300 hover:border-white/20 hover:bg-white/5"
+                              )}
+                            >
+                              Summary
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setAxiomTab("analysis")}
+                              className={cx(
+                                "rounded-full px-3 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase border transition",
+                                axiomTab === "analysis"
+                                  ? "border-white/20 bg-white/10 text-slate-100"
+                                  : "border-white/10 bg-black/20 text-slate-300 hover:border-white/20 hover:bg-white/5"
+                              )}
+                            >
+                              Analysis
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setAxiomTab("advice")}
+                              className={cx(
+                                "rounded-full px-3 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase border transition",
+                                axiomTab === "advice"
+                                  ? "border-white/20 bg-white/10 text-slate-100"
+                                  : "border-white/10 bg-black/20 text-slate-300 hover:border-white/20 hover:bg-white/5"
+                              )}
+                            >
+                              Advice
+                            </button>
+                          </div>
+
+                          <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3">
+                            {axiomTab === "advisory" ? (
+                              <div className="text-[12px] text-slate-300">
+                                AXIOM is advisory only. It never blocks signing or alters resolution templates.
+                              </div>
+                            ) : null}
+
+                            {axiomTab === "summary" ? (
+                              <div className="text-[12px] text-slate-200 whitespace-pre-wrap">
+                                {axiomLatest.summary?.summary ?? "No summary yet."}
+                              </div>
+                            ) : null}
+
+                            {axiomTab === "analysis" ? (
+                              <div className="text-[12px] text-slate-200 whitespace-pre-wrap">
+                                {axiomLatest.analysis?.analysis ?? "No analysis yet."}
+                              </div>
+                            ) : null}
+
+                            {axiomTab === "advice" ? (
+                              <div className="text-[12px] text-slate-200 whitespace-pre-wrap">
+                                {axiomLatest.advice?.advice ?? "No advice yet."}
+                              </div>
+                            ) : null}
+                          </div>
+
+                          <div className="mt-3">
+                            <ActionButton label="Run AXIOM" tone="cyan" disabled={axiomLoading} onClick={() => onRunAxiom()} />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="col-span-12">
+                      <div className="text-[11px] text-slate-500">
+                        Forge is signature-only. Archive is idempotent and lane-safe. No SQL shortcuts; all writes via RPC/Edge Functions.
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Right Sidecar */}
+          <div className="col-span-12 lg:col-span-3">
+            {!selected ? (
+              <EmptyState title="No record selected." />
+            ) : (
+              <div className="rounded-3xl border border-white/10 bg-black/20 overflow-hidden">
+                <div className="px-4 py-3 border-b border-white/10 bg-white/[0.03]">
+                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Sidecar</div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <RightTabButton k="evidence" label="Evidence" />
+                    <RightTabButton k="portal" label="Portal" />
+                    <RightTabButton k="axiom" label="AXIOM" />
+                    <RightTabButton k="intent" label="Intent" />
+                    <RightTabButton k="notes" label="Notes" />
+                  </div>
+                </div>
+
+                <div className="p-4">
+                  {/* Evidence */}
+                  {rightTab === "evidence" ? (
+                    <div className="space-y-3">
+                      {evidenceError ? (
+                        <div className="rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-[12px] text-rose-100">
+                          {evidenceError}
+                        </div>
+                      ) : null}
+
+                      {evidenceLoading ? (
+                        <div className="text-[12px] text-slate-400">Loading evidence…</div>
+                      ) : (
+                        <>
+                          <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Minute Book</div>
+                            <div className="mt-2 text-[12px] text-slate-200">
+                              {evidence.minute_book_entry_id ? (
+                                <>
+                                  <div className="font-semibold">{evidence.minute_book_title || "Minute Book Entry"}</div>
+                                  <div className="mt-1 text-slate-400">
+                                    Entry ID <span className="font-mono">{evidence.minute_book_entry_id}</span>
+                                  </div>
+                                  <div className="mt-1 text-slate-400">
+                                    Storage <span className="font-mono">{evidence.minute_book_storage_path || "—"}</span>
+                                  </div>
+                                </>
+                              ) : (
+                                <div className="text-slate-400">No Minute Book entry yet.</div>
+                              )}
                             </div>
                           </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ) : null}
 
-                {/* AXIOM */}
-                {rightTab === "axiom" ? (
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">AXIOM</div>
-                      <button
-                        type="button"
-                        className="rounded-xl border border-white/10 bg-black/15 px-2 py-1 text-[11px] font-semibold text-white/75 hover:bg-black/25 hover:border-white/20 transition"
-                        disabled={axiomLoading}
-                        onClick={() => onRunAxiom()}
-                      >
-                        Run
-                      </button>
-                    </div>
-
-                    {axiomError ? (
-                      <div className="rounded-2xl border border-rose-500/25 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-100">
-                        {axiomError}
-                      </div>
-                    ) : null}
-                    {axiomInfo ? (
-                      <div className="rounded-2xl border border-emerald-500/25 bg-emerald-500/10 px-4 py-3 text-[12px] text-emerald-100">
-                        {axiomInfo}
-                      </div>
-                    ) : null}
-
-                    <div className="flex flex-wrap items-center gap-2">
-                      {(["advisory", "summary", "analysis", "advice"] as AxiomTab[]).map((k) => (
-                        <button
-                          key={k}
-                          type="button"
-                          onClick={() => setAxiomTab(k)}
-                          className={cx(
-                            "rounded-full px-3 py-1.5 text-[10px] font-semibold tracking-[0.18em] uppercase border transition",
-                            axiomTab === k
-                              ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
-                              : "border-white/10 bg-black/10 text-white/60 hover:border-white/20 hover:text-white/80"
-                          )}
-                        >
-                          {k}
-                        </button>
-                      ))}
-                    </div>
-
-                    <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
-                      {axiomTab === "advisory" ? (
-                        <div className="text-[12px] text-white/70">
-                          AXIOM is advisory-only. It never blocks Forge workflows.
-                          <div className="mt-2 text-white/45">
-                            Latest Summary: <span className="text-white/70">{fmt(axiomLatest.summary?.generated_at ?? null)}</span>
+                          <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Verified Registry</div>
+                            <div className="mt-2 text-[12px] text-slate-200">
+                              {evidence.verified_document?.id ? (
+                                <>
+                                  <div className="font-semibold">Certified</div>
+                                  <div className="mt-1 text-slate-400">
+                                    Hash <span className="font-mono">{evidence.verified_document.file_hash || "—"}</span>
+                                  </div>
+                                  <div className="mt-1 text-slate-400">
+                                    Path{" "}
+                                    <span className="font-mono">
+                                      {evidence.verified_document.storage_bucket}/{evidence.verified_document.storage_path}
+                                    </span>
+                                  </div>
+                                </>
+                              ) : (
+                                <div className="text-slate-400">No verified document yet.</div>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      ) : null}
 
-                      {axiomTab === "summary" ? (
-                        <div className="text-[12px] text-white/75 whitespace-pre-wrap">
-                          {axiomLatest.summary?.summary ?? "—"}
-                        </div>
-                      ) : null}
+                          <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Supporting Docs</div>
+                            <div className="mt-2 space-y-2">
+                              {evidence.supporting_docs.length === 0 ? (
+                                <div className="text-[12px] text-slate-400">No supporting documents yet.</div>
+                              ) : (
+                                evidence.supporting_docs.slice(0, 10).map((d) => (
+                                  <div key={d.id} className="rounded-xl border border-white/10 bg-black/15 px-3 py-2">
+                                    <div className="text-[12px] font-semibold text-slate-200">
+                                      {d.file_name || d.doc_type || "Document"}
+                                    </div>
+                                    <div className="mt-1 text-[11px] text-slate-500">
+                                      {d.file_hash ? <span className="font-mono">{d.file_hash}</span> : "—"}
+                                    </div>
+                                  </div>
+                                ))
+                              )}
+                            </div>
+                          </div>
 
-                      {axiomTab === "analysis" ? (
-                        <div className="text-[12px] text-white/75 whitespace-pre-wrap">
-                          {axiomLatest.analysis?.analysis ?? "—"}
-                        </div>
-                      ) : null}
-
-                      {axiomTab === "advice" ? (
-                        <div className="text-[12px] text-white/75 whitespace-pre-wrap">
-                          {axiomLatest.advice?.advice ?? "—"}
-                        </div>
-                      ) : null}
-                    </div>
-                  </div>
-                ) : null}
-
-                {/* INTENT (explicit, operator-driven) */}
-                {rightTab === "intent" ? (
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">Intent</div>
-
-                      {!intentHeader ? (
-                        <button
-                          type="button"
-                          onClick={() => setIntentCreateOpen(true)}
-                          className="rounded-xl border border-amber-500/35 bg-amber-500/10 px-2 py-1 text-[11px] font-semibold text-amber-100 hover:bg-amber-500/15 transition"
-                        >
-                          Create
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => doBackfillIntentArtifacts()}
-                          disabled={intentBackfilling}
-                          className={cx(
-                            "rounded-xl border px-2 py-1 text-[11px] font-semibold transition",
-                            intentBackfilling
-                              ? "border-slate-700 bg-slate-950/40 text-slate-400 cursor-not-allowed"
-                              : "border-amber-500/35 bg-amber-500/10 text-amber-100 hover:bg-amber-500/15"
-                          )}
-                        >
-                          {intentBackfilling ? "Working…" : "Backfill"}
-                        </button>
+                          <ActionButton label="Open Archive PDF" tone="slate" disabled={isOpeningArchive} onClick={() => onViewArchivePdf()} />
+                        </>
                       )}
                     </div>
+                  ) : null}
 
-                    {intentError ? (
-                      <div className="rounded-2xl border border-rose-500/25 bg-rose-500/10 px-4 py-3 text-[12px] text-rose-100">
-                        {intentError}
-                      </div>
-                    ) : null}
-                    {intentInfo ? (
-                      <div className="rounded-2xl border border-emerald-500/25 bg-emerald-500/10 px-4 py-3 text-[12px] text-emerald-100">
-                        {intentInfo}
-                      </div>
-                    ) : null}
-
-                    {intentLoading ? (
-                      <div className="text-[12px] text-white/50">Loading…</div>
-                    ) : !intentHeader ? (
-                      <div className="rounded-2xl border border-white/10 bg-black/10 p-3 text-[12px] text-white/70">
-                        No Intent linked (by design). Use <span className="font-semibold text-white/85">Create Intent</span> to establish an explicit governance link.
-                      </div>
-                    ) : (
-                      <>
-                        <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
-                          <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">Intent</div>
-                          <div className="mt-1 text-[12px] text-white/85 font-semibold">
-                            {intentHeader.title ?? "Untitled Intent"}
-                          </div>
-                          <div className="mt-1 text-[11px] text-white/50 break-all">{intentHeader.id}</div>
-                          <div className="mt-2 text-[12px] text-white/70 whitespace-pre-wrap">{intentHeader.summary ?? "—"}</div>
+                  {/* Portal */}
+                  {rightTab === "portal" ? (
+                    <div className="space-y-3">
+                      {!selected.envelope_id ? (
+                        <EmptyState title="No envelope yet." detail="Start signature to generate portal URLs." />
+                      ) : portalError ? (
+                        <div className="rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-[12px] text-rose-100">
+                          {portalError}
                         </div>
-
-                        <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
-                          <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">Artifacts</div>
-                          {intentArtifacts.length === 0 ? (
-                            <div className="mt-2 text-[12px] text-white/55">
-                              Link exists but attachments are missing. Use <span className="font-semibold">Backfill</span>.
-                            </div>
-                          ) : (
-                            <div className="mt-2 space-y-2">
-                              {intentArtifacts.slice(0, 8).map((a) => (
-                                <div key={a.id} className="rounded-xl border border-white/10 bg-black/10 p-2">
-                                  <div className="flex items-center justify-between gap-2">
-                                    <div className="min-w-0">
-                                      <div className="text-[11px] uppercase tracking-[0.18em] text-white/45">{a.artifact_type}</div>
-                                      <div className="mt-1 text-[12px] text-white/80 break-all">{a.artifact_id}</div>
-                                    </div>
-                                    <div className="text-[11px] text-white/40">{fmt(a.created_at)}</div>
-                                  </div>
-                                </div>
-                              ))}
-                              {intentArtifacts.length > 8 ? (
-                                <div className="text-[11px] text-white/40">+ {intentArtifacts.length - 8} more</div>
-                              ) : null}
-                            </div>
-                          )}
-                        </div>
-                      </>
-                    )}
-
-                    <Modal
-                      open={intentCreateOpen}
-                      title="Create Intent"
-                      description="Explicit, operator-driven governance link (never automatic)."
-                      confirmLabel={intentCreating ? "Creating…" : "Create"}
-                      confirmTone="amber"
-                      confirmDisabled={intentCreating}
-                      onConfirm={async () => {
-                        await doCreateIntentAndLink();
-                      }}
-                      onClose={() => setIntentCreateOpen(false)}
-                    >
-                      <div className="space-y-3">
-                        <label className="block">
-                          <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Title *</div>
-                          <input
-                            value={intentTitle}
-                            onChange={(e) => setIntentTitle(e.target.value)}
-                            className="mt-1 w-full rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-amber-500/40"
-                            placeholder="Intent title"
-                          />
-                        </label>
-
-                        <label className="block">
-                          <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Reason *</div>
-                          <textarea
-                            value={intentReason}
-                            onChange={(e) => setIntentReason(e.target.value)}
-                            className="mt-1 w-full min-h-[90px] rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-[12px] text-slate-100 outline-none focus:border-amber-500/40"
-                            placeholder="Why are you creating this intent? (required)"
-                          />
-                        </label>
-
-                        <label className="flex items-center gap-2 text-[12px] text-slate-200">
-                          <input
-                            type="checkbox"
-                            checked={intentBackfillAfterCreate}
-                            onChange={(e) => setIntentBackfillAfterCreate(e.target.checked)}
-                          />
-                          Backfill Forge artifacts after create (default ON)
-                        </label>
-
-                        <div className="text-[12px] text-slate-400">
-                          Backfill calls the guarded helper{" "}
-                          <span className="text-slate-200 font-semibold">attach_intent_artifacts_from_ledger</span> after the link exists.
-                        </div>
-                      </div>
-                    </Modal>
-                  </div>
-                ) : null}
-
-                {/* Notes (placeholder, stays stable) */}
-                {rightTab === "notes" ? (
-                  <div className="space-y-3">
-                    <div className="text-[11px] uppercase tracking-[0.22em] text-white/45">Notes</div>
-                    <div className="rounded-2xl border border-white/10 bg-black/10 p-3 text-[12px] text-white/60">
-                      Operator notes panel (optional). No wiring changes.
+                      ) : (
+                        <>
+                          <a
+                            className={cx(
+                              "block rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-[12px] text-slate-200 hover:border-white/20 hover:bg-white/5 transition",
+                              !portal.signer_url ? "opacity-60 pointer-events-none" : ""
+                            )}
+                            href={portal.signer_url || "#"}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Open Signer Terminal
+                          </a>
+                          <a
+                            className={cx(
+                              "block rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-[12px] text-slate-200 hover:border-white/20 hover:bg-white/5 transition",
+                              !portal.viewer_url ? "opacity-60 pointer-events-none" : ""
+                            )}
+                            href={portal.viewer_url || "#"}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Open Viewer
+                          </a>
+                          <a
+                            className={cx(
+                              "block rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-[12px] text-slate-200 hover:border-white/20 hover:bg-white/5 transition",
+                              !portal.verify_url ? "opacity-60 pointer-events-none" : ""
+                            )}
+                            href={portal.verify_url || "#"}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Open Verify
+                          </a>
+                          <a
+                            className={cx(
+                              "block rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-[12px] text-slate-200 hover:border-white/20 hover:bg-white/5 transition",
+                              !portal.certificate_url ? "opacity-60 pointer-events-none" : ""
+                            )}
+                            href={portal.certificate_url || "#"}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Open Certificate
+                          </a>
+                        </>
+                      )}
                     </div>
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          </div>
-        </div>
+                  ) : null}
 
-        {/* Footer hint */}
-        <div className="mt-5 text-[11px] text-white/35">
-          Lane-safe via <span className="text-white/55 font-semibold">is_test</span>, entity-safe via{" "}
-          <span className="text-white/55 font-semibold">OsEntityContext</span>. Intent is explicit + operator-driven.
+                  {/* AXIOM */}
+                  {rightTab === "axiom" ? (
+                    <div className="space-y-3">
+                      <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Advisory</div>
+                        <div className="mt-2 text-[12px] text-slate-300">
+                          AXIOM is a sidecar. It does not change the resolution PDF or block signing.
+                        </div>
+                      </div>
+
+                      <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Latest Summary</div>
+                        <div className="mt-2 text-[12px] text-slate-200 whitespace-pre-wrap">
+                          {axiomLatest.summary?.summary ?? "No summary yet."}
+                        </div>
+                      </div>
+
+                      <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Latest Analysis</div>
+                        <div className="mt-2 text-[12px] text-slate-200 whitespace-pre-wrap">
+                          {axiomLatest.analysis?.analysis ?? "No analysis yet."}
+                        </div>
+                      </div>
+
+                      <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                        <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Latest Advice</div>
+                        <div className="mt-2 text-[12px] text-slate-200 whitespace-pre-wrap">
+                          {axiomLatest.advice?.advice ?? "No advice yet."}
+                        </div>
+                      </div>
+
+                      <ActionButton label="Run AXIOM" tone="cyan" disabled={axiomLoading} onClick={() => onRunAxiom()} />
+                    </div>
+                  ) : null}
+
+                  {/* Intent */}
+                  {rightTab === "intent" ? (
+                    <div className="space-y-3">
+                      {intentError ? (
+                        <div className="rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-[12px] text-rose-100">
+                          {intentError}
+                        </div>
+                      ) : null}
+
+                      {intentInfo ? (
+                        <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-[12px] text-emerald-100">
+                          {intentInfo}
+                        </div>
+                      ) : null}
+
+                      {intentLoading ? (
+                        <div className="text-[12px] text-slate-400">Loading intent…</div>
+                      ) : !intentHeader ? (
+                        <EmptyState
+                          title="No Intent linked (by design)."
+                          detail="Forge does not create intents automatically. This is operator-driven."
+                          action={
+                            <ActionButton
+                              label="Create Intent"
+                              tone="amber"
+                              disabled={!selected?.ledger_id}
+                              onClick={() => {
+                                setIntentTitle(selected?.title || "");
+                                setIntentReason("");
+                                setIntentBackfillAfterCreate(true);
+                                setIntentCreateOpen(true);
+                              }}
+                            />
+                          }
+                        />
+                      ) : (
+                        <>
+                          <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Intent</div>
+                            <div className="mt-2 text-[13px] font-semibold text-slate-100">
+                              {intentHeader.title || "Untitled Intent"}
+                            </div>
+                            <div className="mt-2 text-[12px] text-slate-300 whitespace-pre-wrap">
+                              {intentHeader.summary || "—"}
+                            </div>
+                            <div className="mt-2 text-[11px] text-slate-500">
+                              Intent ID <span className="font-mono text-slate-300">{intentHeader.id}</span>
+                            </div>
+                          </div>
+
+                          <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Linked Artifacts</div>
+                            <div className="mt-2 space-y-2">
+                              {intentArtifacts.length === 0 ? (
+                                <div className="text-[12px] text-slate-400">No artifacts attached yet.</div>
+                              ) : (
+                                intentArtifacts.slice(0, 12).map((a) => (
+                                  <div key={a.id} className="rounded-xl border border-white/10 bg-black/15 px-3 py-2">
+                                    <div className="text-[12px] font-semibold text-slate-200">{a.artifact_type}</div>
+                                    <div className="mt-1 text-[11px] text-slate-500 font-mono break-all">{a.artifact_id}</div>
+                                    <div className="mt-1 text-[10px] text-slate-600">{fmt(a.created_at)}</div>
+                                  </div>
+                                ))
+                              )}
+                            </div>
+                          </div>
+
+                          <ActionButton
+                            label={intentBackfilling ? "Backfilling…" : "Backfill / Attach Forge Artifacts"}
+                            tone="cyan"
+                            disabled={intentBackfilling}
+                            onClick={() => doBackfillIntentArtifacts()}
+                          />
+
+                          <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-100">
+                            Backfill is guarded. It only works when a link exists and artifacts are eligible. SANDBOX remains artifact-only by default unless you choose to backfill.
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  ) : null}
+
+                  {/* Notes */}
+                  {rightTab === "notes" ? (
+                    <div className="space-y-3">
+                      <EmptyState
+                        title="Notes (optional)"
+                        detail="Reserved for operator notes. Keep Forge execution clean."
+                      />
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
+
+      {/* Modals */}
+      <Modal
+        open={startModalOpen}
+        title="Start signature envelope"
+        description="Creates (or reuses) a signature envelope for this record. No archive changes."
+        confirmLabel={isStarting ? "Starting…" : "Start"}
+        confirmTone="amber"
+        confirmDisabled={isStarting}
+        onConfirm={async () => {
+          setStartModalOpen(false);
+          await onStartSignature();
+        }}
+        onClose={() => setStartModalOpen(false)}
+      />
+
+      <Modal
+        open={inviteModalOpen}
+        title="Send signature invite"
+        description="Sends the signing invitation to the primary signer (and optional CC)."
+        confirmLabel={isSendingInvite ? "Sending…" : "Send"}
+        confirmTone="amber"
+        confirmDisabled={isSendingInvite}
+        onConfirm={async () => {
+          setInviteModalOpen(false);
+          await onSendInvite();
+        }}
+        onClose={() => setInviteModalOpen(false)}
+      />
+
+      <Modal
+        open={archiveModalOpen}
+        title="Archive now"
+        description="Runs the canonical archive-save-document flow (idempotent). Writes Minute Book primary + Verified registry."
+        confirmLabel={isArchiving ? "Archiving…" : "Archive"}
+        confirmTone="emerald"
+        confirmDisabled={isArchiving}
+        onConfirm={async () => {
+          setArchiveModalOpen(false);
+          await onArchiveNow();
+        }}
+        onClose={() => setArchiveModalOpen(false)}
+      />
+
+      <Modal
+        open={resealModalOpen}
+        title="Re-seal / Repair"
+        description="Repairs missing pointers and registry rows. Safe to run repeatedly."
+        confirmLabel={isResealing ? "Repairing…" : "Repair"}
+        confirmTone="cyan"
+        confirmDisabled={isResealing}
+        onConfirm={async () => {
+          setResealModalOpen(false);
+          await onRepairReseal();
+        }}
+        onClose={() => setResealModalOpen(false)}
+      />
+
+      <Modal
+        open={intentCreateOpen}
+        title="Create Intent"
+        description="Operator-driven. Creates an intent and links it to this ledger record. Optional backfill attaches Forge artifacts."
+        confirmLabel={intentCreating ? "Creating…" : "Create"}
+        confirmTone="amber"
+        confirmDisabled={intentCreating}
+        onConfirm={async () => {
+          await doCreateIntentAndLink();
+        }}
+        onClose={() => setIntentCreateOpen(false)}
+      >
+        <div className="grid grid-cols-12 gap-3">
+          <div className="col-span-12">
+            <label className="block text-[11px] uppercase tracking-[0.22em] text-slate-500">Title</label>
+            <input
+              value={intentTitle}
+              onChange={(e) => setIntentTitle(e.target.value)}
+              className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-[13px] text-slate-100 outline-none focus:border-white/20"
+              placeholder="Intent title"
+            />
+          </div>
+
+          <div className="col-span-12">
+            <label className="block text-[11px] uppercase tracking-[0.22em] text-slate-500">Reason (stored as summary)</label>
+            <textarea
+              value={intentReason}
+              onChange={(e) => setIntentReason(e.target.value)}
+              rows={5}
+              className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-[13px] text-slate-100 outline-none focus:border-white/20"
+              placeholder="Required: why are we creating this intent?"
+            />
+          </div>
+
+          <div className="col-span-12">
+            <label className="flex items-center gap-2 rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-200">
+              <input
+                type="checkbox"
+                checked={intentBackfillAfterCreate}
+                onChange={(e) => setIntentBackfillAfterCreate(e.target.checked)}
+                className="h-4 w-4 accent-amber-400"
+              />
+              Backfill Forge artifacts after create (recommended)
+            </label>
+            <div className="mt-2 text-[11px] text-slate-500">
+              Backfill calls the guarded helper <span className="font-mono">attach_intent_artifacts_from_ledger</span> (no SQL shortcuts).
+            </div>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }
