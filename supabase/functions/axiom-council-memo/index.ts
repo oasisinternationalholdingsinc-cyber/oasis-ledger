@@ -199,6 +199,45 @@ function splitBulletLead(text: string) {
   return { boldLead: lead, rest };
 }
 
+/**
+ * Enterprise-safe: bold ONLY what fits on the FIRST rendered line.
+ * Returns:
+ * - boldLine: the bold first line text (fits width in bold font)
+ * - restText: remaining text (regular, wraps normally)
+ */
+function fitBoldFirstLine(
+  text: string,
+  fontBold: any,
+  size: number,
+  maxWidth: number,
+) {
+  const s = safeStr(text);
+  if (!s) return { boldLine: "", restText: "" };
+
+  const words = s.split(/\s+/).filter(Boolean);
+  let boldWords: string[] = [];
+  let i = 0;
+
+  const widthOf = (t: string) => fontBold.widthOfTextAtSize(t, size);
+
+  while (i < words.length) {
+    const candidate = boldWords.length
+      ? `${boldWords.join(" ")} ${words[i]}`
+      : words[i];
+    if (widthOf(candidate) > maxWidth) break;
+    boldWords.push(words[i]);
+    i++;
+  }
+
+  // If nothing fits (ultra edge case), do not bold at all.
+  if (boldWords.length === 0) return { boldLine: "", restText: s };
+
+  return {
+    boldLine: boldWords.join(" "),
+    restText: words.slice(i).join(" ").trim(),
+  };
+}
+
 Deno.serve(async (req) => {
   try {
     if (req.method === "OPTIONS")
@@ -389,10 +428,10 @@ Deno.serve(async (req) => {
     };
 
     /**
-     * Apple-style bullets:
-     * - Bold lead clause (first sentence or short lead)
+     * Apple-style bullets (enterprise-safe):
+     * - Bold ONLY the first rendered line (never bold wraps)
      * - Rest regular
-     * - No markdown reliance, no headings injected
+     * - Filters out markdown heading artifacts that may appear as bullet items (e.g. "- ## Executive summary")
      */
     const drawBullets = (text: string, size = 11) => {
       const t = safeStr(text);
@@ -431,21 +470,27 @@ Deno.serve(async (req) => {
       const textX = marginX + 14;
       const innerWidth = maxWidth - 14;
 
-      for (const item of bulletItems) {
-        const { boldLead, rest } = splitBulletLead(item);
+      for (const itemRaw of bulletItems) {
+        // Drop markdown-heading artifacts that sometimes appear as list items
+        const trimmed = safeStr(itemRaw);
+        if (/^\s*#{1,6}\s+/.test(trimmed)) continue;
+        if (/^\s*#{1,6}\s*$/.test(trimmed)) continue;
+        if (/^\s*(?:[-•]\s*)?#{1,6}\s+/.test(trimmed)) continue;
 
-        // Wrap the bold lead first (so the first line(s) are bold)
-        const leadLines = boldLead
-          ? wrapByWidth(boldLead, fontBold, size, innerWidth)
+        const { boldLead, rest } = splitBulletLead(trimmed);
+        const combined = safeStr(`${boldLead}${rest ? ` ${rest}` : ""}`);
+
+        const { boldLine, restText } = fitBoldFirstLine(
+          combined,
+          fontBold,
+          size,
+          innerWidth,
+        );
+
+        const restLines = restText
+          ? wrapByWidth(restText, fontRegular, size, innerWidth)
           : [];
 
-        // For remainder, we wrap with regular font and append after lead.
-        // If lead ends mid-line (rare), we keep it simple: remainder starts on next line.
-        const restLines = rest
-          ? wrapByWidth(rest, fontRegular, size, innerWidth)
-          : [];
-
-        // Draw bullet dot aligned to first line
         ensureSpace(size + 4);
         page.drawText("•", {
           x: bulletX,
@@ -455,10 +500,8 @@ Deno.serve(async (req) => {
           color: black,
         });
 
-        // Draw lead lines (bold)
-        for (const l of leadLines) {
-          ensureSpace(size + 4);
-          page.drawText(l, {
+        if (boldLine) {
+          page.drawText(boldLine, {
             x: textX,
             y,
             size,
@@ -468,7 +511,6 @@ Deno.serve(async (req) => {
           y -= size + 3;
         }
 
-        // Draw rest lines (regular)
         for (const l of restLines) {
           ensureSpace(size + 4);
           page.drawText(l, {
@@ -775,6 +817,9 @@ Deno.serve(async (req) => {
       source_model: sourceModel,
     });
   } catch (e) {
-    return json({ ok: false, error: e instanceof Error ? e.message : String(e) }, 500);
+    return json({
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+    }, 500);
   }
 });
