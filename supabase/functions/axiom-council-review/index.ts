@@ -37,6 +37,12 @@ const NOTE_TYPE_FOR_COUNCIL = "summary";
 // ai_notes.scope_type enum: document/section/book/entity
 const SCOPE_TYPE_FOR_LEDGER = "document";
 
+/**
+ * Memo-friendly fallback (enterprise, court-style, stable)
+ * - Bullet-only sections (no paragraphs)
+ * - No pasted source text (prevents ugly PDF + overflow)
+ * - Title matches your preferred language
+ */
 function fallbackTemplate(rec: {
   id: string;
   title: string | null;
@@ -45,33 +51,41 @@ function fallbackTemplate(rec: {
   body: string | null;
 }) {
   const title = rec.title ?? "(untitled)";
-  const bodyText = safeStr(rec.body);
+  const lane = rec.is_test ? "SANDBOX" : "RoT";
+  const status = safeStr(rec.status) || "—";
 
   return [
-    `# AXIOM Council Advisory`,
+    `# Council Advisory — Evidence-based Analysis`,
     ``,
     `**Record:** ${title}`,
-    `**Status:** ${safeStr(rec.status) || "—"}`,
-    `**Lane:** ${rec.is_test ? "SANDBOX" : "RoT"}`,
+    `**Status:** ${status}`,
+    `**Lane:** ${lane}`,
     ``,
     `## Executive summary`,
-    `- What this resolution does (in plain language)`,
-    `- Why the Board would approve it`,
-    `- Top risks / unknowns`,
+    `- Summarize the decision in plain language (1–2 sentences).`,
+    `- State the purpose (“why this exists”) in one sentence.`,
+    `- Identify the minimum conditions for Council comfort (e.g., approvals, attachments, confirmations).`,
     ``,
     `## Risks / clarity checks`,
-    `- [GREEN] Consistency: …`,
-    `- [YELLOW] Evidence gaps: …`,
-    `- [RED] Blocking issues (if any): …`,
+    `- [GREEN] Internal consistency appears intact based on the provided text.`,
+    `- [YELLOW] Evidence/attachments are not explicitly referenced; confirm supporting materials are filed.`,
+    `- [YELLOW] Success criteria / timelines / responsible parties may require explicit statement for audit clarity.`,
+    `- [RED] If any required authority, dependency, or legal condition is missing, send back for correction before signature.`,
     ``,
     `## Recommendations`,
-    `- Approve / Reject rationale`,
-    `- Attachments required before signature`,
-    `- Wording fixes before sealing`,
+    `- Confirm the scope, timeline, and responsible parties are stated clearly.`,
+    `- Attach any required evidence (contracts, approvals, budgets, policies) before signature.`,
+    `- Clarify any ambiguous wording that could be disputed later (dates, thresholds, responsibilities).`,
+    `- Approve if the above conditions are satisfied; otherwise Send back with a short correction note.`,
     ``,
-    `---`,
-    `### Source text (truncated)`,
-    bodyText.slice(0, 12000),
+    `## Questions to confirm`,
+    `1. What specific evidence/attachments should be referenced for this decision?`,
+    `2. Are the responsible parties and timelines explicitly stated and reviewable?`,
+    `3. Are there any external approvals/consents required before execution?`,
+    `4. Does the text include measurable success/acceptance criteria where appropriate?`,
+    `5. Are any operational, privacy, or security safeguards required and documented?`,
+    ``,
+    `<!-- memo_ready:v1 -->`,
   ].join("\n");
 }
 
@@ -133,36 +147,43 @@ Deno.serve(async (req) => {
 You are AXIOM inside Oasis Digital Parliament.
 You are advisory-only and non-binding.
 You do NOT approve or reject; Council is the authority.
-Your job is to explain: what this record does, WHY, risks, and recommended next steps before signature/archive.
 
-Return Markdown with EXACTLY these sections (keep concise, practical):
-# AXIOM Council Advisory
+OUTPUT RULES (critical):
+- Use Markdown headings ONLY for the section titles below.
+- Under each heading, write ONLY bullet points (no paragraphs).
+- Executive summary: 3–6 bullets max.
+- Risks / clarity checks: bullets only, EACH bullet MUST start with [GREEN] or [YELLOW] or [RED].
+- Recommendations: 4–8 bullets max, EACH bullet must start with a verb (e.g., "Confirm...", "Attach...", "Clarify...").
+- Questions to confirm: numbered list 1–5 (only if needed).
+- Do NOT include a "Source text" section or paste the resolution text.
+
+Return Markdown with EXACTLY these sections:
+
+# Council Advisory — Evidence-based Analysis
 **Record:** <title>
 **Status:** <status>
 **Lane:** <RoT|SANDBOX>
 
 ## Executive summary
-- 3–6 bullets explaining the decision and why it exists.
+- ...
 
 ## Risks / clarity checks
-- Bullets grouped by severity tags: [GREEN], [YELLOW], [RED]
-- Include the “why” and the risk in plain language.
-- If something is missing, say what evidence/attachment would close the gap.
+- [GREEN] ...
+- [YELLOW] ...
+- [RED] ...
 
 ## Recommendations
-- 4–8 bullets, action-oriented.
-- Include “Approve if…” and/or “Reject/Send back if…” conditions.
-- Include wording fixes if any.
+- ...
 
 ## Questions to confirm
-- Up to 5 short questions, only if needed.
+1. ...
 
 Context:
 - Lane: ${lane}
 - Record type: ${recordType}
 - Title: ${title}
 
-Source text:
+Resolution text (for analysis only; do NOT paste it in output):
 ${bodyText.slice(0, 14000)}
 `.trim();
 
@@ -177,7 +198,8 @@ ${bodyText.slice(0, 14000)}
 
       advisory = completion.choices?.[0]?.message?.content?.trim() ?? "";
       if (!advisory) advisory = fallbackTemplate(rec);
-      modelName = "axiom-review-council:v2";
+      advisory = `${advisory}\n\n<!-- memo_ready:v1 -->`;
+      modelName = "axiom-review-council:v3";
     } else {
       advisory = fallbackTemplate(rec);
     }
@@ -189,7 +211,7 @@ ${bodyText.slice(0, 14000)}
         scope_type: SCOPE_TYPE_FOR_LEDGER,
         scope_id: rec.id,
         note_type: NOTE_TYPE_FOR_COUNCIL,
-        title: `AXIOM Council Advisory — ${title}`,
+        title: `Council Advisory — Evidence-based Analysis — ${title}`,
         content: advisory,
         model: modelName,
         tokens_used: null,
