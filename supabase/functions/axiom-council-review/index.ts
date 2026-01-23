@@ -1,9 +1,10 @@
+// supabase/functions/axiom-council-review/index.ts
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 type ReqBody = {
   record_id: string; // governance_ledger.id
-  is_test?: boolean; // optional; record is source of truth
+  is_test?: boolean; // optional; record is source of truth (ignored)
 };
 
 // ---- CORS (so browser invoke is clean) ----
@@ -39,8 +40,12 @@ const SCOPE_TYPE_FOR_LEDGER = "document";
 
 Deno.serve(async (req) => {
   try {
-    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
-    if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
+    if (req.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsHeaders });
+    }
+    if (req.method !== "POST") {
+      return json({ ok: false, error: "Method not allowed" }, 405);
+    }
 
     // Caller must be authenticated so we can attribute created_by properly
     const authHeader = req.headers.get("Authorization") ?? "";
@@ -56,30 +61,35 @@ Deno.serve(async (req) => {
     const serviceKey = mustEnv("SUPABASE_SERVICE_ROLE_KEY");
     const anonKey = mustEnv("SUPABASE_ANON_KEY");
 
-    // Admin client (for reliable reads/writes even if RLS is strict)
-    const admin = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false } });
+    // Admin client (reliable reads/writes even if RLS is strict)
+    const admin = createClient(supabaseUrl, serviceKey, {
+      auth: { persistSession: false },
+    });
 
-    // User client (to resolve caller user id from JWT)
+    // User client (resolve caller user id from JWT)
     const userClient = createClient(supabaseUrl, anonKey, {
       global: { headers: { Authorization: authHeader } },
       auth: { persistSession: false },
     });
 
     const { data: userRes, error: userErr } = await userClient.auth.getUser();
-    if (userErr || !userRes?.user?.id) return json({ ok: false, error: "Invalid session" }, 401);
+    if (userErr || !userRes?.user?.id) {
+      return json({ ok: false, error: "Invalid session" }, 401);
+    }
     const userId = userRes.user.id;
 
-    // 1) Load ledger record
+    // 1) Load ledger record (lane/source of truth comes from record)
     const { data: rec, error: recErr } = await admin
       .from("governance_ledger")
       .select("id,title,body,status,entity_id,is_test,created_at,record_type")
       .eq("id", record_id)
       .single();
 
-    if (recErr || !rec) return json({ ok: false, error: recErr?.message ?? "Record not found" }, 404);
+    if (recErr || !rec) {
+      return json({ ok: false, error: recErr?.message ?? "Record not found" }, 404);
+    }
 
     // 2) Create council-grade advisory (template baseline)
-    // NOTE: later you can swap this block with your “more intelligent” AXIOM model pipeline.
     const title = rec.title ?? "(untitled)";
     const bodyText = safeStr(rec.body);
 
@@ -130,7 +140,8 @@ Deno.serve(async (req) => {
     }
 
     return json({ ok: true, note_id: noteRow.id, record_id: rec.id });
-  } catch (e: any) {
-    return json({ ok: false, error: e?.message ?? "Unhandled error" }, 500);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return json({ ok: false, error: msg || "Unhandled error" }, 500);
   }
 });
