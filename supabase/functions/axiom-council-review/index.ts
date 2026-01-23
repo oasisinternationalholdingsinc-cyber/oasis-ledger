@@ -41,7 +41,11 @@ const SCOPE_TYPE_FOR_LEDGER = "document";
  * Memo-friendly fallback (enterprise, court-style, stable)
  * - Bullet-only sections (no paragraphs)
  * - No pasted source text (prevents ugly PDF + overflow)
- * - Title matches your preferred language
+ * - Authority-aligned: AXIOM never competes with governance
+ *
+ * IMPORTANT: We keep the top metadata lines because your memo renderer
+ * parses sections and strips markdown — but we label them in an
+ * authority-safe way so they don't fight the ledger.
  */
 function fallbackTemplate(rec: {
   id: string;
@@ -57,33 +61,34 @@ function fallbackTemplate(rec: {
   return [
     `# Council Advisory — Evidence-based Analysis`,
     ``,
-    `**Record:** ${title}`,
-    `**Status:** ${status}`,
+    `**Source record:** ${title}`,
+    `**Ledger status:** ${status}`,
     `**Lane:** ${lane}`,
     ``,
     `## Executive summary`,
-    `- Summarize the decision in plain language (1–2 sentences).`,
+    `- Advisory only; this memorandum does not approve, reject, or modify the governance record.`,
     `- State the purpose (“why this exists”) in one sentence.`,
-    `- Identify the minimum conditions for Council comfort (e.g., approvals, attachments, confirmations).`,
+    `- Summarize the decision context in plain language (1–2 bullets).`,
+    `- Identify minimum conditions for Council comfort (e.g., approvals, attachments, confirmations).`,
     ``,
     `## Risks / clarity checks`,
-    `- [GREEN] Internal consistency appears intact based on the provided text.`,
-    `- [YELLOW] Evidence/attachments are not explicitly referenced; confirm supporting materials are filed.`,
-    `- [YELLOW] Success criteria / timelines / responsible parties may require explicit statement for audit clarity.`,
-    `- [RED] If any required authority, dependency, or legal condition is missing, send back for correction before signature.`,
+    `- [GREEN] The text appears internally consistent based on the provided content.`,
+    `- [YELLOW] Evidence/attachments are not explicitly referenced; confirm required supporting materials are filed.`,
+    `- [YELLOW] Timelines, responsible parties, and success criteria should be explicit for audit clarity.`,
+    `- [RED] If any required authority, dependency, consent, or condition is missing, return for correction before signature.`,
     ``,
     `## Recommendations`,
-    `- Confirm the scope, timeline, and responsible parties are stated clearly.`,
-    `- Attach any required evidence (contracts, approvals, budgets, policies) before signature.`,
-    `- Clarify any ambiguous wording that could be disputed later (dates, thresholds, responsibilities).`,
-    `- Approve if the above conditions are satisfied; otherwise Send back with a short correction note.`,
+    `- Confirm scope, timeline, and responsible parties are stated unambiguously.`,
+    `- Attach required evidence (contracts, approvals, budgets, policies) before execution.`,
+    `- Clarify any wording that could be disputed later (dates, thresholds, responsibilities).`,
+    `- Approve only if the above conditions are satisfied; otherwise send back with a short correction note.`,
     ``,
     `## Questions to confirm`,
     `1. What specific evidence/attachments should be referenced for this decision?`,
-    `2. Are the responsible parties and timelines explicitly stated and reviewable?`,
-    `3. Are there any external approvals/consents required before execution?`,
-    `4. Does the text include measurable success/acceptance criteria where appropriate?`,
-    `5. Are any operational, privacy, or security safeguards required and documented?`,
+    `2. Are responsible parties and timelines explicitly stated and reviewable?`,
+    `3. Are any external approvals/consents required before execution?`,
+    `4. Are measurable success/acceptance criteria stated where appropriate?`,
+    `5. Are operational, privacy, or security safeguards required and documented?`,
     ``,
     `<!-- memo_ready:v1 -->`,
   ].join("\n");
@@ -91,7 +96,9 @@ function fallbackTemplate(rec: {
 
 Deno.serve(async (req) => {
   try {
-    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
+    if (req.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsHeaders });
+    }
     if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
 
     // Caller must be authenticated so we can attribute created_by properly
@@ -143,6 +150,8 @@ Deno.serve(async (req) => {
     if (openaiKey) {
       const openai = new OpenAI({ apiKey: openaiKey });
 
+      // IMPORTANT: Keep these three metadata lines so your memo renderer
+      // can display them cleanly, but label them in authority-safe terms.
       const prompt = `
 You are AXIOM inside Oasis Digital Parliament.
 You are advisory-only and non-binding.
@@ -156,12 +165,13 @@ OUTPUT RULES (critical):
 - Recommendations: 4–8 bullets max, EACH bullet must start with a verb (e.g., "Confirm...", "Attach...", "Clarify...").
 - Questions to confirm: numbered list 1–5 (only if needed).
 - Do NOT include a "Source text" section or paste the resolution text.
+- Do NOT restate governance authority. This is commentary only.
 
 Return Markdown with EXACTLY these sections:
 
 # Council Advisory — Evidence-based Analysis
-**Record:** <title>
-**Status:** <status>
+**Source record:** <title>
+**Ledger status:** <status>
 **Lane:** <RoT|SANDBOX>
 
 ## Executive summary
@@ -198,7 +208,12 @@ ${bodyText.slice(0, 14000)}
 
       advisory = completion.choices?.[0]?.message?.content?.trim() ?? "";
       if (!advisory) advisory = fallbackTemplate(rec);
-      advisory = `${advisory}\n\n<!-- memo_ready:v1 -->`;
+
+      // Ensure sentinel marker exactly once
+      if (!advisory.includes("<!-- memo_ready:v1 -->")) {
+        advisory = `${advisory}\n\n<!-- memo_ready:v1 -->`;
+      }
+
       modelName = "axiom-review-council:v3";
     } else {
       advisory = fallbackTemplate(rec);
@@ -211,7 +226,8 @@ ${bodyText.slice(0, 14000)}
         scope_type: SCOPE_TYPE_FOR_LEDGER,
         scope_id: rec.id,
         note_type: NOTE_TYPE_FOR_COUNCIL,
-        title: `Council Advisory — Evidence-based Analysis — ${title}`,
+        // Keep title clean (avoid duplicating record title; memo PDF shows it in header)
+        title: `Council Advisory — Evidence-based Analysis`,
         content: advisory,
         model: modelName,
         tokens_used: null,

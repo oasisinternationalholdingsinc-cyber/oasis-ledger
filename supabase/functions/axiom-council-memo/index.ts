@@ -108,10 +108,7 @@ function parseAdvisory(md: string) {
   let section: Key = "other";
 
   const norm = (h: string) =>
-    h
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, " ")
-      .trim();
+    h.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
   const pickSection = (heading: string): Key => {
     const h = norm(heading);
@@ -171,7 +168,8 @@ function wrapByWidth(text: string, font: any, size: number, maxWidth: number) {
 
 Deno.serve(async (req) => {
   try {
-    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
+    if (req.method === "OPTIONS")
+      return new Response(null, { status: 204, headers: corsHeaders });
     if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);
 
     const body = (await req.json().catch(() => ({}))) as ReqBody;
@@ -196,7 +194,10 @@ Deno.serve(async (req) => {
       .single();
 
     if (ledgerErr || !ledger) {
-      return json({ ok: false, error: `Ledger fetch failed: ${ledgerErr?.message ?? "not found"}` }, 400);
+      return json(
+        { ok: false, error: `Ledger fetch failed: ${ledgerErr?.message ?? "not found"}` },
+        400,
+      );
     }
 
     const is_test = !!ledger.is_test;
@@ -230,8 +231,7 @@ Deno.serve(async (req) => {
         !isEmptyText(clientMemo.notes));
 
     let memoTitle =
-      safeStr(clientMemo?.title) ||
-      "Council Advisory — Evidence-based Analysis";
+      safeStr(clientMemo?.title) || "Council Advisory — Evidence-based Analysis";
 
     let executive_summary = safeStr(clientMemo?.executive_summary);
     let risks = safeStr(clientMemo?.risks);
@@ -244,7 +244,6 @@ Deno.serve(async (req) => {
     let sourceModel: string | null = null;
 
     if (!hasClientContent) {
-      // Pull latest Council advisory from ai_notes
       const { data: note } = await supabase
         .from("ai_notes")
         .select("id, title, content, model, created_at")
@@ -258,7 +257,6 @@ Deno.serve(async (req) => {
       if (note?.content) {
         sourceNoteId = note.id;
         sourceModel = safeStr(note.model);
-        // Title: keep it professional; avoid duplicating entity twice
         memoTitle = "Council Advisory — Evidence-based Analysis";
 
         const parsed = parseAdvisory(note.content);
@@ -266,15 +264,13 @@ Deno.serve(async (req) => {
         risks = parsed.risks || "";
         recommendations = parsed.recommendations || "";
         questions = parsed.questions || "";
-        notes = ""; // keep notes reserved for provenance line below
+        notes = ""; // reserved for provenance line below
       } else {
-        // hard fallback (never blank)
         executive_summary =
           "No advisory content was available at generation time. Generate an advisory in Council and retry.";
       }
     }
 
-    // Final safety: never blank body
     if (
       isEmptyText(executive_summary) &&
       isEmptyText(risks) &&
@@ -294,7 +290,7 @@ Deno.serve(async (req) => {
 
     const pageSize: [number, number] = [612, 792]; // US Letter
 
-    const marginX = 54; // slightly wider margins (more “court memo”)
+    const marginX = 54;
     const marginTop = 62;
     const marginBottom = 54;
 
@@ -330,7 +326,13 @@ Deno.serve(async (req) => {
       y -= gapBottom;
     };
 
-    const drawTextLines = (lines: string[], size: number, font: any, color = black, lineGap = 3) => {
+    const drawTextLines = (
+      lines: string[],
+      size: number,
+      font: any,
+      color = black,
+      lineGap = 3,
+    ) => {
       for (const ln of lines) {
         ensureSpace(size + lineGap + 1);
         page.drawText(ln, { x: marginX, y, size, font, color });
@@ -352,7 +354,6 @@ Deno.serve(async (req) => {
 
       const rawLines = t.split("\n").map((l) => l.trim()).filter(Boolean);
 
-      // Normalize bullets: keep "-" and "•", otherwise treat as paragraph
       const bulletLines: string[] = [];
       let buffer: string[] = [];
 
@@ -374,7 +375,6 @@ Deno.serve(async (req) => {
       }
       flushBuffer();
 
-      // Render each as bullet if multiple, else paragraph
       if (bulletLines.length <= 1) {
         drawParagraph(bulletLines[0] ?? t, size);
         return;
@@ -383,10 +383,8 @@ Deno.serve(async (req) => {
       for (const item of bulletLines) {
         const lines = wrapByWidth(item, fontRegular, size, maxWidth - 14);
         ensureSpace(size + 4);
-        // bullet dot
         page.drawText("•", { x: marginX, y, size, font: fontBold, color: black });
-        // lines
-        let first = true;
+
         for (const l of lines) {
           ensureSpace(size + 4);
           page.drawText(l, {
@@ -397,7 +395,6 @@ Deno.serve(async (req) => {
             color: black,
           });
           y -= size + 3;
-          first = false;
         }
         y -= 4;
       }
@@ -416,56 +413,103 @@ Deno.serve(async (req) => {
       y -= 14;
     };
 
-    // ---- Header ----
-    // Title (keep it professional; avoid repeating entity twice)
+    // ---- Header (FIXED: no overlap, no authority fight) ----
     const headerTitle = memoTitle;
     page.drawText(headerTitle, { x: marginX, y, size: 18, font: fontBold, color: black });
     y -= 22;
 
     const recordTitle = safeStr(ledger.title) || record_id;
     const laneLabel = is_test ? "SANDBOX" : "RoT";
-    const statusLabel = safeStr(ledger.status) || "—";
+    const ledgerStatus = safeStr(ledger.status) || "—";
 
-    const metaLeft = [
-      ["Record:", recordTitle],
-      ["Status:", statusLabel],
+    // Labels are explicit about authority boundaries:
+    // - "Ledger status" is what governance says
+    // - This memo stays "Advisory only" (disclaimer below)
+    const metaLeft: Array<[string, string]> = [
+      ["Source record", recordTitle],
+      ["Ledger status", ledgerStatus],
+      ...(entitySlug ? ([["Entity", entitySlug]] as Array<[string, string]>) : []),
     ];
 
-    const metaRight = [
-      ["Record ID:", record_id],
-      ["Lane:", laneLabel],
+    const metaRight: Array<[string, string]> = [
+      ["Record ID", record_id],
+      ["Lane", laneLabel],
     ];
 
     const rowFontSize = 10.5;
     const colGap = 18;
     const colWidth = (maxWidth - colGap) / 2;
 
-    const drawMetaRow = (x: number, label: string, value: string, rowY: number) => {
-      page.drawText(label, { x, y: rowY, size: rowFontSize, font: fontBold, color: gray });
-      page.drawText(value, {
-        x: x + 64,
-        y: rowY,
-        size: rowFontSize,
-        font: fontRegular,
-        color: black,
-      });
+    const labelColor = gray;
+    const valueColor = black;
+
+    const labelMaxWidth = (rows: Array<[string, string]>) => {
+      let w = 0;
+      for (const [label] of rows) {
+        const ww = fontBold.widthOfTextAtSize(`${label}:`, rowFontSize);
+        if (ww > w) w = ww;
+      }
+      return w;
     };
 
-    ensureSpace(40);
-    let rowY = y;
-    for (let i = 0; i < Math.max(metaLeft.length, metaRight.length); i++) {
-      const left = metaLeft[i];
-      const right = metaRight[i];
-      if (left) drawMetaRow(marginX, left[0], left[1], rowY);
-      if (right) drawMetaRow(marginX + colWidth + colGap, right[0], right[1], rowY);
-      rowY -= 14;
-    }
-    y = rowY - 4;
+    const leftLabelW = labelMaxWidth(metaLeft);
+    const rightLabelW = labelMaxWidth(metaRight);
 
-    // Disclaimer line (small, calm, “court memo” tone)
+    const drawMetaBlock = (
+      x: number,
+      rows: Array<[string, string]>,
+      labelW: number,
+      blockWidth: number,
+      startY: number,
+    ) => {
+      let yy = startY;
+      const pad = 10;
+      const valueX = x + labelW + pad;
+      const valueW = blockWidth - (labelW + pad);
+
+      for (const [label, value] of rows) {
+        // label
+        page.drawText(`${label}:`, {
+          x,
+          y: yy,
+          size: rowFontSize,
+          font: fontBold,
+          color: labelColor,
+        });
+
+        // value wraps within its column (THIS prevents overlap)
+        const vLines = wrapByWidth(value, fontRegular, rowFontSize, valueW);
+        for (let i = 0; i < vLines.length; i++) {
+          page.drawText(vLines[i], {
+            x: valueX,
+            y: yy,
+            size: rowFontSize,
+            font: fontRegular,
+            color: valueColor,
+          });
+          yy -= 14;
+        }
+
+        // extra spacing between meta rows
+        yy -= 2;
+      }
+      return yy;
+    };
+
+    ensureSpace(80);
+    const startY = y;
+
+    const leftBottom = drawMetaBlock(marginX, metaLeft, leftLabelW, colWidth, startY);
+    const rightX = marginX + colWidth + colGap;
+    const rightBottom = drawMetaBlock(rightX, metaRight, rightLabelW, colWidth, startY);
+
+    // header ends after whichever column is taller
+    y = Math.min(leftBottom, rightBottom) - 2;
+
+    // Disclaimer line (strong boundary)
     const disclaimer =
       "Advisory only. Evidence-based analysis to support Council review; not an approval or decision.";
-    ensureSpace(18);
+    ensureSpace(20);
     page.drawText(disclaimer, { x: marginX, y, size: 9.5, font: fontRegular, color: gray });
     y -= 6;
 
