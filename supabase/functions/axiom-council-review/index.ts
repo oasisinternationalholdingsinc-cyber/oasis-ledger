@@ -32,64 +32,33 @@ function safeStr(s: unknown) {
   return String(s ?? "").trim();
 }
 
-function normalizeAdvisory(md: string) {
-  let s = String(md ?? "").replace(/\r/g, "").trim();
-
-  // Normalize bullet glyphs and double-dash artifacts
-  s = s.replace(/^\s*•\s+/gm, "- ");
-  s = s.replace(/^\s*-\s*-\s+/gm, "- ");
-
-  // Hard-stop any accidental extra top-level title repeats inside bullets
-  // (Keeps headings intact but prevents weird "## Executive..." leaking into a bullet line.)
-  s = s.replace(/^\s*-\s*#+\s+/gm, "- ");
-
-  // Remove accidental empty bullets
-  s = s.replace(/^\s*-\s*$/gm, "");
-
-  // Clamp excessive blank lines
-  s = s.replace(/\n{4,}/g, "\n\n\n").trim();
-
-  return s;
-}
-
 // Keep compatible with your chk_note_type constraint
 const NOTE_TYPE_FOR_COUNCIL = "summary";
 // ai_notes.scope_type enum: document/section/book/entity
 const SCOPE_TYPE_FOR_LEDGER = "document";
 
 /**
- * Memo-friendly fallback (enterprise, court-style, stable)
- * - Bullet-only sections (no paragraphs)
- * - No pasted source text (prevents ugly PDF + overflow)
- * - Authority-aligned: AXIOM never competes with governance
+ * OPTION A (LOCKED): AXIOM produces CONTENT ONLY (no meta lines).
+ * The memo renderer is sole authority for:
+ * - title/header
+ * - Source record / Ledger status / Lane / Entity
+ * - disclaimer
  *
- * IMPORTANT: We keep the top metadata lines because your memo renderer
- * parses sections and strips markdown — but we label them in an
- * authority-safe way so they don't fight the ledger.
+ * Therefore this fallback MUST NOT include those meta lines either.
  */
-function fallbackTemplate(rec: {
+function fallbackTemplate(_rec: {
   id: string;
   title: string | null;
   status: string | null;
   is_test: boolean | null;
   body: string | null;
 }) {
-  const title = rec.title ?? "(untitled)";
-  const lane = rec.is_test ? "SANDBOX" : "RoT";
-  const status = safeStr(rec.status) || "—";
-
   return [
-    `# Council Advisory — Evidence-based Analysis`,
-    ``,
-    `**Source record:** ${title}`,
-    `**Ledger status:** ${status}`,
-    `**Lane:** ${lane}`,
-    ``,
     `## Executive summary`,
     `- Advisory only; this memorandum does not approve, reject, or modify the governance record.`,
+    `- Summarize the decision in plain language (1–2 bullets).`,
     `- State the purpose (“why this exists”) in one sentence.`,
-    `- Summarize the decision context in plain language (1–2 bullets).`,
-    `- Identify minimum conditions for Council comfort (e.g., approvals, attachments, confirmations).`,
+    `- Identify the minimum conditions for Council comfort (approvals, attachments, confirmations).`,
     ``,
     `## Risks / clarity checks`,
     `- [GREEN] The text appears internally consistent based on the provided content.`,
@@ -101,7 +70,7 @@ function fallbackTemplate(rec: {
     `- Confirm scope, timeline, and responsible parties are stated unambiguously.`,
     `- Attach required evidence (contracts, approvals, budgets, policies) before execution.`,
     `- Clarify any wording that could be disputed later (dates, thresholds, responsibilities).`,
-    `- Approve only if the above conditions are satisfied; otherwise send back with a short correction note.`,
+    `- Approve only if conditions are satisfied; otherwise send back with a short correction note.`,
     ``,
     `## Questions to confirm`,
     `1. What specific evidence/attachments should be referenced for this decision?`,
@@ -112,6 +81,37 @@ function fallbackTemplate(rec: {
     ``,
     `<!-- memo_ready:v1 -->`,
   ].join("\n");
+}
+
+function normalizeAdvisory(md: string) {
+  // Ensure sentinel marker exactly once
+  let s = safeStr(md);
+  if (!s) return s;
+
+  // Hard strip any accidental "meta lines" if model violates contract
+  // (defensive, but does NOT change wiring — it only removes disallowed header junk)
+  s = s.replace(/^\s*#\s+.*$/gm, ""); // remove any top-level title lines
+  s = s.replace(/^\s*\*\*Source record:\*\*.*$/gim, "");
+  s = s.replace(/^\s*\*\*Ledger status:\*\*.*$/gim, "");
+  s = s.replace(/^\s*\*\*Lane:\*\*.*$/gim, "");
+  s = s.replace(/^\s*\*\*Record:\*\*.*$/gim, "");
+  s = s.replace(/^\s*\*\*Status:\*\*.*$/gim, "");
+
+  // Trim excess blank lines after stripping
+  s = s.replace(/\n{3,}/g, "\n\n").trim();
+
+  if (!s.includes("<!-- memo_ready:v1 -->")) {
+    s = `${s}\n\n<!-- memo_ready:v1 -->`;
+  } else {
+    // keep only first occurrence
+    const idx = s.indexOf("<!-- memo_ready:v1 -->");
+    s =
+      s.slice(0, idx + "<!-- memo_ready:v1 -->".length) +
+      s.slice(idx + "<!-- memo_ready:v1 -->".length).replace(/<!--\s*memo_ready:v1\s*-->/g, "");
+    s = s.trim();
+  }
+
+  return s;
 }
 
 Deno.serve(async (req) => {
@@ -161,6 +161,7 @@ Deno.serve(async (req) => {
     const bodyText = safeStr(rec.body);
     const lane = rec.is_test ? "SANDBOX" : "RoT";
     const recordType = safeStr((rec as any).record_type) || "resolution";
+    const status = safeStr(rec.status) || "—";
 
     // 2) Generate advisory (preferred) with OpenAI, else fallback template
     let advisory = "";
@@ -170,29 +171,22 @@ Deno.serve(async (req) => {
     if (openaiKey) {
       const openai = new OpenAI({ apiKey: openaiKey });
 
+      // OPTION A: CONTENT ONLY — NO META LINES, NO TITLE
       const prompt = `
 You are AXIOM inside Oasis Digital Parliament.
 You are advisory-only and non-binding.
 You do NOT approve or reject; Council is the authority.
 
-OUTPUT RULES (critical):
-- Output MUST be valid Markdown.
-- Use EXACT section headings below. Do not add extra headings.
-- Under each heading, write ONLY bullet points using "-" (dash + space). No paragraphs.
-- Executive summary: 3–6 bullets max.
-- Risks / clarity checks: bullets only, EACH bullet MUST start with [GREEN] or [YELLOW] or [RED].
-- Recommendations: 4–8 bullets max, EACH bullet MUST start with a verb ("Confirm...", "Attach...", "Clarify...").
-- Questions to confirm: numbered list 1–5 (only if needed).
-- Do NOT include a "Source text" section or paste the resolution text.
-- Do NOT restate governance authority. This is commentary only.
-- Do NOT include any "Record/Status/Lane" lines except in the header area.
+CRITICAL OUTPUT CONTRACT (must follow exactly):
+- Output MUST start with "## Executive summary" (no leading title, no "#" heading, no metadata lines).
+- Under each section heading, write ONLY bullet points (no paragraphs).
+- "Risks / clarity checks": each bullet MUST start with [GREEN] or [YELLOW] or [RED].
+- "Recommendations": 4–8 bullets max, EACH bullet must start with a verb (Confirm/Attach/Clarify/Ensure/Require/etc).
+- "Questions to confirm": numbered list 1–5 ONLY if needed.
+- Do NOT paste or quote the resolution text.
+- Do NOT include any record metadata such as Source record / Ledger status / Lane / Record ID.
 
-Return Markdown with EXACTLY this structure:
-
-# Council Advisory — Evidence-based Analysis
-**Source record:** <title>
-**Ledger status:** <status>
-**Lane:** <RoT|SANDBOX>
+Return Markdown with EXACTLY these sections, in this exact order:
 
 ## Executive summary
 - ...
@@ -208,8 +202,9 @@ Return Markdown with EXACTLY this structure:
 ## Questions to confirm
 1. ...
 
-Context:
+Context (for analysis only):
 - Lane: ${lane}
+- Ledger status: ${status}
 - Record type: ${recordType}
 - Title: ${title}
 
@@ -230,16 +225,9 @@ ${bodyText.slice(0, 14000)}
       if (!advisory) advisory = fallbackTemplate(rec);
 
       advisory = normalizeAdvisory(advisory);
-
-      // Ensure sentinel marker exactly once
-      if (!advisory.includes("<!-- memo_ready:v1 -->")) {
-        advisory = `${advisory}\n\n<!-- memo_ready:v1 -->`;
-      }
-
-      modelName = "axiom-review-council:v3";
+      modelName = "axiom-review-council:v4";
     } else {
-      advisory = fallbackTemplate(rec);
-      advisory = normalizeAdvisory(advisory);
+      advisory = normalizeAdvisory(fallbackTemplate(rec));
     }
 
     // 3) Insert ai_notes (ledger-scoped, lane-safe)
@@ -249,7 +237,7 @@ ${bodyText.slice(0, 14000)}
         scope_type: SCOPE_TYPE_FOR_LEDGER,
         scope_id: rec.id,
         note_type: NOTE_TYPE_FOR_COUNCIL,
-        // Keep title clean (avoid duplicating record title; memo PDF shows it in header)
+        // Keep title clean; memo PDF is authoritative for header/meta
         title: `Council Advisory — Evidence-based Analysis`,
         content: advisory,
         model: modelName,

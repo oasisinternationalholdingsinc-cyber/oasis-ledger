@@ -75,9 +75,6 @@ function stripMarkdown(md: string) {
   // Remove heading markers like #, ##, ###
   s = s.replace(/^\s{0,3}#{1,6}\s+/gm, "");
 
-  // Remove HTML-ish comments used as sentinel tags
-  s = s.replace(/<!--[\s\S]*?-->/g, "");
-
   // Collapse extra spaces
   s = s.replace(/[ \t]+/g, " ");
 
@@ -94,6 +91,8 @@ function stripMarkdown(md: string) {
  * ## Risks / clarity checks
  * ## Recommendations
  * ## Questions to confirm
+ *
+ * OPTION A: advisory content contains NO meta lines.
  */
 function parseAdvisory(md: string) {
   const raw = (md ?? "").replace(/\r/g, "");
@@ -129,8 +128,11 @@ function parseAdvisory(md: string) {
       continue;
     }
 
-    // ignore top title "# ..."
+    // ignore any accidental top title "# ..."
     if (/^\s{0,3}#\s+/.test(ln)) continue;
+
+    // ignore memo_ready marker
+    if (/<!--\s*memo_ready:v1\s*-->/.test(ln)) continue;
 
     out[section].push(ln);
   }
@@ -221,7 +223,7 @@ Deno.serve(async (req) => {
     // ---- Determine memo content source ----
     // Priority:
     // 1) body.memo (if provided and has meaningful content)
-    // 2) latest ai_notes advisory for this record
+    // 2) latest ai_notes advisory for this record (OPTION A: content-only)
     const clientMemo = body.memo ?? null;
 
     const hasClientContent =
@@ -343,68 +345,49 @@ Deno.serve(async (req) => {
       }
     };
 
-    // ✅ FIX: always strip markdown before rendering paragraphs
     const drawParagraph = (text: string, size = 11, color = black) => {
       const t = safeStr(text);
       if (!t) return;
-
-      const cleaned = stripMarkdown(t);
-      if (!cleaned) return;
-
-      const lines = wrapByWidth(cleaned, fontRegular, size, maxWidth);
+      const lines = wrapByWidth(t, fontRegular, size, maxWidth);
       drawTextLines(lines, size, fontRegular, color, 3);
       y -= 6;
     };
 
-    // ✅ FIX: strip markdown per bullet item so ** / ## / # never leak into PDF
     const drawBullets = (text: string, size = 11) => {
       const t = safeStr(text);
       if (!t) return;
 
-      const rawLines = t
-        .replace(/\r/g, "")
-        .split("\n")
-        .map((l) => l.trim())
-        .filter(Boolean);
+      const rawLines = t.split("\n").map((l) => l.trim()).filter(Boolean);
 
-      const bulletItems: string[] = [];
+      const bulletLines: string[] = [];
       let buffer: string[] = [];
 
       const flushBuffer = () => {
-        if (!buffer.length) return;
-        const paragraph = buffer.join(" ").trim();
-        if (paragraph) bulletItems.push(paragraph);
-        buffer = [];
+        if (buffer.length) {
+          const paragraph = buffer.join(" ").trim();
+          if (paragraph) bulletLines.push(paragraph);
+          buffer = [];
+        }
       };
 
       for (const ln of rawLines) {
         if (/^[-•]\s+/.test(ln)) {
           flushBuffer();
-          bulletItems.push(ln.replace(/^[-•]\s+/, ""));
+          bulletLines.push(ln.replace(/^[-•]\s+/, ""));
         } else {
           buffer.push(ln);
         }
       }
       flushBuffer();
 
-      // Clean each item (removes markdown + comment tags)
-      const cleanedItems = bulletItems
-        .map((it) => stripMarkdown(it))
-        .map((it) => safeStr(it))
-        .filter(Boolean);
-
-      if (cleanedItems.length === 0) return;
-
-      // If only one line, render as paragraph (still markdown-safe)
-      if (cleanedItems.length === 1) {
-        drawParagraph(cleanedItems[0], size);
+      if (bulletLines.length <= 1) {
+        drawParagraph(bulletLines[0] ?? t, size);
         return;
       }
 
-      for (const item of cleanedItems) {
+      for (const item of bulletLines) {
         const lines = wrapByWidth(item, fontRegular, size, maxWidth - 14);
         ensureSpace(size + 4);
-
         page.drawText("•", { x: marginX, y, size, font: fontBold, color: black });
 
         for (const l of lines) {
@@ -435,7 +418,7 @@ Deno.serve(async (req) => {
       y -= 14;
     };
 
-    // ---- Header (no overlap, no authority fight) ----
+    // ---- Header (authoritative meta lives here) ----
     const headerTitle = memoTitle;
     page.drawText(headerTitle, { x: marginX, y, size: 18, font: fontBold, color: black });
     y -= 22;
@@ -495,10 +478,9 @@ Deno.serve(async (req) => {
           color: labelColor,
         });
 
-        // wrap values safely in column
-        const vLines = wrapByWidth(stripMarkdown(safeStr(value)), fontRegular, rowFontSize, valueW);
-        for (const ln of vLines) {
-          page.drawText(ln, {
+        const vLines = wrapByWidth(value, fontRegular, rowFontSize, valueW);
+        for (let i = 0; i < vLines.length; i++) {
+          page.drawText(vLines[i], {
             x: valueX,
             y: yy,
             size: rowFontSize,
@@ -507,6 +489,7 @@ Deno.serve(async (req) => {
           });
           yy -= 14;
         }
+
         yy -= 2;
       }
       return yy;
@@ -521,6 +504,7 @@ Deno.serve(async (req) => {
 
     y = Math.min(leftBottom, rightBottom) - 2;
 
+    // Disclaimer line (strong boundary)
     const disclaimer =
       "Advisory only. Evidence-based analysis to support Council review; not an approval or decision.";
     ensureSpace(20);
@@ -548,7 +532,6 @@ Deno.serve(async (req) => {
       drawBullets(questions, 11);
     }
 
-    // Structured findings (optional)
     if ((findings?.length ?? 0) > 0) {
       drawSection("Findings (Structured)");
       let idx = 1;
@@ -561,13 +544,7 @@ Deno.serve(async (req) => {
           `${f.category ? ` — ${safeStr(f.category)}` : ""}`;
 
         ensureSpace(18);
-        page.drawText(stripMarkdown(head), {
-          x: marginX,
-          y,
-          size: 11,
-          font: fontBold,
-          color: black,
-        });
+        page.drawText(head, { x: marginX, y, size: 11, font: fontBold, color: black });
         y -= 14;
 
         if (!isEmptyText(f.evidence)) {
@@ -593,7 +570,6 @@ Deno.serve(async (req) => {
       }
     }
 
-    // Additional notes / provenance
     drawSection("Additional Notes");
 
     const provenanceBits: string[] = [];
