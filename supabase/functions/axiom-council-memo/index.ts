@@ -75,6 +75,9 @@ function stripMarkdown(md: string) {
   // Remove heading markers like #, ##, ###
   s = s.replace(/^\s{0,3}#{1,6}\s+/gm, "");
 
+  // Remove HTML-ish comments used as sentinel tags
+  s = s.replace(/<!--[\s\S]*?-->/g, "");
+
   // Collapse extra spaces
   s = s.replace(/[ \t]+/g, " ");
 
@@ -107,7 +110,8 @@ function parseAdvisory(md: string) {
 
   let section: Key = "other";
 
-  const norm = (h: string) => h.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const norm = (h: string) =>
+    h.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
   const pickSection = (heading: string): Key => {
     const h = norm(heading);
@@ -125,7 +129,7 @@ function parseAdvisory(md: string) {
       continue;
     }
 
-    // ignore top title "# AXIOM Council Advisory"
+    // ignore top title "# ..."
     if (/^\s{0,3}#\s+/.test(ln)) continue;
 
     out[section].push(ln);
@@ -140,28 +144,6 @@ function parseAdvisory(md: string) {
     questions: joinClean(out.questions),
     other: joinClean(out.other),
   };
-}
-
-/**
- * Remove “header leakage” that sometimes shows up as a first bullet after parsing.
- * This is a presentation-only hygiene guard (NO wiring changes).
- */
-function cleanHeaderLeak(s: string) {
-  let t = safeStr(s);
-  if (!t) return "";
-
-  // Drop memo/advisory banner fragments that can sneak into the first bullet
-  // (case-insensitive, resilient to punctuation/spacing)
-  t = t.replace(/^\s*(axiom\s+council\s+advisory|council\s+advisory)[\s\S]{0,400}?\b(executive\s+summary)\b\s*/i, "");
-  t = t.replace(/^\s*(record|source\s+record|ledger\s+status|status|lane)\s*:\s*.*$/gim, "").trim();
-
-  // If the first line still looks like an orphaned heading fragment, remove it
-  const lines = t.split("\n").map((x) => x.trim()).filter(Boolean);
-  if (lines.length && /^(council\s+advisory|axiom\s+council\s+advisory)$/i.test(lines[0])) {
-    lines.shift();
-  }
-
-  return lines.join("\n").trim();
 }
 
 /**
@@ -189,7 +171,8 @@ function wrapByWidth(text: string, font: any, size: number, maxWidth: number) {
 
 Deno.serve(async (req) => {
   try {
-    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
+    if (req.method === "OPTIONS")
+      return new Response(null, { status: 204, headers: corsHeaders });
     if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);
 
     const body = (await req.json().catch(() => ({}))) as ReqBody;
@@ -250,7 +233,8 @@ Deno.serve(async (req) => {
         (clientMemo.findings?.length ?? 0) > 0 ||
         !isEmptyText(clientMemo.notes));
 
-    let memoTitle = safeStr(clientMemo?.title) || "Council Advisory — Evidence-based Analysis";
+    let memoTitle =
+      safeStr(clientMemo?.title) || "Council Advisory — Evidence-based Analysis";
 
     let executive_summary = safeStr(clientMemo?.executive_summary);
     let risks = safeStr(clientMemo?.risks);
@@ -263,7 +247,6 @@ Deno.serve(async (req) => {
     let sourceModel: string | null = null;
 
     if (!hasClientContent) {
-      // Pull latest Council advisory from ai_notes
       const { data: note } = await supabase
         .from("ai_notes")
         .select("id, title, content, model, created_at")
@@ -280,22 +263,17 @@ Deno.serve(async (req) => {
         memoTitle = "Council Advisory — Evidence-based Analysis";
 
         const parsed = parseAdvisory(note.content);
-
-        // ✅ critical hygiene guard (fixes your screenshot, no wiring change)
-        executive_summary = cleanHeaderLeak(parsed.executive_summary || "");
-        risks = cleanHeaderLeak(parsed.risks || "");
-        recommendations = cleanHeaderLeak(parsed.recommendations || "");
-        questions = cleanHeaderLeak(parsed.questions || "");
-
+        executive_summary = parsed.executive_summary || "";
+        risks = parsed.risks || "";
+        recommendations = parsed.recommendations || "";
+        questions = parsed.questions || "";
         notes = ""; // reserved for provenance line below
       } else {
-        // hard fallback (never blank)
         executive_summary =
           "No advisory content was available at generation time. Generate an advisory in Council and retry.";
       }
     }
 
-    // Final safety: never blank body
     if (
       isEmptyText(executive_summary) &&
       isEmptyText(risks) &&
@@ -315,7 +293,7 @@ Deno.serve(async (req) => {
 
     const pageSize: [number, number] = [612, 792]; // US Letter
 
-    const marginX = 54; // court memo margins
+    const marginX = 54;
     const marginTop = 62;
     const marginBottom = 54;
 
@@ -351,7 +329,13 @@ Deno.serve(async (req) => {
       y -= gapBottom;
     };
 
-    const drawTextLines = (lines: string[], size: number, font: any, color = black, lineGap = 3) => {
+    const drawTextLines = (
+      lines: string[],
+      size: number,
+      font: any,
+      color = black,
+      lineGap = 3,
+    ) => {
       for (const ln of lines) {
         ensureSpace(size + lineGap + 1);
         page.drawText(ln, { x: marginX, y, size, font, color });
@@ -359,49 +343,65 @@ Deno.serve(async (req) => {
       }
     };
 
+    // ✅ FIX: always strip markdown before rendering paragraphs
     const drawParagraph = (text: string, size = 11, color = black) => {
       const t = safeStr(text);
       if (!t) return;
-      const lines = wrapByWidth(t, fontRegular, size, maxWidth);
+
+      const cleaned = stripMarkdown(t);
+      if (!cleaned) return;
+
+      const lines = wrapByWidth(cleaned, fontRegular, size, maxWidth);
       drawTextLines(lines, size, fontRegular, color, 3);
       y -= 6;
     };
 
+    // ✅ FIX: strip markdown per bullet item so ** / ## / # never leak into PDF
     const drawBullets = (text: string, size = 11) => {
       const t = safeStr(text);
       if (!t) return;
 
-      const rawLines = t.split("\n").map((l) => l.trim()).filter(Boolean);
+      const rawLines = t
+        .replace(/\r/g, "")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
 
-      // Normalize bullets: keep "-" and "•", otherwise treat as paragraph
-      const bulletLines: string[] = [];
+      const bulletItems: string[] = [];
       let buffer: string[] = [];
 
       const flushBuffer = () => {
-        if (buffer.length) {
-          const paragraph = buffer.join(" ").trim();
-          if (paragraph) bulletLines.push(paragraph);
-          buffer = [];
-        }
+        if (!buffer.length) return;
+        const paragraph = buffer.join(" ").trim();
+        if (paragraph) bulletItems.push(paragraph);
+        buffer = [];
       };
 
       for (const ln of rawLines) {
         if (/^[-•]\s+/.test(ln)) {
           flushBuffer();
-          bulletLines.push(ln.replace(/^[-•]\s+/, ""));
+          bulletItems.push(ln.replace(/^[-•]\s+/, ""));
         } else {
           buffer.push(ln);
         }
       }
       flushBuffer();
 
-      // Render each as bullet if multiple, else paragraph
-      if (bulletLines.length <= 1) {
-        drawParagraph(bulletLines[0] ?? t, size);
+      // Clean each item (removes markdown + comment tags)
+      const cleanedItems = bulletItems
+        .map((it) => stripMarkdown(it))
+        .map((it) => safeStr(it))
+        .filter(Boolean);
+
+      if (cleanedItems.length === 0) return;
+
+      // If only one line, render as paragraph (still markdown-safe)
+      if (cleanedItems.length === 1) {
+        drawParagraph(cleanedItems[0], size);
         return;
       }
 
-      for (const item of bulletLines) {
+      for (const item of cleanedItems) {
         const lines = wrapByWidth(item, fontRegular, size, maxWidth - 14);
         ensureSpace(size + 4);
 
@@ -435,8 +435,9 @@ Deno.serve(async (req) => {
       y -= 14;
     };
 
-    // ---- Header (no overlap, wrapped values, authority-safe labels) ----
-    page.drawText(memoTitle, { x: marginX, y, size: 18, font: fontBold, color: black });
+    // ---- Header (no overlap, no authority fight) ----
+    const headerTitle = memoTitle;
+    page.drawText(headerTitle, { x: marginX, y, size: 18, font: fontBold, color: black });
     y -= 22;
 
     const recordTitle = safeStr(ledger.title) || record_id;
@@ -457,6 +458,9 @@ Deno.serve(async (req) => {
     const rowFontSize = 10.5;
     const colGap = 18;
     const colWidth = (maxWidth - colGap) / 2;
+
+    const labelColor = gray;
+    const valueColor = black;
 
     const labelMaxWidth = (rows: Array<[string, string]>) => {
       let w = 0;
@@ -488,17 +492,18 @@ Deno.serve(async (req) => {
           y: yy,
           size: rowFontSize,
           font: fontBold,
-          color: gray,
+          color: labelColor,
         });
 
-        const vLines = wrapByWidth(value, fontRegular, rowFontSize, valueW);
+        // wrap values safely in column
+        const vLines = wrapByWidth(stripMarkdown(safeStr(value)), fontRegular, rowFontSize, valueW);
         for (const ln of vLines) {
           page.drawText(ln, {
             x: valueX,
             y: yy,
             size: rowFontSize,
             font: fontRegular,
-            color: black,
+            color: valueColor,
           });
           yy -= 14;
         }
@@ -507,13 +512,15 @@ Deno.serve(async (req) => {
       return yy;
     };
 
-    ensureSpace(84);
+    ensureSpace(80);
     const startY = y;
+
     const leftBottom = drawMetaBlock(marginX, metaLeft, leftLabelW, colWidth, startY);
-    const rightBottom = drawMetaBlock(marginX + colWidth + colGap, metaRight, rightLabelW, colWidth, startY);
+    const rightX = marginX + colWidth + colGap;
+    const rightBottom = drawMetaBlock(rightX, metaRight, rightLabelW, colWidth, startY);
+
     y = Math.min(leftBottom, rightBottom) - 2;
 
-    // Disclaimer line (strong boundary)
     const disclaimer =
       "Advisory only. Evidence-based analysis to support Council review; not an approval or decision.";
     ensureSpace(20);
@@ -554,7 +561,13 @@ Deno.serve(async (req) => {
           `${f.category ? ` — ${safeStr(f.category)}` : ""}`;
 
         ensureSpace(18);
-        page.drawText(head, { x: marginX, y, size: 11, font: fontBold, color: black });
+        page.drawText(stripMarkdown(head), {
+          x: marginX,
+          y,
+          size: 11,
+          font: fontBold,
+          color: black,
+        });
         y -= 14;
 
         if (!isEmptyText(f.evidence)) {

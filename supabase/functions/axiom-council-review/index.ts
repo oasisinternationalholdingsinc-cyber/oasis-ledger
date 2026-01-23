@@ -32,6 +32,26 @@ function safeStr(s: unknown) {
   return String(s ?? "").trim();
 }
 
+function normalizeAdvisory(md: string) {
+  let s = String(md ?? "").replace(/\r/g, "").trim();
+
+  // Normalize bullet glyphs and double-dash artifacts
+  s = s.replace(/^\s*•\s+/gm, "- ");
+  s = s.replace(/^\s*-\s*-\s+/gm, "- ");
+
+  // Hard-stop any accidental extra top-level title repeats inside bullets
+  // (Keeps headings intact but prevents weird "## Executive..." leaking into a bullet line.)
+  s = s.replace(/^\s*-\s*#+\s+/gm, "- ");
+
+  // Remove accidental empty bullets
+  s = s.replace(/^\s*-\s*$/gm, "");
+
+  // Clamp excessive blank lines
+  s = s.replace(/\n{4,}/g, "\n\n\n").trim();
+
+  return s;
+}
+
 // Keep compatible with your chk_note_type constraint
 const NOTE_TYPE_FOR_COUNCIL = "summary";
 // ai_notes.scope_type enum: document/section/book/entity
@@ -150,24 +170,24 @@ Deno.serve(async (req) => {
     if (openaiKey) {
       const openai = new OpenAI({ apiKey: openaiKey });
 
-      // IMPORTANT: Keep these three metadata lines so your memo renderer
-      // can display them cleanly, but label them in authority-safe terms.
       const prompt = `
 You are AXIOM inside Oasis Digital Parliament.
 You are advisory-only and non-binding.
 You do NOT approve or reject; Council is the authority.
 
 OUTPUT RULES (critical):
-- Use Markdown headings ONLY for the section titles below.
-- Under each heading, write ONLY bullet points (no paragraphs).
+- Output MUST be valid Markdown.
+- Use EXACT section headings below. Do not add extra headings.
+- Under each heading, write ONLY bullet points using "-" (dash + space). No paragraphs.
 - Executive summary: 3–6 bullets max.
 - Risks / clarity checks: bullets only, EACH bullet MUST start with [GREEN] or [YELLOW] or [RED].
-- Recommendations: 4–8 bullets max, EACH bullet must start with a verb (e.g., "Confirm...", "Attach...", "Clarify...").
+- Recommendations: 4–8 bullets max, EACH bullet MUST start with a verb ("Confirm...", "Attach...", "Clarify...").
 - Questions to confirm: numbered list 1–5 (only if needed).
 - Do NOT include a "Source text" section or paste the resolution text.
 - Do NOT restate governance authority. This is commentary only.
+- Do NOT include any "Record/Status/Lane" lines except in the header area.
 
-Return Markdown with EXACTLY these sections:
+Return Markdown with EXACTLY this structure:
 
 # Council Advisory — Evidence-based Analysis
 **Source record:** <title>
@@ -209,6 +229,8 @@ ${bodyText.slice(0, 14000)}
       advisory = completion.choices?.[0]?.message?.content?.trim() ?? "";
       if (!advisory) advisory = fallbackTemplate(rec);
 
+      advisory = normalizeAdvisory(advisory);
+
       // Ensure sentinel marker exactly once
       if (!advisory.includes("<!-- memo_ready:v1 -->")) {
         advisory = `${advisory}\n\n<!-- memo_ready:v1 -->`;
@@ -217,6 +239,7 @@ ${bodyText.slice(0, 14000)}
       modelName = "axiom-review-council:v3";
     } else {
       advisory = fallbackTemplate(rec);
+      advisory = normalizeAdvisory(advisory);
     }
 
     // 3) Insert ai_notes (ledger-scoped, lane-safe)
