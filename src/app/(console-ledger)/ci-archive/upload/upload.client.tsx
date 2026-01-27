@@ -1,4 +1,3 @@
-// src/app/(os)/ci-archive/upload/upload.client.tsx
 "use client";
 
 export const dynamic = "force-dynamic";
@@ -14,7 +13,7 @@ import {
   CheckCircle2,
 } from "lucide-react";
 
-import { supabaseBrowser } from "@/lib/supabase/browser";
+import { supabaseBrowser as supabaseBrowserImport } from "@/lib/supabase/browser";
 import { useEntity } from "@/components/OsEntityContext";
 
 /**
@@ -27,11 +26,8 @@ import { useEntity } from "@/components/OsEntityContext";
  *    - storage path: <entity>/<domain>/<entry_type>/<YYYY-MM-DD>/<sha>-<filename>
  *    - RPC: register_minute_book_upload (with p_supporting array)
  *
- * ✅ OS consistency (layout only):
- *    - matches CI-ARCHIVE launchpad shell/header/body pattern
- *    - no module-owned viewport (no h-full / overflow-hidden window)
- *    - iPhone-first: single-page scroll, big tap targets, stacked sections
- *    - desktop: 3-column surface, but still OS-native (no nested hard scroll required)
+ * ✅ No hardcoding:
+ *    - entityKey comes ONLY from OsEntityContext
  */
 
 type GovernanceDomain = {
@@ -83,8 +79,16 @@ async function sha256Hex(file: File): Promise<string> {
     .join("");
 }
 
+// ✅ supports BOTH exports:
+// - function supabaseBrowser(): SupabaseClient
+// - const supabaseBrowser: SupabaseClient
+function getSupabaseClient() {
+  const anyRef: any = supabaseBrowserImport as any;
+  return typeof anyRef === "function" ? anyRef() : anyRef;
+}
+
 export default function UploadClient() {
-  const supabase = useMemo(() => supabaseBrowser(), []);
+  const supabase = useMemo(() => getSupabaseClient(), []);
   const { entityKey } = useEntity();
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -161,7 +165,8 @@ export default function UploadClient() {
   }, [domains, domainKey]);
 
   const preview = useMemo(() => {
-    if (!entityKey || !domainKey || !entryType || !entryDate || !title.trim() || !file || !sha) return null;
+    if (!entityKey || !domainKey || !entryType || !entryDate || !title.trim() || !file || !sha)
+      return null;
 
     const cleanFile = safeFilename(file.name);
     const storage_path = `${entityKey}/${domainKey}/${entryType}/${entryDate}/${sha}-${cleanFile}`;
@@ -222,7 +227,10 @@ export default function UploadClient() {
 
   async function uploadAndRegister() {
     if (!preview || !file) {
-      setState({ status: "error", message: "Missing required fields (title, pdf, or hashing not complete)." });
+      setState({
+        status: "error",
+        message: "Missing required fields (title, pdf, or hashing not complete).",
+      });
       return;
     }
 
@@ -296,7 +304,8 @@ export default function UploadClient() {
     }
   }
 
-  const busy = state.status === "hashing" || state.status === "uploading" || state.status === "registering";
+  const busy =
+    state.status === "hashing" || state.status === "uploading" || state.status === "registering";
   const statusLabel =
     state.status === "hashing"
       ? "Hashing…"
@@ -323,7 +332,9 @@ export default function UploadClient() {
           <div className={header}>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">CI • Archive</div>
+                <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">
+                  CI • Archive
+                </div>
                 <h1 className="mt-1 text-lg sm:text-xl font-semibold text-slate-50">Upload</h1>
                 <p className="mt-1 max-w-3xl text-[11px] sm:text-xs text-slate-400 leading-relaxed">
                   Domain-driven filing intake. SHA-256 enforced. Storage upload → register_minute_book_upload().
@@ -375,7 +386,6 @@ export default function UploadClient() {
               <span className="text-slate-500">OS module surface</span>
             </div>
           </div>
-
           <div className={body}>
             {/* Status banner (kept, OS styled) */}
             {(state.status === "error" || state.status === "success") && (
@@ -402,7 +412,9 @@ export default function UploadClient() {
                           Upload + registration complete{state.entryId ? ` • Entry ID: ${state.entryId}` : ""}.
                         </span>
                         <Link
-                          href={`/ci-archive/minute-book${entityKey ? `?entity_key=${encodeURIComponent(entityKey)}` : ""}`}
+                          href={`/ci-archive/minute-book${
+                            entityKey ? `?entity_key=${encodeURIComponent(entityKey)}` : ""
+                          }`}
                           className="inline-flex items-center gap-2 rounded-full border border-emerald-400/20 bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-200 hover:bg-emerald-500/15"
                         >
                           View in Registry →
@@ -484,7 +496,9 @@ export default function UploadClient() {
                               </>
                             )}
                           </select>
-                          <div className="mt-1 text-[11px] text-slate-500">Source: entry_type_section_defaults</div>
+                          <div className="mt-1 text-[11px] text-slate-500">
+                            Source: entry_type_section_defaults
+                          </div>
                         </div>
 
                         <div>
@@ -566,9 +580,17 @@ export default function UploadClient() {
 
                         <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                           <div className="text-[11px] text-slate-500 leading-relaxed">
-                            This page writes: <span className="text-slate-200">Storage upload → register_minute_book_upload()</span>.
+                            This page writes:{" "}
+                            <span className="text-slate-200">
+                              Storage upload → register_minute_book_upload()
+                            </span>
+                            .
                             <br />
-                            The registry reads evidence from <span className="text-slate-200">minute_book_entries + supporting_documents</span>.
+                            The registry reads evidence from{" "}
+                            <span className="text-slate-200">
+                              minute_book_entries + supporting_documents
+                            </span>
+                            .
                           </div>
                         </div>
 
@@ -613,7 +635,13 @@ export default function UploadClient() {
                         <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                           <div className="text-[11px] text-slate-400 tracking-wider uppercase">Storage Path</div>
                           <div className="mt-2 font-mono text-xs text-slate-200 break-all">
-                            {preview ? preview.storage_path : <span className="text-slate-500">Fill fields + choose a PDF to compute path…</span>}
+                            {preview ? (
+                              preview.storage_path
+                            ) : (
+                              <span className="text-slate-500">
+                                Fill fields + choose a PDF to compute path…
+                              </span>
+                            )}
                           </div>
                         </div>
 
@@ -621,7 +649,8 @@ export default function UploadClient() {
                           <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                             <div className="text-[11px] text-slate-400 tracking-wider uppercase">Domain</div>
                             <div className="mt-1 text-sm text-slate-200">
-                              {domainKey || "—"} <span className="text-slate-500">({domainLabel})</span>
+                              {domainKey || "—"}{" "}
+                              <span className="text-slate-500">({domainLabel})</span>
                             </div>
                           </div>
 
@@ -664,7 +693,8 @@ export default function UploadClient() {
 
                         <div className="text-[11px] text-slate-500 leading-relaxed">
                           If the Minute Book registry ever says “no storage_path on primary document”, it means{" "}
-                          <span className="text-slate-200">supporting_documents</span> didn’t get created for that entry_id.
+                          <span className="text-slate-200">supporting_documents</span> didn’t get created for that
+                          entry_id.
                           (Your current RPC payload already fixes this.)
                         </div>
 
@@ -683,7 +713,8 @@ export default function UploadClient() {
                 <div className="mt-5 rounded-3xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
                   <div className="font-semibold text-slate-200">OS behavior</div>
                   <div className="mt-1 leading-relaxed text-slate-400">
-                    CI-Archive Upload inherits the OS shell. No module-owned window frames. This surface is the sole write entry point for Minute Book records.
+                    CI-Archive Upload inherits the OS shell. No module-owned window frames. This surface is the sole
+                    write entry point for Minute Book records.
                   </div>
                 </div>
               </>
@@ -722,3 +753,4 @@ export default function UploadClient() {
     </div>
   );
 }
+
