@@ -1,22 +1,18 @@
-﻿import { createClient } from "@supabase/supabase-js";
+﻿import { createBrowserClient } from "@supabase/ssr";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
-const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-if (!url) throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL");
-if (!anon) throw new Error("Missing NEXT_PUBLIC_SUPABASE_ANON_KEY");
+if (!supabaseUrl) throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL");
+if (!supabaseAnonKey) throw new Error("Missing NEXT_PUBLIC_SUPABASE_ANON_KEY");
 
+// IMPORTANT: must be `any` to avoid TS "subsequent variable declarations" conflicts
+// if this global is declared elsewhere (or by older code).
 declare global {
   // eslint-disable-next-line no-var
-  var __oasis_supabase__: ReturnType<typeof createClient> | undefined;
+  var __oasis_supabase__: any;
 }
-
-export const supabaseBrowser =
-  globalThis.__oasis_supabase__ ??
-  (globalThis.__oasis_supabase__ = createClient(url, anon, {
-    auth: {
-      persistSession: true,
-      autoRefreshToken: true,
-      detectSessionInUrl: true,
-    },
-  }));
+export const supabaseBrowser: SupabaseClient =
+  (globalThis.__oasis_supabase__ as SupabaseClient | undefined) ??
+  ((globalThis.__oasis_supabase__ = createBrowserClient(supabaseUrl, supabaseAnonKey)) as SupabaseClient);
