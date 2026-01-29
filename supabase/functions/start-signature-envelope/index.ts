@@ -7,7 +7,9 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
 const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-if (!SUPABASE_URL || !SERVICE_ROLE_KEY) throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
+if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
+  throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
+}
 
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
 
@@ -29,6 +31,12 @@ function json(data: unknown, status = 200) {
 
 function normEmail(s: string) {
   return s.trim().toLowerCase();
+}
+
+function safeText(s: unknown): string | null {
+  if (s == null) return null;
+  const t = String(s).trim();
+  return t.length ? t : null;
 }
 
 type PartyInput = {
@@ -66,10 +74,10 @@ serve(async (req) => {
   try {
     const body = (await req.json().catch(() => ({}))) as ReqBody;
 
-    const record_id = (body.record_id ?? "").trim();
-    const entity_slug = (body.entity_slug ?? "").trim();
+    const record_id = safeText(body.record_id);
+    const entity_slug = safeText(body.entity_slug);
     const is_test = !!body.is_test;
-    const actor_id = (body.actor_id ?? "").trim() || null;
+    const actor_id = safeText(body.actor_id); // confirmed nullable in DB
 
     if (!record_id) return json<Resp>({ ok: false, error: "RECORD_ID_REQUIRED" }, 400);
     if (!entity_slug) return json<Resp>({ ok: false, error: "ENTITY_SLUG_REQUIRED" }, 400);
@@ -89,9 +97,10 @@ serve(async (req) => {
     const entity_id = ent.data.id as string;
 
     // Ledger row must exist and match entity + lane
+    // ✅ include title (needed because signature_envelopes.title is NOT NULL)
     const gl = await supabase
       .from("governance_ledger")
-      .select("id, entity_id, is_test, status")
+      .select("id, entity_id, is_test, status, title")
       .eq("id", record_id)
       .maybeSingle();
 
@@ -104,6 +113,11 @@ serve(async (req) => {
     if (!!gl.data.is_test !== is_test) {
       return json<Resp>({ ok: false, error: "LANE_MISMATCH" }, 409);
     }
+
+    // Canonical envelope title (enterprise-safe; NOT NULL)
+    const ledgerTitle = safeText((gl.data as any)?.title);
+    const envelopeTitle =
+      ledgerTitle ?? `Signature Envelope — ${record_id}`;
 
     // -----------------------------
     // Reuse existing envelope in same lane
@@ -150,8 +164,9 @@ serve(async (req) => {
         record_id,
         entity_id,
         is_test,
-        status: "draft", // keep neutral; send-signature-invite can move to pending/sent
-        created_by: actor_id, // ok if null depending on schema; if NOT NULL, actor_id must be present
+        title: envelopeTitle,      // ✅ REQUIRED by schema (NOT NULL)
+        status: "draft",           // must satisfy status_check
+        created_by: actor_id,      // nullable (confirmed by your SQL)
       } as any)
       .select("id")
       .single();
@@ -219,9 +234,9 @@ async function maybeCreateParties(args: {
 
   parties = parties
     .map((p) => ({
-      name: (p.name ?? null) ? String(p.name).trim() : null,
-      email: (p.email ?? null) ? normEmail(String(p.email)) : null,
-      role: (p.role ?? null) ? String(p.role).trim() : null,
+      name: safeText(p.name),
+      email: p.email ? normEmail(String(p.email)) : null,
+      role: safeText(p.role),
     }))
     .filter((p) => !!p.email);
 
@@ -235,7 +250,9 @@ async function maybeCreateParties(args: {
 
   if (existing.error) return 0;
 
-  const existingEmails = new Set(((existing.data ?? []) as any[]).map((r) => String(r.email || "").toLowerCase()));
+  const existingEmails = new Set(
+    ((existing.data ?? []) as any[]).map((r) => String(r.email || "").toLowerCase()),
+  );
 
   const rows = parties
     .filter((p) => p.email && !existingEmails.has(String(p.email).toLowerCase()))
