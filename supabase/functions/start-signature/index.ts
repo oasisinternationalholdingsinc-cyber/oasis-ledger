@@ -15,7 +15,13 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
   global: { fetch },
 });
 
-const EDGE_BASE = SUPABASE_URL.replace(/\/rest\/v1$/, "");
+// ✅ NO-404 / NO-REGRESSION: always build the correct base for /functions/v1
+// Handles both:
+// - https://xyz.supabase.co
+// - https://xyz.supabase.co/rest/v1
+const EDGE_BASE = SUPABASE_URL
+  .replace(/\/rest\/v1\/?$/, "")
+  .replace(/\/+$/, "");
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -87,7 +93,7 @@ serve(async (req) => {
     .map((p, i) => ({
       signer_email: String(p.signer_email ?? "").trim().toLowerCase(),
       signer_name: String(p.signer_name ?? "").trim(),
-      role: (p.role ?? "signer").trim(),
+      role: String(p.role ?? "signer").trim() || "signer",
       signing_order: Number.isFinite(p.signing_order)
         ? Number(p.signing_order)
         : i + 1,
@@ -147,7 +153,6 @@ serve(async (req) => {
 
     // ---------------------------------------------------------------------
     // 3) If a COMPLETED envelope already exists, do NOT touch it (immutability).
-    //    Return it so Forge can show Archive Now.
     // ---------------------------------------------------------------------
     const { data: completedEnvelope } = await supabase
       .from("signature_envelopes")
@@ -172,7 +177,6 @@ serve(async (req) => {
 
     // ---------------------------------------------------------------------
     // 4) Reuse latest pending/in_progress envelope (enterprise rule)
-    //    (safe to update lane flag if needed because it's NOT completed)
     // ---------------------------------------------------------------------
     const { data: existingEnvelope } = await supabase
       .from("signature_envelopes")
@@ -202,7 +206,6 @@ serve(async (req) => {
       // -------------------------------------------------------------------
       // 5) Create a new envelope (lane-safe at creation)
       // -------------------------------------------------------------------
-      // OPTIONAL: find latest governance document path for context, if you use it
       const { data: doc } = await supabase
         .from("governance_documents")
         .select("storage_path")
@@ -245,7 +248,6 @@ serve(async (req) => {
       // -------------------------------------------------------------------
       // 6) Generate the signing PDF (NON-ARCHIVE) — wiring unchanged
       // -------------------------------------------------------------------
-      // (don’t block on it; but do attempt)
       await fetch(`${EDGE_BASE}/functions/v1/odp-pdf-engine`, {
         method: "POST",
         headers: {
@@ -258,13 +260,14 @@ serve(async (req) => {
           envelope_id: envelopeId,
           is_test: laneIsTest,
         }),
-      }).catch(() => {});
+      }).catch(() => {
+        // best-effort; do not block start-signature
+      });
     }
 
     // ---------------------------------------------------------------------
     // 7) Insert signature parties (avoid duplicates if UI retries)
     // ---------------------------------------------------------------------
-    // We’ll do: existing emails for this envelope → insert only missing.
     const { data: existingParties } = await supabase
       .from("signature_parties")
       .select("email")
@@ -285,8 +288,7 @@ serve(async (req) => {
         role: p.role ?? "signer",
         signing_order: p.signing_order,
         status: "pending",
-
-        // ✅ ONLY ADDITION (token for capability links)
+        // ✅ capability token for signer links
         party_token: generatePartyToken(),
       }));
 
@@ -302,8 +304,6 @@ serve(async (req) => {
 
     // ---------------------------------------------------------------------
     // 8) Queue email + job for the “primary” signer (wiring unchanged)
-    //    Rule: if we inserted someone new, use the first inserted.
-    //          otherwise, fall back to the first signer input (lookup existing party id)
     // ---------------------------------------------------------------------
     let primaryParty:
       | { id: string; email: string; display_name: string }
