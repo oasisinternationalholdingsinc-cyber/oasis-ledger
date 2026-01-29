@@ -16,7 +16,9 @@ if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
   throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
 }
 
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+  global: { fetch },
+});
 const BUCKET = "minute_book";
 
 // ---------------------------------------------------------------------------
@@ -86,6 +88,10 @@ serve(async (req) => {
   const {
     envelope_id,
     party_id,
+
+    // 🔐 capability token (ADD ONLY; legacy-safe)
+    token,
+
     client_ip,
     user_agent,
     wet_signature_mode,
@@ -93,7 +99,10 @@ serve(async (req) => {
   } = body ?? {};
 
   if (!envelope_id || !party_id) {
-    return json({ ok: false, error: "envelope_id and party_id are required" }, 400);
+    return json(
+      { ok: false, error: "envelope_id and party_id are required" },
+      400,
+    );
   }
 
   try {
@@ -104,28 +113,58 @@ serve(async (req) => {
     // -----------------------------------------------------------------------
     const { data: envelope, error: envErr } = await supabase
       .from("signature_envelopes")
-      .select("id, status, title, entity_id, record_id, supporting_document_path, metadata")
+      .select(
+        "id, status, title, entity_id, record_id, supporting_document_path, metadata",
+      )
       .eq("id", envelope_id)
       .single();
 
     if (envErr || !envelope) {
       console.error("Envelope fetch error", envErr);
-      return json({ ok: false, error: "Envelope not found", details: envErr }, 404);
+      return json(
+        { ok: false, error: "Envelope not found", details: envErr },
+        404,
+      );
     }
 
     // -----------------------------------------------------------------------
-    // 2) Load party
+    // 2) Load party (include party_token for capability enforcement)
     // -----------------------------------------------------------------------
     const { data: party, error: partyErr } = await supabase
       .from("signature_parties")
-      .select("id, envelope_id, email, display_name, role, status")
+      .select("id, envelope_id, email, display_name, role, status, party_token")
       .eq("id", party_id)
       .eq("envelope_id", envelope_id)
       .single();
 
     if (partyErr || !party) {
       console.error("Party fetch error", partyErr);
-      return json({ ok: false, error: "Signature party not found", details: partyErr }, 404);
+      return json(
+        {
+          ok: false,
+          error: "Signature party not found",
+          details: partyErr,
+        },
+        404,
+      );
+    }
+
+    // -----------------------------------------------------------------------
+    // 2.1) 🔐 Capability token enforcement (NO REGRESSION)
+    // Rule:
+    // - party_token IS NULL  → legacy signer → ALLOW
+    // - party_token EXISTS   → token REQUIRED and must match
+    // -----------------------------------------------------------------------
+    if (party.party_token) {
+      const expected = String(party.party_token);
+      const provided = String(token ?? "");
+
+      if (!provided) {
+        return json({ ok: false, error: "SIGNING_TOKEN_REQUIRED" }, 401);
+      }
+      if (provided !== expected) {
+        return json({ ok: false, error: "SIGNING_TOKEN_INVALID" }, 403);
+      }
     }
 
     // -----------------------------------------------------------------------
@@ -139,7 +178,10 @@ serve(async (req) => {
 
     if (partyUpdateErr) {
       console.error("Party update error", partyUpdateErr);
-      return json({ ok: false, error: "Failed to update party", details: partyUpdateErr }, 500);
+      return json(
+        { ok: false, error: "Failed to update party", details: partyUpdateErr },
+        500,
+      );
     }
 
     // -----------------------------------------------------------------------
@@ -188,10 +230,18 @@ serve(async (req) => {
 
     if (allPartiesErr || !allParties) {
       console.error("All parties fetch error", allPartiesErr);
-      return json({ ok: false, error: "Failed to check parties", details: allPartiesErr }, 500);
+      return json(
+        {
+          ok: false,
+          error: "Failed to check parties",
+          details: allPartiesErr,
+        },
+        500,
+      );
     }
 
-    const allSigned = allParties.length > 0 && allParties.every((p) => p.status === "signed");
+    const allSigned =
+      allParties.length > 0 && allParties.every((p) => p.status === "signed");
     const newStatus = allSigned ? "completed" : "partial";
 
     // sync envelope.status (redundant with view but good to have)
@@ -211,19 +261,23 @@ serve(async (req) => {
     // -----------------------------------------------------------------------
     if (allSigned) {
       try {
-        const { error: auditErr } = await supabase.from("signature_audit_log").insert({
-          envelope_id,
-          record_id: envelope.record_id,
-          event_type: "envelope_completed",
-          actor_email: party.email ?? null,
-          metadata: {
-            client_ip: client_ip ?? null,
-            user_agent: user_agent ?? null,
-            wet_signature_path: wetSignaturePath ?? null,
-            wet_signature_mode: String(wet_signature_mode ?? "").toLowerCase() || "click",
-          },
-        });
-        if (auditErr) console.error("signature_audit_log insert error (non-fatal)", auditErr);
+        const { error: auditErr } = await supabase.from("signature_audit_log")
+          .insert({
+            envelope_id,
+            record_id: envelope.record_id,
+            event_type: "envelope_completed",
+            actor_email: party.email ?? null,
+            metadata: {
+              client_ip: client_ip ?? null,
+              user_agent: user_agent ?? null,
+              wet_signature_path: wetSignaturePath ?? null,
+              wet_signature_mode:
+                String(wet_signature_mode ?? "").toLowerCase() || "click",
+            },
+          });
+        if (auditErr) {
+          console.error("signature_audit_log insert error (non-fatal)", auditErr);
+        }
       } catch (auditCatchErr) {
         console.error("signature_audit_log insert threw (non-fatal)", auditCatchErr);
       }
@@ -281,7 +335,9 @@ serve(async (req) => {
         }
 
         if (!objectPath) {
-          console.warn("No objectPath available for certificate PDF generation; skipping PDF step.");
+          console.warn(
+            "No objectPath available for certificate PDF generation; skipping PDF step.",
+          );
         } else {
           // 6a) Download original PDF
           const { data: originalFile, error: dlErr } = await supabase.storage
@@ -361,7 +417,8 @@ serve(async (req) => {
             });
 
             y -= 20;
-            const entityLine = entity?.name ?? "Oasis International Group (entity unknown)";
+            const entityLine =
+              entity?.name ?? "Oasis International Group (entity unknown)";
             certPage.drawText(entityLine, {
               x: margin,
               y,
@@ -482,7 +539,12 @@ serve(async (req) => {
               const qrX = width - margin - qrSize;
               const qrY = margin + 14;
 
-              certPage.drawImage(qrImage, { x: qrX, y: qrY, width: qrSize, height: qrSize });
+              certPage.drawImage(qrImage, {
+                x: qrX,
+                y: qrY,
+                width: qrSize,
+                height: qrSize,
+              });
 
               const caption = "Scan to verify";
               const captionWidth = font.widthOfTextAtSize(caption, 8);
@@ -499,7 +561,13 @@ serve(async (req) => {
 
             const footerText =
               "This certificate page forms part of the official governance record within the Oasis Digital Parliament Ledger.";
-            certPage.drawText(footerText, { x: margin, y: 40, size: 8, font, color: textMuted });
+            certPage.drawText(footerText, {
+              x: margin,
+              y: 40,
+              size: 8,
+              font,
+              color: textMuted,
+            });
 
             // ---- OPTIONAL: embed wet-ink signature image (fail-soft) ----
             try {
@@ -652,10 +720,14 @@ serve(async (req) => {
       // 10a) Ingest signed PDF into minute book / governance_documents
       try {
         const entitySlug = entity?.slug ?? null;
-        const resolutionTitle = record?.title ?? envelope.title ?? "Signed Corporate Record";
+        const resolutionTitle =
+          record?.title ?? envelope.title ?? "Signed Corporate Record";
 
         if (!entitySlug) {
-          console.warn("No entity.slug available; skipping odp-pdf-ingest for envelope", envelope_id);
+          console.warn(
+            "No entity.slug available; skipping odp-pdf-ingest for envelope",
+            envelope_id,
+          );
         } else {
           const ingestBody = {
             entity_slug: entitySlug,
@@ -683,36 +755,51 @@ serve(async (req) => {
 
           if (!ingestRes.ok) {
             const text = await ingestRes.text().catch(() => "");
-            console.error("odp-pdf-ingest call failed (non-fatal)", ingestRes.status, text);
+            console.error(
+              "odp-pdf-ingest call failed (non-fatal)",
+              ingestRes.status,
+              text,
+            );
           }
         }
       } catch (ingestErr) {
-        console.error("Unexpected error when calling odp-pdf-ingest (non-fatal)", ingestErr);
+        console.error(
+          "Unexpected error when calling odp-pdf-ingest (non-fatal)",
+          ingestErr,
+        );
       }
 
       // 10b) Auto-trigger odp-pdf-certify to generate the ledger certificate PDF
       try {
-        const certifyRes = await fetch(`${edgeBase}/functions/v1/odp-pdf-certify`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            apikey: SERVICE_ROLE_KEY,
-            Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+        const certifyRes = await fetch(
+          `${edgeBase}/functions/v1/odp-pdf-certify`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              apikey: SERVICE_ROLE_KEY,
+              Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+            },
+            body: JSON.stringify({
+              envelope_id,
+              force_regen: false,
+            }),
           },
-          body: JSON.stringify({
-            envelope_id,
-            // we usually want to re-use if already there; this lets
-            // odp-pdf-certify skip regeneration if a cert already exists.
-            force_regen: false,
-          }),
-        });
+        );
 
         if (!certifyRes.ok) {
           const text = await certifyRes.text().catch(() => "");
-          console.error("odp-pdf-certify call failed (non-fatal)", certifyRes.status, text);
+          console.error(
+            "odp-pdf-certify call failed (non-fatal)",
+            certifyRes.status,
+            text,
+          );
         }
       } catch (certErr) {
-        console.error("Unexpected error when calling odp-pdf-certify (non-fatal)", certErr);
+        console.error(
+          "Unexpected error when calling odp-pdf-certify (non-fatal)",
+          certErr,
+        );
       }
     }
 

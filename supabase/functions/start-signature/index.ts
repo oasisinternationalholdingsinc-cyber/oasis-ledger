@@ -31,6 +31,17 @@ function json(data: unknown, status = 200) {
   });
 }
 
+/**
+ * 🔐 PARTY TOKEN GENERATOR (CAPABILITY TOKEN)
+ * - Cryptographically secure
+ * - Non-guessable
+ * - Used for signer authorization (NOT identity)
+ */
+function generatePartyToken(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 type PartyInput = {
   signer_email: string;
   signer_name: string;
@@ -39,9 +50,9 @@ type PartyInput = {
 };
 
 type ReqBody = {
-  record_id: string;      // governance_ledger.id
-  entity_slug: string;    // entities.slug (must match record.entity_id)
-  parties: PartyInput[];  // at least 1
+  record_id: string; // governance_ledger.id
+  entity_slug: string; // entities.slug (must match record.entity_id)
+  parties: PartyInput[]; // at least 1
 };
 
 serve(async (req) => {
@@ -58,11 +69,17 @@ serve(async (req) => {
   const { record_id, entity_slug, parties } = body ?? ({} as ReqBody);
 
   if (!record_id || !entity_slug) {
-    return json({ ok: false, error: "record_id and entity_slug are required" }, 400);
+    return json(
+      { ok: false, error: "record_id and entity_slug are required" },
+      400,
+    );
   }
 
   if (!Array.isArray(parties) || parties.length === 0) {
-    return json({ ok: false, error: "At least one signer (parties[]) is required" }, 400);
+    return json(
+      { ok: false, error: "At least one signer (parties[]) is required" },
+      400,
+    );
   }
 
   // basic normalization
@@ -71,12 +88,17 @@ serve(async (req) => {
       signer_email: String(p.signer_email ?? "").trim().toLowerCase(),
       signer_name: String(p.signer_name ?? "").trim(),
       role: (p.role ?? "signer").trim(),
-      signing_order: Number.isFinite(p.signing_order) ? Number(p.signing_order) : i + 1,
+      signing_order: Number.isFinite(p.signing_order)
+        ? Number(p.signing_order)
+        : i + 1,
     }))
     .filter((p) => p.signer_email && p.signer_name);
 
   if (normalizedParties.length === 0) {
-    return json({ ok: false, error: "parties[] missing valid signer_email/signer_name" }, 400);
+    return json(
+      { ok: false, error: "parties[] missing valid signer_email/signer_name" },
+      400,
+    );
   }
 
   try {
@@ -112,7 +134,10 @@ serve(async (req) => {
           ok: false,
           error:
             "Entity mismatch: entity_slug does not match governance_ledger.entity_id",
-          details: { record_entity_id: record.entity_id, provided_entity_id: entity.id },
+          details: {
+            record_entity_id: record.entity_id,
+            provided_entity_id: entity.id,
+          },
         },
         409,
       );
@@ -260,9 +285,13 @@ serve(async (req) => {
         role: p.role ?? "signer",
         signing_order: p.signing_order,
         status: "pending",
+
+        // ✅ ONLY ADDITION (token for capability links)
+        party_token: generatePartyToken(),
       }));
 
-    let insertedParties: Array<{ id: string; email: string; display_name: string }> = [];
+    let insertedParties: Array<{ id: string; email: string; display_name: string }> =
+      [];
     if (toInsert.length > 0) {
       const { data } = await supabase
         .from("signature_parties")
