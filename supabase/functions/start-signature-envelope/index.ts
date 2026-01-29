@@ -19,9 +19,7 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
 // Handles both:
 // - https://xyz.supabase.co
 // - https://xyz.supabase.co/rest/v1
-const EDGE_BASE = SUPABASE_URL
-  .replace(/\/rest\/v1\/?$/, "")
-  .replace(/\/+$/, "");
+const EDGE_BASE = SUPABASE_URL.replace(/\/rest\/v1\/?$/, "").replace(/\/+$/, "");
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -55,24 +53,36 @@ type PartyInput = {
   signing_order?: number;
 };
 
-type ReqBody = {
-  record_id: string; // governance_ledger.id
-  entity_slug: string; // entities.slug (must match record.entity_id)
-  parties: PartyInput[]; // at least 1
+// ✅ Backward compatible (NO UI regression):
+// Forge may still send legacy signer_name/signer_email.
+// This function accepts BOTH:
+//   (A) { record_id, entity_slug, parties: [...] }
+//   (B) { record_id, entity_slug, signer_name, signer_email, role?, signing_order? }
+type LegacyReqBody = {
+  record_id: string;
+  entity_slug: string;
+  parties?: PartyInput[] | null;
+
+  // legacy fields (single primary signer)
+  signer_email?: string | null;
+  signer_name?: string | null;
+  role?: string | null;
+  signing_order?: number | null;
 };
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return json({ ok: true });
   if (req.method !== "POST") return json({ ok: false, error: "Use POST" }, 405);
 
-  let body: ReqBody;
+  let body: LegacyReqBody;
   try {
-    body = (await req.json()) as ReqBody;
+    body = (await req.json()) as LegacyReqBody;
   } catch {
     return json({ ok: false, error: "Invalid JSON body" }, 400);
   }
 
-  const { record_id, entity_slug, parties } = body ?? ({} as ReqBody);
+  const record_id = String(body?.record_id ?? "").trim();
+  const entity_slug = String(body?.entity_slug ?? "").trim();
 
   if (!record_id || !entity_slug) {
     return json(
@@ -81,9 +91,35 @@ serve(async (req) => {
     );
   }
 
+  // ✅ Prefer new contract, but fallback to legacy if parties missing/empty
+  let parties: PartyInput[] = Array.isArray(body?.parties) ? body.parties : [];
+
+  if (!Array.isArray(parties) || parties.length === 0) {
+    const legacyEmail = String(body?.signer_email ?? "")
+      .trim()
+      .toLowerCase();
+    const legacyName = String(body?.signer_name ?? "").trim();
+    if (legacyEmail && legacyName) {
+      parties = [
+        {
+          signer_email: legacyEmail,
+          signer_name: legacyName,
+          role: String(body?.role ?? "signer").trim() || "signer",
+          signing_order: Number.isFinite(body?.signing_order as number)
+            ? Number(body?.signing_order)
+            : 1,
+        },
+      ];
+    }
+  }
+
   if (!Array.isArray(parties) || parties.length === 0) {
     return json(
-      { ok: false, error: "At least one signer (parties[]) is required" },
+      {
+        ok: false,
+        error:
+          "At least one signer is required (send parties[] or signer_email/signer_name)",
+      },
       400,
     );
   }
