@@ -30,15 +30,24 @@ const SIGNING_BASE_URL =
 
 const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
+// ---------------------------------------------------------------------------
+// RESPONSES + UTILS
+// ---------------------------------------------------------------------------
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers":
+      "Content-Type, Authorization, apikey, x-client-info",
+  };
+}
+
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
     headers: {
       "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers":
-        "Content-Type, Authorization, apikey, x-client-info",
+      ...corsHeaders(),
     },
   });
 }
@@ -57,6 +66,14 @@ function laneLabel(isTest: boolean | null | undefined) {
   return isTest ? "SANDBOX" : "RoT";
 }
 
+function normEmail(input: unknown): string {
+  return String(input ?? "").trim().toLowerCase();
+}
+
+function safeStr(input: unknown): string {
+  return String(input ?? "").trim();
+}
+
 /**
  * 🔐 PARTY TOKEN GENERATOR (CAPABILITY TOKEN)
  * - Cryptographically secure
@@ -67,6 +84,9 @@ function generatePartyToken(): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// ---------------------------------------------------------------------------
+// TYPES
+// ---------------------------------------------------------------------------
 type QueueJob = {
   id: string;
   envelope_id: string;
@@ -85,30 +105,46 @@ type QueueJob = {
 type EnvelopeLookup = { record_id?: string | null; is_test?: boolean | null };
 type LedgerLookup = { entity_id?: string | null; is_test?: boolean | null };
 type EntityLookup = { slug?: string | null; name?: string | null };
-type PartyLookup = { party_token?: string | null };
+type PartyLookup = { party_token?: string | null; status?: string | null };
 
-async function bestEffortContext(job: QueueJob): Promise<{
+type InviteBody = {
+  // API mode (Forge calls this)
+  envelope_id: string;
+  signer_email: string;
+  signer_name?: string | null;
+  document_title?: string | null;
+  entity_slug?: string | null;
+  is_test?: boolean | null;
+
+  // optional: immediate send vs enqueue-only
+  send_now?: boolean | null;
+};
+
+// ---------------------------------------------------------------------------
+// CONTEXT HELPERS (BEST EFFORT — NEVER BLOCK)
+// ---------------------------------------------------------------------------
+async function bestEffortContextFromEnvelope(envelopeId: string): Promise<{
   entitySlug: string | null;
   entityName: string | null;
   isTest: boolean;
   recordId: string | null;
 }> {
-  let entitySlug = (job.entity_slug ?? null) || null;
+  let entitySlug: string | null = null;
   let entityName: string | null = null;
-  let isTest: boolean | null = typeof job.is_test === "boolean" ? job.is_test : null;
+  let isTest: boolean | null = null;
   let recordId: string | null = null;
 
   try {
     const envRes = await supabase
       .from("signature_envelopes")
       .select("record_id, is_test")
-      .eq("id", job.envelope_id)
+      .eq("id", envelopeId)
       .maybeSingle();
 
     if (!envRes.error && envRes.data) {
       const env = envRes.data as EnvelopeLookup;
-      recordId = (env.record_id ?? null) || recordId;
-      if (typeof env.is_test === "boolean" && isTest === null) isTest = env.is_test;
+      recordId = (env.record_id ?? null) || null;
+      if (typeof env.is_test === "boolean") isTest = env.is_test;
     }
 
     if (recordId) {
@@ -122,7 +158,7 @@ async function bestEffortContext(job: QueueJob): Promise<{
         const gl = glRes.data as LedgerLookup;
         if (typeof gl.is_test === "boolean" && isTest === null) isTest = gl.is_test;
 
-        if (!entitySlug && gl.entity_id) {
+        if (gl.entity_id) {
           const entRes = await supabase
             .from("entities")
             .select("slug, name")
@@ -131,58 +167,94 @@ async function bestEffortContext(job: QueueJob): Promise<{
 
           if (!entRes.error && entRes.data) {
             const ent = entRes.data as EntityLookup;
-            entitySlug = (ent.slug ?? null) || entitySlug;
-            entityName = (ent.name ?? null) || entityName;
+            entitySlug = (ent.slug ?? null) || null;
+            entityName = (ent.name ?? null) || null;
           }
         }
       }
     }
   } catch {
-    // never block sending
+    // never block
   }
 
-  return { entitySlug: entitySlug || null, entityName, isTest: isTest ?? false, recordId };
+  return { entitySlug, entityName, isTest: isTest ?? false, recordId };
 }
 
-async function bestEffortPartyToken(job: QueueJob): Promise<string | null> {
+async function bestEffortContext(job: QueueJob): Promise<{
+  entitySlug: string | null;
+  entityName: string | null;
+  isTest: boolean;
+  recordId: string | null;
+}> {
+  // prefer job hints, then enrich from DB
+  const seeded = {
+    entitySlug: (job.entity_slug ?? null) || null,
+    entityName: null as string | null,
+    isTest: typeof job.is_test === "boolean" ? job.is_test : null,
+    recordId: null as string | null,
+  };
+
+  const enriched = await bestEffortContextFromEnvelope(job.envelope_id);
+
+  return {
+    entitySlug: seeded.entitySlug || enriched.entitySlug,
+    entityName: enriched.entityName,
+    isTest: (seeded.isTest ?? enriched.isTest) ?? false,
+    recordId: enriched.recordId,
+  };
+}
+
+async function bestEffortPartyTokenByParty(
+  envelopeId: string,
+  partyId: string,
+): Promise<string | null> {
   // NO REGRESSION:
   // - If column exists and token present -> use it
   // - If column exists but token missing -> best-effort backfill
-  // - If column doesn't exist -> fall back to legacy link (no token)
+  // - If column doesn't exist -> return null (legacy link)
   try {
     const r = await supabase
       .from("signature_parties")
       .select("party_token")
-      .eq("id", job.party_id)
-      .eq("envelope_id", job.envelope_id)
+      .eq("id", partyId)
+      .eq("envelope_id", envelopeId)
       .maybeSingle();
 
-    if (r.error) {
-      // column may not exist (or other non-fatal issues) — do not block email
-      return null;
-    }
+    if (r.error) return null; // column may not exist or other non-fatal issue
 
     const row = (r.data ?? null) as PartyLookup | null;
     const existing = row?.party_token ? String(row.party_token) : null;
     if (existing) return existing;
 
-    // token missing — best-effort set it (safe, additive)
     const token = generatePartyToken();
     const u = await supabase
       .from("signature_parties")
       .update({ party_token: token })
-      .eq("id", job.party_id)
-      .eq("envelope_id", job.envelope_id)
+      .eq("id", partyId)
+      .eq("envelope_id", envelopeId)
       .is("party_token", null);
 
-    if (u.error) {
-      // don't block email; just fall back to legacy link
-      return null;
-    }
+    if (u.error) return null;
     return token;
   } catch {
     return null;
   }
+}
+
+function buildSigningUrl(args: {
+  envelopeId: string;
+  partyId: string;
+  partyToken: string | null;
+}) {
+  // IMPORTANT: token param name aligned to your locked capability model:
+  // envelope_id + party_id + party_token
+  const base =
+    `${SIGNING_BASE_URL}?envelope_id=${encodeURIComponent(args.envelopeId)}` +
+    `&party_id=${encodeURIComponent(args.partyId)}`;
+
+  return args.partyToken
+    ? `${base}&party_token=${encodeURIComponent(args.partyToken)}`
+    : base;
 }
 
 function buildAuthorityEmailHtml(args: {
@@ -196,7 +268,9 @@ function buildAuthorityEmailHtml(args: {
 }) {
   const toName = (args.toName ?? "").trim();
   const docTitle = args.documentTitle.trim() || "Governance Document";
-  const entityToken = args.entitySlug ? `Entity: ${escapeHtml(args.entitySlug)}` : "Entity: —";
+  const entityToken = args.entitySlug
+    ? `Entity: ${escapeHtml(args.entitySlug)}`
+    : "Entity: —";
   const laneToken = `Lane: ${escapeHtml(args.lane)}`;
   const envToken = `Envelope: ${escapeHtml(args.envelopeId.slice(0, 8))}…`;
   const partyToken = `Party: ${escapeHtml(args.partyId.slice(0, 8))}…`;
@@ -251,9 +325,13 @@ function buildAuthorityEmailHtml(args: {
                       <strong style="color:rgba(255,255,255,0.92); font-weight:700;">${escapeHtml(docTitle)}</strong>
                     </div>
 
-                    ${toName ? `<div style="margin-top:6px; font-family: ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:1.5; color:rgba(255,255,255,0.55);">
+                    ${
+                      toName
+                        ? `<div style="margin-top:6px; font-family: ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:1.5; color:rgba(255,255,255,0.55);">
                       Recipient: ${escapeHtml(toName)}
-                    </div>` : ""}
+                    </div>`
+                        : ""
+                    }
 
                     <div style="margin-top:22px;">
                       <a href="${escapeHtml(args.signingUrl)}"
@@ -297,8 +375,10 @@ function buildAuthorityEmailHtml(args: {
 </html>`;
 }
 
+// ---------------------------------------------------------------------------
+// QUEUE WORKER (BACKCOMPAT: process oldest pending row)
+// ---------------------------------------------------------------------------
 async function pickOldestPendingJob(): Promise<{ job: QueueJob | null; err: any | null }> {
-  // Try with optional columns first
   const withOptional = [
     "id",
     "envelope_id",
@@ -331,7 +411,6 @@ async function pickOldestPendingJob(): Promise<{ job: QueueJob | null; err: any 
     .limit(1);
 
   if (r.error) {
-    // Retry with core columns if optional columns don't exist
     r = await supabase
       .from("signature_email_queue")
       .select(coreOnly)
@@ -345,23 +424,366 @@ async function pickOldestPendingJob(): Promise<{ job: QueueJob | null; err: any 
   return { job: jobs[0] ?? null, err: null };
 }
 
+async function sendOneQueueJob(job: QueueJob) {
+  const partyToken = await bestEffortPartyTokenByParty(job.envelope_id, job.party_id);
+  const signingUrl = buildSigningUrl({
+    envelopeId: job.envelope_id,
+    partyId: job.party_id,
+    partyToken,
+  });
+
+  const ctx = await bestEffortContext(job);
+  const lane = laneLabel(ctx.isTest) as "SANDBOX" | "RoT";
+
+  const docTitle = job.document_title ?? "Governance Document";
+  const subject = `Oasis Digital Parliament — Signature Required — ${docTitle}`;
+
+  const html = buildAuthorityEmailHtml({
+    toName: job.to_name ?? null,
+    documentTitle: docTitle,
+    signingUrl,
+    entitySlug: ctx.entitySlug,
+    lane,
+    envelopeId: job.envelope_id,
+    partyId: job.party_id,
+  });
+
+  if (!resend || !RESEND_API_KEY) {
+    console.warn("RESEND_API_KEY not configured – logging email instead of sending.");
+    console.log({
+      to: job.to_email,
+      subject,
+      signingUrl,
+      entity_slug: ctx.entitySlug,
+      lane,
+      has_party_token: Boolean(partyToken),
+    });
+  } else {
+    await resend.emails.send({
+      from: `${FROM_NAME} <${FROM_EMAIL}>`,
+      to: job.to_email,
+      subject,
+      html,
+    });
+  }
+
+  // mark sent
+  const { error: updateErr } = await supabase
+    .from("signature_email_queue")
+    .update({
+      status: "sent",
+      attempts: (job.attempts ?? 0) + 1,
+      sent_at: new Date().toISOString(),
+      error_message: null,
+    })
+    .eq("id", job.id);
+
+  if (updateErr) throw updateErr;
+
+  return { signingUrl, ctx, hasPartyToken: Boolean(partyToken) };
+}
+
+// ---------------------------------------------------------------------------
+// API MODE (NO REGRESSION): create party + queue row, optionally send now
+// This is what Forge UI should call.
+// ---------------------------------------------------------------------------
+async function upsertPartyAndQueue(inv: InviteBody): Promise<{
+  envelopeId: string;
+  partyId: string;
+  partyToken: string | null;
+  queueId: string | null;
+  signingUrl: string;
+  lane: "SANDBOX" | "RoT";
+  entitySlug: string | null;
+}> {
+  const envelopeId = safeStr(inv.envelope_id);
+  const signerEmail = normEmail(inv.signer_email);
+  const signerName = safeStr(inv.signer_name ?? "") || null;
+
+  // Validate envelope exists
+  const envRes = await supabase
+    .from("signature_envelopes")
+    .select("id, record_id, is_test")
+    .eq("id", envelopeId)
+    .maybeSingle();
+
+  if (envRes.error) throw envRes.error;
+  if (!envRes.data) throw new Error("ENVELOPE_NOT_FOUND");
+
+  // Best-effort context (lane + entity)
+  const ctxFromEnv = await bestEffortContextFromEnvelope(envelopeId);
+  const entitySlug = (safeStr(inv.entity_slug ?? "") || ctxFromEnv.entitySlug) ?? null;
+  const isTest = typeof inv.is_test === "boolean" ? inv.is_test : ctxFromEnv.isTest;
+  const lane = laneLabel(isTest) as "SANDBOX" | "RoT";
+
+  // Upsert party by (envelope_id + email)
+  let partyId: string;
+  let partyToken: string | null = null;
+
+  const existing = await supabase
+    .from("signature_parties")
+    .select("id, party_token, status")
+    .eq("envelope_id", envelopeId)
+    .eq("email", signerEmail)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (existing.error) {
+    // if the table exists but query failed for some reason, treat as hard error
+    throw existing.error;
+  }
+
+  if (existing.data?.id) {
+    partyId = existing.data.id;
+    partyToken = (existing.data as PartyLookup).party_token
+      ? String((existing.data as PartyLookup).party_token)
+      : null;
+
+    // backfill token if missing (safe additive)
+    if (!partyToken) {
+      partyToken = await bestEffortPartyTokenByParty(envelopeId, partyId);
+    }
+  } else {
+    // create party (try to include token column; if schema lacks it, fallback)
+    const token = generatePartyToken();
+
+    // Attempt insert with party_token
+    const ins = await supabase
+      .from("signature_parties")
+      .insert({
+        envelope_id: envelopeId,
+        email: signerEmail,
+        name: signerName,
+        status: "pending",
+        party_token: token,
+      })
+      .select("id")
+      .single();
+
+    if (!ins.error) {
+      partyId = ins.data.id;
+      partyToken = token;
+    } else {
+      // Fallback insert without party_token (legacy schema)
+      const ins2 = await supabase
+        .from("signature_parties")
+        .insert({
+          envelope_id: envelopeId,
+          email: signerEmail,
+          name: signerName,
+          status: "pending",
+        })
+        .select("id")
+        .single();
+
+      if (ins2.error) throw ins2.error;
+      partyId = ins2.data.id;
+      partyToken = null;
+    }
+  }
+
+  const signingUrl = buildSigningUrl({ envelopeId, partyId, partyToken });
+
+  // Insert queue row if table exists; do not hard-fail if queue schema isn't present
+  let queueId: string | null = null;
+  const docTitle = safeStr(inv.document_title ?? "") || null;
+
+  try {
+    // "idempotent-ish": if a pending job exists within 30s, reuse it
+    const recent = await supabase
+      .from("signature_email_queue")
+      .select("id, status, created_at")
+      .eq("envelope_id", envelopeId)
+      .eq("party_id", partyId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!recent.error && recent.data?.id) {
+      const lastStatus = String((recent.data as any).status ?? "");
+      const lastCreatedAt = (recent.data as any).created_at
+        ? new Date((recent.data as any).created_at).getTime()
+        : 0;
+
+      if (lastStatus === "pending" && lastCreatedAt && Date.now() - lastCreatedAt < 30_000) {
+        queueId = recent.data.id;
+      }
+    }
+
+    if (!queueId) {
+      // try insert with optional columns
+      const try1 = await supabase
+        .from("signature_email_queue")
+        .insert({
+          envelope_id: envelopeId,
+          party_id: partyId,
+          to_email: signerEmail,
+          to_name: signerName,
+          document_title: docTitle,
+          status: "pending",
+          attempts: 0,
+          entity_slug: entitySlug,
+          is_test: isTest,
+        })
+        .select("id")
+        .single();
+
+      if (!try1.error) {
+        queueId = try1.data.id;
+      } else {
+        // fallback core columns
+        const try2 = await supabase
+          .from("signature_email_queue")
+          .insert({
+            envelope_id: envelopeId,
+            party_id: partyId,
+            to_email: signerEmail,
+            to_name: signerName,
+            document_title: docTitle,
+            status: "pending",
+            attempts: 0,
+          })
+          .select("id")
+          .single();
+
+        if (!try2.error) queueId = try2.data.id;
+      }
+    }
+  } catch {
+    // queue is best-effort; do not block invite
+    queueId = null;
+  }
+
+  return { envelopeId, partyId, partyToken, queueId, signingUrl, lane, entitySlug };
+}
+
+async function sendDirectEmail(args: {
+  toEmail: string;
+  toName: string | null;
+  documentTitle: string;
+  signingUrl: string;
+  entitySlug: string | null;
+  lane: "SANDBOX" | "RoT";
+  envelopeId: string;
+  partyId: string;
+}) {
+  const subject = `Oasis Digital Parliament — Signature Required — ${args.documentTitle}`;
+  const html = buildAuthorityEmailHtml({
+    toName: args.toName,
+    documentTitle: args.documentTitle,
+    signingUrl: args.signingUrl,
+    entitySlug: args.entitySlug,
+    lane: args.lane,
+    envelopeId: args.envelopeId,
+    partyId: args.partyId,
+  });
+
+  if (!resend || !RESEND_API_KEY) {
+    console.warn("RESEND_API_KEY not configured – logging email instead of sending.");
+    console.log({
+      to: args.toEmail,
+      subject,
+      signingUrl: args.signingUrl,
+      entity_slug: args.entitySlug,
+      lane: args.lane,
+      has_party_token: args.signingUrl.includes("party_token="),
+    });
+    return;
+  }
+
+  await resend.emails.send({
+    from: `${FROM_NAME} <${FROM_EMAIL}>`,
+    to: args.toEmail,
+    subject,
+    html,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// HANDLER
+// ---------------------------------------------------------------------------
 serve(async (req) => {
   if (req.method === "OPTIONS") {
-    return new Response("ok", {
-      status: 200,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey, x-client-info",
-      },
-    });
+    return new Response("ok", { status: 200, headers: corsHeaders() });
   }
 
   if (req.method !== "POST") {
     return json({ ok: false, error: "Use POST" }, 405);
   }
 
+  // Dual-mode (NO REGRESSION):
+  // 1) API mode: if body contains envelope_id + signer_email -> enqueue + optionally send
+  // 2) Worker mode: if no invite payload -> process oldest pending queue row
+  let body: any = null;
   try {
+    body = await req.json();
+  } catch {
+    body = null;
+  }
+
+  const hasInvitePayload =
+    body &&
+    typeof body === "object" &&
+    safeStr(body.envelope_id || "") &&
+    safeStr(body.signer_email || "");
+
+  try {
+    if (hasInvitePayload) {
+      const inv = body as InviteBody;
+
+      const envelopeId = safeStr(inv.envelope_id);
+      const signerEmail = normEmail(inv.signer_email);
+      if (!envelopeId) return json({ ok: false, error: "ENVELOPE_REQUIRED" }, 400);
+      if (!signerEmail || !signerEmail.includes("@"))
+        return json({ ok: false, error: "SIGNER_EMAIL_REQUIRED" }, 400);
+
+      const docTitle = safeStr(inv.document_title ?? "") || "Governance Document";
+      const sendNow = inv.send_now !== false; // default true
+
+      const out = await upsertPartyAndQueue(inv);
+
+      if (sendNow) {
+        await sendDirectEmail({
+          toEmail: signerEmail,
+          toName: safeStr(inv.signer_name ?? "") || null,
+          documentTitle: docTitle,
+          signingUrl: out.signingUrl,
+          entitySlug: out.entitySlug,
+          lane: out.lane,
+          envelopeId: out.envelopeId,
+          partyId: out.partyId,
+        });
+
+        // best-effort: mark queue sent if we created one
+        if (out.queueId) {
+          await supabase
+            .from("signature_email_queue")
+            .update({
+              status: "sent",
+              sent_at: new Date().toISOString(),
+              error_message: null,
+            })
+            .eq("id", out.queueId);
+        }
+      }
+
+      return json({
+        ok: true,
+        message: sendNow ? "Signature invitation email sent." : "Signature invitation queued.",
+        envelope_id: out.envelopeId,
+        party_id: out.partyId,
+        queue_id: out.queueId,
+        signing_url: out.signingUrl,
+        entity_slug: out.entitySlug,
+        lane: out.lane,
+        has_party_token: Boolean(out.partyToken),
+      });
+    }
+
+    // ---------------------------
+    // Worker mode (legacy-safe)
+    // ---------------------------
     const { job, err } = await pickOldestPendingJob();
     if (err) {
       console.error("signature_email_queue query error", err);
@@ -372,76 +794,22 @@ serve(async (req) => {
       return json({ ok: true, message: "No pending signature email jobs." });
     }
 
-    // 🔐 NEW (NO REGRESSION): include capability token when available.
-    // If token column missing / token null, we fall back to legacy link.
-    const partyToken = await bestEffortPartyToken(job);
-
-    const signingUrl =
-      `${SIGNING_BASE_URL}?envelope_id=${encodeURIComponent(job.envelope_id)}` +
-      `&party_id=${encodeURIComponent(job.party_id)}` +
-      (partyToken ? `&token=${encodeURIComponent(partyToken)}` : "");
-
-    const ctx = await bestEffortContext(job);
-    const lane = laneLabel(ctx.isTest) as "SANDBOX" | "RoT";
-
-    const docTitle = job.document_title ?? "Governance Document";
-    const subject = `Oasis Digital Parliament — Signature Required — ${docTitle}`;
-
-    const html = buildAuthorityEmailHtml({
-      toName: job.to_name ?? null,
-      documentTitle: docTitle,
-      signingUrl,
-      entitySlug: ctx.entitySlug,
-      lane,
-      envelopeId: job.envelope_id,
-      partyId: job.party_id,
-    });
-
-    if (!resend || !RESEND_API_KEY) {
-      console.warn("RESEND_API_KEY not configured – logging email instead of sending.");
-      console.log({
-        to: job.to_email,
-        subject,
-        signingUrl,
-        entity_slug: ctx.entitySlug,
-        lane,
-        has_party_token: Boolean(partyToken),
-      });
-    } else {
-      await resend.emails.send({
-        from: `${FROM_NAME} <${FROM_EMAIL}>`,
-        to: job.to_email,
-        subject,
-        html,
-      });
-    }
-
-    const { error: updateErr } = await supabase
-      .from("signature_email_queue")
-      .update({
-        status: "sent",
-        attempts: (job.attempts ?? 0) + 1,
-        sent_at: new Date().toISOString(),
-        error_message: null,
-      })
-      .eq("id", job.id);
-
-    if (updateErr) {
-      console.error("signature_email_queue update error", updateErr);
-      return json({ ok: false, error: "Email sent, but failed to update queue row." }, 500);
-    }
+    const sent = await sendOneQueueJob(job);
 
     return json({
       ok: true,
       message: "Signature invitation email sent.",
       job_id: job.id,
-      signing_url: signingUrl,
-      entity_slug: ctx.entitySlug,
-      lane,
-      has_party_token: Boolean(partyToken),
+      signing_url: sent.signingUrl,
+      entity_slug: sent.ctx.entitySlug,
+      lane: laneLabel(sent.ctx.isTest),
+      has_party_token: sent.hasPartyToken,
     });
   } catch (e) {
     console.error("Unexpected error in send-signature-invite", e);
-    return json({ ok: false, error: "Unexpected server error", details: String(e) }, 500);
+    return json(
+      { ok: false, error: "Unexpected server error", details: String(e?.message ?? e) },
+      500,
+    );
   }
 });
