@@ -5,13 +5,16 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
 const SERVICE_ROLE_KEY =
-  Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  Deno.env.get("SERVICE_ROLE_KEY") ??
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
 if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
   throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
 }
 
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+  global: { fetch },
+});
 
 // -----------------------------
 // CORS + helpers
@@ -19,7 +22,8 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch 
 const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type",
 };
 
 function json(data: unknown, status = 200) {
@@ -42,7 +46,7 @@ function safeText(s: unknown): string | null {
 type PartyInput = {
   name?: string | null;
   email?: string | null;
-  role?: string | null; // optional label (primary/cc/etc)
+  role?: string | null;
 };
 
 type ReqBody = {
@@ -51,7 +55,6 @@ type ReqBody = {
   is_test?: boolean;
   actor_id?: string;
 
-  // legacy / optional:
   parties?: PartyInput[];
   signer_name?: string | null;
   signer_email?: string | null;
@@ -69,7 +72,8 @@ type Resp = {
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return json({ ok: true }, 200);
-  if (req.method !== "POST") return json({ ok: false, error: "METHOD_NOT_ALLOWED" }, 405);
+  if (req.method !== "POST")
+    return json({ ok: false, error: "METHOD_NOT_ALLOWED" }, 405);
 
   try {
     const body = (await req.json().catch(() => ({}))) as ReqBody;
@@ -77,13 +81,15 @@ serve(async (req) => {
     const record_id = safeText(body.record_id);
     const entity_slug = safeText(body.entity_slug);
     const is_test = !!body.is_test;
-    const actor_id = safeText(body.actor_id); // confirmed nullable in DB
+    const actor_id = safeText(body.actor_id);
 
-    if (!record_id) return json<Resp>({ ok: false, error: "RECORD_ID_REQUIRED" }, 400);
-    if (!entity_slug) return json<Resp>({ ok: false, error: "ENTITY_SLUG_REQUIRED" }, 400);
+    if (!record_id)
+      return json<Resp>({ ok: false, error: "RECORD_ID_REQUIRED" }, 400);
+    if (!entity_slug)
+      return json<Resp>({ ok: false, error: "ENTITY_SLUG_REQUIRED" }, 400);
 
     // -----------------------------
-    // Resolve entity + validate ledger record is in-scope
+    // Resolve entity
     // -----------------------------
     const ent = await supabase
       .from("entities")
@@ -91,51 +97,97 @@ serve(async (req) => {
       .eq("slug", entity_slug)
       .maybeSingle();
 
-    if (ent.error) return json<Resp>({ ok: false, error: ent.error.message }, 400);
-    if (!ent.data?.id) return json<Resp>({ ok: false, error: "ENTITY_NOT_FOUND" }, 404);
+    if (ent.error)
+      return json<Resp>({ ok: false, error: ent.error.message }, 400);
+    if (!ent.data?.id)
+      return json<Resp>({ ok: false, error: "ENTITY_NOT_FOUND" }, 404);
 
     const entity_id = ent.data.id as string;
 
-    // Ledger row must exist and match entity + lane
-    // ✅ include title (needed because signature_envelopes.title is NOT NULL)
+    // -----------------------------
+    // Load ledger record
+    // -----------------------------
     const gl = await supabase
       .from("governance_ledger")
       .select("id, entity_id, is_test, status, title")
       .eq("id", record_id)
       .maybeSingle();
 
-    if (gl.error) return json<Resp>({ ok: false, error: gl.error.message }, 400);
-    if (!gl.data?.id) return json<Resp>({ ok: false, error: "LEDGER_NOT_FOUND" }, 404);
+    if (gl.error)
+      return json<Resp>({ ok: false, error: gl.error.message }, 400);
+    if (!gl.data?.id)
+      return json<Resp>({ ok: false, error: "LEDGER_NOT_FOUND" }, 404);
 
-    if (gl.data.entity_id !== entity_id) {
+    if (gl.data.entity_id !== entity_id)
       return json<Resp>({ ok: false, error: "ENTITY_MISMATCH" }, 403);
-    }
-    if (!!gl.data.is_test !== is_test) {
-      return json<Resp>({ ok: false, error: "LANE_MISMATCH" }, 409);
-    }
 
-    // Canonical envelope title (enterprise-safe; NOT NULL)
-    const ledgerTitle = safeText((gl.data as any)?.title);
-    const envelopeTitle =
-      ledgerTitle ?? `Signature Envelope — ${record_id}`;
+    if (!!gl.data.is_test !== is_test)
+      return json<Resp>({ ok: false, error: "LANE_MISMATCH" }, 409);
+
+    const ledgerTitle =
+      safeText((gl.data as any)?.title) ??
+      `Signature Envelope — ${record_id}`;
+
+    // ============================================================
+    // 🔒 ENTERPRISE INVARIANT
+    // Ensure base Minute Book PDF exists BEFORE signing
+    // ============================================================
+    const { data: existingPdf } = await supabase
+      .from("storage.objects")
+      .select("name")
+      .eq("bucket_id", "minute_book")
+      .ilike("name", `%${record_id}%.pdf`)
+      .limit(1)
+      .maybeSingle();
+
+    if (!existingPdf) {
+      // 🔁 Idempotent PDF generation
+      const edgeBase = SUPABASE_URL.replace(/\/rest\/v1$/, "");
+
+      const pdfRes = await fetch(
+        `${edgeBase}/functions/v1/odp-pdf-engine`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            apikey: SERVICE_ROLE_KEY,
+            Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+          },
+          body: JSON.stringify({
+            record_id,
+            envelope_id: null, // base PDF only
+          }),
+        },
+      );
+
+      if (!pdfRes.ok) {
+        const txt = await pdfRes.text().catch(() => "");
+        return json<Resp>(
+          {
+            ok: false,
+            error: `BASE_PDF_GENERATION_FAILED: ${txt}`,
+          },
+          500,
+        );
+      }
+    }
 
     // -----------------------------
-    // Reuse existing envelope in same lane
+    // Reuse existing envelope
     // -----------------------------
     const existing = await supabase
       .from("signature_envelopes")
-      .select("id, status, is_test, record_id")
+      .select("id, status, is_test")
       .eq("record_id", record_id)
       .eq("is_test", is_test)
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
 
-    if (existing.error) return json<Resp>({ ok: false, error: existing.error.message }, 400);
+    if (existing.error)
+      return json<Resp>({ ok: false, error: existing.error.message }, 400);
 
-    // If found, reuse it (Forge expects this)
     if (existing.data?.id) {
-      // Optional: if legacy caller sent parties and none exist yet, you may add them
       const created_parties = await maybeCreateParties({
         envelope_id: existing.data.id,
         record_id,
@@ -156,7 +208,7 @@ serve(async (req) => {
     }
 
     // -----------------------------
-    // Create new envelope (NO signer required)
+    // Create envelope
     // -----------------------------
     const ins = await supabase
       .from("signature_envelopes")
@@ -164,18 +216,18 @@ serve(async (req) => {
         record_id,
         entity_id,
         is_test,
-        title: envelopeTitle,      // ✅ REQUIRED by schema (NOT NULL)
-        status: "draft",           // must satisfy status_check
-        created_by: actor_id,      // nullable (confirmed by your SQL)
+        title: ledgerTitle,
+        status: "draft",
+        created_by: actor_id,
       } as any)
       .select("id")
       .single();
 
-    if (ins.error) return json<Resp>({ ok: false, error: ins.error.message }, 400);
+    if (ins.error)
+      return json<Resp>({ ok: false, error: ins.error.message }, 400);
 
     const envelope_id = ins.data.id as string;
 
-    // Best effort: move ledger into SIGNING (do not hard-fail)
     await supabase
       .from("governance_ledger")
       .update({ status: "SIGNING" } as any)
@@ -199,15 +251,15 @@ serve(async (req) => {
       created_parties: created_parties || 0,
     });
   } catch (e: any) {
-    return json<Resp>({ ok: false, error: e?.message || "UNHANDLED" }, 500);
+    return json<Resp>(
+      { ok: false, error: e?.message || "UNHANDLED" },
+      500,
+    );
   }
 });
 
 // -----------------------------
-// Legacy compatibility: optional parties creation
-// - If body.parties is present, create parties.
-// - Else if signer_email present, create a single party.
-// - Otherwise: do nothing (Forge path).
+// Legacy compatibility (unchanged)
 // -----------------------------
 async function maybeCreateParties(args: {
   envelope_id: string;
@@ -219,7 +271,6 @@ async function maybeCreateParties(args: {
 }): Promise<number> {
   const { envelope_id, body } = args;
 
-  // Normalize legacy inputs into parties array
   let parties: PartyInput[] = Array.isArray(body.parties) ? body.parties : [];
 
   if (!parties.length && body.signer_email) {
@@ -242,7 +293,6 @@ async function maybeCreateParties(args: {
 
   if (!parties.length) return 0;
 
-  // Check if parties already exist (avoid duplicates)
   const existing = await supabase
     .from("signature_parties")
     .select("id, email")
@@ -251,19 +301,21 @@ async function maybeCreateParties(args: {
   if (existing.error) return 0;
 
   const existingEmails = new Set(
-    ((existing.data ?? []) as any[]).map((r) => String(r.email || "").toLowerCase()),
+    ((existing.data ?? []) as any[]).map((r) =>
+      String(r.email || "").toLowerCase(),
+    ),
   );
 
   const rows = parties
-    .filter((p) => p.email && !existingEmails.has(String(p.email).toLowerCase()))
+    .filter(
+      (p) => p.email && !existingEmails.has(String(p.email).toLowerCase()),
+    )
     .map((p, idx) => ({
       envelope_id,
       name: p.name,
       email: p.email,
       role: p.role ?? (idx === 0 ? "primary" : "cc"),
       status: "pending",
-      // party_token should be generated server-side if your schema uses a default/trigger.
-      // If NOT, do it here and store it.
     }));
 
   if (!rows.length) return 0;
