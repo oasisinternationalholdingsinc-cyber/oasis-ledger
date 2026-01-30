@@ -24,14 +24,20 @@ const BUCKET = "minute_book";
 // ---------------------------------------------------------------------------
 // HELPERS
 // ---------------------------------------------------------------------------
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey",
+  };
+}
+
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
     headers: {
       "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey",
+      ...corsHeaders(),
     },
   });
 }
@@ -62,14 +68,7 @@ function decodePngDataUrl(dataUrl: string): Uint8Array {
 serve(async (req) => {
   // CORS preflight
   if (req.method === "OPTIONS") {
-    return new Response("ok", {
-      status: 200,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey",
-      },
-    });
+    return new Response("ok", { status: 200, headers: corsHeaders() });
   }
 
   if (req.method !== "POST") {
@@ -89,8 +88,9 @@ serve(async (req) => {
     envelope_id,
     party_id,
 
-    // 🔐 capability token (ADD ONLY; legacy-safe)
+    // 🔐 capability token (accept BOTH names; legacy-safe; NO REGRESSION)
     token,
+    party_token,
 
     client_ip,
     user_agent,
@@ -104,6 +104,9 @@ serve(async (req) => {
       400,
     );
   }
+
+  // canonical: allow either name (party_token preferred)
+  const providedToken = party_token ?? token;
 
   try {
     const signedAt = new Date().toISOString();
@@ -157,7 +160,7 @@ serve(async (req) => {
     // -----------------------------------------------------------------------
     if (party.party_token) {
       const expected = String(party.party_token);
-      const provided = String(token ?? "");
+      const provided = String(providedToken ?? "");
 
       if (!provided) {
         return json({ ok: false, error: "SIGNING_TOKEN_REQUIRED" }, 401);
@@ -168,20 +171,33 @@ serve(async (req) => {
     }
 
     // -----------------------------------------------------------------------
-    // 3) Mark this party as signed
+    // 2.2) Idempotency guard (NO REGRESSION)
+    // If already signed, do not re-run side effects.
     // -----------------------------------------------------------------------
-    const { error: partyUpdateErr } = await supabase
-      .from("signature_parties")
-      .update({ status: "signed", signed_at: signedAt })
-      .eq("id", party_id)
-      .eq("envelope_id", envelope_id);
+    const partyStatus = String(party.status ?? "").toLowerCase();
+    const alreadySigned = partyStatus === "signed";
 
-    if (partyUpdateErr) {
-      console.error("Party update error", partyUpdateErr);
-      return json(
-        { ok: false, error: "Failed to update party", details: partyUpdateErr },
-        500,
-      );
+    // -----------------------------------------------------------------------
+    // 3) Mark this party as signed (only if not already)
+    // -----------------------------------------------------------------------
+    if (!alreadySigned) {
+      const { error: partyUpdateErr } = await supabase
+        .from("signature_parties")
+        .update({ status: "signed", signed_at: signedAt })
+        .eq("id", party_id)
+        .eq("envelope_id", envelope_id);
+
+      if (partyUpdateErr) {
+        console.error("Party update error", partyUpdateErr);
+        return json(
+          {
+            ok: false,
+            error: "Failed to update party",
+            details: partyUpdateErr,
+          },
+          500,
+        );
+      }
     }
 
     // -----------------------------------------------------------------------
@@ -279,7 +295,10 @@ serve(async (req) => {
           console.error("signature_audit_log insert error (non-fatal)", auditErr);
         }
       } catch (auditCatchErr) {
-        console.error("signature_audit_log insert threw (non-fatal)", auditCatchErr);
+        console.error(
+          "signature_audit_log insert threw (non-fatal)",
+          auditCatchErr,
+        );
       }
 
       try {
@@ -288,7 +307,9 @@ serve(async (req) => {
           record_id: envelope.record_id,
           status: "pending",
         });
-        if (jobErr) console.error("certificate_jobs insert error (non-fatal)", jobErr);
+        if (jobErr) {
+          console.error("certificate_jobs insert error (non-fatal)", jobErr);
+        }
       } catch (jobCatchErr) {
         console.error("certificate_jobs insert threw (non-fatal)", jobCatchErr);
       }
@@ -532,7 +553,9 @@ serve(async (req) => {
               const base64 = dataUrl.split(",")[1];
               const binary = atob(base64);
               const bytes = new Uint8Array(binary.length);
-              for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+              for (let i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i);
+              }
 
               const qrImage = await pdfDoc.embedPng(bytes);
               const qrSize = 90;
@@ -600,7 +623,10 @@ serve(async (req) => {
                 }
               }
             } catch (sigEmbedErr) {
-              console.error("Wet signature embed error (non-fatal)", sigEmbedErr);
+              console.error(
+                "Wet signature embed error (non-fatal)",
+                sigEmbedErr,
+              );
             }
 
             // Save & upload signed PDF
@@ -675,7 +701,8 @@ serve(async (req) => {
       wet_signature_mode:
         String(wet_signature_mode ?? "").toLowerCase() ||
         (existingMeta.wet_signature_mode ?? "click"),
-      wet_signature_path: wetSignaturePath ?? existingMeta.wet_signature_path ?? null,
+      wet_signature_path:
+        wetSignaturePath ?? existingMeta.wet_signature_path ?? null,
     };
 
     const { error: metaErr } = await supabase
@@ -715,6 +742,7 @@ serve(async (req) => {
     //      AND auto-trigger odp-pdf-certify for official certificate PDF
     // -----------------------------------------------------------------------
     if (allSigned && signedPath) {
+      // SUPABASE_URL is already project base, but keep your pattern (NO REGRESSION)
       const edgeBase = SUPABASE_URL.replace(/\/rest\/v1$/, "");
 
       // 10a) Ingest signed PDF into minute book / governance_documents
