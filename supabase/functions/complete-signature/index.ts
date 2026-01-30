@@ -62,6 +62,51 @@ function decodePngDataUrl(dataUrl: string): Uint8Array {
   return bytes;
 }
 
+/**
+ * ✅ Enterprise invariant (NO REGRESSION):
+ * If we are going to mark an envelope as COMPLETED, we must ensure the base
+ * resolution PDF exists in minute_book storage AND the envelope has storage_path.
+ *
+ * This function calls your existing odp-pdf-engine (server-side, service role),
+ * which uploads the base PDF and updates signature_envelopes.storage_path /
+ * supporting_document_path / metadata.storage_path.
+ */
+async function ensureMinuteBookPdf(opts: {
+  record_id: string;
+  envelope_id: string;
+  request_id?: string | null;
+}) {
+  const { record_id, envelope_id, request_id } = opts;
+
+  const url = `${SUPABASE_URL}/functions/v1/odp-pdf-engine`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+      ...(request_id ? { "x-sb-request-id": request_id } : {}),
+    },
+    body: JSON.stringify({ record_id, envelope_id }),
+  });
+
+  const text = await res.text();
+  let payload: any = null;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    payload = { raw: text };
+  }
+
+  if (!res.ok || !payload?.ok) {
+    throw new Error(
+      `ODP_PDF_ENGINE_FAILED status=${res.status} payload=${JSON.stringify(payload)}`,
+    );
+  }
+
+  return payload; // { ok, storage_bucket, storage_path, ... }
+}
+
 // ---------------------------------------------------------------------------
 // HTTP HANDLER
 // ---------------------------------------------------------------------------
@@ -74,6 +119,11 @@ serve(async (req) => {
   if (req.method !== "POST") {
     return json({ ok: false, error: "Use POST" }, 405);
   }
+
+  const reqId =
+    req.headers.get("x-sb-request-id") ??
+    req.headers.get("x-sb-requestid") ??
+    null;
 
   // Parse body
   let body: any;
@@ -117,7 +167,7 @@ serve(async (req) => {
     const { data: envelope, error: envErr } = await supabase
       .from("signature_envelopes")
       .select(
-        "id, status, title, entity_id, record_id, supporting_document_path, metadata",
+        "id, status, title, entity_id, record_id, supporting_document_path, metadata, storage_path",
       )
       .eq("id", envelope_id)
       .single();
@@ -237,7 +287,7 @@ serve(async (req) => {
     }
 
     // -----------------------------------------------------------------------
-    // 4) Check if all parties are signed and update envelope.status
+    // 4) Check if all parties are signed
     // -----------------------------------------------------------------------
     const { data: allParties, error: allPartiesErr } = await supabase
       .from("signature_parties")
@@ -258,21 +308,60 @@ serve(async (req) => {
 
     const allSigned =
       allParties.length > 0 && allParties.every((p) => p.status === "signed");
+
+    // -----------------------------------------------------------------------
+    // 4.0) ✅ HARD INVARIANT BEFORE COMPLETION:
+    // If allSigned, ensure the base minute_book PDF exists + envelope has storage_path.
+    // Refuse to complete if PDF handoff fails. (Fixes your current completed+NULL pointers.)
+    // -----------------------------------------------------------------------
+    if (allSigned) {
+      try {
+        await ensureMinuteBookPdf({
+          record_id: String(envelope.record_id),
+          envelope_id: String(envelope_id),
+          request_id: reqId,
+        });
+      } catch (handoffErr) {
+        console.error(
+          "PDF handoff failed; refusing to complete envelope",
+          handoffErr,
+        );
+        return json(
+          {
+            ok: false,
+            error: "PDF_HANDOFF_FAILED",
+            details: String(handoffErr),
+            request_id: reqId,
+          },
+          500,
+        );
+      }
+    }
+
     const newStatus = allSigned ? "completed" : "partial";
 
-    // sync envelope.status (redundant with view but good to have)
-    const { error: envUpdateErr } = await supabase
-      .from("signature_envelopes")
-      .update({ status: newStatus })
-      .eq("id", envelope_id);
+    // -----------------------------------------------------------------------
+    // 4.1) Update envelope.status (and completed_at when completed)
+    // -----------------------------------------------------------------------
+    try {
+      const patch: Record<string, unknown> = { status: newStatus };
+      if (allSigned) patch.completed_at = signedAt;
 
-    if (envUpdateErr) {
-      console.error("Envelope update error", envUpdateErr);
-      // non-fatal – we still continue with certificate + events
+      const { error: envUpdateErr } = await supabase
+        .from("signature_envelopes")
+        .update(patch)
+        .eq("id", envelope_id);
+
+      if (envUpdateErr) {
+        console.error("Envelope update error", envUpdateErr);
+        // non-fatal – continue with cert + events
+      }
+    } catch (envCatchErr) {
+      console.error("Envelope update threw (non-fatal)", envCatchErr);
     }
 
     // -----------------------------------------------------------------------
-    // 4.1) Optional: audit log + certificate job when fully completed
+    // 4.2) Optional: audit log + certificate job when fully completed
     //      (these fail soft if tables don't exist yet)
     // -----------------------------------------------------------------------
     if (allSigned) {
@@ -346,13 +435,22 @@ serve(async (req) => {
     // -----------------------------------------------------------------------
     if (allSigned) {
       try {
+        // Reload envelope now that odp-pdf-engine may have updated pointers
+        const { data: env2 } = await supabase
+          .from("signature_envelopes")
+          .select("supporting_document_path, metadata, storage_path")
+          .eq("id", envelope_id)
+          .maybeSingle();
+
         let objectPath: string | null = null;
 
-        if (envelope.supporting_document_path) {
-          objectPath = envelope.supporting_document_path;
-        } else if (envelope.metadata?.storage_path) {
-          const mPath = envelope.metadata.storage_path;
-          objectPath = mPath.replace(/^minute_book\//, "");
+        if (env2?.supporting_document_path) {
+          objectPath = env2.supporting_document_path;
+        } else if (env2?.storage_path) {
+          objectPath = env2.storage_path;
+        } else if (env2?.metadata?.storage_path) {
+          const mPath = env2.metadata.storage_path;
+          objectPath = String(mPath).replace(/^minute_book\//, "");
         }
 
         if (!objectPath) {
@@ -846,11 +944,12 @@ serve(async (req) => {
       // ✅ additive
       wet_signature_mode: String(wet_signature_mode ?? "").toLowerCase() || "click",
       wet_signature_path: wetSignaturePath,
+      request_id: reqId,
     });
   } catch (e) {
     console.error("Unexpected error in complete-signature", e);
     return json(
-      { ok: false, error: "Unexpected server error", details: String(e) },
+      { ok: false, error: "Unexpected server error", details: String(e), request_id: reqId },
       500,
     );
   }
