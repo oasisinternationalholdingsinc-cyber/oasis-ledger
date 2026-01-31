@@ -29,7 +29,8 @@ function corsHeaders() {
   return {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey",
+    "Access-Control-Allow-Headers":
+      "Content-Type, Authorization, apikey, X-Client-Info",
   };
 }
 
@@ -41,9 +42,24 @@ function json(data: unknown, status = 200) {
 }
 
 async function sha256Hex(bytes: ArrayBuffer | Uint8Array) {
-  const buf = bytes instanceof Uint8Array ? bytes.buffer : bytes;
-  const hashBuffer = await crypto.subtle.digest("SHA-256", buf);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  // ✅ No regression: keep SHA-256, but fix Uint8Array offset edge case.
+  const u8 =
+    bytes instanceof Uint8Array
+      ? bytes
+      : new Uint8Array(bytes);
+  const view =
+    bytes instanceof Uint8Array
+      ? u8
+      : new Uint8Array(bytes);
+
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    view.byteOffset === 0 && view.byteLength === view.buffer.byteLength
+      ? view.buffer
+      : view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength),
+  );
+
+  const hashArray = Array.from(new Uint8Array(digest));
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
@@ -97,8 +113,9 @@ async function resolveBasePdfPath(recordId: string): Promise<string | null> {
   for (const row of data as any[]) {
     const name = String(row?.name ?? "");
     if (!name) continue;
-    if (!name.toLowerCase().includes(lowerNeedle)) continue;
-    if (!name.toLowerCase().endsWith("-signed.pdf")) return name;
+    const lower = name.toLowerCase();
+    if (!lower.includes(lowerNeedle)) continue;
+    if (!lower.endsWith("-signed.pdf")) return name;
   }
 
   // Fallback: signed exists
@@ -114,6 +131,12 @@ async function resolveBasePdfPath(recordId: string): Promise<string | null> {
 function canonicalizeResolutionsPath(p: string): string {
   // additive: creates a canonical lowercase twin, while preserving legacy path
   return p.replace("/Resolutions/", "/resolutions/");
+}
+
+function toSignedPath(basePath: string): string {
+  // ✅ no regression: keeps your convention, but handles rare non-.pdf edge cases
+  if (/\.pdf$/i.test(basePath)) return basePath.replace(/\.pdf$/i, "-signed.pdf");
+  return `${basePath}-signed.pdf`;
 }
 
 // ---------------------------------------------------------------------------
@@ -593,9 +616,7 @@ serve(async (req) => {
                 .download(wetSignaturePath);
 
               if (!sigDlErr && sigFile) {
-                const sigBytes = new Uint8Array(
-                  await sigFile.arrayBuffer(),
-                );
+                const sigBytes = new Uint8Array(await sigFile.arrayBuffer());
                 const sigImg = await pdfDoc.embedPng(sigBytes);
 
                 certPage.drawText("Wet-Ink Signature (Captured)", {
@@ -623,7 +644,7 @@ serve(async (req) => {
           pdfHash = await sha256Hex(pdfBytes);
 
           // Legacy signed path (NO REGRESSION): follows basePath casing
-          signedPath = basePath.replace(/\.pdf$/i, "-signed.pdf");
+          signedPath = toSignedPath(basePath);
 
           // Canonical twin (additive): lowercase folder version
           signedPathCanonical = canonicalizeResolutionsPath(signedPath);
@@ -739,7 +760,7 @@ serve(async (req) => {
       })
       .eq("id", envelope_id);
 
-    // 9) Log event (non-fatal)
+    // 9) Log event (non-fatal) — keep your event_type as-is (NO REGRESSION)
     await supabase.from("signature_events").insert({
       envelope_id,
       event_type: "completed",
