@@ -1,3 +1,4 @@
+// supabase/functions/start-signature-envelope/index.ts
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -53,9 +54,9 @@ type ReqBody = {
   is_test?: boolean;
   actor_id?: string;
 
-  // NEW (optional, additive)
-  force_new?: boolean; // allow new envelope even if latest is completed
-  ensure_pdf?: boolean; // DEFAULTS TO TRUE (NO REGRESSION)
+  // optional (additive)
+  force_new?: boolean; // allow creating a new envelope even if latest is completed
+  ensure_pdf?: boolean; // 🔒 DEFAULT TRUE (NO REGRESSION)
 
   // legacy / optional:
   parties?: PartyInput[];
@@ -130,10 +131,9 @@ serve(async (req) => {
       return json<Resp>({ ok: false, error: "LANE_MISMATCH" }, 409);
 
     const ledgerTitle = safeText((gl.data as any)?.title);
-    const envelopeTitle =
-      ledgerTitle ?? `Signature Envelope — ${record_id}`;
+    const envelopeTitle = ledgerTitle ?? `Signature Envelope — ${record_id}`;
 
-    // Reuse latest envelope unless force_new
+    // Reuse latest envelope unless force_new (only when latest is completed)
     const existing = await supabase
       .from("signature_envelopes")
       .select("id, status, is_test, record_id")
@@ -146,12 +146,13 @@ serve(async (req) => {
     if (existing.error)
       return json<Resp>({ ok: false, error: existing.error.message }, 400);
 
-    const existingId = existing.data?.id
-      ? String(existing.data.id)
-      : null;
-    const existingStatus = safeText(existing.data?.status) ?? "";
+    const existingId = existing.data?.id ? String(existing.data.id) : null;
+    const existingStatus = (safeText(existing.data?.status) ?? "").toLowerCase();
 
-    if (existingId && !(force_new && existingStatus.toLowerCase() === "completed")) {
+    if (
+      existingId &&
+      !(force_new && existingStatus === "completed")
+    ) {
       const created_parties = await maybeCreateParties({
         envelope_id: existingId,
         body,
@@ -191,7 +192,7 @@ serve(async (req) => {
 
     const envelope_id = String(ins.data.id);
 
-    // Best-effort: move ledger into SIGNING
+    // Best-effort: move ledger into SIGNING (no hard dependency)
     await supabase
       .from("governance_ledger")
       .update({ status: "SIGNING" } as any)
@@ -216,10 +217,13 @@ serve(async (req) => {
       ensured_pdf: ensured,
     });
   } catch (e: any) {
-    return json<Resp>({
-      ok: false,
-      error: e?.message || "UNHANDLED",
-    }, 500);
+    return json<Resp>(
+      {
+        ok: false,
+        error: e?.message || "UNHANDLED",
+      },
+      500,
+    );
   }
 });
 
@@ -232,9 +236,7 @@ async function maybeCreateParties(args: {
 }): Promise<number> {
   const { envelope_id, body } = args;
 
-  let parties: PartyInput[] = Array.isArray(body.parties)
-    ? body.parties
-    : [];
+  let parties: PartyInput[] = Array.isArray(body.parties) ? body.parties : [];
 
   if (!parties.length && body.signer_email) {
     parties = [
@@ -271,9 +273,7 @@ async function maybeCreateParties(args: {
 
   const rows = parties
     .filter(
-      (p) =>
-        p.email &&
-        !existingEmails.has(String(p.email).toLowerCase()),
+      (p) => p.email && !existingEmails.has(String(p.email).toLowerCase()),
     )
     .map((p, idx) => ({
       envelope_id,
@@ -285,10 +285,7 @@ async function maybeCreateParties(args: {
 
   if (!rows.length) return 0;
 
-  const ins = await supabase
-    .from("signature_parties")
-    .insert(rows as any);
-
+  const ins = await supabase.from("signature_parties").insert(rows as any);
   if (ins.error) return 0;
 
   return rows.length;
@@ -302,19 +299,19 @@ async function ensurePdfForEnvelope(
   envelope_id: string,
 ): Promise<boolean> {
   try {
+    // SUPABASE_URL is typically "https://<ref>.supabase.co"
+    // (sometimes "https://<ref>.supabase.co/rest/v1" in older setups)
     const edgeBase = (SUPABASE_URL ?? "").replace(/\/rest\/v1$/, "");
-    const res = await fetch(
-      `${edgeBase}/functions/v1/odp-pdf-engine`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          apikey: SERVICE_ROLE_KEY!,
-          Authorization: `Bearer ${SERVICE_ROLE_KEY!}`,
-        },
-        body: JSON.stringify({ record_id, envelope_id }),
+
+    const res = await fetch(`${edgeBase}/functions/v1/odp-pdf-engine`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: SERVICE_ROLE_KEY!,
+        Authorization: `Bearer ${SERVICE_ROLE_KEY!}`,
       },
-    );
+      body: JSON.stringify({ record_id, envelope_id }),
+    });
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
