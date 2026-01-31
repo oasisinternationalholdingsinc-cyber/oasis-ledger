@@ -1,11 +1,6 @@
-// supabase/functions/odp-pdf-engine/index.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import {
-  PDFDocument,
-  StandardFonts,
-  rgb,
-} from "https://esm.sh/pdf-lib@1.17.1";
+import { PDFDocument, StandardFonts, rgb } from "https://esm.sh/pdf-lib@1.17.1";
 
 // ---------------------------------------------------------------------------
 // ENV + CLIENT
@@ -28,14 +23,18 @@ const BUCKET = "minute_book";
 // ---------------------------------------------------------------------------
 // HELPERS
 // ---------------------------------------------------------------------------
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey",
+};
+
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
     headers: {
       "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey",
+      ...CORS_HEADERS,
     },
   });
 }
@@ -262,14 +261,7 @@ function addSignatureBlock(page: any, font: any, fontBold: any) {
 serve(async (req) => {
   // CORS preflight
   if (req.method === "OPTIONS") {
-    return new Response("ok", {
-      status: 200,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey",
-      },
-    });
+    return new Response("ok", { status: 200, headers: CORS_HEADERS });
   }
 
   if (req.method !== "POST") {
@@ -285,10 +277,7 @@ serve(async (req) => {
 
   const { record_id, envelope_id } = body ?? {};
   if (!record_id || !envelope_id) {
-    return json(
-      { ok: false, error: "record_id and envelope_id are required" },
-      400,
-    );
+    return json({ ok: false, error: "record_id and envelope_id are required" }, 400);
   }
 
   try {
@@ -301,10 +290,7 @@ serve(async (req) => {
 
     if (recErr || !record) {
       console.error("Ledger fetch error", recErr);
-      return json(
-        { ok: false, error: "Ledger record not found", details: recErr },
-        404,
-      );
+      return json({ ok: false, error: "Ledger record not found", details: recErr }, 404);
     }
 
     // 2) Load entity
@@ -316,10 +302,7 @@ serve(async (req) => {
 
     if (entErr || !entity) {
       console.error("Entity fetch error", entErr);
-      return json(
-        { ok: false, error: "Entity not found for record", details: entErr },
-        404,
-      );
+      return json({ ok: false, error: "Entity not found for record", details: entErr }, 404);
     }
 
     // 3) Load envelope so we can merge metadata
@@ -331,13 +314,10 @@ serve(async (req) => {
 
     if (envErr || !envelope) {
       console.error("Envelope fetch error", envErr);
-      return json(
-        { ok: false, error: "Envelope not found", details: envErr },
-        404,
-      );
+      return json({ ok: false, error: "Envelope not found", details: envErr }, 404);
     }
 
-    // 4) Build enterprise, print-safe PDF (no layout overlap, correct pagination)
+    // 4) Build enterprise, print-safe PDF
     const pdfDoc = await PDFDocument.create();
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
     const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
@@ -348,7 +328,7 @@ serve(async (req) => {
 
     // helper to create a fully framed page (header+footer) and return body start Y
     const newFramedPage = () => {
-      const p = pdfDoc.addPage(); // default size (letter-ish) – consistent with your current behavior
+      const p = pdfDoc.addPage();
       const startY = addOasisHeader(p, font, fontBold, entityName, title, createdAt);
       addFooter(p, font);
       return { page: p, startY };
@@ -369,25 +349,14 @@ serve(async (req) => {
     const out = drawWrappedText(
       pdfDoc,
       bodyText,
-      {
-        page: currPage,
-        font,
-        fontBold,
-        margin,
-        maxWidth,
-        startY,
-        lineHeight,
-      },
+      { page: currPage, font, fontBold, margin, maxWidth, startY, lineHeight },
       () => newFramedPage(),
     );
 
     currPage = out.page;
 
     // Always place signature block on a clean final page if we're too low.
-    // (enterprise: never crowd signatures into the last lines of body)
-    const yAfter = out.y;
-    const needSigPage = yAfter < 200;
-
+    const needSigPage = out.y < 200;
     if (needSigPage) {
       const next = newFramedPage();
       currPage = next.page;
@@ -395,30 +364,48 @@ serve(async (req) => {
 
     addSignatureBlock(currPage, font, fontBold);
 
-    // 5) Save + upload base PDF
+    // 5) Save PDF bytes
     const pdfBytes = await pdfDoc.save();
     const fileName = `${record.id}.pdf`;
-    const storagePath = `${entity.slug}/Resolutions/${fileName}`; // KEEP EXACT PATH (no wiring change)
 
-    const { error: uploadErr } = await supabase.storage
+    // -----------------------------------------------------------------------
+    // ✅ NO REGRESSION: keep legacy path EXACT (capital R)
+    // ✅ ADD: canonical lowercase mirror for seal/registry scanners
+    // -----------------------------------------------------------------------
+    const legacyPath = `${entity.slug}/Resolutions/${fileName}`;    // KEEP EXACT
+    const canonicalPath = `${entity.slug}/resolutions/${fileName}`; // ADD (canonical)
+
+    // Upload canonical first (this is what archive/seal should see)
+    const { error: upCanonErr } = await supabase.storage
       .from(BUCKET)
-      .upload(storagePath, new Blob([pdfBytes], { type: "application/pdf" }), {
-        upsert: true,
-      });
+      .upload(
+        canonicalPath,
+        new Blob([pdfBytes], { type: "application/pdf" }),
+        { upsert: true, contentType: "application/pdf" },
+      );
 
-    if (uploadErr) {
-      console.error("Error uploading base Forge PDF:", uploadErr);
+    if (upCanonErr) {
+      console.error("Error uploading canonical Forge PDF:", upCanonErr);
       return json(
-        {
-          ok: false,
-          error: "Failed to upload base resolution PDF",
-          details: uploadErr,
-        },
+        { ok: false, error: "Failed to upload canonical resolution PDF", details: upCanonErr },
         500,
       );
     }
 
-    // 6) Attach path onto envelope (so complete-signature can use it)
+    // Upload legacy copy (non-fatal if it fails; canonical is source of truth)
+    const { error: upLegacyErr } = await supabase.storage
+      .from(BUCKET)
+      .upload(
+        legacyPath,
+        new Blob([pdfBytes], { type: "application/pdf" }),
+        { upsert: true, contentType: "application/pdf" },
+      );
+
+    if (upLegacyErr) {
+      console.error("Legacy upload failed (non-fatal):", upLegacyErr);
+    }
+
+    // 6) Attach canonical path onto envelope (so complete-signature + seal use it)
     const existingMeta = envelope.metadata ?? {};
     const newMetadata = {
       ...existingMeta,
@@ -426,14 +413,15 @@ serve(async (req) => {
       entity_id: entity.id,
       entity_slug: entity.slug,
       entity_name: entity.name,
-      storage_path: storagePath,
+      storage_path: canonicalPath,          // canonical pointer
+      legacy_storage_path: legacyPath,      // preserve legacy pointer (no regression)
     };
 
     const { error: envUpdateErr } = await supabase
       .from("signature_envelopes")
       .update({
-        supporting_document_path: storagePath,
-        storage_path: storagePath,
+        supporting_document_path: canonicalPath,
+        storage_path: canonicalPath,
         metadata: newMetadata,
       })
       .eq("id", envelope_id);
@@ -448,14 +436,12 @@ serve(async (req) => {
       record_id: record.id,
       envelope_id,
       storage_bucket: BUCKET,
-      storage_path: storagePath,
+      storage_path: canonicalPath,
+      legacy_storage_path: legacyPath,
       entity_slug: entity.slug,
     });
   } catch (e) {
     console.error("Unexpected error in odp-pdf-engine", e);
-    return json(
-      { ok: false, error: "Unexpected server error", details: String(e) },
-      500,
-    );
+    return json({ ok: false, error: "Unexpected server error", details: String(e) }, 500);
   }
 });
