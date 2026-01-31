@@ -87,6 +87,15 @@ function canonicalizeResolutionsPath(p: string): string {
   return p.replace("/Resolutions/", "/resolutions/");
 }
 
+// Enterprise: prevent certificate column “overlap” by shortening long fields (UUID/email/hash)
+function truncateMiddle(s: string, max = 34) {
+  const t = String(s ?? "");
+  if (t.length <= max) return t;
+  const left = Math.ceil((max - 3) / 2);
+  const right = Math.floor((max - 3) / 2);
+  return `${t.slice(0, left)}...${t.slice(t.length - right)}`;
+}
+
 // Resolve a base PDF path even when envelope pointers are missing.
 // We search by record_id directly (cheap + deterministic) rather than scanning random rows.
 async function resolveBasePdfPath(recordId: string): Promise<string | null> {
@@ -392,7 +401,7 @@ serve(async (req) => {
           const originalBytes = await originalFile.arrayBuffer();
           const pdfDoc = await PDFDocument.load(originalBytes);
 
-          // Add certificate page
+          // Add certificate page (page 2)
           const certPage = pdfDoc.addPage();
           const width = certPage.getWidth();
           const height = certPage.getHeight();
@@ -498,7 +507,7 @@ serve(async (req) => {
               font: fontBold,
               color: textDark,
             });
-            certPage.drawText(String(value), {
+            certPage.drawText(truncateMiddle(String(value), 36), {
               x: margin + 95,
               y: leftY,
               size: 9,
@@ -517,7 +526,7 @@ serve(async (req) => {
               font: fontBold,
               color: textDark,
             });
-            certPage.drawText(String(value), {
+            certPage.drawText(truncateMiddle(String(value), 28), {
               x: margin + colGap + 95,
               y: rightY,
               size: 9,
@@ -550,7 +559,7 @@ serve(async (req) => {
               techY -= 12;
             }
             if (user_agent) {
-              certPage.drawText(`User Agent: ${user_agent}`, {
+              certPage.drawText(`User Agent: ${truncateMiddle(user_agent, 68)}`, {
                 x: margin,
                 y: techY,
                 size: 8,
@@ -561,29 +570,57 @@ serve(async (req) => {
             }
           }
 
-          // QR code
-          try {
-            const dataUrl = await QRCode.toDataURL(verifyUrl, {
-              margin: 1,
-              width: 118,
-              color: { dark: "#22c55e", light: "#00000000" },
+          // QR code (CERTIFICATE PAGE ONLY) — MUST EXIST (enterprise invariant)
+          // NOTE: we intentionally do NOT swallow failures; a certificate without QR is not allowed.
+          {
+            const qrSize = 96;
+            const pad = 36;
+            const qrX = width - pad - qrSize;
+            const qrY = pad;
+
+            // White plate behind QR for legibility
+            certPage.drawRectangle({
+              x: qrX - 6,
+              y: qrY - 6,
+              width: qrSize + 12,
+              height: qrSize + 22, // caption space
+              color: rgb(1, 1, 1),
+              borderColor: rgb(0.9, 0.9, 0.9),
+              borderWidth: 1,
             });
 
-            const base64 = dataUrl.split(",")[1];
-            const binary = atob(base64);
-            const bytes = new Uint8Array(binary.length);
-            for (let i = 0; i < binary.length; i++) {
-              bytes[i] = binary.charCodeAt(i);
+            let qrPngBytes: Uint8Array;
+            try {
+              const dataUrl = await QRCode.toDataURL(verifyUrl, {
+                margin: 1,
+                width: 220,
+                // enterprise: black on white (no transparency drift)
+                color: { dark: "#000000", light: "#ffffff" },
+              });
+
+              const base64 = dataUrl.split(",")[1] ?? "";
+              const binary = atob(base64);
+              const bytes = new Uint8Array(binary.length);
+              for (let i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i);
+              }
+              qrPngBytes = bytes;
+            } catch (e) {
+              console.error("QR toDataURL failed", e);
+              throw new Error("CERTIFICATE_QR_GENERATION_FAILED");
             }
 
-            const qrImage = await pdfDoc.embedPng(bytes);
-            const qrSize = 90;
-            const qrX = width - margin - qrSize;
-            const qrY = margin + 14;
+            let qrImage;
+            try {
+              qrImage = await pdfDoc.embedPng(qrPngBytes);
+            } catch (e) {
+              console.error("QR embedPng failed", e);
+              throw new Error("CERTIFICATE_QR_EMBED_FAILED");
+            }
 
             certPage.drawImage(qrImage, {
               x: qrX,
-              y: qrY,
+              y: qrY + 16,
               width: qrSize,
               height: qrSize,
             });
@@ -592,13 +629,11 @@ serve(async (req) => {
             const captionWidth = font.widthOfTextAtSize(caption, 8);
             certPage.drawText(caption, {
               x: qrX + (qrSize - captionWidth) / 2,
-              y: qrY - 10,
+              y: qrY + 4,
               size: 8,
               font,
               color: textMuted,
             });
-          } catch (qrErr) {
-            console.error("QR generation / embed error:", qrErr);
           }
 
           // Optional: embed wet-ink signature image (fail-soft)
@@ -632,7 +667,7 @@ serve(async (req) => {
             console.error("Wet signature embed error (non-fatal)", e);
           }
 
-          // Save + hash
+          // Save + hash (hash is computed from final PDF that includes certificate page)
           const pdfBytes = await pdfDoc.save();
           pdfHash = await sha256Hex(pdfBytes);
 
@@ -863,9 +898,14 @@ serve(async (req) => {
       status: nextStatus,
       certificate: cert,
       base_document_path: safeText(cert?.base_document_path) ?? null,
-      signed_document_path: safeText(cert?.signed_document_path) ?? safeText(meta?.signed_document_path) ?? null,
+      signed_document_path:
+        safeText(cert?.signed_document_path) ??
+        safeText(meta?.signed_document_path) ??
+        null,
       signed_document_path_canonical:
-        safeText(cert?.signed_document_path_canonical) ?? safeText(meta?.signed_document_path_canonical) ?? null,
+        safeText(cert?.signed_document_path_canonical) ??
+        safeText(meta?.signed_document_path_canonical) ??
+        null,
       pdf_hash: safeText(cert?.pdf_hash) ?? safeText(meta?.pdf_hash) ?? null,
       verify_url: safeText(cert?.verify_url) ?? safeText(meta?.verify_url) ?? verifyUrl,
       wet_signature_mode: String(wet_signature_mode ?? "").toLowerCase() || "click",
