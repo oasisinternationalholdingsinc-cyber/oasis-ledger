@@ -69,21 +69,16 @@ function safeText(v: unknown): string | null {
 // Resolve a base PDF path even when envelope pointers are missing.
 // Searches bucket minute_book for the record_id and prefers the newest hit.
 async function resolveBasePdfPath(recordId: string): Promise<string | null> {
-  // Look for either folder casing.
-  const patterns = [
-    `%/${recordId}.pdf%`,
-    `%/${recordId}-%`, // sometimes your archive renders include suffixes
-  ];
+  // NOTE: patterns kept for intent; we still scan latest rows to keep it cheap.
+  const patterns = [`%/${recordId}.pdf%`, `%/${recordId}-%`];
+  void patterns;
 
-  // Try to keep this cheap: only scan relevant rows.
-  // We sort by created_at desc and pick first match.
   const { data, error } = await supabase
     .from("storage.objects")
     .select("name, created_at")
     .eq("bucket_id", BUCKET)
     .or(
       [
-        // both casings, both common locations
         `name.ilike.%/Resolutions/%`,
         `name.ilike.%/resolutions/%`,
       ].join(","),
@@ -98,41 +93,39 @@ async function resolveBasePdfPath(recordId: string): Promise<string | null> {
 
   const lowerNeedle = recordId.toLowerCase();
 
+  // Prefer non -signed
   for (const row of data as any[]) {
     const name = String(row?.name ?? "");
     if (!name) continue;
-
-    // Must include the record id somewhere
     if (!name.toLowerCase().includes(lowerNeedle)) continue;
-
-    // Prefer a base (non -signed) if present; if not, still return something usable.
-    if (!name.toLowerCase().endsWith("-signed.pdf")) {
-      return name;
-    }
+    if (!name.toLowerCase().endsWith("-signed.pdf")) return name;
   }
 
-  // fallback: if only signed exists, return it
+  // Fallback: signed exists
   for (const row of data as any[]) {
     const name = String(row?.name ?? "");
     if (!name) continue;
     if (name.toLowerCase().includes(lowerNeedle)) return name;
   }
 
-  // last fallback: direct exact guesses (your common path)
-  for (const p of patterns) {
-    // not executing another query; just here to show intent
-    void p;
-  }
-
   return null;
+}
+
+function canonicalizeResolutionsPath(p: string): string {
+  // additive: creates a canonical lowercase twin, while preserving legacy path
+  return p.replace("/Resolutions/", "/resolutions/");
 }
 
 // ---------------------------------------------------------------------------
 // HTTP HANDLER
 // ---------------------------------------------------------------------------
 serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { status: 200, headers: corsHeaders() });
-  if (req.method !== "POST") return json({ ok: false, error: "Use POST" }, 405);
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { status: 200, headers: corsHeaders() });
+  }
+  if (req.method !== "POST") {
+    return json({ ok: false, error: "Use POST" }, 405);
+  }
 
   let body: any;
   try {
@@ -159,7 +152,10 @@ serve(async (req) => {
   } = body ?? {};
 
   if (!envelope_id || !party_id) {
-    return json({ ok: false, error: "envelope_id and party_id are required" }, 400);
+    return json(
+      { ok: false, error: "envelope_id and party_id are required" },
+      400,
+    );
   }
 
   const providedToken = party_token ?? token;
@@ -170,13 +166,18 @@ serve(async (req) => {
     // 1) Load envelope
     const { data: envelope, error: envErr } = await supabase
       .from("signature_envelopes")
-      .select("id, status, title, entity_id, record_id, supporting_document_path, storage_path, metadata")
+      .select(
+        "id, status, title, entity_id, record_id, supporting_document_path, storage_path, metadata",
+      )
       .eq("id", envelope_id)
       .single();
 
     if (envErr || !envelope) {
       console.error("Envelope fetch error", envErr);
-      return json({ ok: false, error: "Envelope not found", details: envErr }, 404);
+      return json(
+        { ok: false, error: "Envelope not found", details: envErr },
+        404,
+      );
     }
 
     // 2) Load party (include party_token)
@@ -189,7 +190,10 @@ serve(async (req) => {
 
     if (partyErr || !party) {
       console.error("Party fetch error", partyErr);
-      return json({ ok: false, error: "Signature party not found", details: partyErr }, 404);
+      return json(
+        { ok: false, error: "Signature party not found", details: partyErr },
+        404,
+      );
     }
 
     // 2.1) Capability token enforcement (NO REGRESSION)
@@ -197,8 +201,12 @@ serve(async (req) => {
       const expected = String(party.party_token);
       const provided = String(providedToken ?? "");
 
-      if (!provided) return json({ ok: false, error: "SIGNING_TOKEN_REQUIRED" }, 401);
-      if (provided !== expected) return json({ ok: false, error: "SIGNING_TOKEN_INVALID" }, 403);
+      if (!provided) {
+        return json({ ok: false, error: "SIGNING_TOKEN_REQUIRED" }, 401);
+      }
+      if (provided !== expected) {
+        return json({ ok: false, error: "SIGNING_TOKEN_INVALID" }, 403);
+      }
     }
 
     const partyStatus = String(party.status ?? "").toLowerCase();
@@ -215,7 +223,14 @@ serve(async (req) => {
 
       if (partyUpdateErr) {
         console.error("Party update error", partyUpdateErr);
-        return json({ ok: false, error: "Failed to update party", details: partyUpdateErr }, 500);
+        return json(
+          {
+            ok: false,
+            error: "Failed to update party",
+            details: partyUpdateErr,
+          },
+          500,
+        );
       }
     }
 
@@ -233,10 +248,14 @@ serve(async (req) => {
 
           const { error: sigUpErr } = await supabase.storage
             .from(BUCKET)
-            .upload(wetSignaturePath, new Blob([pngBytes], { type: "image/png" }), {
-              upsert: true,
-              contentType: "image/png",
-            });
+            .upload(
+              wetSignaturePath,
+              new Blob([pngBytes], { type: "image/png" }),
+              {
+                upsert: true,
+                contentType: "image/png",
+              },
+            );
 
           if (sigUpErr) {
             console.error("Wet signature upload error (non-fatal)", sigUpErr);
@@ -257,14 +276,23 @@ serve(async (req) => {
 
     if (allPartiesErr || !allParties) {
       console.error("All parties fetch error", allPartiesErr);
-      return json({ ok: false, error: "Failed to check parties", details: allPartiesErr }, 500);
+      return json(
+        { ok: false, error: "Failed to check parties", details: allPartiesErr },
+        500,
+      );
     }
 
-    const allSigned = allParties.length > 0 && allParties.every((p: any) => p.status === "signed");
+    const allSigned =
+      allParties.length > 0 &&
+      allParties.every((p: any) => p.status === "signed");
+
     const newStatus = allSigned ? "completed" : "partial";
 
     // sync envelope.status (non-fatal)
-    await supabase.from("signature_envelopes").update({ status: newStatus }).eq("id", envelope_id);
+    await supabase
+      .from("signature_envelopes")
+      .update({ status: newStatus })
+      .eq("id", envelope_id);
 
     // 5) Load entity + record for certificate text
     const { data: entity } = await supabase
@@ -285,7 +313,8 @@ serve(async (req) => {
       `https://sign.oasisintlholdings.com/verify.html?envelope_id=${envelope_id}`;
 
     let basePath: string | null = null;
-    let signedPath: string | null = null;
+    let signedPath: string | null = null; // legacy path (NO REGRESSION)
+    let signedPathCanonical: string | null = null; // additive twin
     let pdfHash: string | null = null;
 
     // -----------------------------------------------------------------------
@@ -310,19 +339,17 @@ serve(async (req) => {
       }
 
       if (!basePath) {
-        console.warn("No base PDF path could be resolved; cannot generate signed PDF.");
+        console.warn(
+          "No base PDF path could be resolved; cannot generate signed PDF.",
+        );
       } else {
         // If pointers were missing, repair them now (non-breaking)
-        const needsPointerRepair =
-          !envSupport || !envStorage || !metaPath;
+        const needsPointerRepair = !envSupport || !envStorage || !metaPath;
 
         if (needsPointerRepair) {
           try {
             const existingMeta = (envelope as any)?.metadata ?? {};
-            const repairedMeta = {
-              ...existingMeta,
-              storage_path: basePath,
-            };
+            const repairedMeta = { ...existingMeta, storage_path: basePath };
 
             await supabase
               .from("signature_envelopes")
@@ -404,7 +431,8 @@ serve(async (req) => {
           );
 
           y -= 24;
-          const title = record?.title ?? (envelope as any)?.title ?? "Corporate Record";
+          const title =
+            record?.title ?? (envelope as any)?.title ?? "Corporate Record";
           certPage.drawText(title, {
             x: margin,
             y,
@@ -528,14 +556,21 @@ serve(async (req) => {
             const base64 = dataUrl.split(",")[1];
             const binary = atob(base64);
             const bytes = new Uint8Array(binary.length);
-            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            for (let i = 0; i < binary.length; i++) {
+              bytes[i] = binary.charCodeAt(i);
+            }
 
             const qrImage = await pdfDoc.embedPng(bytes);
             const qrSize = 90;
             const qrX = width - margin - qrSize;
             const qrY = margin + 14;
 
-            certPage.drawImage(qrImage, { x: qrX, y: qrY, width: qrSize, height: qrSize });
+            certPage.drawImage(qrImage, {
+              x: qrX,
+              y: qrY,
+              width: qrSize,
+              height: qrSize,
+            });
 
             const caption = "Scan to verify";
             const captionWidth = font.widthOfTextAtSize(caption, 8);
@@ -558,7 +593,9 @@ serve(async (req) => {
                 .download(wetSignaturePath);
 
               if (!sigDlErr && sigFile) {
-                const sigBytes = new Uint8Array(await sigFile.arrayBuffer());
+                const sigBytes = new Uint8Array(
+                  await sigFile.arrayBuffer(),
+                );
                 const sigImg = await pdfDoc.embedPng(sigBytes);
 
                 certPage.drawText("Wet-Ink Signature (Captured)", {
@@ -581,17 +618,45 @@ serve(async (req) => {
             console.error("Wet signature embed error (non-fatal)", e);
           }
 
+          // 6c) Save + hash
           const pdfBytes = await pdfDoc.save();
           pdfHash = await sha256Hex(pdfBytes);
 
+          // Legacy signed path (NO REGRESSION): follows basePath casing
           signedPath = basePath.replace(/\.pdf$/i, "-signed.pdf");
+
+          // Canonical twin (additive): lowercase folder version
+          signedPathCanonical = canonicalizeResolutionsPath(signedPath);
+
+          // Upload canonical first (safe), then legacy (primary continuity)
+          try {
+            const { error: upCanonErr } = await supabase.storage
+              .from(BUCKET)
+              .upload(
+                signedPathCanonical,
+                new Blob([pdfBytes], { type: "application/pdf" }),
+                { upsert: true },
+              );
+
+            if (upCanonErr) {
+              console.error("Error uploading canonical signed PDF:", upCanonErr);
+            }
+          } catch (e) {
+            console.error("Canonical signed upload threw (non-fatal)", e);
+          }
 
           const { error: uploadErr } = await supabase.storage
             .from(BUCKET)
-            .upload(signedPath, new Blob([pdfBytes], { type: "application/pdf" }), { upsert: true });
+            .upload(
+              signedPath,
+              new Blob([pdfBytes], { type: "application/pdf" }),
+              { upsert: true },
+            );
 
           if (uploadErr) {
-            console.error("Error uploading signed PDF:", uploadErr);
+            console.error("Error uploading legacy signed PDF:", uploadErr);
+            // If legacy failed but canonical succeeded, keep returning legacy as null (no regression),
+            // but preserve canonical in metadata so verify/cert can still work.
             signedPath = null;
           }
         }
@@ -619,9 +684,15 @@ serve(async (req) => {
       verify_url: verifyUrl,
       pdf_hash: pdfHash,
       bucket: BUCKET,
-      base_document_path: basePath ?? envelope.supporting_document_path ?? envelope.storage_path ?? null,
-      signed_document_path: signedPath,
-      wet_signature_mode: String(wet_signature_mode ?? "").toLowerCase() || "click",
+      base_document_path:
+        basePath ??
+        envelope.supporting_document_path ??
+        envelope.storage_path ??
+        null,
+      signed_document_path: signedPath, // legacy (NO REGRESSION)
+      signed_document_path_canonical: signedPathCanonical, // additive twin
+      wet_signature_mode:
+        String(wet_signature_mode ?? "").toLowerCase() || "click",
       wet_signature_path: wetSignaturePath,
     };
 
@@ -631,27 +702,40 @@ serve(async (req) => {
       ...existingMeta,
       verify_url: verifyUrl,
       certificate,
+
+      // keep canonical pointer discipline: storage_path remains base PDF pointer
       storage_path:
         existingMeta.storage_path ??
-        (basePath ?? envelope.supporting_document_path ?? envelope.storage_path ?? null),
-      signed_document_path:
-        signedPath ?? existingMeta.signed_document_path ?? null,
+        (basePath ??
+          envelope.supporting_document_path ??
+          envelope.storage_path ??
+          null),
+
+      // signed pointers: preserve legacy + additive canonical
+      signed_document_path: signedPath ?? existingMeta.signed_document_path ?? null,
+      signed_document_path_canonical:
+        signedPathCanonical ??
+        existingMeta.signed_document_path_canonical ??
+        null,
+
+      // keep hash accessible for verify/certificate
+      pdf_hash: pdfHash ?? existingMeta.pdf_hash ?? null,
+
       wet_signature_mode:
         String(wet_signature_mode ?? "").toLowerCase() ||
         (existingMeta.wet_signature_mode ?? "click"),
-      wet_signature_path:
-        wetSignaturePath ?? existingMeta.wet_signature_path ?? null,
+      wet_signature_path: wetSignaturePath ?? existingMeta.wet_signature_path ?? null,
     };
 
     await supabase
       .from("signature_envelopes")
       .update({
         metadata: newMetadata,
-        // repair-safe pointers:
+
+        // repair-safe base pointers (DO NOT repoint to signed)
         supporting_document_path:
           envelope.supporting_document_path ?? basePath ?? null,
-        storage_path:
-          envelope.storage_path ?? basePath ?? null,
+        storage_path: envelope.storage_path ?? basePath ?? null,
       })
       .eq("id", envelope_id);
 
@@ -664,7 +748,9 @@ serve(async (req) => {
         signed_at: signedAt,
         certificate,
         signed_document_path: signedPath,
-        wet_signature_mode: String(wet_signature_mode ?? "").toLowerCase() || "click",
+        signed_document_path_canonical: signedPathCanonical,
+        wet_signature_mode:
+          String(wet_signature_mode ?? "").toLowerCase() || "click",
         wet_signature_path: wetSignaturePath,
         force_regen: !!force_regen,
       },
@@ -686,7 +772,7 @@ serve(async (req) => {
             document_class: "resolution",
             section_name: "Resolutions",
             source_bucket: BUCKET,
-            source_path: signedPath,
+            source_path: signedPath, // legacy path remains for continuity
             title: resolutionTitle,
             source_table: "governance_ledger",
             source_record_id: envelope.record_id,
@@ -694,19 +780,26 @@ serve(async (req) => {
             pdf_hash: pdfHash,
           };
 
-          const ingestRes = await fetch(`${edgeBase}/functions/v1/odp-pdf-ingest`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              apikey: SERVICE_ROLE_KEY,
-              Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+          const ingestRes = await fetch(
+            `${edgeBase}/functions/v1/odp-pdf-ingest`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                apikey: SERVICE_ROLE_KEY,
+                Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+              },
+              body: JSON.stringify(ingestBody),
             },
-            body: JSON.stringify(ingestBody),
-          });
+          );
 
           if (!ingestRes.ok) {
             const text = await ingestRes.text().catch(() => "");
-            console.error("odp-pdf-ingest failed (non-fatal)", ingestRes.status, text);
+            console.error(
+              "odp-pdf-ingest failed (non-fatal)",
+              ingestRes.status,
+              text,
+            );
           }
         }
       } catch (e) {
@@ -714,19 +807,26 @@ serve(async (req) => {
       }
 
       try {
-        const certifyRes = await fetch(`${edgeBase}/functions/v1/odp-pdf-certify`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            apikey: SERVICE_ROLE_KEY,
-            Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+        const certifyRes = await fetch(
+          `${edgeBase}/functions/v1/odp-pdf-certify`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              apikey: SERVICE_ROLE_KEY,
+              Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+            },
+            body: JSON.stringify({ envelope_id, force_regen: false }),
           },
-          body: JSON.stringify({ envelope_id, force_regen: false }),
-        });
+        );
 
         if (!certifyRes.ok) {
           const text = await certifyRes.text().catch(() => "");
-          console.error("odp-pdf-certify failed (non-fatal)", certifyRes.status, text);
+          console.error(
+            "odp-pdf-certify failed (non-fatal)",
+            certifyRes.status,
+            text,
+          );
         }
       } catch (e) {
         console.error("odp-pdf-certify threw (non-fatal)", e);
@@ -739,15 +839,20 @@ serve(async (req) => {
       status: newStatus,
       certificate,
       base_document_path: basePath ?? null,
-      signed_document_path: signedPath,
+      signed_document_path: signedPath, // legacy (no regression)
+      signed_document_path_canonical: signedPathCanonical, // additive
       pdf_hash: pdfHash,
       verify_url: verifyUrl,
-      wet_signature_mode: String(wet_signature_mode ?? "").toLowerCase() || "click",
+      wet_signature_mode:
+        String(wet_signature_mode ?? "").toLowerCase() || "click",
       wet_signature_path: wetSignaturePath,
       force_regen: !!force_regen,
     });
   } catch (e) {
     console.error("Unexpected error in complete-signature", e);
-    return json({ ok: false, error: "Unexpected server error", details: String(e) }, 500);
+    return json(
+      { ok: false, error: "Unexpected server error", details: String(e) },
+      500,
+    );
   }
 });
