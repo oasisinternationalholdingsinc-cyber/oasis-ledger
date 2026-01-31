@@ -43,14 +43,9 @@ function json(data: unknown, status = 200) {
 
 async function sha256Hex(bytes: ArrayBuffer | Uint8Array) {
   // ✅ No regression: keep SHA-256, but fix Uint8Array offset edge case.
-  const u8 =
-    bytes instanceof Uint8Array
-      ? bytes
-      : new Uint8Array(bytes);
+  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   const view =
-    bytes instanceof Uint8Array
-      ? u8
-      : new Uint8Array(bytes);
+    bytes instanceof Uint8Array ? u8 : new Uint8Array(bytes);
 
   const digest = await crypto.subtle.digest(
     "SHA-256",
@@ -733,7 +728,8 @@ serve(async (req) => {
           null),
 
       // signed pointers: preserve legacy + additive canonical
-      signed_document_path: signedPath ?? existingMeta.signed_document_path ?? null,
+      signed_document_path:
+        signedPath ?? existingMeta.signed_document_path ?? null,
       signed_document_path_canonical:
         signedPathCanonical ??
         existingMeta.signed_document_path_canonical ??
@@ -745,7 +741,8 @@ serve(async (req) => {
       wet_signature_mode:
         String(wet_signature_mode ?? "").toLowerCase() ||
         (existingMeta.wet_signature_mode ?? "click"),
-      wet_signature_path: wetSignaturePath ?? existingMeta.wet_signature_path ?? null,
+      wet_signature_path:
+        wetSignaturePath ?? existingMeta.wet_signature_path ?? null,
     };
 
     await supabase

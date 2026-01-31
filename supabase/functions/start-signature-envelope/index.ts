@@ -1,4 +1,3 @@
-// supabase/functions/start-signature-envelope/index.ts
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -11,7 +10,9 @@ if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
   throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
 }
 
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+  global: { fetch },
+});
 
 // -----------------------------
 // CORS + helpers
@@ -19,7 +20,8 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch 
 const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type",
 };
 
 function json(data: unknown, status = 200) {
@@ -52,8 +54,8 @@ type ReqBody = {
   actor_id?: string;
 
   // NEW (optional, additive)
-  force_new?: boolean;   // allow new envelope even if latest is completed
-  ensure_pdf?: boolean;  // call odp-pdf-engine after create/reuse (safe)
+  force_new?: boolean; // allow new envelope even if latest is completed
+  ensure_pdf?: boolean; // DEFAULTS TO TRUE (NO REGRESSION)
 
   // legacy / optional:
   parties?: PartyInput[];
@@ -74,7 +76,8 @@ type Resp = {
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return json({ ok: true }, 200);
-  if (req.method !== "POST") return json({ ok: false, error: "METHOD_NOT_ALLOWED" }, 405);
+  if (req.method !== "POST")
+    return json({ ok: false, error: "METHOD_NOT_ALLOWED" }, 405);
 
   try {
     const body = (await req.json().catch(() => ({}))) as ReqBody;
@@ -85,10 +88,15 @@ serve(async (req) => {
     const actor_id = safeText(body.actor_id);
 
     const force_new = !!body.force_new;
-    const ensure_pdf = !!body.ensure_pdf;
 
-    if (!record_id) return json<Resp>({ ok: false, error: "RECORD_ID_REQUIRED" }, 400);
-    if (!entity_slug) return json<Resp>({ ok: false, error: "ENTITY_SLUG_REQUIRED" }, 400);
+    // 🔒 CRITICAL FIX — DEFAULT TRUE
+    const ensure_pdf =
+      body.ensure_pdf === undefined ? true : !!body.ensure_pdf;
+
+    if (!record_id)
+      return json<Resp>({ ok: false, error: "RECORD_ID_REQUIRED" }, 400);
+    if (!entity_slug)
+      return json<Resp>({ ok: false, error: "ENTITY_SLUG_REQUIRED" }, 400);
 
     // Resolve entity
     const ent = await supabase
@@ -97,8 +105,10 @@ serve(async (req) => {
       .eq("slug", entity_slug)
       .maybeSingle();
 
-    if (ent.error) return json<Resp>({ ok: false, error: ent.error.message }, 400);
-    if (!ent.data?.id) return json<Resp>({ ok: false, error: "ENTITY_NOT_FOUND" }, 404);
+    if (ent.error)
+      return json<Resp>({ ok: false, error: ent.error.message }, 400);
+    if (!ent.data?.id)
+      return json<Resp>({ ok: false, error: "ENTITY_NOT_FOUND" }, 404);
 
     const entity_id = ent.data.id as string;
 
@@ -109,14 +119,19 @@ serve(async (req) => {
       .eq("id", record_id)
       .maybeSingle();
 
-    if (gl.error) return json<Resp>({ ok: false, error: gl.error.message }, 400);
-    if (!gl.data?.id) return json<Resp>({ ok: false, error: "LEDGER_NOT_FOUND" }, 404);
+    if (gl.error)
+      return json<Resp>({ ok: false, error: gl.error.message }, 400);
+    if (!gl.data?.id)
+      return json<Resp>({ ok: false, error: "LEDGER_NOT_FOUND" }, 404);
 
-    if (gl.data.entity_id !== entity_id) return json<Resp>({ ok: false, error: "ENTITY_MISMATCH" }, 403);
-    if (!!gl.data.is_test !== is_test) return json<Resp>({ ok: false, error: "LANE_MISMATCH" }, 409);
+    if (gl.data.entity_id !== entity_id)
+      return json<Resp>({ ok: false, error: "ENTITY_MISMATCH" }, 403);
+    if (!!gl.data.is_test !== is_test)
+      return json<Resp>({ ok: false, error: "LANE_MISMATCH" }, 409);
 
     const ledgerTitle = safeText((gl.data as any)?.title);
-    const envelopeTitle = ledgerTitle ?? `Signature Envelope — ${record_id}`;
+    const envelopeTitle =
+      ledgerTitle ?? `Signature Envelope — ${record_id}`;
 
     // Reuse latest envelope unless force_new
     const existing = await supabase
@@ -128,9 +143,12 @@ serve(async (req) => {
       .limit(1)
       .maybeSingle();
 
-    if (existing.error) return json<Resp>({ ok: false, error: existing.error.message }, 400);
+    if (existing.error)
+      return json<Resp>({ ok: false, error: existing.error.message }, 400);
 
-    const existingId = existing.data?.id ? String(existing.data.id) : null;
+    const existingId = existing.data?.id
+      ? String(existing.data.id)
+      : null;
     const existingStatus = safeText(existing.data?.status) ?? "";
 
     if (existingId && !(force_new && existingStatus.toLowerCase() === "completed")) {
@@ -168,12 +186,16 @@ serve(async (req) => {
       .select("id")
       .single();
 
-    if (ins.error) return json<Resp>({ ok: false, error: ins.error.message }, 400);
+    if (ins.error)
+      return json<Resp>({ ok: false, error: ins.error.message }, 400);
 
     const envelope_id = String(ins.data.id);
 
     // Best-effort: move ledger into SIGNING
-    await supabase.from("governance_ledger").update({ status: "SIGNING" } as any).eq("id", record_id);
+    await supabase
+      .from("governance_ledger")
+      .update({ status: "SIGNING" } as any)
+      .eq("id", record_id);
 
     const created_parties = await maybeCreateParties({
       envelope_id,
@@ -194,18 +216,34 @@ serve(async (req) => {
       ensured_pdf: ensured,
     });
   } catch (e: any) {
-    return json<Resp>({ ok: false, error: e?.message || "UNHANDLED" }, 500);
+    return json<Resp>({
+      ok: false,
+      error: e?.message || "UNHANDLED",
+    }, 500);
   }
 });
 
+// -----------------------------------------------------
 // Legacy compatibility: optional parties creation
-async function maybeCreateParties(args: { envelope_id: string; body: ReqBody }): Promise<number> {
+// -----------------------------------------------------
+async function maybeCreateParties(args: {
+  envelope_id: string;
+  body: ReqBody;
+}): Promise<number> {
   const { envelope_id, body } = args;
 
-  let parties: PartyInput[] = Array.isArray(body.parties) ? body.parties : [];
+  let parties: PartyInput[] = Array.isArray(body.parties)
+    ? body.parties
+    : [];
 
   if (!parties.length && body.signer_email) {
-    parties = [{ name: body.signer_name ?? null, email: body.signer_email ?? null, role: "primary" }];
+    parties = [
+      {
+        name: body.signer_name ?? null,
+        email: body.signer_email ?? null,
+        role: "primary",
+      },
+    ];
   }
 
   parties = parties
@@ -225,41 +263,58 @@ async function maybeCreateParties(args: { envelope_id: string; body: ReqBody }):
 
   if (existing.error) return 0;
 
-  const existingEmails = new Set(((existing.data ?? []) as any[]).map((r) => String(r.email || "").toLowerCase()));
+  const existingEmails = new Set(
+    ((existing.data ?? []) as any[]).map((r) =>
+      String(r.email || "").toLowerCase(),
+    ),
+  );
 
   const rows = parties
-    .filter((p) => p.email && !existingEmails.has(String(p.email).toLowerCase()))
+    .filter(
+      (p) =>
+        p.email &&
+        !existingEmails.has(String(p.email).toLowerCase()),
+    )
     .map((p, idx) => ({
       envelope_id,
       name: p.name,
       email: p.email,
       role: p.role ?? (idx === 0 ? "primary" : "cc"),
       status: "pending",
-      // party_token should be generated by default/trigger if your schema has it.
     }));
 
   if (!rows.length) return 0;
 
-  const ins = await supabase.from("signature_parties").insert(rows as any);
+  const ins = await supabase
+    .from("signature_parties")
+    .insert(rows as any);
+
   if (ins.error) return 0;
 
   return rows.length;
 }
 
-// Safe helper: ensure base PDF exists + envelope pointers are written.
-// Calls odp-pdf-engine using service role (internal).
-async function ensurePdfForEnvelope(record_id: string, envelope_id: string): Promise<boolean> {
+// -----------------------------------------------------
+// Safe helper: ensure base PDF exists (NO REGRESSION)
+// -----------------------------------------------------
+async function ensurePdfForEnvelope(
+  record_id: string,
+  envelope_id: string,
+): Promise<boolean> {
   try {
     const edgeBase = (SUPABASE_URL ?? "").replace(/\/rest\/v1$/, "");
-    const res = await fetch(`${edgeBase}/functions/v1/odp-pdf-engine`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        apikey: SERVICE_ROLE_KEY!,
-        Authorization: `Bearer ${SERVICE_ROLE_KEY!}`,
+    const res = await fetch(
+      `${edgeBase}/functions/v1/odp-pdf-engine`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: SERVICE_ROLE_KEY!,
+          Authorization: `Bearer ${SERVICE_ROLE_KEY!}`,
+        },
+        body: JSON.stringify({ record_id, envelope_id }),
       },
-      body: JSON.stringify({ record_id, envelope_id }),
-    });
+    );
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
