@@ -120,7 +120,7 @@ async function resolveBasePdfPath(recordId: string): Promise<string | null> {
       .eq("name", name)
       .limit(1);
 
-    if (!error && data && data.length > 0) return String(data[0].name);
+    if (!error && data && data.length > 0) return String((data as any[])[0].name);
   }
 
   // 2) Fallback: scan last 400 objects under resolutions and pick newest matching record_id
@@ -369,10 +369,27 @@ serve(async (req) => {
 
     // -----------------------------------------------------------------------
     // 6) Generate signed PDF with certificate page
-    //    - run when ALL parties have signed
-    //    - AND either: this call just signed a party, OR force_regen is true
+    //
+    // ✅ CRITICAL NO-REGRESSION FIX:
+    //   Generate when ALL parties signed AND (force_regen OR signed artifact/hash missing)
+    //   This prevents "COMPLETED but no hash / no signed PDF" forever.
     // -----------------------------------------------------------------------
-    if (allSigned && (!alreadySigned || wantRegen)) {
+    const existingMeta: any = (envelope as any)?.metadata ?? {};
+    const existingCert: any = existingMeta?.certificate ?? null;
+
+    const existingSignedPath =
+      safeText(existingMeta?.signed_document_path) ??
+      safeText(existingCert?.signed_document_path) ??
+      null;
+
+    const existingHash =
+      safeText(existingMeta?.pdf_hash) ??
+      safeText(existingCert?.pdf_hash) ??
+      null;
+
+    const needsSignedArtifact = !existingSignedPath || !existingHash;
+
+    if (allSigned && (wantRegen || needsSignedArtifact)) {
       const metaPath = safeText((envelope as any)?.metadata?.storage_path);
       const envSupport = safeText((envelope as any)?.supporting_document_path);
       const envStorage = safeText((envelope as any)?.storage_path);
@@ -388,400 +405,401 @@ serve(async (req) => {
       }
 
       if (!basePath) {
-        console.warn("No base PDF path could be resolved; cannot generate signed PDF.");
-      } else {
-        // Download original PDF
-        const { data: originalFile, error: dlErr } = await supabase.storage
-          .from(BUCKET)
-          .download(basePath);
+        // Enterprise invariant: NEVER mark completed if we cannot produce signed artifact.
+        throw new Error("BASE_PDF_NOT_FOUND_FOR_SIGNING");
+      }
 
-        if (dlErr || !originalFile) {
-          console.error("Error downloading base PDF:", dlErr);
-        } else {
-          const originalBytes = await originalFile.arrayBuffer();
-          const pdfDoc = await PDFDocument.load(originalBytes);
+      // Download original PDF
+      const { data: originalFile, error: dlErr } = await supabase.storage
+        .from(BUCKET)
+        .download(basePath);
 
-          // Add certificate page (page 2)
-          const certPage = pdfDoc.addPage();
-          const width = certPage.getWidth();
-          const height = certPage.getHeight();
+      if (dlErr || !originalFile) {
+        console.error("Error downloading base PDF:", dlErr);
+        throw new Error("BASE_PDF_DOWNLOAD_FAILED");
+      }
 
-          const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-          const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+      const originalBytes = await originalFile.arrayBuffer();
+      const pdfDoc = await PDFDocument.load(originalBytes);
 
-          const margin = 50;
-          const accent = rgb(0.11, 0.77, 0.55);
-          const textDark = rgb(0.16, 0.18, 0.22);
-          const textMuted = rgb(0.45, 0.48, 0.55);
+      // Add certificate page (page 2)
+      const certPage = pdfDoc.addPage();
+      const width = certPage.getWidth();
+      const height = certPage.getHeight();
 
-          const headerHeight = 70;
-          certPage.drawRectangle({
-            x: 0,
-            y: height - headerHeight,
-            width,
-            height: headerHeight,
-            color: rgb(0.04, 0.08, 0.12),
-          });
+      const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+      const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
 
-          certPage.drawText("Oasis Digital Parliament", {
+      const margin = 50;
+      const accent = rgb(0.11, 0.77, 0.55);
+      const textDark = rgb(0.16, 0.18, 0.22);
+      const textMuted = rgb(0.45, 0.48, 0.55);
+
+      const headerHeight = 70;
+      certPage.drawRectangle({
+        x: 0,
+        y: height - headerHeight,
+        width,
+        height: headerHeight,
+        color: rgb(0.04, 0.08, 0.12),
+      });
+
+      certPage.drawText("Oasis Digital Parliament", {
+        x: margin,
+        y: height - headerHeight + 32,
+        size: 16,
+        font: fontBold,
+        color: accent,
+      });
+
+      certPage.drawText("Signature Certificate", {
+        x: margin,
+        y: height - headerHeight + 14,
+        size: 11,
+        font,
+        color: rgb(0.8, 0.84, 0.9),
+      });
+
+      const rightHeader = "Issued by the Oasis Digital Parliament Ledger";
+      const rightWidth = font.widthOfTextAtSize(rightHeader, 9);
+      certPage.drawText(rightHeader, {
+        x: width - margin - rightWidth,
+        y: height - headerHeight + 20,
+        size: 9,
+        font,
+        color: rgb(0.7, 0.75, 0.82),
+      });
+
+      let y = height - headerHeight - 35;
+      certPage.drawText(
+        "This page certifies the electronic execution of the following record:",
+        { x: margin, y, size: 10, font, color: textMuted },
+      );
+
+      y -= 24;
+      const title =
+        record?.title ?? (envelope as any)?.title ?? "Corporate Record";
+      certPage.drawText(title, {
+        x: margin,
+        y,
+        size: 13,
+        font: fontBold,
+        color: textDark,
+      });
+
+      y -= 20;
+      const entityLine = entity?.name ?? "Entity";
+      certPage.drawText(entityLine, {
+        x: margin,
+        y,
+        size: 10,
+        font,
+        color: textMuted,
+      });
+
+      y -= 26;
+
+      const leftLines: Array<[string, unknown]> = [
+        ["Certificate ID", envelope.id],
+        ["Entity", entityLine],
+        ["Record ID", String(envelope.record_id)],
+        ["Record Title", title],
+        ["Signed At (UTC)", signedAt],
+        ["Envelope Status", nextStatus],
+      ];
+
+      const rightLines: Array<[string, unknown]> = [
+        ["Signer Name", party.display_name],
+        ["Signer Email", party.email ?? "N/A"],
+        ["Signer Role", party.role ?? "signer"],
+        ["Entity ID", String(envelope.entity_id)],
+        ["Entity Slug", entity?.slug ?? "n/a"],
+        ["Created At", record?.created_at ?? "N/A"],
+      ];
+
+      let leftY = y;
+      const colGap = 220;
+
+      for (const [label, value] of leftLines) {
+        certPage.drawText(label + ":", {
+          x: margin,
+          y: leftY,
+          size: 9,
+          font: fontBold,
+          color: textDark,
+        });
+        certPage.drawText(truncateMiddle(String(value), 36), {
+          x: margin + 95,
+          y: leftY,
+          size: 9,
+          font,
+          color: textMuted,
+        });
+        leftY -= 16;
+      }
+
+      let rightY = y;
+      for (const [label, value] of rightLines) {
+        certPage.drawText(label + ":", {
+          x: margin + colGap,
+          y: rightY,
+          size: 9,
+          font: fontBold,
+          color: textDark,
+        });
+        certPage.drawText(truncateMiddle(String(value), 28), {
+          x: margin + colGap + 95,
+          y: rightY,
+          size: 9,
+          font,
+          color: textMuted,
+        });
+        rightY -= 16;
+      }
+
+      // Technical footprint
+      let techY = Math.min(leftY, rightY) - 18;
+      if (client_ip || user_agent) {
+        certPage.drawText("Technical footprint", {
+          x: margin,
+          y: techY,
+          size: 9,
+          font: fontBold,
+          color: textDark,
+        });
+        techY -= 14;
+
+        if (client_ip) {
+          certPage.drawText(`Client IP: ${client_ip}`, {
             x: margin,
-            y: height - headerHeight + 32,
-            size: 16,
-            font: fontBold,
-            color: accent,
-          });
-
-          certPage.drawText("Signature Certificate", {
-            x: margin,
-            y: height - headerHeight + 14,
-            size: 11,
-            font,
-            color: rgb(0.8, 0.84, 0.9),
-          });
-
-          const rightHeader = "Issued by the Oasis Digital Parliament Ledger";
-          const rightWidth = font.widthOfTextAtSize(rightHeader, 9);
-          certPage.drawText(rightHeader, {
-            x: width - margin - rightWidth,
-            y: height - headerHeight + 20,
-            size: 9,
-            font,
-            color: rgb(0.7, 0.75, 0.82),
-          });
-
-          let y = height - headerHeight - 35;
-          certPage.drawText(
-            "This page certifies the electronic execution of the following record:",
-            { x: margin, y, size: 10, font, color: textMuted },
-          );
-
-          y -= 24;
-          const title =
-            record?.title ?? (envelope as any)?.title ?? "Corporate Record";
-          certPage.drawText(title, {
-            x: margin,
-            y,
-            size: 13,
-            font: fontBold,
-            color: textDark,
-          });
-
-          y -= 20;
-          const entityLine = entity?.name ?? "Entity";
-          certPage.drawText(entityLine, {
-            x: margin,
-            y,
-            size: 10,
+            y: techY,
+            size: 8,
             font,
             color: textMuted,
           });
+          techY -= 12;
+        }
+        if (user_agent) {
+          certPage.drawText(`User Agent: ${truncateMiddle(user_agent, 68)}`, {
+            x: margin,
+            y: techY,
+            size: 8,
+            font,
+            color: textMuted,
+          });
+          techY -= 12;
+        }
+      }
 
-          y -= 26;
+      // QR code (CERTIFICATE PAGE ONLY) — MUST EXIST (enterprise invariant)
+      {
+        const qrSize = 96;
+        const pad = 36;
+        const qrX = width - pad - qrSize;
+        const qrY = pad;
 
-          const leftLines: Array<[string, unknown]> = [
-            ["Certificate ID", envelope.id],
-            ["Entity", entityLine],
-            ["Record ID", String(envelope.record_id)],
-            ["Record Title", title],
-            ["Signed At (UTC)", signedAt],
-            ["Envelope Status", nextStatus],
-          ];
+        // White plate behind QR for legibility
+        certPage.drawRectangle({
+          x: qrX - 6,
+          y: qrY - 6,
+          width: qrSize + 12,
+          height: qrSize + 22, // caption space
+          color: rgb(1, 1, 1),
+          borderColor: rgb(0.9, 0.9, 0.9),
+          borderWidth: 1,
+        });
 
-          const rightLines: Array<[string, unknown]> = [
-            ["Signer Name", party.display_name],
-            ["Signer Email", party.email ?? "N/A"],
-            ["Signer Role", party.role ?? "signer"],
-            ["Entity ID", String(envelope.entity_id)],
-            ["Entity Slug", entity?.slug ?? "n/a"],
-            ["Created At", record?.created_at ?? "N/A"],
-          ];
+        let qrPngBytes: Uint8Array;
+        try {
+          const dataUrl = await QRCode.toDataURL(verifyUrl, {
+            margin: 1,
+            width: 220,
+            // enterprise: black on white (no transparency drift)
+            color: { dark: "#000000", light: "#ffffff" },
+          });
 
-          let leftY = y;
-          const colGap = 220;
+          const base64 = dataUrl.split(",")[1] ?? "";
+          const binary = atob(base64);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+          }
+          qrPngBytes = bytes;
+        } catch (e) {
+          console.error("QR toDataURL failed", e);
+          throw new Error("CERTIFICATE_QR_GENERATION_FAILED");
+        }
 
-          for (const [label, value] of leftLines) {
-            certPage.drawText(label + ":", {
+        let qrImage;
+        try {
+          qrImage = await pdfDoc.embedPng(qrPngBytes);
+        } catch (e) {
+          console.error("QR embedPng failed", e);
+          throw new Error("CERTIFICATE_QR_EMBED_FAILED");
+        }
+
+        certPage.drawImage(qrImage, {
+          x: qrX,
+          y: qrY + 16,
+          width: qrSize,
+          height: qrSize,
+        });
+
+        const caption = "Scan to verify";
+        const captionWidth = font.widthOfTextAtSize(caption, 8);
+        certPage.drawText(caption, {
+          x: qrX + (qrSize - captionWidth) / 2,
+          y: qrY + 4,
+          size: 8,
+          font,
+          color: textMuted,
+        });
+      }
+
+      // Optional: embed wet-ink signature image (fail-soft)
+      try {
+        if (wetSignaturePath) {
+          const { data: sigFile, error: sigDlErr } = await supabase.storage
+            .from(BUCKET)
+            .download(wetSignaturePath);
+
+          if (!sigDlErr && sigFile) {
+            const sigBytes = new Uint8Array(await sigFile.arrayBuffer());
+            const sigImg = await pdfDoc.embedPng(sigBytes);
+
+            certPage.drawText("Wet-Ink Signature (Captured)", {
               x: margin,
-              y: leftY,
-              size: 9,
-              font: fontBold,
-              color: textDark,
-            });
-            certPage.drawText(truncateMiddle(String(value), 36), {
-              x: margin + 95,
-              y: leftY,
-              size: 9,
-              font,
-              color: textMuted,
-            });
-            leftY -= 16;
-          }
-
-          let rightY = y;
-          for (const [label, value] of rightLines) {
-            certPage.drawText(label + ":", {
-              x: margin + colGap,
-              y: rightY,
-              size: 9,
-              font: fontBold,
-              color: textDark,
-            });
-            certPage.drawText(truncateMiddle(String(value), 28), {
-              x: margin + colGap + 95,
-              y: rightY,
-              size: 9,
-              font,
-              color: textMuted,
-            });
-            rightY -= 16;
-          }
-
-          // Technical footprint
-          let techY = Math.min(leftY, rightY) - 18;
-          if (client_ip || user_agent) {
-            certPage.drawText("Technical footprint", {
-              x: margin,
-              y: techY,
-              size: 9,
-              font: fontBold,
-              color: textDark,
-            });
-            techY -= 14;
-
-            if (client_ip) {
-              certPage.drawText(`Client IP: ${client_ip}`, {
-                x: margin,
-                y: techY,
-                size: 8,
-                font,
-                color: textMuted,
-              });
-              techY -= 12;
-            }
-            if (user_agent) {
-              certPage.drawText(`User Agent: ${truncateMiddle(user_agent, 68)}`, {
-                x: margin,
-                y: techY,
-                size: 8,
-                font,
-                color: textMuted,
-              });
-              techY -= 12;
-            }
-          }
-
-          // QR code (CERTIFICATE PAGE ONLY) — MUST EXIST (enterprise invariant)
-          // NOTE: we intentionally do NOT swallow failures; a certificate without QR is not allowed.
-          {
-            const qrSize = 96;
-            const pad = 36;
-            const qrX = width - pad - qrSize;
-            const qrY = pad;
-
-            // White plate behind QR for legibility
-            certPage.drawRectangle({
-              x: qrX - 6,
-              y: qrY - 6,
-              width: qrSize + 12,
-              height: qrSize + 22, // caption space
-              color: rgb(1, 1, 1),
-              borderColor: rgb(0.9, 0.9, 0.9),
-              borderWidth: 1,
-            });
-
-            let qrPngBytes: Uint8Array;
-            try {
-              const dataUrl = await QRCode.toDataURL(verifyUrl, {
-                margin: 1,
-                width: 220,
-                // enterprise: black on white (no transparency drift)
-                color: { dark: "#000000", light: "#ffffff" },
-              });
-
-              const base64 = dataUrl.split(",")[1] ?? "";
-              const binary = atob(base64);
-              const bytes = new Uint8Array(binary.length);
-              for (let i = 0; i < binary.length; i++) {
-                bytes[i] = binary.charCodeAt(i);
-              }
-              qrPngBytes = bytes;
-            } catch (e) {
-              console.error("QR toDataURL failed", e);
-              throw new Error("CERTIFICATE_QR_GENERATION_FAILED");
-            }
-
-            let qrImage;
-            try {
-              qrImage = await pdfDoc.embedPng(qrPngBytes);
-            } catch (e) {
-              console.error("QR embedPng failed", e);
-              throw new Error("CERTIFICATE_QR_EMBED_FAILED");
-            }
-
-            certPage.drawImage(qrImage, {
-              x: qrX,
-              y: qrY + 16,
-              width: qrSize,
-              height: qrSize,
-            });
-
-            const caption = "Scan to verify";
-            const captionWidth = font.widthOfTextAtSize(caption, 8);
-            certPage.drawText(caption, {
-              x: qrX + (qrSize - captionWidth) / 2,
-              y: qrY + 4,
+              y: 125,
               size: 8,
               font,
               color: textMuted,
             });
+
+            certPage.drawImage(sigImg, {
+              x: margin,
+              y: 50,
+              width: 220,
+              height: 70,
+            });
           }
-
-          // Optional: embed wet-ink signature image (fail-soft)
-          try {
-            if (wetSignaturePath) {
-              const { data: sigFile, error: sigDlErr } = await supabase.storage
-                .from(BUCKET)
-                .download(wetSignaturePath);
-
-              if (!sigDlErr && sigFile) {
-                const sigBytes = new Uint8Array(await sigFile.arrayBuffer());
-                const sigImg = await pdfDoc.embedPng(sigBytes);
-
-                certPage.drawText("Wet-Ink Signature (Captured)", {
-                  x: margin,
-                  y: 125,
-                  size: 8,
-                  font,
-                  color: textMuted,
-                });
-
-                certPage.drawImage(sigImg, {
-                  x: margin,
-                  y: 50,
-                  width: 220,
-                  height: 70,
-                });
-              }
-            }
-          } catch (e) {
-            console.error("Wet signature embed error (non-fatal)", e);
-          }
-
-          // Save + hash (hash is computed from final PDF that includes certificate page)
-          const pdfBytes = await pdfDoc.save();
-          pdfHash = await sha256Hex(pdfBytes);
-
-          // Legacy signed path (NO REGRESSION): follows basePath casing
-          signedPath = toSignedPath(basePath);
-
-          // Canonical twin (additive): lowercase folder version
-          signedPathCanonical = canonicalizeResolutionsPath(signedPath);
-
-          // Upload canonical first (safe), then legacy (primary continuity)
-          try {
-            const { error: upCanonErr } = await supabase.storage
-              .from(BUCKET)
-              .upload(
-                signedPathCanonical,
-                new Blob([pdfBytes], { type: "application/pdf" }),
-                { upsert: true },
-              );
-
-            if (upCanonErr) {
-              console.error("Error uploading canonical signed PDF:", upCanonErr);
-            }
-          } catch (e) {
-            console.error("Canonical signed upload threw (non-fatal)", e);
-          }
-
-          const { error: uploadErr } = await supabase.storage
-            .from(BUCKET)
-            .upload(
-              signedPath,
-              new Blob([pdfBytes], { type: "application/pdf" }),
-              { upsert: true },
-            );
-
-          if (uploadErr) {
-            console.error("Error uploading legacy signed PDF:", uploadErr);
-            signedPath = null;
-          }
-
-          // Pointer repair + metadata write MUST happen BEFORE we mark envelope completed
-          const existingMeta = (envelope as any)?.metadata ?? {};
-          const certificate = {
-            certificate_version: 1,
-            envelope_id,
-            record_id: envelope.record_id,
-            entity_id: envelope.entity_id,
-            entity_name: entity?.name ?? null,
-            record_title: record?.title ?? envelope.title ?? null,
-            signer: {
-              party_id: party.id,
-              name: party.display_name,
-              email: party.email,
-              role: party.role ?? "signer",
-            },
-            signed_at: signedAt,
-            envelope_status: nextStatus,
-            client_ip: client_ip ?? null,
-            user_agent: user_agent ?? null,
-            verify_url: verifyUrl,
-            pdf_hash: pdfHash,
-            bucket: BUCKET,
-            base_document_path: basePath ?? envSupport ?? envStorage ?? null,
-            signed_document_path: signedPath,
-            signed_document_path_canonical: signedPathCanonical,
-            wet_signature_mode: String(wet_signature_mode ?? "").toLowerCase() || "click",
-            wet_signature_path: wetSignaturePath,
-          };
-
-          const newMetadata = {
-            ...existingMeta,
-            verify_url: verifyUrl,
-            certificate,
-
-            // keep canonical pointer discipline: storage_path remains base PDF pointer
-            storage_path: existingMeta.storage_path ?? basePath ?? null,
-
-            // signed pointers: preserve legacy + additive canonical
-            signed_document_path: signedPath ?? existingMeta.signed_document_path ?? null,
-            signed_document_path_canonical:
-              signedPathCanonical ?? existingMeta.signed_document_path_canonical ?? null,
-
-            // keep hash accessible for verify/certificate
-            pdf_hash: pdfHash ?? existingMeta.pdf_hash ?? null,
-
-            wet_signature_mode:
-              String(wet_signature_mode ?? "").toLowerCase() ||
-              (existingMeta.wet_signature_mode ?? "click"),
-            wet_signature_path: wetSignaturePath ?? existingMeta.wet_signature_path ?? null,
-          };
-
-          await mustUpdateEnvelope(envelope_id, {
-            // still not completed yet; trigger will allow metadata/pointer write
-            status: allSigned ? "partial" : "partial",
-            metadata: newMetadata,
-            supporting_document_path: envSupport ?? basePath ?? null,
-            storage_path: envStorage ?? basePath ?? null,
-          });
-
-          await mustInsertEvent({
-            envelope_id,
-            event_type: "completed",
-            metadata: {
-              party_id,
-              signed_at: signedAt,
-              certificate,
-              signed_document_path: signedPath,
-              signed_document_path_canonical: signedPathCanonical,
-              wet_signature_mode: String(wet_signature_mode ?? "").toLowerCase() || "click",
-              wet_signature_path: wetSignaturePath,
-              force_regen: !!force_regen,
-            },
-          });
         }
+      } catch (e) {
+        console.error("Wet signature embed error (non-fatal)", e);
       }
+
+      // Save + hash (hash is computed from final PDF that includes certificate page)
+      const pdfBytes = await pdfDoc.save();
+      pdfHash = await sha256Hex(pdfBytes);
+
+      // Legacy signed path (NO REGRESSION): follows basePath casing
+      signedPath = toSignedPath(basePath);
+
+      // Canonical twin (additive): lowercase folder version
+      signedPathCanonical = canonicalizeResolutionsPath(signedPath);
+
+      // Upload canonical first (safe), then legacy (primary continuity)
+      try {
+        const { error: upCanonErr } = await supabase.storage
+          .from(BUCKET)
+          .upload(
+            signedPathCanonical,
+            new Blob([pdfBytes], { type: "application/pdf" }),
+            { upsert: true },
+          );
+
+        if (upCanonErr) {
+          console.error("Error uploading canonical signed PDF:", upCanonErr);
+        }
+      } catch (e) {
+        console.error("Canonical signed upload threw (non-fatal)", e);
+      }
+
+      const { error: uploadErr } = await supabase.storage
+        .from(BUCKET)
+        .upload(
+          signedPath,
+          new Blob([pdfBytes], { type: "application/pdf" }),
+          { upsert: true },
+        );
+
+      if (uploadErr) {
+        console.error("Error uploading legacy signed PDF:", uploadErr);
+        // Enterprise invariant: never complete if upload failed
+        throw new Error("SIGNED_PDF_UPLOAD_FAILED");
+      }
+
+      // Pointer repair + metadata write MUST happen BEFORE we mark envelope completed
+      const certificate = {
+        certificate_version: 1,
+        envelope_id,
+        record_id: envelope.record_id,
+        entity_id: envelope.entity_id,
+        entity_name: entity?.name ?? null,
+        record_title: record?.title ?? envelope.title ?? null,
+        signer: {
+          party_id: party.id,
+          name: party.display_name,
+          email: party.email,
+          role: party.role ?? "signer",
+        },
+        signed_at: signedAt,
+        envelope_status: nextStatus,
+        client_ip: client_ip ?? null,
+        user_agent: user_agent ?? null,
+        verify_url: verifyUrl,
+        pdf_hash: pdfHash,
+        bucket: BUCKET,
+        base_document_path: basePath ?? null,
+        signed_document_path: signedPath,
+        signed_document_path_canonical: signedPathCanonical,
+        wet_signature_mode: String(wet_signature_mode ?? "").toLowerCase() || "click",
+        wet_signature_path: wetSignaturePath,
+      };
+
+      const newMetadata = {
+        ...existingMeta,
+        verify_url: verifyUrl,
+        certificate,
+
+        // keep canonical pointer discipline: storage_path remains base PDF pointer
+        storage_path: existingMeta.storage_path ?? basePath ?? null,
+
+        // signed pointers: preserve legacy + additive canonical
+        signed_document_path: signedPath ?? existingMeta.signed_document_path ?? null,
+        signed_document_path_canonical:
+          signedPathCanonical ?? existingMeta.signed_document_path_canonical ?? null,
+
+        // keep hash accessible for verify/certificate
+        pdf_hash: pdfHash ?? existingMeta.pdf_hash ?? null,
+
+        wet_signature_mode:
+          String(wet_signature_mode ?? "").toLowerCase() ||
+          (existingMeta.wet_signature_mode ?? "click"),
+        wet_signature_path: wetSignaturePath ?? existingMeta.wet_signature_path ?? null,
+      };
+
+      await mustUpdateEnvelope(envelope_id, {
+        // still not completed yet; trigger will allow metadata/pointer write
+        status: "partial",
+        metadata: newMetadata,
+        supporting_document_path: safeText((envelope as any)?.supporting_document_path) ?? basePath ?? null,
+        storage_path: safeText((envelope as any)?.storage_path) ?? basePath ?? null,
+      });
+
+      await mustInsertEvent({
+        envelope_id,
+        event_type: "completed",
+        metadata: {
+          party_id,
+          signed_at: signedAt,
+          certificate,
+          signed_document_path: signedPath,
+          signed_document_path_canonical: signedPathCanonical,
+          wet_signature_mode: String(wet_signature_mode ?? "").toLowerCase() || "click",
+          wet_signature_path: wetSignaturePath,
+          force_regen: !!force_regen,
+        },
+      });
     }
 
     // -----------------------------------------------------------------------
