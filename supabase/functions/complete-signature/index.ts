@@ -92,6 +92,11 @@ function truncateMiddle(s: string, max = 34) {
   return `${t.slice(0, left)}...${t.slice(t.length - right)}`;
 }
 
+function safeUpper(v: unknown, fallback = "N/A") {
+  const t = safeText(v);
+  return t ? t.toUpperCase() : fallback;
+}
+
 // ---------------------------------------------------------------------------
 // QR RENDERING (EDGE-SAFE): draw QR as vector modules directly in PDF
 // ---------------------------------------------------------------------------
@@ -108,7 +113,6 @@ function drawQrToPdf(opts: {
   const { page, url, x, y, size } = opts;
 
   // Create QR matrix (no canvas)
-  // errorCorrectionLevel M is a good balance; you can bump to Q if you want.
   const qr = QRCode.create(url, { errorCorrectionLevel: "M" });
 
   const modules = qr.modules;
@@ -119,7 +123,7 @@ function drawQrToPdf(opts: {
   const n = modules.size;
   const data: boolean[] = modules.data; // row-major booleans
 
-  // Add a quiet zone (margin) as white plate is already drawn outside.
+  // Quiet zone
   const quiet = 2; // modules
   const total = n + quiet * 2;
   const cell = size / total;
@@ -225,6 +229,75 @@ async function mustInsertEvent(row: Record<string, unknown>) {
   const { error } = await supabase.from("signature_events").insert(row);
   if (error) {
     console.error("signature_events insert failed (non-fatal)", error);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Resolver-driven registry snapshot (READ-ONLY, FAIL-SOFT) — NO DRIFT
+// ---------------------------------------------------------------------------
+type RegistrySnapshot = {
+  ok: boolean;
+  verification_level: "provisional" | "verified" | "certified";
+  file_hash: string | null;
+  verified_document_id: string | null;
+  verified_at: string | null;
+};
+
+function normalizeLevel(v: any): "provisional" | "verified" | "certified" {
+  const t = String(v ?? "").toLowerCase().trim();
+  if (t === "certified") return "certified";
+  if (t === "verified") return "verified";
+  return "provisional";
+}
+
+async function resolveRegistrySnapshot(args: {
+  envelope_id: string;
+  ledger_id: string;
+}): Promise<RegistrySnapshot> {
+  const fallback: RegistrySnapshot = {
+    ok: false,
+    verification_level: "provisional",
+    file_hash: null,
+    verified_document_id: null,
+    verified_at: null,
+  };
+
+  try {
+    // Canonical SQL: public.resolve_verified_record(p_hash, p_envelope_id, p_ledger_id)
+    const { data, error } = await supabase.rpc("resolve_verified_record", {
+      p_hash: null,
+      p_envelope_id: args.envelope_id,
+      p_ledger_id: args.ledger_id,
+    });
+
+    if (error || !data) return fallback;
+
+    // data is jsonb → JS object
+    if (!data.ok) return fallback;
+
+    const verified = (data as any).verified ?? null;
+
+    const snap: RegistrySnapshot = {
+      ok: true,
+      verification_level: normalizeLevel(verified?.verification_level),
+      file_hash: safeText(verified?.file_hash) ?? null,
+      verified_document_id: safeText((data as any).verified_document_id) ?? null,
+      verified_at: safeText(verified?.created_at) ?? null,
+    };
+
+    // If resolver says ok but no verified yet, treat as provisional
+    if (!snap.file_hash || !snap.verified_document_id) {
+      return {
+        ...snap,
+        ok: false,
+        verification_level: "provisional",
+      };
+    }
+
+    return snap;
+  } catch (e) {
+    console.warn("resolveRegistrySnapshot failed (non-fatal)", e);
+    return fallback;
   }
 }
 
@@ -396,7 +469,7 @@ serve(async (req) => {
     let pdfHash: string | null = null;
 
     // -----------------------------------------------------------------------
-    // 6) Generate signed PDF with certificate page
+    // 6) Generate signed PDF with certificate page (execution certificate only)
     // -----------------------------------------------------------------------
     if (allSigned && (!alreadySigned || wantRegen)) {
       const metaPath = safeText((envelope as any)?.metadata?.storage_path);
@@ -426,7 +499,15 @@ serve(async (req) => {
           const originalBytes = await originalFile.arrayBuffer();
           const pdfDoc = await PDFDocument.load(originalBytes);
 
-          // Add certificate page
+          // -------------------------------
+          // Resolver-driven registry snapshot (READ-ONLY, FAIL-SOFT)
+          // -------------------------------
+          const registrySnapshot = await resolveRegistrySnapshot({
+            envelope_id,
+            ledger_id: String(envelope.record_id),
+          });
+
+          // Add certificate page (new final page; original pages untouched)
           const certPage = pdfDoc.addPage();
           const width = certPage.getWidth();
           const height = certPage.getHeight();
@@ -438,6 +519,15 @@ serve(async (req) => {
           const accent = rgb(0.11, 0.77, 0.55);
           const textDark = rgb(0.16, 0.18, 0.22);
           const textMuted = rgb(0.45, 0.48, 0.55);
+
+          // ---- Layout guards (ZERO OVERLAP) ----
+          // Reserve a bottom band for QR + (optional) wet ink, so text never runs into it.
+          const bandPad = 36;
+          const qrSize = 96;
+          const qrPlateH = qrSize + 22; // matches plate height below
+          const wetBoxH = 95; // room for label + signature image
+          const bottomBandH = Math.max(qrPlateH + 12, wetBoxH + 12); // deterministic
+          const bottomBandTopY = bandPad + bottomBandH; // all text must stay above this
 
           const headerHeight = 70;
           certPage.drawRectangle({
@@ -481,8 +571,7 @@ serve(async (req) => {
           );
 
           y -= 24;
-          const title =
-            record?.title ?? (envelope as any)?.title ?? "Corporate Record";
+          const title = record?.title ?? (envelope as any)?.title ?? "Corporate Record";
           certPage.drawText(title, {
             x: margin,
             y,
@@ -561,9 +650,13 @@ serve(async (req) => {
             rightY -= 16;
           }
 
-          // Technical footprint
+          // Technical footprint (bounded so it never overlaps the bottom band)
           let techY = Math.min(leftY, rightY) - 18;
-          if (client_ip || user_agent) {
+
+          const minTextY = bottomBandTopY + 14; // guard
+          const canWriteAt = (yy: number) => yy >= minTextY;
+
+          if ((client_ip || user_agent) && canWriteAt(techY)) {
             certPage.drawText("Technical footprint", {
               x: margin,
               y: techY,
@@ -573,7 +666,7 @@ serve(async (req) => {
             });
             techY -= 14;
 
-            if (client_ip) {
+            if (client_ip && canWriteAt(techY)) {
               certPage.drawText(`Client IP: ${client_ip}`, {
                 x: margin,
                 y: techY,
@@ -583,7 +676,7 @@ serve(async (req) => {
               });
               techY -= 12;
             }
-            if (user_agent) {
+            if (user_agent && canWriteAt(techY)) {
               certPage.drawText(`User Agent: ${truncateMiddle(user_agent, 68)}`, {
                 x: margin,
                 y: techY,
@@ -595,10 +688,85 @@ serve(async (req) => {
             }
           }
 
-          // QR code (CERTIFICATE PAGE ONLY) — MUST EXIST
+          // Resolver-driven attestation (bounded, truth-safe, registry-first)
+          if (canWriteAt(techY)) {
+            // small spacer
+            techY -= 4;
+
+            if (canWriteAt(techY)) {
+              certPage.drawText("Registry Attestation (Read-Only)", {
+                x: margin,
+                y: techY,
+                size: 9,
+                font: fontBold,
+                color: textDark,
+              });
+              techY -= 14;
+            }
+
+            if (canWriteAt(techY)) {
+              certPage.drawText(
+                `Verification Level: ${safeUpper(registrySnapshot.verification_level, "PROVISIONAL")}`,
+                { x: margin, y: techY, size: 8, font, color: textMuted },
+              );
+              techY -= 12;
+            }
+
+            // Canonical rule: only print a hash if registry provides it
+            if (registrySnapshot.file_hash && canWriteAt(techY)) {
+              certPage.drawText(`SHA-256 (Registry): ${registrySnapshot.file_hash}`, {
+                x: margin,
+                y: techY,
+                size: 8,
+                font,
+                color: textMuted,
+              });
+              techY -= 12;
+            } else if (canWriteAt(techY)) {
+              certPage.drawText("SHA-256 (Registry): Not registered at time of execution", {
+                x: margin,
+                y: techY,
+                size: 8,
+                font,
+                color: textMuted,
+              });
+              techY -= 12;
+            }
+
+            if (registrySnapshot.verified_document_id && canWriteAt(techY)) {
+              certPage.drawText(`Registry ID: ${registrySnapshot.verified_document_id}`, {
+                x: margin,
+                y: techY,
+                size: 8,
+                font,
+                color: textMuted,
+              });
+              techY -= 12;
+            }
+
+            if (canWriteAt(techY)) {
+              certPage.drawText(
+                "This attestation reflects the Oasis Verified Registry state at execution time. Authority is conferred exclusively by the Registry.",
+                {
+                  x: margin,
+                  y: techY,
+                  size: 7,
+                  font,
+                  color: textMuted,
+                  maxWidth: width - margin * 2,
+                },
+              );
+              techY -= 10;
+            }
+          }
+
+          // -------------------------------
+          // Bottom band (QR + wet ink) — ZERO OVERLAP
+          // -------------------------------
+
+          // QR code (CERTIFICATE PAGE ONLY) — MUST EXIST (VECTOR)
           {
-            const qrSize = 96;
-            const pad = 36;
+            const pad = bandPad;
             const qrX = width - pad - qrSize;
             const qrY = pad;
 
@@ -637,7 +805,7 @@ serve(async (req) => {
             });
           }
 
-          // Optional wet-ink embed (fail-soft)
+          // Optional wet-ink embed (fail-soft) — in bottom band left, never overlaps text
           try {
             if (wetSignaturePath) {
               const { data: sigFile, error: sigDlErr } = await supabase.storage
@@ -648,19 +816,43 @@ serve(async (req) => {
                 const sigBytes = new Uint8Array(await sigFile.arrayBuffer());
                 const sigImg = await pdfDoc.embedPng(sigBytes);
 
+                // left bottom band box
+                const boxX = margin;
+                const boxY = bandPad;
+                const boxW = Math.min(280, width - margin * 2 - (qrSize + 60)); // keep away from QR
+                const boxH = wetBoxH;
+
+                // subtle plate
+                certPage.drawRectangle({
+                  x: boxX,
+                  y: boxY,
+                  width: boxW,
+                  height: boxH,
+                  color: rgb(1, 1, 1),
+                  borderColor: rgb(0.92, 0.92, 0.92),
+                  borderWidth: 1,
+                });
+
                 certPage.drawText("Wet-Ink Signature (Captured)", {
-                  x: margin,
-                  y: 125,
+                  x: boxX + 10,
+                  y: boxY + boxH - 16,
                   size: 8,
                   font,
                   color: textMuted,
                 });
 
+                // image inside the plate
+                const imgPad = 10;
+                const imgX = boxX + imgPad;
+                const imgY = boxY + imgPad;
+                const imgW = boxW - imgPad * 2;
+                const imgH = boxH - 26; // room for label
+
                 certPage.drawImage(sigImg, {
-                  x: margin,
-                  y: 50,
-                  width: 220,
-                  height: 70,
+                  x: imgX,
+                  y: imgY,
+                  width: imgW,
+                  height: imgH,
                 });
               }
             }
@@ -668,7 +860,7 @@ serve(async (req) => {
             console.error("Wet signature embed error (non-fatal)", e);
           }
 
-          // Save + hash
+          // Save + hash (internal; do NOT print as canonical unless registry returns it)
           const pdfBytes = await pdfDoc.save();
           pdfHash = await sha256Hex(pdfBytes);
 
@@ -724,11 +916,24 @@ serve(async (req) => {
             client_ip: client_ip ?? null,
             user_agent: user_agent ?? null,
             verify_url: verifyUrl,
+
+            // Internal render digest (not canonical registry truth)
             pdf_hash: pdfHash,
+
             bucket: BUCKET,
             base_document_path: basePath ?? envSupport ?? envStorage ?? null,
             signed_document_path: signedPath,
             signed_document_path_canonical: signedPathCanonical,
+
+            // Resolver-driven registry snapshot (read-only; helps UI/debug; NOT authority)
+            registry_attestation: {
+              ok: registrySnapshot.ok,
+              verification_level: registrySnapshot.verification_level,
+              file_hash: registrySnapshot.file_hash,
+              verified_document_id: registrySnapshot.verified_document_id,
+              verified_at: registrySnapshot.verified_at,
+            },
+
             wet_signature_mode: String(wet_signature_mode ?? "").toLowerCase() || "click",
             wet_signature_path: wetSignaturePath,
           };
@@ -744,7 +949,12 @@ serve(async (req) => {
             signed_document_path_canonical:
               signedPathCanonical ?? existingMeta.signed_document_path_canonical ?? null,
 
+            // Keep internal digest for continuity (do not treat as registry authority)
             pdf_hash: pdfHash ?? existingMeta.pdf_hash ?? null,
+
+            // Mirror resolver snapshot at top-level (additive; no consumer required)
+            registry_attestation:
+              certificate.registry_attestation ?? existingMeta.registry_attestation ?? null,
 
             wet_signature_mode:
               String(wet_signature_mode ?? "").toLowerCase() ||
@@ -889,6 +1099,10 @@ serve(async (req) => {
       wet_signature_mode: String(wet_signature_mode ?? "").toLowerCase() || "click",
       wet_signature_path: safeText(cert?.wet_signature_path) ?? null,
       force_regen: !!force_regen,
+
+      // additive: expose registry snapshot for callers (read-only)
+      registry_attestation:
+        cert?.registry_attestation ?? meta?.registry_attestation ?? null,
     });
   } catch (e) {
     console.error("Unexpected error in complete-signature", e);
