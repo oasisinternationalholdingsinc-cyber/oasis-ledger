@@ -5,6 +5,25 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { PDFDocument, rgb, StandardFonts } from "https://esm.sh/pdf-lib@1.17.1";
 import QRCode from "https://esm.sh/qrcode@1.5.3";
 
+/**
+ * certify-governance-record (Option A — enterprise)
+ *
+ * Purpose:
+ *  - Explicitly creates/refreshes the *certified* PDF (with QR) and writes the canonical SHA-256 hash
+ *    into verified_documents.
+ *  - Lane-safe: writes certified PDF to governance_sandbox or governance_truth.
+ *  - NO "public.storage.objects" bug: storage scan uses schema("storage").from("objects")
+ *
+ * Inputs:
+ *  - ledger_id (or record_id alias)
+ *  - actor_id optional (otherwise resolved from JWT)
+ *  - force optional (regen even if already certified)
+ *  - verify_base_url optional (otherwise env VERIFY_BASE_URL; fallback to portal verify)
+ *
+ * Output:
+ *  - ok, verified_document_id, source pointer, certified pointer + hash
+ */
+
 type ReqBody = {
   ledger_id?: string;
   record_id?: string; // tolerated alias
@@ -28,6 +47,8 @@ type Resp = {
   reused?: boolean;
 
   error?: string;
+  details?: unknown;
+  request_id?: string | null;
 };
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
@@ -82,15 +103,47 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return hex;
 }
 
-// Build a stable verify URL for QR.
-// ✅ Enterprise approach: allow env override so you can change public gateway without rewiring PDFs.
 function buildVerifyUrl(base: string, verifiedId: string, ledgerId: string) {
-  // Use a conservative query that you can support in the public resolver.
-  // You can choose to prioritize verified_id (best) while also including ledger_id.
   const u = new URL(base);
+  // Prefer verified_id as the canonical public resolver key
   u.searchParams.set("verified_id", verifiedId);
+  // Include ledger_id as a helpful secondary hint (optional)
   u.searchParams.set("ledger_id", ledgerId);
   return u.toString();
+}
+
+async function resolveActorIdFromJwt(req: Request): Promise<string | null> {
+  const authHeader = req.headers.get("authorization") ?? req.headers.get("Authorization");
+  const jwt = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (!jwt) return null;
+
+  const { data, error } = await supabaseAdmin.auth.getUser(jwt);
+  if (error) return null;
+
+  const id = data?.user?.id ?? null;
+  return id && isUuid(id) ? id : null;
+}
+
+async function pickMinuteBookSourcePdf(ledgerId: string): Promise<string | null> {
+  // ✅ KEY FIX: query storage schema correctly (NO public.storage.objects)
+  const { data, error } = await supabaseAdmin
+    .schema("storage")
+    .from("objects")
+    .select("name, updated_at")
+    .eq("bucket_id", "minute_book")
+    .ilike("name", `%${ledgerId}%`)
+    .ilike("name", "%.pdf")
+    .order("updated_at", { ascending: false })
+    .limit(50);
+
+  if (error) throw error;
+
+  const candidates = (data ?? []) as Array<{ name: string }>;
+  if (!candidates.length) return null;
+
+  // Prefer "-signed.pdf" if present (your enterprise convention)
+  const signed = candidates.find((o) => String(o.name).toLowerCase().includes("-signed.pdf"));
+  return String((signed ?? candidates[0]).name);
 }
 
 serve(async (req) => {
@@ -107,32 +160,19 @@ serve(async (req) => {
       return json({ ok: false, error: "ledger_id must be uuid", request_id: reqId }, 400);
     }
 
-    // Actor: prefer body.actor_id; else resolve from user JWT if present.
     let actorId = safeText(body.actor_id);
     if (actorId && !isUuid(actorId)) {
       return json({ ok: false, error: "actor_id must be uuid", request_id: reqId }, 400);
     }
 
-    if (!actorId) {
-      const authHeader = req.headers.get("authorization") ?? req.headers.get("Authorization");
-      const jwt = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
-
-      if (jwt) {
-        const { data, error } = await supabaseAdmin.auth.getUser(jwt);
-        if (error) {
-          return json({ ok: false, error: "Actor unresolved", request_id: reqId }, 401);
-        }
-        actorId = data?.user?.id ?? null;
-      }
-    }
-
+    if (!actorId) actorId = await resolveActorIdFromJwt(req);
     if (!actorId) {
       return json({ ok: false, error: "ACTOR_REQUIRED", request_id: reqId }, 401);
     }
 
     const force = !!body.force;
 
-    // 1) Load ledger
+    // 1) Load ledger (minimal, stable)
     const gl = await supabaseAdmin
       .from("governance_ledger")
       .select("id, entity_id, title, is_test")
@@ -147,17 +187,22 @@ serve(async (req) => {
     const title = String((gl.data as any).title ?? "Untitled Resolution");
 
     // 2) Load entity
-    const ent = await supabaseAdmin.from("entities").select("id, slug, name").eq("id", entity_id).maybeSingle();
+    const ent = await supabaseAdmin
+      .from("entities")
+      .select("id, slug, name")
+      .eq("id", entity_id)
+      .maybeSingle();
+
     if (ent.error) return json({ ok: false, error: ent.error.message, request_id: reqId }, 400);
     if (!ent.data?.id) return json({ ok: false, error: "ENTITY_NOT_FOUND", request_id: reqId }, 404);
 
     const entity_slug = String((ent.data as any).slug);
-    const entity_name = String((ent.data as any).name ?? entity_slug);
+    // NOTE: entity_name not embedded in PDF here to avoid template drift; QR is the authoritative bridge.
 
-    // 3) Check if a verified row already exists and is already certified with file_hash
+    // 3) Existing verified doc (latest)
     const existingVd = await supabaseAdmin
       .from("verified_documents")
-      .select("id, storage_bucket, storage_path, file_hash, verification_level")
+      .select("id, storage_bucket, storage_path, file_hash, verification_level, is_archived")
       .eq("source_table", "governance_ledger")
       .eq("source_record_id", ledgerId)
       .order("created_at", { ascending: false })
@@ -168,12 +213,12 @@ serve(async (req) => {
     const existingHash = safeText((existingVd.data as any)?.file_hash);
     const existingLevel = safeText((existingVd.data as any)?.verification_level);
 
-    // Our target certified location (lane-safe)
+    // Certified destination (lane-safe, deterministic)
     const certified_bucket = is_test ? "governance_sandbox" : "governance_truth";
     const certified_path = is_test ? `sandbox/archive/${ledgerId}.pdf` : `truth/archive/${ledgerId}.pdf`;
 
+    // Fast path: already certified and already pointing where we expect
     if (!force && existingId && existingHash && (existingLevel ?? "").toLowerCase() === "certified") {
-      // If it already points to our certified location, we can short-circuit.
       const sb = safeText((existingVd.data as any)?.storage_bucket);
       const sp = safeText((existingVd.data as any)?.storage_path);
       if (sb === certified_bucket && sp === certified_path) {
@@ -188,52 +233,34 @@ serve(async (req) => {
             bucket: certified_bucket,
             path: certified_path,
             file_hash: existingHash,
-            file_size: 0,
+            file_size: 0, // unknown without re-download; intentionally omitted
           },
+          request_id: reqId,
         });
       }
     }
 
-    // 4) Resolve source PDF from minute_book (prefer signed)
+    // 4) Resolve source PDF from minute_book
     const source_bucket = "minute_book";
-
-    const src = await supabaseAdmin.rpc("resolve_minute_book_pdf_path", {
-      // If you have this RPC; if not, we fallback to storage.objects query below.
-      // Your screenshot shows resolve_minute_book_pdf_path(entity_key_enum, uuid) exists.
-      // We cannot call it without knowing entity_key_enum type, so we do the safer storage.objects scan.
-    } as any);
-
-    // Fallback: storage.objects scan for this ledgerId
-    const srcObj = await supabaseAdmin
-      .from("storage.objects")
-      .select("name, updated_at")
-      .eq("bucket_id", source_bucket)
-      .ilike("name", `%${ledgerId}%`)
-      .ilike("name", `%.pdf%`)
-      .order("updated_at", { ascending: false })
-      .limit(25);
-
-    if (srcObj.error) return json({ ok: false, error: srcObj.error.message, request_id: reqId }, 500);
-
-    const candidates = (srcObj.data ?? []) as any[];
-    const pick =
-      candidates.find((o) => String(o.name).toLowerCase().includes("-signed.pdf")) ??
-      candidates[0];
-
-    if (!pick?.name) {
+    let source_path: string;
+    try {
+      const picked = await pickMinuteBookSourcePdf(ledgerId);
+      if (!picked) {
+        return json(
+          { ok: false, error: "SOURCE_PDF_NOT_FOUND_IN_MINUTE_BOOK", request_id: reqId },
+          404,
+        );
+      }
+      source_path = picked;
+    } catch (e) {
+      console.error("minute_book source scan failed:", e);
       return json(
-        {
-          ok: false,
-          error: "SOURCE_PDF_NOT_FOUND_IN_MINUTE_BOOK",
-          request_id: reqId,
-        },
-        404,
+        { ok: false, error: "SOURCE_SCAN_FAILED", details: String((e as any)?.message ?? e), request_id: reqId },
+        500,
       );
     }
 
-    const source_path = String(pick.name);
-
-    // 5) Ensure we have a verified_documents row id BEFORE QR (so QR can encode verified_id)
+    // 5) Ensure we have a verified_documents id BEFORE we build QR
     let verified_id = existingId;
 
     if (!verified_id) {
@@ -246,22 +273,28 @@ serve(async (req) => {
           title,
           source_table: "governance_ledger",
           source_record_id: ledgerId,
-          // provisional — will be overwritten after upload
+
+          // certified target (will be true after upload)
           storage_bucket: certified_bucket,
           storage_path: certified_path,
           file_hash: null,
           mime_type: "application/pdf",
           verification_level: "certified",
           is_archived: true,
+
+          // provenance pointers (useful for audits)
           source_storage_bucket: source_bucket,
           source_storage_path: source_path,
+
           created_by: actorId,
           updated_by: actorId,
         } as any)
         .select("id")
         .single();
 
-      if (ins.error) return json({ ok: false, error: ins.error.message, request_id: reqId }, 500);
+      if (ins.error) {
+        return json({ ok: false, error: "VERIFIED_DOC_INSERT_FAILED", details: ins.error, request_id: reqId }, 500);
+      }
       verified_id = String(ins.data.id);
     }
 
@@ -276,11 +309,10 @@ serve(async (req) => {
 
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // 7) Stamp QR into PDF (bottom-right)
+    // 7) Build verify URL + QR
     const verifyBase =
       safeText(body.verify_base_url) ??
       Deno.env.get("VERIFY_BASE_URL") ??
-      // safe default (you can change later via env without changing PDF engine):
       "https://portal.oasisintlholdings.com/verify";
 
     const verifyUrl = buildVerifyUrl(verifyBase, verified_id!, ledgerId);
@@ -293,28 +325,20 @@ serve(async (req) => {
 
     const qrBytes = dataUrlToBytes(qrDataUrl);
 
+    // 8) Stamp QR onto the last page (bottom-right), minimal + classy
     const pdfDoc = await PDFDocument.load(sourceBytes);
     const pages = pdfDoc.getPages();
     const last = pages[pages.length - 1];
 
     const qrImage = await pdfDoc.embedPng(qrBytes);
-    const qrSize = 92; // matches your old “bottom-right QR” feel
-    const margin = 50;
 
-    const w = last.getWidth();
-    const h = last.getHeight();
+    const qrSize = 92;   // matches your old “bottom-right QR” feel
+    const margin = 50;   // consistent margin
+    const x = last.getWidth() - margin - qrSize;
+    const y = margin + 24;
 
-    const x = w - margin - qrSize;
-    const y = margin + 24; // lift slightly above bottom margin
+    last.drawImage(qrImage, { x, y, width: qrSize, height: qrSize });
 
-    last.drawImage(qrImage, {
-      x,
-      y,
-      width: qrSize,
-      height: qrSize,
-    });
-
-    // Optional tiny label under QR (clean, not noisy)
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
     last.drawText("Verify", {
       x: x + 24,
@@ -324,15 +348,25 @@ serve(async (req) => {
       color: rgb(0.35, 0.38, 0.45),
     });
 
+    // Save certified PDF bytes
     const certifiedBytes = new Uint8Array(await pdfDoc.save());
     const hashHex = await sha256Hex(certifiedBytes);
 
-    // 8) Upload certified PDF (lane-safe bucket)
+    // 9) Upload certified PDF (lane-safe bucket)
     const up = await supabaseAdmin.storage
       .from(certified_bucket)
       .upload(certified_path, new Blob([certifiedBytes], { type: "application/pdf" }), {
         upsert: true,
         contentType: "application/pdf",
+        // Helpful metadata for future diagnostics (optional)
+        metadata: {
+          sha256: hashHex,
+          verified_id: verified_id!,
+          ledger_id: ledgerId,
+          entity_slug,
+          source_bucket,
+          source_path,
+        } as any,
       });
 
     if (up.error) {
@@ -342,7 +376,7 @@ serve(async (req) => {
       );
     }
 
-    // 9) Update verified_documents with canonical hash + certified location
+    // 10) Update verified_documents as the canonical hash + certified pointer
     const upd = await supabaseAdmin
       .from("verified_documents")
       .update({
@@ -379,6 +413,7 @@ serve(async (req) => {
         file_hash: hashHex,
         file_size: certifiedBytes.length,
       },
+      request_id: reqId,
     });
   } catch (e: any) {
     console.error("certify-governance-record fatal:", e);
@@ -386,8 +421,9 @@ serve(async (req) => {
       {
         ok: false,
         error: "CERTIFY_FATAL",
-        message: String(e?.message ?? e),
-      },
+        details: String(e?.message ?? e),
+        request_id: req.headers.get("x-sb-request-id") ?? null,
+      } satisfies Resp,
       500,
     );
   }
