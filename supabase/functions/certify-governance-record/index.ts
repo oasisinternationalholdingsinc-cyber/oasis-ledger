@@ -3,22 +3,12 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { PDFDocument, rgb, StandardFonts } from "https://esm.sh/pdf-lib@1.17.1";
-import QRCode from "https://esm.sh/qrcode@1.5.3";
 
-/**
- * certify-governance-record (Option A — enterprise)
- *
- * ✅ Explicit authority step: creates/refreshes the *certified* PDF (with QR) and writes SHA-256 into verified_documents.
- * ✅ Lane-safe: certified PDF saved to governance_sandbox / governance_truth.
- * ✅ NO storage.objects: does NOT query storage schema (PostgREST blocks it).
- * ✅ Source resolution:
- *    1) signature_envelopes (completed) -> minute_book pdf path
- *    2) supporting_documents -> minute_book primary/signed pointer
- *
- * IMPORTANT SCHEMA RULE:
- * - verified_documents.source_storage_bucket is GENERATED → DO NOT INSERT/UPDATE it.
- * - (same for source_storage_path if also generated)
- */
+// ✅ Server-safe QR → SVG (NO canvas)
+import QRCode from "https://esm.sh/qrcode-svg@1.1.0";
+
+// ✅ SVG → PNG in Deno (NO canvas)
+import { initialize, svg2png } from "https://esm.sh/svg2png-wasm@1.4.1";
 
 type ReqBody = {
   ledger_id?: string;
@@ -79,15 +69,6 @@ function safeText(v: unknown): string | null {
   return t.length ? t : null;
 }
 
-function dataUrlToBytes(dataUrl: string): Uint8Array {
-  const m = dataUrl.match(/^data:.*?;base64,(.*)$/);
-  const b64 = m?.[1] ?? "";
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   const arr = new Uint8Array(digest);
@@ -116,15 +97,14 @@ async function resolveActorIdFromJwt(req: Request): Promise<string | null> {
 }
 
 /**
- * ✅ Source path resolver without storage.objects:
- * 1) completed signature_envelopes should have a minute_book pdf path
- * 2) supporting_documents may have primary/signed minute_book pointers
+ * ✅ Resolve minute_book PDF WITHOUT storage.objects (PostgREST blocks it)
+ * 1) signature_envelopes paths
+ * 2) supporting_documents primary pointer
  */
 async function resolveMinuteBookSourcePdf(ledgerId: string): Promise<string | null> {
-  // 1) signature_envelopes (best for signing flow)
   const env = await supabaseAdmin
     .from("signature_envelopes")
-    .select("id,status,storage_path,supporting_document_path,certificate_path,created_at")
+    .select("status,storage_path,supporting_document_path,certificate_path,created_at")
     .eq("record_id", ledgerId)
     .order("created_at", { ascending: false })
     .limit(10);
@@ -140,13 +120,9 @@ async function resolveMinuteBookSourcePdf(ledgerId: string): Promise<string | nu
     safeText(completed?.certificate_path),
   ].filter(Boolean) as string[];
 
-  const pdfFromEnv =
-    candidates.find((p) => p.toLowerCase().endsWith(".pdf")) ??
-    candidates.find((p) => p.toLowerCase().includes(".pdf"));
-
+  const pdfFromEnv = candidates.find((p) => p.toLowerCase().endsWith(".pdf"));
   if (pdfFromEnv) return pdfFromEnv;
 
-  // 2) supporting_documents fallback (minute_book primary pointer if it exists)
   const sd = await supabaseAdmin
     .from("supporting_documents")
     .select("storage_bucket,storage_path,is_primary,created_at,source_table,source_record_id")
@@ -167,6 +143,36 @@ async function resolveMinuteBookSourcePdf(ledgerId: string): Promise<string | nu
     sdRows[0];
 
   return safeText(pick?.storage_path);
+}
+
+// -----------------------------------------------------------------------------
+// ✅ QR generation (Edge-safe): URL → SVG → PNG bytes
+// -----------------------------------------------------------------------------
+let svgWasmReady = false;
+
+async function qrPngBytes(verifyUrl: string, sizePx: number): Promise<Uint8Array> {
+  // qrcode-svg returns an SVG string
+  const qr = new QRCode({
+    content: verifyUrl,
+    padding: 0,
+    width: sizePx,
+    height: sizePx,
+    ecl: "M",
+    color: "#000000",
+    background: "#ffffff",
+  });
+
+  const svg = qr.svg(); // string
+
+  // Initialize wasm once
+  if (!svgWasmReady) {
+    // svg2png-wasm fetches its wasm internally; initialize once per isolate
+    await initialize(fetch);
+    svgWasmReady = true;
+  }
+
+  const png = await svg2png(svg, { width: sizePx, height: sizePx });
+  return new Uint8Array(png);
 }
 
 serve(async (req) => {
@@ -206,19 +212,13 @@ serve(async (req) => {
     const entity_id = String((gl.data as any).entity_id);
     const title = String((gl.data as any).title ?? "Untitled Resolution");
 
-    // 2) Load entity slug
-    const ent = await supabaseAdmin
-      .from("entities")
-      .select("id, slug")
-      .eq("id", entity_id)
-      .maybeSingle();
-
+    // 2) entity slug
+    const ent = await supabaseAdmin.from("entities").select("id, slug").eq("id", entity_id).maybeSingle();
     if (ent.error) return json({ ok: false, error: ent.error.message, request_id: reqId }, 400);
     if (!ent.data?.id) return json({ ok: false, error: "ENTITY_NOT_FOUND", request_id: reqId }, 404);
-
     const entity_slug = String((ent.data as any).slug);
 
-    // 3) Existing verified doc (latest)
+    // 3) Existing verified doc
     const existingVd = await supabaseAdmin
       .from("verified_documents")
       .select("id, storage_bucket, storage_path, file_hash, verification_level")
@@ -232,11 +232,9 @@ serve(async (req) => {
     const existingHash = safeText((existingVd.data as any)?.file_hash);
     const existingLevel = safeText((existingVd.data as any)?.verification_level);
 
-    // Certified destination (lane-safe)
     const certified_bucket = is_test ? "governance_sandbox" : "governance_truth";
     const certified_path = is_test ? `sandbox/archive/${ledgerId}.pdf` : `truth/archive/${ledgerId}.pdf`;
 
-    // Fast path
     if (!force && existingId && existingHash && (existingLevel ?? "").toLowerCase() === "certified") {
       const sb = safeText((existingVd.data as any)?.storage_bucket);
       const sp = safeText((existingVd.data as any)?.storage_path);
@@ -254,19 +252,9 @@ serve(async (req) => {
       }
     }
 
-    // 4) Resolve source PDF path (minute_book)
+    // 4) Resolve source PDF in minute_book
     const source_bucket = "minute_book";
-    let source_path: string | null = null;
-
-    try {
-      source_path = await resolveMinuteBookSourcePdf(ledgerId);
-    } catch (e) {
-      console.error("minute_book source resolve failed:", e);
-      return json(
-        { ok: false, error: "SOURCE_RESOLVE_FAILED", details: String((e as any)?.message ?? e), request_id: reqId },
-        500,
-      );
-    }
+    const source_path = await resolveMinuteBookSourcePdf(ledgerId);
 
     if (!source_path) {
       return json(
@@ -281,11 +269,11 @@ serve(async (req) => {
       );
     }
 
-    // 5) Ensure verified_documents row exists (need verified_id for QR)
+    // 5) Ensure verified_documents row exists (need id for QR)
     let verified_id = existingId;
 
     if (!verified_id) {
-      // IMPORTANT: do NOT write generated columns (source_storage_bucket/source_storage_path)
+      // ✅ DO NOT write generated columns (source_storage_bucket/source_storage_path)
       const ins = await supabaseAdmin
         .from("verified_documents")
         .insert({
@@ -295,37 +283,30 @@ serve(async (req) => {
           title,
           source_table: "governance_ledger",
           source_record_id: ledgerId,
-
           storage_bucket: certified_bucket,
           storage_path: certified_path,
           file_hash: null,
           mime_type: "application/pdf",
           verification_level: "certified",
           is_archived: true,
-
           created_by: actorId,
           updated_by: actorId,
         } as any)
         .select("id")
         .single();
 
-      if (ins.error) {
-        return json({ ok: false, error: "VERIFIED_DOC_INSERT_FAILED", details: ins.error, request_id: reqId }, 500);
-      }
+      if (ins.error) return json({ ok: false, error: "VERIFIED_DOC_INSERT_FAILED", details: ins.error, request_id: reqId }, 500);
       verified_id = String(ins.data.id);
     }
 
     // 6) Download source PDF
     const dl = await supabaseAdmin.storage.from(source_bucket).download(source_path);
     if (dl.error || !dl.data) {
-      return json(
-        { ok: false, error: "SOURCE_PDF_DOWNLOAD_FAILED", details: dl.error, request_id: reqId },
-        500,
-      );
+      return json({ ok: false, error: "SOURCE_PDF_DOWNLOAD_FAILED", details: dl.error, request_id: reqId }, 500);
     }
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // 7) Build verify URL + QR
+    // 7) QR URL
     const verifyBase =
       safeText(body.verify_base_url) ??
       Deno.env.get("VERIFY_BASE_URL") ??
@@ -333,19 +314,15 @@ serve(async (req) => {
 
     const verifyUrl = buildVerifyUrl(verifyBase, verified_id!, ledgerId);
 
-    const qrDataUrl = await QRCode.toDataURL(verifyUrl, {
-      errorCorrectionLevel: "M",
-      margin: 0,
-      width: 256,
-    });
-    const qrBytes = dataUrlToBytes(qrDataUrl);
+    // ✅ Generate PNG bytes (NO canvas)
+    const qrPng = await qrPngBytes(verifyUrl, 256);
 
-    // 8) Stamp QR bottom-right on last page (preserves wet signature)
+    // 8) Stamp QR bottom-right on last page (wet signature preserved)
     const pdfDoc = await PDFDocument.load(sourceBytes);
     const pages = pdfDoc.getPages();
     const last = pages[pages.length - 1];
 
-    const qrImage = await pdfDoc.embedPng(qrBytes);
+    const qrImage = await pdfDoc.embedPng(qrPng);
 
     const qrSize = 92;
     const margin = 50;
@@ -366,7 +343,7 @@ serve(async (req) => {
     const certifiedBytes = new Uint8Array(await pdfDoc.save());
     const hashHex = await sha256Hex(certifiedBytes);
 
-    // 9) Upload certified PDF (lane-safe bucket)
+    // 9) Upload certified PDF
     const up = await supabaseAdmin.storage
       .from(certified_bucket)
       .upload(certified_path, new Blob([certifiedBytes], { type: "application/pdf" }), {
@@ -374,15 +351,10 @@ serve(async (req) => {
         contentType: "application/pdf",
       });
 
-    if (up.error) {
-      return json(
-        { ok: false, error: "CERTIFIED_PDF_UPLOAD_FAILED", details: up.error, request_id: reqId },
-        500,
-      );
-    }
+    if (up.error) return json({ ok: false, error: "CERTIFIED_PDF_UPLOAD_FAILED", details: up.error, request_id: reqId }, 500);
 
-    // 10) Update verified_documents with canonical pointer + hash
-    // IMPORTANT: do NOT update generated columns (source_storage_bucket/source_storage_path)
+    // 10) Update verified_documents canonical pointer + hash
+    // ✅ DO NOT update generated columns
     const upd = await supabaseAdmin
       .from("verified_documents")
       .update({
@@ -400,9 +372,7 @@ serve(async (req) => {
       } as any)
       .eq("id", verified_id);
 
-    if (upd.error) {
-      return json({ ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId }, 500);
-    }
+    if (upd.error) return json({ ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId }, 500);
 
     return json<Resp>({
       ok: true,
