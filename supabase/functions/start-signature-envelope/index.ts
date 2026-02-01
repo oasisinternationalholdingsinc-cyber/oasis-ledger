@@ -23,6 +23,7 @@ const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
 function json(data: unknown, status = 200) {
@@ -58,6 +59,9 @@ type ReqBody = {
   force_new?: boolean; // allow creating a new envelope even if latest is completed
   ensure_pdf?: boolean; // 🔒 DEFAULT TRUE (NO REGRESSION)
 
+  // ✅ NEW: repair mode (no new envelope, no parties, no ledger status change)
+  repair?: boolean;
+
   // legacy / optional:
   parties?: PartyInput[];
   signer_name?: string | null;
@@ -72,11 +76,14 @@ type Resp = {
   reused?: boolean;
   created_parties?: number;
   ensured_pdf?: boolean;
+  repaired?: boolean;
   error?: string;
 };
 
 serve(async (req) => {
-  if (req.method === "OPTIONS") return json({ ok: true }, 200);
+  // ✅ Clean preflight
+  if (req.method === "OPTIONS")
+    return new Response(null, { status: 204, headers: corsHeaders });
   if (req.method !== "POST")
     return json({ ok: false, error: "METHOD_NOT_ALLOWED" }, 405);
 
@@ -91,8 +98,10 @@ serve(async (req) => {
     const force_new = !!body.force_new;
 
     // 🔒 CRITICAL FIX — DEFAULT TRUE
-    const ensure_pdf =
-      body.ensure_pdf === undefined ? true : !!body.ensure_pdf;
+    const ensure_pdf = body.ensure_pdf === undefined ? true : !!body.ensure_pdf;
+
+    // ✅ NEW: explicit repair mode
+    const repair = !!body.repair;
 
     if (!record_id)
       return json<Resp>({ ok: false, error: "RECORD_ID_REQUIRED" }, 400);
@@ -111,7 +120,7 @@ serve(async (req) => {
     if (!ent.data?.id)
       return json<Resp>({ ok: false, error: "ENTITY_NOT_FOUND" }, 404);
 
-    const entity_id = ent.data.id as string;
+    const entity_id = String(ent.data.id);
 
     // Validate ledger row matches entity + lane
     const gl = await supabase
@@ -125,15 +134,16 @@ serve(async (req) => {
     if (!gl.data?.id)
       return json<Resp>({ ok: false, error: "LEDGER_NOT_FOUND" }, 404);
 
-    if (gl.data.entity_id !== entity_id)
+    if (String(gl.data.entity_id) !== entity_id)
       return json<Resp>({ ok: false, error: "ENTITY_MISMATCH" }, 403);
+
     if (!!gl.data.is_test !== is_test)
       return json<Resp>({ ok: false, error: "LANE_MISMATCH" }, 409);
 
     const ledgerTitle = safeText((gl.data as any)?.title);
     const envelopeTitle = ledgerTitle ?? `Signature Envelope — ${record_id}`;
 
-    // Reuse latest envelope unless force_new (only when latest is completed)
+    // Reuse latest envelope unless (force_new && latest is completed)
     const existing = await supabase
       .from("signature_envelopes")
       .select("id, status, is_test, record_id")
@@ -149,15 +159,38 @@ serve(async (req) => {
     const existingId = existing.data?.id ? String(existing.data.id) : null;
     const existingStatus = (safeText(existing.data?.status) ?? "").toLowerCase();
 
-    if (
-      existingId &&
-      !(force_new && existingStatus === "completed")
-    ) {
+    // ✅ NEW: REPAIR MODE — never create a new envelope, never create parties,
+    // never change ledger status. Just re-run artifact generation (PDF engine).
+    if (repair) {
+      if (!existingId) {
+        return json<Resp>({ ok: false, error: "NO_ENVELOPE_TO_REPAIR" }, 404);
+      }
+
+      const ensured = ensure_pdf
+        ? await ensurePdfForEnvelope(record_id, existingId)
+        : false;
+
+      return json<Resp>({
+        ok: true,
+        reused: true,
+        repaired: true,
+        envelope_id: existingId,
+        record_id,
+        entity_slug,
+        created_parties: 0,
+        ensured_pdf: ensured,
+      });
+    }
+
+    // Normal reuse path
+    if (existingId && !(force_new && existingStatus === "completed")) {
       const created_parties = await maybeCreateParties({
         envelope_id: existingId,
         body,
       });
 
+      // ✅ If you rerun start-signature on a completed envelope to repair missing PDFs,
+      // ensure_pdf=true will still kick in here. (This is the behavior you want.)
       const ensured = ensure_pdf
         ? await ensurePdfForEnvelope(record_id, existingId)
         : false;
@@ -198,14 +231,9 @@ serve(async (req) => {
       .update({ status: "SIGNING" } as any)
       .eq("id", record_id);
 
-    const created_parties = await maybeCreateParties({
-      envelope_id,
-      body,
-    });
+    const created_parties = await maybeCreateParties({ envelope_id, body });
 
-    const ensured = ensure_pdf
-      ? await ensurePdfForEnvelope(record_id, envelope_id)
-      : false;
+    const ensured = ensure_pdf ? await ensurePdfForEnvelope(record_id, envelope_id) : false;
 
     return json<Resp>({
       ok: true,
@@ -217,13 +245,7 @@ serve(async (req) => {
       ensured_pdf: ensured,
     });
   } catch (e: any) {
-    return json<Resp>(
-      {
-        ok: false,
-        error: e?.message || "UNHANDLED",
-      },
-      500,
-    );
+    return json<Resp>({ ok: false, error: e?.message || "UNHANDLED" }, 500);
   }
 });
 
@@ -299,16 +321,16 @@ async function ensurePdfForEnvelope(
   envelope_id: string,
 ): Promise<boolean> {
   try {
-    // SUPABASE_URL is typically "https://<ref>.supabase.co"
-    // (sometimes "https://<ref>.supabase.co/rest/v1" in older setups)
     const edgeBase = (SUPABASE_URL ?? "").replace(/\/rest\/v1$/, "");
 
     const res = await fetch(`${edgeBase}/functions/v1/odp-pdf-engine`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        // ✅ consistent header keys
         apikey: SERVICE_ROLE_KEY!,
         Authorization: `Bearer ${SERVICE_ROLE_KEY!}`,
+        "x-client-info": "odp/start-signature-envelope:ensure-pdf",
       },
       body: JSON.stringify({ record_id, envelope_id }),
     });

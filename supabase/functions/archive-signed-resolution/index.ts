@@ -41,8 +41,11 @@ if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
 }
 
 const isUuid = (s: string) =>
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-    .test(s);
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    s,
+  );
+
+const edgeBase = SUPABASE_URL.replace(/\/rest\/v1\/?$/, "");
 
 /* ============================
    MAIN
@@ -157,9 +160,46 @@ serve(async (req) => {
       );
     }
 
+    /* ============================================================
+       ✅ OPTION A (ENTERPRISE): CERTIFY FIRST (QR + REAL PDF HASH)
+       - No regressions: sealer call unchanged
+       - Certification is explicit authority and updates verified_documents
+    ============================================================ */
+    const certRes = await fetch(`${edgeBase}/functions/v1/certify-governance-record`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+        "x-client-info": "odp/archive-signed-resolution:certify",
+      },
+      body: JSON.stringify({
+        ledger_id: ledgerId,
+        actor_id: actorId,
+      }),
+    });
+
+    if (!certRes.ok) {
+      const t = await certRes.text().catch(() => "");
+      console.error("certify-governance-record failed:", certRes.status, t);
+      return json(
+        {
+          ok: false,
+          error: "CERTIFY_FAILED",
+          status: certRes.status,
+          details: t,
+          envelope_id: envelopeId,
+          ledger_id: ledgerId,
+          actor_id: actorId,
+          request_id: reqId,
+        },
+        500,
+      );
+    }
+
     /* -------- canonical sealer call (LOCKED) --------
        - No extra args. No p_file_hash. No minute_book assumptions.
-       - Sealer is source of truth for Verified Registry + idempotent repair.
+       - Sealer remains source of truth for linking + minute_book pointers + status.
     */
     const rpcArgs = {
       p_actor_id: actorId,
@@ -174,6 +214,9 @@ serve(async (req) => {
         {
           ok: false,
           error: r.error.message ?? String(r.error),
+          envelope_id: envelopeId,
+          ledger_id: ledgerId,
+          actor_id: actorId,
           request_id: reqId,
         },
         500,

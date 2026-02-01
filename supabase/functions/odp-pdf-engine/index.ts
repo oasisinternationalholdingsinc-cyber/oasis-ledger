@@ -27,6 +27,7 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey",
+  "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
 function json(data: unknown, status = 200) {
@@ -49,8 +50,24 @@ type DrawOptions = {
   lineHeight: number;
 };
 
-// Word-wrap helper for pdf-lib with basic page-break support.
-// IMPORTANT: returns updated page + y so caller can continue drawing.
+function safeText(s: unknown): string | null {
+  if (s == null) return null;
+  const t = String(s).trim();
+  return t.length ? t : null;
+}
+
+function bytesToHex(bytes: Uint8Array) {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function sha256Hex(data: Uint8Array) {
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return bytesToHex(new Uint8Array(digest));
+}
+
+// Word-wrap helper with basic page-break support.
 function drawWrappedText(
   pdfDoc: PDFDocument,
   text: string,
@@ -60,11 +77,10 @@ function drawWrappedText(
   let { page, font, margin, maxWidth, startY, lineHeight } = opts;
   let y = startY;
 
-  const safeBottom = 92; // keep clear of footer/signature zones
+  const safeBottom = 92;
   const paragraphs = String(text ?? "").split(/\n\s*\n/);
 
   for (const para of paragraphs) {
-    // Preserve intentional blank lines lightly
     const words = para.trim().length ? para.split(/\s+/) : [];
     let line = "";
 
@@ -86,23 +102,17 @@ function drawWrappedText(
       const width = font.widthOfTextAtSize(testLine, 11);
 
       if (width > maxWidth) {
-        // flush current line
         flushLine();
-
-        // page break if needed
         if (y < safeBottom) {
           const next = addPageFn();
           page = next.page;
           y = next.startY;
         }
-
-        // start new line with word
         line = word;
       } else {
         line = testLine;
       }
 
-      // page break guard (if we are at bottom mid-paragraph)
       if (y < safeBottom) {
         flushLine();
         const next = addPageFn();
@@ -111,13 +121,9 @@ function drawWrappedText(
       }
     }
 
-    // flush any remaining line
     flushLine();
-
-    // paragraph spacing
     y -= lineHeight * 0.35;
 
-    // page break guard after paragraph gap
     if (y < safeBottom) {
       const next = addPageFn();
       page = next.page;
@@ -128,7 +134,6 @@ function drawWrappedText(
   return { page, y };
 }
 
-// Enterprise header: clean, minimal, print-safe (no heavy bands).
 function addOasisHeader(
   page: any,
   font: any,
@@ -139,10 +144,8 @@ function addOasisHeader(
 ) {
   const width = page.getWidth();
   const height = page.getHeight();
-
   const margin = 50;
 
-  // top rule + brand
   page.drawText("Oasis Digital Parliament", {
     x: margin,
     y: height - 52,
@@ -159,7 +162,6 @@ function addOasisHeader(
     color: rgb(0.38, 0.42, 0.5),
   });
 
-  // right meta: date
   const dateText = createdAt
     ? `Created ${new Date(createdAt).toISOString().slice(0, 10)}`
     : "";
@@ -174,7 +176,6 @@ function addOasisHeader(
     });
   }
 
-  // divider line
   page.drawLine({
     start: { x: margin, y: height - 80 },
     end: { x: width - margin, y: height - 80 },
@@ -182,7 +183,6 @@ function addOasisHeader(
     color: rgb(0.82, 0.84, 0.88),
   });
 
-  // Title block (centered but restrained)
   const titleText = title || "Corporate Resolution";
   const titleSize = 14;
   const titleW = fontBold.widthOfTextAtSize(titleText, titleSize);
@@ -204,7 +204,6 @@ function addOasisHeader(
     color: rgb(0.45, 0.48, 0.55),
   });
 
-  // return body start Y
   return height - 165;
 }
 
@@ -255,18 +254,26 @@ function addSignatureBlock(page: any, font: any, fontBold: any) {
   });
 }
 
+async function objectExists(bucket: string, path: string): Promise<boolean> {
+  // Storage list requires a folder + limit; we do best-effort.
+  const parts = path.split("/");
+  const file = parts.pop()!;
+  const folder = parts.join("/");
+
+  const { data, error } = await supabase.storage
+    .from(bucket)
+    .list(folder, { limit: 1000, search: file });
+
+  if (error) return false;
+  return Array.isArray(data) && data.some((o) => o?.name === file);
+}
+
 // ---------------------------------------------------------------------------
 // HANDLER
 // ---------------------------------------------------------------------------
 serve(async (req) => {
-  // CORS preflight
-  if (req.method === "OPTIONS") {
-    return new Response("ok", { status: 200, headers: CORS_HEADERS });
-  }
-
-  if (req.method !== "POST") {
-    return json({ ok: false, error: "Use POST" }, 405);
-  }
+  if (req.method === "OPTIONS") return new Response("ok", { status: 200, headers: CORS_HEADERS });
+  if (req.method !== "POST") return json({ ok: false, error: "Use POST" }, 405);
 
   let body: any;
   try {
@@ -275,7 +282,8 @@ serve(async (req) => {
     return json({ ok: false, error: "Invalid JSON body" }, 400);
   }
 
-  const { record_id, envelope_id } = body ?? {};
+  const record_id = safeText(body?.record_id);
+  const envelope_id = safeText(body?.envelope_id);
   if (!record_id || !envelope_id) {
     return json({ ok: false, error: "record_id and envelope_id are required" }, 400);
   }
@@ -290,7 +298,7 @@ serve(async (req) => {
 
     if (recErr || !record) {
       console.error("Ledger fetch error", recErr);
-      return json({ ok: false, error: "Ledger record not found", details: recErr }, 404);
+      return json({ ok: false, error: "Ledger record not found" }, 404);
     }
 
     // 2) Load entity
@@ -302,7 +310,7 @@ serve(async (req) => {
 
     if (entErr || !entity) {
       console.error("Entity fetch error", entErr);
-      return json({ ok: false, error: "Entity not found for record", details: entErr }, 404);
+      return json({ ok: false, error: "Entity not found for record" }, 404);
     }
 
     // 3) Load envelope so we can merge metadata
@@ -314,10 +322,10 @@ serve(async (req) => {
 
     if (envErr || !envelope) {
       console.error("Envelope fetch error", envErr);
-      return json({ ok: false, error: "Envelope not found", details: envErr }, 404);
+      return json({ ok: false, error: "Envelope not found" }, 404);
     }
 
-    // 4) Build enterprise, print-safe PDF
+    // 4) Build base (unsigned) PDF
     const pdfDoc = await PDFDocument.create();
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
     const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
@@ -326,7 +334,6 @@ serve(async (req) => {
     const title = record.title ?? "Corporate Resolution";
     const createdAt = record.created_at ?? null;
 
-    // helper to create a fully framed page (header+footer) and return body start Y
     const newFramedPage = () => {
       const p = pdfDoc.addPage();
       const startY = addOasisHeader(p, font, fontBold, entityName, title, createdAt);
@@ -334,7 +341,6 @@ serve(async (req) => {
       return { page: p, startY };
     };
 
-    // First page
     let { page: currPage, startY } = newFramedPage();
 
     const margin = 50;
@@ -345,7 +351,6 @@ serve(async (req) => {
       record.body ||
       "No resolution body found. This is a placeholder generated by Oasis Digital Parliament.";
 
-    // Draw body with page breaks
     const out = drawWrappedText(
       pdfDoc,
       bodyText,
@@ -355,27 +360,27 @@ serve(async (req) => {
 
     currPage = out.page;
 
-    // Always place signature block on a clean final page if we're too low.
-    const needSigPage = out.y < 200;
-    if (needSigPage) {
+    if (out.y < 200) {
       const next = newFramedPage();
       currPage = next.page;
     }
 
     addSignatureBlock(currPage, font, fontBold);
 
-    // 5) Save PDF bytes
+    // 5) Bytes + draft hash (NOT certification)
     const pdfBytes = await pdfDoc.save();
+    const pdfU8 = new Uint8Array(pdfBytes);
+    const draft_sha256 = await sha256Hex(pdfU8);
+
     const fileName = `${record.id}.pdf`;
 
-    // -----------------------------------------------------------------------
-    // ✅ NO REGRESSION: keep legacy path EXACT (capital R)
-    // ✅ ADD: canonical lowercase mirror for seal/registry scanners
-    // -----------------------------------------------------------------------
-    const legacyPath = `${entity.slug}/Resolutions/${fileName}`;    // KEEP EXACT
-    const canonicalPath = `${entity.slug}/resolutions/${fileName}`; // ADD (canonical)
+    // ✅ canonical is the source of truth going forward
+    const canonicalPath = `${entity.slug}/resolutions/${fileName}`;
 
-    // Upload canonical first (this is what archive/seal should see)
+    // ✅ legacy path preserved (NO regression)
+    const legacyPath = `${entity.slug}/Resolutions/${fileName}`;
+
+    // 6) Upload canonical (idempotent upsert)
     const { error: upCanonErr } = await supabase.storage
       .from(BUCKET)
       .upload(
@@ -385,36 +390,47 @@ serve(async (req) => {
       );
 
     if (upCanonErr) {
-      console.error("Error uploading canonical Forge PDF:", upCanonErr);
-      return json(
-        { ok: false, error: "Failed to upload canonical resolution PDF", details: upCanonErr },
-        500,
-      );
+      console.error("Canonical upload failed:", upCanonErr);
+      return json({ ok: false, error: "Failed to upload canonical PDF" }, 500);
     }
 
-    // Upload legacy copy (non-fatal if it fails; canonical is source of truth)
-    const { error: upLegacyErr } = await supabase.storage
-      .from(BUCKET)
-      .upload(
-        legacyPath,
-        new Blob([pdfBytes], { type: "application/pdf" }),
-        { upsert: true, contentType: "application/pdf" },
-      );
+    // 7) Legacy copy ONLY if missing (prevents permanent duplication churn)
+    let legacy_written = false;
+    const legacyExists = await objectExists(BUCKET, legacyPath);
 
-    if (upLegacyErr) {
-      console.error("Legacy upload failed (non-fatal):", upLegacyErr);
+    if (!legacyExists) {
+      const { error: upLegacyErr } = await supabase.storage
+        .from(BUCKET)
+        .upload(
+          legacyPath,
+          new Blob([pdfBytes], { type: "application/pdf" }),
+          { upsert: true, contentType: "application/pdf" },
+        );
+
+      if (upLegacyErr) {
+        console.error("Legacy upload failed (non-fatal):", upLegacyErr);
+      } else {
+        legacy_written = true;
+      }
     }
 
-    // 6) Attach canonical path onto envelope (so complete-signature + seal use it)
-    const existingMeta = envelope.metadata ?? {};
+    // 8) Update envelope pointers + metadata (same envelope — no duplicates)
+    const existingMeta = (envelope as any)?.metadata ?? {};
     const newMetadata = {
       ...existingMeta,
       record_id: record.id,
       entity_id: entity.id,
       entity_slug: entity.slug,
       entity_name: entity.name,
-      storage_path: canonicalPath,          // canonical pointer
-      legacy_storage_path: legacyPath,      // preserve legacy pointer (no regression)
+
+      // pointers
+      storage_bucket: BUCKET,
+      storage_path: canonicalPath,
+      legacy_storage_path: legacyPath,
+
+      // draft integrity (NOT "certified")
+      draft_pdf_sha256: draft_sha256,
+      draft_pdf_generated_at: new Date().toISOString(),
     };
 
     const { error: envUpdateErr } = await supabase
@@ -423,12 +439,12 @@ serve(async (req) => {
         supporting_document_path: canonicalPath,
         storage_path: canonicalPath,
         metadata: newMetadata,
-      })
+      } as any)
       .eq("id", envelope_id);
 
     if (envUpdateErr) {
-      console.error("Envelope update error (attach storage_path)", envUpdateErr);
-      // non-fatal, but report it
+      console.error("Envelope update error:", envUpdateErr);
+      // Still return success because PDF exists; envelope pointers can be repaired
     }
 
     return json({
@@ -438,10 +454,12 @@ serve(async (req) => {
       storage_bucket: BUCKET,
       storage_path: canonicalPath,
       legacy_storage_path: legacyPath,
+      legacy_written,
+      draft_sha256,
       entity_slug: entity.slug,
     });
   } catch (e) {
-    console.error("Unexpected error in odp-pdf-engine", e);
+    console.error("Unexpected error in odp-pdf-engine:", e);
     return json({ ok: false, error: "Unexpected server error", details: String(e) }, 500);
   }
 });
