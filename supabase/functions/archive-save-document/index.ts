@@ -44,8 +44,12 @@ if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
 }
 
 const isUuid = (s: string) =>
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-    .test(s);
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    s,
+  );
+
+// Normalize base URL for Edge Functions calls (works whether SUPABASE_URL ends with /rest/v1 or not)
+const edgeBase = SUPABASE_URL.replace(/\/rest\/v1\/?$/, "");
 
 /* ============================
    MAIN
@@ -110,10 +114,50 @@ serve(async (req) => {
       }
     }
 
+    /* ============================================================
+       ✅ OPTION A (ENTERPRISE): CERTIFY FIRST (QR + REAL PDF HASH)
+       - No regressions: sealer call unchanged
+       - Certification is explicit authority; it creates/updates verified_documents
+       - Uses service_role to call internal Edge Function (no UI dependency)
+    ============================================================ */
+    const certRes = await fetch(
+      `${edgeBase}/functions/v1/certify-governance-record`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+          "x-client-info": "odp/archive-save-document:certify",
+        },
+        body: JSON.stringify({
+          ledger_id: ledgerId,
+          actor_id: actorId,
+        }),
+      },
+    );
+
+    if (!certRes.ok) {
+      const t = await certRes.text().catch(() => "");
+      console.error("certify-governance-record failed:", certRes.status, t);
+      return json(
+        {
+          ok: false,
+          error: "CERTIFY_FAILED",
+          status: certRes.status,
+          details: t,
+          ledger_id: ledgerId,
+          actor_id: actorId,
+          request_id: reqId,
+        },
+        500,
+      );
+    }
+
     /* -------- canonical sealer call (LOCKED) --------
        IMPORTANT:
        - DO NOT pass extra params (no p_file_hash, no drift).
-       - Sealer is source of truth for archive PDF + verified registry pointers.
+       - Sealer remains source of truth for linking + minute_book pointers + status.
     */
     const rpcArgs = {
       p_actor_id: actorId,
@@ -128,6 +172,8 @@ serve(async (req) => {
         {
           ok: false,
           error: r.error.message ?? String(r.error),
+          ledger_id: ledgerId,
+          actor_id: actorId,
           request_id: reqId,
         },
         500,
