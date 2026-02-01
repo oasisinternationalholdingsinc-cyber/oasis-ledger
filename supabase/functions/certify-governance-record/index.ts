@@ -10,10 +10,14 @@ import QRCode from "https://esm.sh/qrcode@1.5.3";
  *
  * ✅ Explicit authority step: creates/refreshes the *certified* PDF (with QR) and writes SHA-256 into verified_documents.
  * ✅ Lane-safe: certified PDF saved to governance_sandbox / governance_truth.
- * ✅ NO storage schema access: does NOT query storage.objects (PostgREST blocks it).
+ * ✅ NO storage.objects: does NOT query storage schema (PostgREST blocks it).
  * ✅ Source resolution:
  *    1) signature_envelopes (completed) -> minute_book pdf path
  *    2) supporting_documents -> minute_book primary/signed pointer
+ *
+ * IMPORTANT SCHEMA RULE:
+ * - verified_documents.source_storage_bucket is GENERATED → DO NOT INSERT/UPDATE it.
+ * - (same for source_storage_path if also generated)
  */
 
 type ReqBody = {
@@ -120,10 +124,10 @@ async function resolveMinuteBookSourcePdf(ledgerId: string): Promise<string | nu
   // 1) signature_envelopes (best for signing flow)
   const env = await supabaseAdmin
     .from("signature_envelopes")
-    .select("id,status,storage_path,supporting_document_path,certificate_path")
+    .select("id,status,storage_path,supporting_document_path,certificate_path,created_at")
     .eq("record_id", ledgerId)
     .order("created_at", { ascending: false })
-    .limit(5);
+    .limit(10);
 
   if (env.error) throw env.error;
 
@@ -151,7 +155,7 @@ async function resolveMinuteBookSourcePdf(ledgerId: string): Promise<string | nu
     .eq("source_record_id", ledgerId)
     .order("is_primary", { ascending: false })
     .order("created_at", { ascending: false })
-    .limit(10);
+    .limit(25);
 
   if (sd.error) throw sd.error;
 
@@ -162,8 +166,7 @@ async function resolveMinuteBookSourcePdf(ledgerId: string): Promise<string | nu
     sdRows.find((r) => safeText(r.storage_path)?.toLowerCase().endsWith(".pdf")) ??
     sdRows[0];
 
-  const p = safeText(pick?.storage_path);
-  return p ?? null;
+  return safeText(pick?.storage_path);
 }
 
 serve(async (req) => {
@@ -184,7 +187,6 @@ serve(async (req) => {
     if (actorId && !isUuid(actorId)) {
       return json({ ok: false, error: "actor_id must be uuid", request_id: reqId }, 400);
     }
-
     if (!actorId) actorId = await resolveActorIdFromJwt(req);
     if (!actorId) return json({ ok: false, error: "ACTOR_REQUIRED", request_id: reqId }, 401);
 
@@ -204,7 +206,7 @@ serve(async (req) => {
     const entity_id = String((gl.data as any).entity_id);
     const title = String((gl.data as any).title ?? "Untitled Resolution");
 
-    // 2) Load entity slug (used for audit fields)
+    // 2) Load entity slug
     const ent = await supabaseAdmin
       .from("entities")
       .select("id, slug")
@@ -234,7 +236,7 @@ serve(async (req) => {
     const certified_bucket = is_test ? "governance_sandbox" : "governance_truth";
     const certified_path = is_test ? `sandbox/archive/${ledgerId}.pdf` : `truth/archive/${ledgerId}.pdf`;
 
-    // Fast path: already certified + has hash + points to our deterministic location
+    // Fast path
     if (!force && existingId && existingHash && (existingLevel ?? "").toLowerCase() === "certified") {
       const sb = safeText((existingVd.data as any)?.storage_bucket);
       const sp = safeText((existingVd.data as any)?.storage_path);
@@ -252,7 +254,7 @@ serve(async (req) => {
       }
     }
 
-    // 4) Resolve source PDF path (minute_book) WITHOUT storage.objects
+    // 4) Resolve source PDF path (minute_book)
     const source_bucket = "minute_book";
     let source_path: string | null = null;
 
@@ -283,6 +285,7 @@ serve(async (req) => {
     let verified_id = existingId;
 
     if (!verified_id) {
+      // IMPORTANT: do NOT write generated columns (source_storage_bucket/source_storage_path)
       const ins = await supabaseAdmin
         .from("verified_documents")
         .insert({
@@ -292,14 +295,14 @@ serve(async (req) => {
           title,
           source_table: "governance_ledger",
           source_record_id: ledgerId,
+
           storage_bucket: certified_bucket,
           storage_path: certified_path,
           file_hash: null,
           mime_type: "application/pdf",
           verification_level: "certified",
           is_archived: true,
-          source_storage_bucket: source_bucket,
-          source_storage_path: source_path,
+
           created_by: actorId,
           updated_by: actorId,
         } as any)
@@ -379,6 +382,7 @@ serve(async (req) => {
     }
 
     // 10) Update verified_documents with canonical pointer + hash
+    // IMPORTANT: do NOT update generated columns (source_storage_bucket/source_storage_path)
     const upd = await supabaseAdmin
       .from("verified_documents")
       .update({
@@ -391,8 +395,6 @@ serve(async (req) => {
         mime_type: "application/pdf",
         verification_level: "certified",
         is_archived: true,
-        source_storage_bucket: source_bucket,
-        source_storage_path: source_path,
         updated_at: new Date().toISOString(),
         updated_by: actorId,
       } as any)
