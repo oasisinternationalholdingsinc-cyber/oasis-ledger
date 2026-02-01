@@ -234,6 +234,7 @@ async function mustInsertEvent(row: Record<string, unknown>) {
 
 // ---------------------------------------------------------------------------
 // Resolver-driven registry snapshot (READ-ONLY, FAIL-SOFT) — NO DRIFT
+// (Important: used for metadata/UI/debug ONLY. PDF must NOT assert registry truth.)
 // ---------------------------------------------------------------------------
 type RegistrySnapshot = {
   ok: boolean;
@@ -272,7 +273,6 @@ async function resolveRegistrySnapshot(args: {
 
     if (error || !data) return fallback;
 
-    // data is jsonb → JS object
     if (!data.ok) return fallback;
 
     const verified = (data as any).verified ?? null;
@@ -458,7 +458,7 @@ serve(async (req) => {
       .eq("id", envelope.record_id)
       .single();
 
-    // 5.5) Verify URL
+    // 5.5) Verify URL (public terminal; registry confers authority)
     const verifyUrl =
       (envelope as any)?.metadata?.verify_url ??
       `https://sign.oasisintlholdings.com/verify.html?envelope_id=${envelope_id}`;
@@ -469,7 +469,7 @@ serve(async (req) => {
     let pdfHash: string | null = null;
 
     // -----------------------------------------------------------------------
-    // 6) Generate signed PDF with certificate page (execution certificate only)
+    // 6) Generate signed PDF with EXECUTION CERTIFICATE page (no registry claims)
     // -----------------------------------------------------------------------
     if (allSigned && (!alreadySigned || wantRegen)) {
       const metaPath = safeText((envelope as any)?.metadata?.storage_path);
@@ -499,9 +499,7 @@ serve(async (req) => {
           const originalBytes = await originalFile.arrayBuffer();
           const pdfDoc = await PDFDocument.load(originalBytes);
 
-          // -------------------------------
-          // Resolver-driven registry snapshot (READ-ONLY, FAIL-SOFT)
-          // -------------------------------
+          // Resolver snapshot (metadata/UI/debug only; PDF must not assert registry)
           const registrySnapshot = await resolveRegistrySnapshot({
             envelope_id,
             ledger_id: String(envelope.record_id),
@@ -515,21 +513,22 @@ serve(async (req) => {
           const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
           const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
 
-          const margin = 50;
+          // Palette (kept neutral/enterprise)
+          const margin = 54;
           const accent = rgb(0.11, 0.77, 0.55);
           const textDark = rgb(0.16, 0.18, 0.22);
           const textMuted = rgb(0.45, 0.48, 0.55);
 
           // ---- Layout guards (ZERO OVERLAP) ----
           // Reserve a bottom band for QR + (optional) wet ink, so text never runs into it.
-          const bandPad = 36;
-          const qrSize = 96;
-          const qrPlateH = qrSize + 22; // matches plate height below
-          const wetBoxH = 95; // room for label + signature image
-          const bottomBandH = Math.max(qrPlateH + 12, wetBoxH + 12); // deterministic
-          const bottomBandTopY = bandPad + bottomBandH; // all text must stay above this
+          const bandPad = 38;
+          const qrSize = 98;
+          const qrPlateH = qrSize + 22;
+          const wetBoxH = 96;
+          const bottomBandH = Math.max(qrPlateH + 12, wetBoxH + 12);
+          const bottomBandTopY = bandPad + bottomBandH;
 
-          const headerHeight = 70;
+          const headerHeight = 76;
           certPage.drawRectangle({
             x: 0,
             y: height - headerHeight,
@@ -540,15 +539,16 @@ serve(async (req) => {
 
           certPage.drawText("Oasis Digital Parliament", {
             x: margin,
-            y: height - headerHeight + 32,
+            y: height - headerHeight + 40,
             size: 16,
             font: fontBold,
             color: accent,
           });
 
-          certPage.drawText("Signature Certificate", {
+          // ✅ Renamed (per final doctrine): Execution Certificate (not receipt-y)
+          certPage.drawText("Execution Certificate", {
             x: margin,
-            y: height - headerHeight + 14,
+            y: height - headerHeight + 18,
             size: 11,
             font,
             color: rgb(0.8, 0.84, 0.9),
@@ -558,19 +558,24 @@ serve(async (req) => {
           const rightWidth = font.widthOfTextAtSize(rightHeader, 9);
           certPage.drawText(rightHeader, {
             x: width - margin - rightWidth,
-            y: height - headerHeight + 20,
+            y: height - headerHeight + 24,
             size: 9,
             font,
             color: rgb(0.7, 0.75, 0.82),
           });
 
-          let y = height - headerHeight - 35;
-          certPage.drawText(
-            "This page certifies the electronic execution of the following record:",
-            { x: margin, y, size: 10, font, color: textMuted },
-          );
+          let y = height - headerHeight - 34;
 
-          y -= 24;
+          // Declarative (certificate voice, not receipt voice)
+          certPage.drawText("This certificate confirms the electronic execution of the following record:", {
+            x: margin,
+            y,
+            size: 10,
+            font,
+            color: textMuted,
+          });
+
+          y -= 26;
           const title = record?.title ?? (envelope as any)?.title ?? "Corporate Record";
           certPage.drawText(title, {
             x: margin,
@@ -590,14 +595,25 @@ serve(async (req) => {
             color: textMuted,
           });
 
-          y -= 26;
+          y -= 28;
+
+          // Two-column grid with stricter spacing (prevents overlap)
+          const colGap = 270; // widened to eliminate mid-column collision
+          const labelW = 104; // fixed label lane
+          const valuePad = 8;
+
+          const leftLabelX = margin;
+          const leftValueX = margin + labelW + valuePad;
+
+          const rightLabelX = margin + colGap;
+          const rightValueX = rightLabelX + labelW + valuePad;
 
           const leftLines: Array<[string, unknown]> = [
             ["Certificate ID", envelope.id],
             ["Entity", entityLine],
             ["Record ID", String(envelope.record_id)],
             ["Record Title", title],
-            ["Signed At (UTC)", signedAt],
+            ["Executed At (UTC)", signedAt], // ✅ better language
             ["Envelope Status", nextStatus],
           ];
 
@@ -611,22 +627,21 @@ serve(async (req) => {
           ];
 
           let leftY = y;
-          const colGap = 220;
-
           for (const [label, value] of leftLines) {
             certPage.drawText(label + ":", {
-              x: margin,
+              x: leftLabelX,
               y: leftY,
               size: 9,
               font: fontBold,
               color: textDark,
             });
-            certPage.drawText(truncateMiddle(String(value), 36), {
-              x: margin + 95,
+            certPage.drawText(truncateMiddle(String(value), 32), {
+              x: leftValueX,
               y: leftY,
               size: 9,
               font,
               color: textMuted,
+              maxWidth: (rightLabelX - 18) - leftValueX, // hard bound prevents collision
             });
             leftY -= 16;
           }
@@ -634,30 +649,31 @@ serve(async (req) => {
           let rightY = y;
           for (const [label, value] of rightLines) {
             certPage.drawText(label + ":", {
-              x: margin + colGap,
+              x: rightLabelX,
               y: rightY,
               size: 9,
               font: fontBold,
               color: textDark,
             });
-            certPage.drawText(truncateMiddle(String(value), 28), {
-              x: margin + colGap + 95,
+            certPage.drawText(truncateMiddle(String(value), 26), {
+              x: rightValueX,
               y: rightY,
               size: 9,
               font,
               color: textMuted,
+              maxWidth: (width - margin) - rightValueX,
             });
             rightY -= 16;
           }
 
-          // Technical footprint (bounded so it never overlaps the bottom band)
+          // Technical footprint (bounded so it never overlaps bottom band)
           let techY = Math.min(leftY, rightY) - 18;
+          const minTextY = bottomBandTopY + 16;
 
-          const minTextY = bottomBandTopY + 14; // guard
           const canWriteAt = (yy: number) => yy >= minTextY;
 
           if ((client_ip || user_agent) && canWriteAt(techY)) {
-            certPage.drawText("Technical footprint", {
+            certPage.drawText("Technical Footprint", {
               x: margin,
               y: techY,
               size: 9,
@@ -676,8 +692,9 @@ serve(async (req) => {
               });
               techY -= 12;
             }
+
             if (user_agent && canWriteAt(techY)) {
-              certPage.drawText(`User Agent: ${truncateMiddle(user_agent, 68)}`, {
+              certPage.drawText(`User Agent: ${truncateMiddle(user_agent, 70)}`, {
                 x: margin,
                 y: techY,
                 size: 8,
@@ -688,13 +705,14 @@ serve(async (req) => {
             }
           }
 
-          // Resolver-driven attestation (bounded, truth-safe, registry-first)
+          // ✅ Registry doctrine applied:
+          // - Execution Certificate must NOT claim registry hash or registry timing.
+          // - It may only point to verification terminal (QR + URL).
           if (canWriteAt(techY)) {
-            // small spacer
-            techY -= 4;
+            techY -= 6;
 
             if (canWriteAt(techY)) {
-              certPage.drawText("Registry Attestation (Read-Only)", {
+              certPage.drawText("Verification", {
                 x: margin,
                 y: techY,
                 size: 9,
@@ -706,54 +724,28 @@ serve(async (req) => {
 
             if (canWriteAt(techY)) {
               certPage.drawText(
-                `Verification Level: ${safeUpper(registrySnapshot.verification_level, "PROVISIONAL")}`,
-                { x: margin, y: techY, size: 8, font, color: textMuted },
+                "To verify cryptographic truth (hash, certification, registry status), scan the QR code or open the verification terminal.",
+                {
+                  x: margin,
+                  y: techY,
+                  size: 8,
+                  font,
+                  color: textMuted,
+                  maxWidth: width - margin * 2,
+                },
               );
-              techY -= 12;
-            }
-
-            // Canonical rule: only print a hash if registry provides it
-            if (registrySnapshot.file_hash && canWriteAt(techY)) {
-              certPage.drawText(`SHA-256 (Registry): ${registrySnapshot.file_hash}`, {
-                x: margin,
-                y: techY,
-                size: 8,
-                font,
-                color: textMuted,
-              });
-              techY -= 12;
-            } else if (canWriteAt(techY)) {
-              certPage.drawText("SHA-256 (Registry): Not registered at time of execution", {
-                x: margin,
-                y: techY,
-                size: 8,
-                font,
-                color: textMuted,
-              });
-              techY -= 12;
-            }
-
-            if (registrySnapshot.verified_document_id && canWriteAt(techY)) {
-              certPage.drawText(`Registry ID: ${registrySnapshot.verified_document_id}`, {
-                x: margin,
-                y: techY,
-                size: 8,
-                font,
-                color: textMuted,
-              });
               techY -= 12;
             }
 
             if (canWriteAt(techY)) {
               certPage.drawText(
-                "This attestation reflects the Oasis Verified Registry state at execution time. Authority is conferred exclusively by the Registry.",
+                "Authority is conferred exclusively by the Oasis Verified Registry.",
                 {
                   x: margin,
                   y: techY,
-                  size: 7,
+                  size: 7.5,
                   font,
                   color: textMuted,
-                  maxWidth: width - margin * 2,
                 },
               );
               techY -= 10;
@@ -816,13 +808,14 @@ serve(async (req) => {
                 const sigBytes = new Uint8Array(await sigFile.arrayBuffer());
                 const sigImg = await pdfDoc.embedPng(sigBytes);
 
-                // left bottom band box
                 const boxX = margin;
                 const boxY = bandPad;
-                const boxW = Math.min(280, width - margin * 2 - (qrSize + 60)); // keep away from QR
+
+                // keep away from QR
+                const maxLeftW = width - margin - (qrSize + 72);
+                const boxW = Math.min(300, Math.max(240, maxLeftW));
                 const boxH = wetBoxH;
 
-                // subtle plate
                 certPage.drawRectangle({
                   x: boxX,
                   y: boxY,
@@ -841,12 +834,11 @@ serve(async (req) => {
                   color: textMuted,
                 });
 
-                // image inside the plate
                 const imgPad = 10;
                 const imgX = boxX + imgPad;
                 const imgY = boxY + imgPad;
                 const imgW = boxW - imgPad * 2;
-                const imgH = boxH - 26; // room for label
+                const imgH = boxH - 26;
 
                 certPage.drawImage(sigImg, {
                   x: imgX,
@@ -860,7 +852,7 @@ serve(async (req) => {
             console.error("Wet signature embed error (non-fatal)", e);
           }
 
-          // Save + hash (internal; do NOT print as canonical unless registry returns it)
+          // Save + hash (internal; not printed as canonical registry truth)
           const pdfBytes = await pdfDoc.save();
           pdfHash = await sha256Hex(pdfBytes);
 
@@ -900,24 +892,29 @@ serve(async (req) => {
           const existingMeta = (envelope as any)?.metadata ?? {};
           const certificate = {
             certificate_version: 1,
+            certificate_kind: "execution", // additive, no consumer required
+
             envelope_id,
             record_id: envelope.record_id,
             entity_id: envelope.entity_id,
             entity_name: entity?.name ?? null,
             record_title: record?.title ?? envelope.title ?? null,
+
             signer: {
               party_id: party.id,
               name: party.display_name,
               email: party.email,
               role: party.role ?? "signer",
             },
+
             signed_at: signedAt,
             envelope_status: nextStatus,
+
             client_ip: client_ip ?? null,
             user_agent: user_agent ?? null,
             verify_url: verifyUrl,
 
-            // Internal render digest (not canonical registry truth)
+            // Internal render digest (NOT canonical registry truth)
             pdf_hash: pdfHash,
 
             bucket: BUCKET,
@@ -925,7 +922,7 @@ serve(async (req) => {
             signed_document_path: signedPath,
             signed_document_path_canonical: signedPathCanonical,
 
-            // Resolver-driven registry snapshot (read-only; helps UI/debug; NOT authority)
+            // Resolver-driven registry snapshot (read-only; for UI/debug; NOT authority)
             registry_attestation: {
               ok: registrySnapshot.ok,
               verification_level: registrySnapshot.verification_level,
@@ -1101,8 +1098,7 @@ serve(async (req) => {
       force_regen: !!force_regen,
 
       // additive: expose registry snapshot for callers (read-only)
-      registry_attestation:
-        cert?.registry_attestation ?? meta?.registry_attestation ?? null,
+      registry_attestation: cert?.registry_attestation ?? meta?.registry_attestation ?? null,
     });
   } catch (e) {
     console.error("Unexpected error in complete-signature", e);
