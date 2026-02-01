@@ -4,11 +4,9 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { PDFDocument, rgb, StandardFonts } from "https://esm.sh/pdf-lib@1.17.1";
 
-// ✅ Server-safe QR → SVG (NO canvas)
-import QRCode from "https://esm.sh/qrcode-svg@1.1.0";
-
-// ✅ SVG → PNG in Deno (NO canvas)
-import { initialize, svg2png } from "https://esm.sh/svg2png-wasm@1.4.1";
+// ✅ Edge-safe QR (NO canvas / NO wasm)
+import QRGen from "npm:qrcode-generator@1.4.4";
+import { PNG } from "npm:pngjs@7.0.0";
 
 type ReqBody = {
   ledger_id?: string;
@@ -146,33 +144,60 @@ async function resolveMinuteBookSourcePdf(ledgerId: string): Promise<string | nu
 }
 
 // -----------------------------------------------------------------------------
-// ✅ QR generation (Edge-safe): URL → SVG → PNG bytes
+// ✅ QR generation (Edge-safe): URL → PNG bytes (NO wasm / NO canvas)
 // -----------------------------------------------------------------------------
-let svgWasmReady = false;
+function qrPngBytes(
+  text: string,
+  opts?: { size?: number; margin?: number; ecc?: "L" | "M" | "Q" | "H" },
+): Uint8Array {
+  const size = opts?.size ?? 256;
+  const margin = opts?.margin ?? 2;
+  const ecc = opts?.ecc ?? "M";
 
-async function qrPngBytes(verifyUrl: string, sizePx: number): Promise<Uint8Array> {
-  // qrcode-svg returns an SVG string
-  const qr = new QRCode({
-    content: verifyUrl,
-    padding: 0,
-    width: sizePx,
-    height: sizePx,
-    ecl: "M",
-    color: "#000000",
-    background: "#ffffff",
-  });
+  const qr = QRGen(0, ecc);
+  qr.addData(text);
+  qr.make();
 
-  const svg = qr.svg(); // string
+  const count = qr.getModuleCount();
+  const scale = Math.max(1, Math.floor(size / (count + margin * 2)));
+  const imgSize = (count + margin * 2) * scale;
 
-  // Initialize wasm once
-  if (!svgWasmReady) {
-    // svg2png-wasm fetches its wasm internally; initialize once per isolate
-    await initialize(fetch);
-    svgWasmReady = true;
+  const png = new PNG({ width: imgSize, height: imgSize });
+
+  // white background
+  for (let y = 0; y < imgSize; y++) {
+    for (let x = 0; x < imgSize; x++) {
+      const idx = (png.width * y + x) << 2;
+      png.data[idx + 0] = 255;
+      png.data[idx + 1] = 255;
+      png.data[idx + 2] = 255;
+      png.data[idx + 3] = 255;
+    }
   }
 
-  const png = await svg2png(svg, { width: sizePx, height: sizePx });
-  return new Uint8Array(png);
+  // black modules
+  for (let r = 0; r < count; r++) {
+    for (let c = 0; c < count; c++) {
+      if (!qr.isDark(r, c)) continue;
+
+      const x0 = (c + margin) * scale;
+      const y0 = (r + margin) * scale;
+
+      for (let yy = 0; yy < scale; yy++) {
+        for (let xx = 0; xx < scale; xx++) {
+          const x = x0 + xx;
+          const y = y0 + yy;
+          const idx = (png.width * y + x) << 2;
+          png.data[idx + 0] = 0;
+          png.data[idx + 1] = 0;
+          png.data[idx + 2] = 0;
+          png.data[idx + 3] = 255;
+        }
+      }
+    }
+  }
+
+  return PNG.sync.write(png);
 }
 
 serve(async (req) => {
@@ -218,7 +243,7 @@ serve(async (req) => {
     if (!ent.data?.id) return json({ ok: false, error: "ENTITY_NOT_FOUND", request_id: reqId }, 404);
     const entity_slug = String((ent.data as any).slug);
 
-    // 3) Existing verified doc
+    // 3) Existing verified doc (idempotency)
     const existingVd = await supabaseAdmin
       .from("verified_documents")
       .select("id, storage_bucket, storage_path, file_hash, verification_level")
@@ -273,7 +298,6 @@ serve(async (req) => {
     let verified_id = existingId;
 
     if (!verified_id) {
-      // ✅ DO NOT write generated columns (source_storage_bucket/source_storage_path)
       const ins = await supabaseAdmin
         .from("verified_documents")
         .insert({
@@ -295,7 +319,12 @@ serve(async (req) => {
         .select("id")
         .single();
 
-      if (ins.error) return json({ ok: false, error: "VERIFIED_DOC_INSERT_FAILED", details: ins.error, request_id: reqId }, 500);
+      if (ins.error) {
+        return json(
+          { ok: false, error: "VERIFIED_DOC_INSERT_FAILED", details: ins.error, request_id: reqId } satisfies Resp,
+          500,
+        );
+      }
       verified_id = String(ins.data.id);
     }
 
@@ -314,8 +343,8 @@ serve(async (req) => {
 
     const verifyUrl = buildVerifyUrl(verifyBase, verified_id!, ledgerId);
 
-    // ✅ Generate PNG bytes (NO canvas)
-    const qrPng = await qrPngBytes(verifyUrl, 256);
+    // ✅ Generate PNG bytes (Edge-safe)
+    const qrPng = qrPngBytes(verifyUrl, { size: 256, margin: 2, ecc: "M" });
 
     // 8) Stamp QR bottom-right on last page (wet signature preserved)
     const pdfDoc = await PDFDocument.load(sourceBytes);
@@ -354,7 +383,6 @@ serve(async (req) => {
     if (up.error) return json({ ok: false, error: "CERTIFIED_PDF_UPLOAD_FAILED", details: up.error, request_id: reqId }, 500);
 
     // 10) Update verified_documents canonical pointer + hash
-    // ✅ DO NOT update generated columns
     const upd = await supabaseAdmin
       .from("verified_documents")
       .update({
