@@ -22,6 +22,7 @@ const cors: Record<string, string> = {
   "Access-Control-Allow-Headers":
     "authorization, apikey, content-type, x-client-info",
   "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
+  "Access-Control-Max-Age": "86400",
 };
 
 function withCors(extra?: Record<string, string>) {
@@ -34,10 +35,11 @@ const json = (x: unknown, status = 200) =>
     headers: withCors({ "Content-Type": "application/json" }),
   });
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ??
-  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ??
+  "";
 
 if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
   throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
@@ -58,7 +60,11 @@ async function downloadAsU8(
   path: string,
 ): Promise<Uint8Array> {
   const { data, error } = await supabaseAdmin.storage.from(bucket).download(path);
-  if (error || !data) throw new Error(`DOWNLOAD_FAILED: ${bucket}/${path} :: ${error?.message ?? "no data"}`);
+  if (error || !data) {
+    throw new Error(
+      `DOWNLOAD_FAILED: ${bucket}/${path} :: ${error?.message ?? "no data"}`,
+    );
+  }
   const ab = await data.arrayBuffer();
   return new Uint8Array(ab);
 }
@@ -142,6 +148,7 @@ END OF FILE
 async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
   const page = pdf.addPage([612, 792]);
+
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const mono = await pdf.embedFont(StandardFonts.Courier);
 
@@ -153,22 +160,41 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
 
   lines.push({ t: "OASIS DIGITAL PARLIAMENT — ATTESTATION SUMMARY" });
   lines.push({ t: "" });
-  lines.push({ t: "This summary is generated from resolver output at export time." });
-  lines.push({ t: "It does not confer authority; it reports registry-derived integrity signals." });
+  lines.push({
+    t: "This summary is generated from resolver output at export time.",
+  });
+  lines.push({
+    t: "It does not confer authority; it reports registry-derived integrity signals.",
+  });
   lines.push({ t: "" });
 
-  lines.push({ t: `Ledger ID: ${payload?.ledger_id ?? led?.id ?? "—"}`, mono: true });
-  lines.push({ t: `Verified Document ID: ${payload?.verified_document_id ?? "—"}`, mono: true });
-  lines.push({ t: `Hash (SHA-256): ${payload?.hash ?? ver?.file_hash ?? "—"}`, mono: true });
+  lines.push({
+    t: `Ledger ID: ${payload?.ledger_id ?? led?.id ?? "—"}`,
+    mono: true,
+  });
+  lines.push({
+    t: `Verified Document ID: ${payload?.verified_document_id ?? "—"}`,
+    mono: true,
+  });
+  lines.push({
+    t: `Hash (SHA-256): ${payload?.hash ?? ver?.file_hash ?? "—"}`,
+    mono: true,
+  });
   lines.push({ t: "" });
 
-  lines.push({ t: `Entity: ${(ent?.name ?? "—")} • ${(ent?.slug ?? "—")}` });
-  lines.push({ t: `Lane: ${(led?.is_test === true) ? "SANDBOX" : (led?.is_test === false ? "RoT" : "—")}` });
+  lines.push({ t: `Entity: ${ent?.name ?? "—"} • ${ent?.slug ?? "—"}` });
+  lines.push({
+    t: `Lane: ${
+      led?.is_test === true ? "SANDBOX" : led?.is_test === false ? "RoT" : "—"
+    }`,
+  });
   lines.push({ t: `Ledger Title: ${led?.title ?? "—"}` });
   lines.push({ t: `Ledger Status: ${led?.status ?? "—"}` });
   lines.push({ t: "" });
 
-  lines.push({ t: `Verification Level: ${String(ver?.verification_level ?? "—")}` });
+  lines.push({
+    t: `Verification Level: ${String(ver?.verification_level ?? "—")}`,
+  });
   lines.push({ t: `Archive Registered: ${String(ver?.is_archived ?? "—")}` });
   lines.push({ t: "" });
 
@@ -176,12 +202,37 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
   const pub = payload?.public_pdf ?? null;
 
   lines.push({ t: `Best Artifact Kind: ${best?.kind ?? "—"}` });
-  lines.push({ t: `Best Artifact Pointer: ${(best?.storage_bucket && best?.storage_path) ? `${best.storage_bucket}/${best.storage_path}` : "—"}`, mono: true });
-  lines.push({ t: `Minute Book Pointer: ${(pub?.storage_bucket && pub?.storage_path) ? `${pub.storage_bucket}/${pub.storage_path}` : "—"}`, mono: true });
-  lines.push({ t: `Registry Archive Pointer: ${(ver?.storage_bucket && ver?.storage_path) ? `${ver.storage_bucket}/${ver.storage_path}` : "—"}`, mono: true });
+  lines.push({
+    t: `Best Artifact Pointer: ${
+      best?.storage_bucket && best?.storage_path
+        ? `${best.storage_bucket}/${best.storage_path}`
+        : "—"
+    }`,
+    mono: true,
+  });
+  lines.push({
+    t: `Minute Book Pointer: ${
+      pub?.storage_bucket && pub?.storage_path
+        ? `${pub.storage_bucket}/${pub.storage_path}`
+        : "—"
+    }`,
+    mono: true,
+  });
+  lines.push({
+    t: `Registry Archive Pointer: ${
+      ver?.storage_bucket && ver?.storage_path
+        ? `${ver.storage_bucket}/${ver.storage_path}`
+        : "—"
+    }`,
+    mono: true,
+  });
 
   lines.push({ t: "" });
-  lines.push({ t: `Export Timestamp (UTC): ${new Date().toISOString()}`, mono: true, dim: true });
+  lines.push({
+    t: `Export Timestamp (UTC): ${new Date().toISOString()}`,
+    mono: true,
+    dim: true,
+  });
 
   // Render
   const margin = 54;
@@ -199,8 +250,8 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
     y -= lh;
   };
 
-  // Simple wrap for long mono lines
-  const wrap = (s: string, max = 86) => {
+  // Simple wrap for long lines (safe; avoids layout blowups)
+  const wrap = (s: string, max: number) => {
     const out: string[] = [];
     let cur = s;
     while (cur.length > max) {
@@ -213,7 +264,7 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
 
   for (const L of lines) {
     const txt = L.t ?? "";
-    const parts = (L.mono ? wrap(txt, 90) : wrap(txt, 110));
+    const parts = wrap(txt, L.mono ? 90 : 110);
     for (const p of parts) {
       if (y < 60) break;
       drawLine(p, !!L.mono, !!L.dim);
@@ -226,6 +277,7 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
 }
 
 serve(async (req) => {
+  // CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: withCors() });
   }
@@ -235,7 +287,10 @@ serve(async (req) => {
 
   const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { persistSession: false },
-    global: { headers: { "x-client-info": "odp-verify/export-discovery-package" } },
+    global: {
+      fetch,
+      headers: { "x-client-info": "odp-verify/export-discovery-package" },
+    },
   });
 
   let body: ReqBody = {};
@@ -245,14 +300,25 @@ serve(async (req) => {
     return json({ ok: false, error: "INVALID_JSON" }, 400);
   }
 
-  const hash = normalizeHash(((body.hash ?? body.p_hash ?? null)?.toString() ?? null));
+  const hash = normalizeHash(
+    ((body.hash ?? body.p_hash ?? null)?.toString() ?? null),
+  );
   const envelope_id =
-    ((body.envelope_id ?? body.p_envelope_id ?? null)?.toString() ?? "").trim() || null;
+    ((body.envelope_id ?? body.p_envelope_id ?? null)?.toString() ?? "").trim() ||
+    null;
   const ledger_id =
-    ((body.ledger_id ?? body.p_ledger_id ?? null)?.toString() ?? "").trim() || null;
+    ((body.ledger_id ?? body.p_ledger_id ?? null)?.toString() ?? "").trim() ||
+    null;
 
   if (!hash && !envelope_id && !ledger_id) {
-    return json({ ok: false, error: "MISSING_INPUT", message: "Provide hash OR envelope_id OR ledger_id." }, 400);
+    return json(
+      {
+        ok: false,
+        error: "MISSING_INPUT",
+        message: "Provide hash OR envelope_id OR ledger_id.",
+      },
+      400,
+    );
   }
 
   // 1) Resolve using canonical SQL (registry-first; lane-safe; entity-safe)
@@ -263,20 +329,28 @@ serve(async (req) => {
   });
 
   if (rpcErr) {
-    return json({ ok: false, error: "RPC_FAILED", message: rpcErr.message, details: rpcErr }, 500);
+    return json(
+      { ok: false, error: "RPC_FAILED", message: rpcErr.message },
+      500,
+    );
   }
 
   let payload: any = resolved;
   if (typeof payload === "string") {
-    try { payload = JSON.parse(payload); } catch {}
+    try {
+      payload = JSON.parse(payload);
+    } catch {
+      // keep string payload as-is
+    }
   }
 
+  // If resolver didn't succeed, return a ZIP containing resolver output + README (no lying)
   if (!payload || payload.ok !== true) {
-    // Export still returns resolver output (enterprise: no lying)
-    const readme = readmeText();
     const zipBytes = zipSync({
-      "OASIS-DISCOVERY-EXPORT/README.txt": strToU8(readme),
-      "OASIS-DISCOVERY-EXPORT/verification.json": strToU8(JSON.stringify(payload ?? {}, null, 2)),
+      "OASIS-DISCOVERY-EXPORT/README.txt": strToU8(readmeText()),
+      "OASIS-DISCOVERY-EXPORT/verification.json": strToU8(
+        JSON.stringify(payload ?? {}, null, 2),
+      ),
     });
 
     return new Response(zipBytes, {
@@ -291,8 +365,11 @@ serve(async (req) => {
   // 2) Gather artifacts via pointers (NO guessing)
   const files: Record<string, Uint8Array> = {};
   files["OASIS-DISCOVERY-EXPORT/README.txt"] = strToU8(readmeText());
-  files["OASIS-DISCOVERY-EXPORT/verification.json"] = strToU8(JSON.stringify(payload, null, 2));
-  files["OASIS-DISCOVERY-EXPORT/attestation.pdf"] = await buildAttestationPdf(payload);
+  files["OASIS-DISCOVERY-EXPORT/verification.json"] = strToU8(
+    JSON.stringify(payload, null, 2),
+  );
+  files["OASIS-DISCOVERY-EXPORT/attestation.pdf"] =
+    await buildAttestationPdf(payload);
 
   const best = payload.best_pdf ?? null;
   const pub = payload.public_pdf ?? null;
@@ -300,38 +377,54 @@ serve(async (req) => {
 
   // Best artifact
   if (best?.storage_bucket && best?.storage_path) {
-    const u8 = await downloadAsU8(supabaseAdmin, String(best.storage_bucket), String(best.storage_path));
+    const u8 = await downloadAsU8(
+      supabaseAdmin,
+      String(best.storage_bucket),
+      String(best.storage_path),
+    );
     const name =
-      best.kind === "minute_book_signed" ? "minute_book_signed.pdf" :
-      best.kind === "minute_book" ? "minute_book.pdf" :
-      "best_artifact.pdf";
+      best.kind === "minute_book_signed"
+        ? "minute_book_signed.pdf"
+        : best.kind === "minute_book"
+          ? "minute_book.pdf"
+          : "best_artifact.pdf";
     files[`OASIS-DISCOVERY-EXPORT/${name}`] = u8;
   }
 
   // Minute book pointer (include if present and different from best)
   if (pub?.storage_bucket && pub?.storage_path) {
     const sameAsBest =
-      best?.storage_bucket === pub.storage_bucket && best?.storage_path === pub.storage_path;
+      best?.storage_bucket === pub.storage_bucket &&
+      best?.storage_path === pub.storage_path;
     if (!sameAsBest) {
-      const u8 = await downloadAsU8(supabaseAdmin, String(pub.storage_bucket), String(pub.storage_path));
+      const u8 = await downloadAsU8(
+        supabaseAdmin,
+        String(pub.storage_bucket),
+        String(pub.storage_path),
+      );
       files["OASIS-DISCOVERY-EXPORT/minute_book.pdf"] = u8;
     }
   }
 
   // Registry archive (certified archive)
   if (ver?.storage_bucket && ver?.storage_path) {
-    const u8 = await downloadAsU8(supabaseAdmin, String(ver.storage_bucket), String(ver.storage_path));
+    const u8 = await downloadAsU8(
+      supabaseAdmin,
+      String(ver.storage_bucket),
+      String(ver.storage_path),
+    );
     files["OASIS-DISCOVERY-EXPORT/certified_archive.pdf"] = u8;
   }
 
-  // 3) Zip and return (no storage writes, no DB writes)
+  // 3) Zip and return (NO storage writes, NO DB writes)
   const zipBytes = zipSync(files);
 
+  const safeLedgerId = (payload?.ledger_id ?? ledger_id ?? "record").toString();
   return new Response(zipBytes, {
     status: 200,
     headers: withCors({
       "Content-Type": "application/zip",
-      "Content-Disposition": `attachment; filename="Oasis-Discovery-Export-${payload.ledger_id}.zip"`,
+      "Content-Disposition": `attachment; filename="Oasis-Discovery-Export-${safeLedgerId}.zip"`,
     }),
   });
 });
