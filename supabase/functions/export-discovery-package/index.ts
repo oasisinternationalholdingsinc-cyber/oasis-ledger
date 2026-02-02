@@ -5,6 +5,9 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { zipSync, strToU8 } from "https://esm.sh/fflate@0.8.2";
 import { PDFDocument, StandardFonts, rgb } from "https://esm.sh/pdf-lib@1.17.1";
 
+// NOTE: Deno std has built-in crypto.subtle; we use that for SHA-256 manifest.
+// No schema writes. No storage writes. Resolver remains canonical.
+
 type ReqBody = {
   hash?: string | null;
   envelope_id?: string | null;
@@ -118,7 +121,13 @@ The registry, not this export, is the source of truth.
   Registry-archived copy when available.
 
 /attestation.pdf
-  Human-readable summary generated from resolver output.
+  Human-readable summary generated from resolver output (non-authoritative).
+
+/MANIFEST-SHA256.txt
+  SHA-256 hashes of every file in this export (for independent integrity checks).
+
+/QR-HASH-REFERENCE.txt
+  Human-readable verification instructions for the SHA-256 reference.
 
 ---------------------------------------------------------------------
 
@@ -145,21 +154,105 @@ END OF FILE
 `;
 }
 
+function qrHashReferenceText(hash: string) {
+  // NOTE: We do NOT generate QR graphics in Edge here. We provide an auditor-proof text
+  // reference page that ties the hash to the verify terminal without claiming authority.
+  return `OASIS DIGITAL PARLIAMENT
+QR / HASH REFERENCE (NON-AUTHORITATIVE)
+======================================
+
+Reference Hash (SHA-256):
+${hash}
+
+How to verify:
+1) Open: https://verify.oasisintlholdings.com
+2) Paste the hash into the verification terminal.
+3) Confirm the Verified Registry resolves the record and returns signed URL delivery.
+
+This file is a convenience reference for auditors and counsel.
+It does not create authority, certification, or custody.
+`;
+}
+
+// ---------- SHA-256 helpers (manifest) ----------
+function toHex(bytes: ArrayBuffer) {
+  const u8 = new Uint8Array(bytes);
+  let out = "";
+  for (let i = 0; i < u8.length; i++) out += u8[i].toString(16).padStart(2, "0");
+  return out;
+}
+
+async function sha256Hex(u8: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", u8);
+  return toHex(digest);
+}
+
+async function buildManifest(files: Record<string, Uint8Array>) {
+  // Deterministic, auditor-friendly: sort paths, hash bytes, output one per line.
+  const paths = Object.keys(files).slice().sort();
+  const lines: string[] = [];
+  lines.push("OASIS DIGITAL PARLIAMENT — SHA-256 MANIFEST");
+  lines.push("MANIFEST-SHA256.txt is non-authoritative; it supports integrity checking.");
+  lines.push(`Generated (UTC): ${new Date().toISOString()}`);
+  lines.push("");
+  for (const p of paths) {
+    const h = await sha256Hex(files[p]);
+    lines.push(`${h}  ${p}`);
+  }
+  lines.push("");
+  lines.push("END OF MANIFEST");
+  return lines.join("\n");
+}
+
+// ---------- Attestation PDF (enterprise / paginated / watermark / page numbers) ----------
+type AttLine = { t: string; mono?: boolean; dim?: boolean };
+
+function jurisdictionLine(payload: any): string | null {
+  // Defensive: pull from any known field; DO NOT assume schema.
+  const ent = payload?.entity ?? {};
+  const led = payload?.ledger ?? {};
+  const ver = payload?.verified ?? {};
+  const j =
+    payload?.jurisdiction ??
+    ent?.jurisdiction ??
+    led?.jurisdiction ??
+    ver?.jurisdiction ??
+    null;
+  if (!j) return null;
+  const s = String(j).trim();
+  return s ? s : null;
+}
+
 async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
-  const page = pdf.addPage([612, 792]);
 
   const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
   const mono = await pdf.embedFont(StandardFonts.Courier);
 
   const led = payload?.ledger ?? {};
   const ent = payload?.entity ?? {};
   const ver = payload?.verified ?? {};
 
-  const lines: Array<{ t: string; mono?: boolean; dim?: boolean }> = [];
+  const lines: AttLine[] = [];
 
-  lines.push({ t: "OASIS DIGITAL PARLIAMENT — ATTESTATION SUMMARY" });
+  // Header block
+  lines.push({ t: "OASIS DIGITAL PARLIAMENT" });
+  lines.push({ t: "ATTESTATION SUMMARY (NON-AUTHORITATIVE)", dim: true });
   lines.push({ t: "" });
+
+  // Jurisdiction banner (non-authoritative)
+  const juris = jurisdictionLine(payload);
+  if (juris) {
+    lines.push({ t: `Jurisdiction (non-authoritative): ${juris}` });
+    lines.push({
+      t:
+        "Jurisdiction is reported from registry payload fields only. Legal effect is determined by applicable law and competent authority.",
+      dim: true,
+    });
+    lines.push({ t: "" });
+  }
+
   lines.push({
     t: "This summary is generated from resolver output at export time.",
   });
@@ -168,6 +261,7 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
   });
   lines.push({ t: "" });
 
+  // Identifiers
   lines.push({
     t: `Ledger ID: ${payload?.ledger_id ?? led?.id ?? "—"}`,
     mono: true,
@@ -182,6 +276,7 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
   });
   lines.push({ t: "" });
 
+  // Entity + lane
   lines.push({ t: `Entity: ${ent?.name ?? "—"} • ${ent?.slug ?? "—"}` });
   lines.push({
     t: `Lane: ${
@@ -192,12 +287,14 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
   lines.push({ t: `Ledger Status: ${led?.status ?? "—"}` });
   lines.push({ t: "" });
 
+  // Verification signals
   lines.push({
     t: `Verification Level: ${String(ver?.verification_level ?? "—")}`,
   });
   lines.push({ t: `Archive Registered: ${String(ver?.is_archived ?? "—")}` });
   lines.push({ t: "" });
 
+  // Pointers
   const best = payload?.best_pdf ?? null;
   const pub = payload?.public_pdf ?? null;
 
@@ -234,23 +331,15 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
     dim: true,
   });
 
-  // Render
-  const margin = 54;
-  let y = 740;
+  // ---------- pagination render ----------
+  const PAGE_W = 612;
+  const PAGE_H = 792;
+
+  const marginX = 54;
+  const topY = PAGE_H - 54;
+  const bottomY = 54;
   const lh = 16;
 
-  const drawLine = (txt: string, isMono: boolean, dim: boolean) => {
-    page.drawText(txt, {
-      x: margin,
-      y,
-      size: 11,
-      font: isMono ? mono : font,
-      color: dim ? rgb(0.55, 0.55, 0.55) : rgb(0.1, 0.1, 0.1),
-    });
-    y -= lh;
-  };
-
-  // Simple wrap for long lines (safe; avoids layout blowups)
   const wrap = (s: string, max: number) => {
     const out: string[] = [];
     let cur = s;
@@ -262,14 +351,97 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
     return out;
   };
 
+  // Precompute wrapped lines so pagination is deterministic
+  const wrapped: AttLine[] = [];
   for (const L of lines) {
     const txt = L.t ?? "";
     const parts = wrap(txt, L.mono ? 90 : 110);
-    for (const p of parts) {
-      if (y < 60) break;
-      drawLine(p, !!L.mono, !!L.dim);
+    for (const p of parts) wrapped.push({ t: p, mono: L.mono, dim: L.dim });
+  }
+
+  // Determine how many lines fit per page accounting for header/footer space
+  // Header: ~44px, Footer: ~28px
+  const headerSpace = 52;
+  const footerSpace = 34;
+  const usable = (topY - headerSpace) - (bottomY + footerSpace);
+  const linesPerPage = Math.max(1, Math.floor(usable / lh));
+
+  const totalPages = Math.max(1, Math.ceil(wrapped.length / linesPerPage));
+
+  const drawPageFrame = (page: any, pageNo: number) => {
+    // Subtle header line
+    page.drawText("OASIS DIGITAL PARLIAMENT", {
+      x: marginX,
+      y: PAGE_H - 36,
+      size: 9,
+      font: fontBold,
+      color: rgb(0.55, 0.55, 0.55),
+    });
+    page.drawLine({
+      start: { x: marginX, y: PAGE_H - 44 },
+      end: { x: PAGE_W - marginX, y: PAGE_H - 44 },
+      thickness: 1,
+      color: rgb(0.92, 0.92, 0.92),
+      opacity: 0.15,
+    });
+
+    // Watermark
+    const wm = "ATTESTATION (NON-AUTHORITATIVE)";
+    page.drawText(wm, {
+      x: 70,
+      y: PAGE_H / 2,
+      size: 26,
+      font: fontBold,
+      color: rgb(0.2, 0.2, 0.2),
+      opacity: 0.06,
+      rotate: { type: "degrees", angle: 20 },
+    });
+
+    // Footer: page number
+    page.drawLine({
+      start: { x: marginX, y: bottomY + 18 },
+      end: { x: PAGE_W - marginX, y: bottomY + 18 },
+      thickness: 1,
+      color: rgb(0.92, 0.92, 0.92),
+      opacity: 0.10,
+    });
+
+    page.drawText(`Page ${pageNo} of ${totalPages}`, {
+      x: PAGE_W - marginX - 110,
+      y: bottomY + 4,
+      size: 9,
+      font: mono,
+      color: rgb(0.55, 0.55, 0.55),
+    });
+  };
+
+  for (let p = 0; p < totalPages; p++) {
+    const page = pdf.addPage([PAGE_W, PAGE_H]);
+    drawPageFrame(page, p + 1);
+
+    let y = topY - headerSpace;
+
+    const start = p * linesPerPage;
+    const end = Math.min(wrapped.length, start + linesPerPage);
+
+    for (let i = start; i < end; i++) {
+      const L = wrapped[i];
+      const isMono = !!L.mono;
+      const dim = !!L.dim;
+
+      // “Title-ish” first line: slightly bolder if it matches the heading
+      const useBold =
+        (!isMono && !dim && (L.t.includes("ATTESTATION SUMMARY") || L.t === "OASIS DIGITAL PARLIAMENT"));
+
+      page.drawText(L.t, {
+        x: marginX,
+        y,
+        size: 11,
+        font: useBold ? fontBold : (isMono ? mono : font),
+        color: dim ? rgb(0.55, 0.55, 0.55) : rgb(0.10, 0.10, 0.10),
+      });
+      y -= lh;
     }
-    if (y < 60) break;
   }
 
   const bytes = await pdf.save();
@@ -344,14 +516,21 @@ serve(async (req) => {
     }
   }
 
-  // If resolver didn't succeed, return a ZIP containing resolver output + README (no lying)
+  // -------------------------
+  // NO-REGRESSION FAIL-SAFE ZIP (no lying)
+  // -------------------------
   if (!payload || payload.ok !== true) {
-    const zipBytes = zipSync({
-      "OASIS-DISCOVERY-EXPORT/README.txt": strToU8(readmeText()),
-      "OASIS-DISCOVERY-EXPORT/verification.json": strToU8(
-        JSON.stringify(payload ?? {}, null, 2),
-      ),
-    });
+    const base: Record<string, Uint8Array> = {};
+    base["OASIS-DISCOVERY-EXPORT/README.txt"] = strToU8(readmeText());
+    base["OASIS-DISCOVERY-EXPORT/verification.json"] = strToU8(
+      JSON.stringify(payload ?? {}, null, 2),
+    );
+
+    // Manifest should still exist even on failure (integrity of the export itself)
+    const manifest = await buildManifest(base);
+    base["OASIS-DISCOVERY-EXPORT/MANIFEST-SHA256.txt"] = strToU8(manifest);
+
+    const zipBytes = zipSync(base);
 
     return new Response(zipBytes, {
       status: 200,
@@ -368,12 +547,26 @@ serve(async (req) => {
   files["OASIS-DISCOVERY-EXPORT/verification.json"] = strToU8(
     JSON.stringify(payload, null, 2),
   );
+
+  // Attestation (non-authoritative) — enterprise paginated, watermark, page numbers
   files["OASIS-DISCOVERY-EXPORT/attestation.pdf"] =
     await buildAttestationPdf(payload);
 
   const best = payload.best_pdf ?? null;
   const pub = payload.public_pdf ?? null;
   const ver = payload.verified ?? null;
+
+  // Canonical hash for reference page
+  const canonicalHash =
+    (payload?.hash && String(payload.hash)) ||
+    (ver?.file_hash && String(ver.file_hash)) ||
+    null;
+
+  if (canonicalHash) {
+    files["OASIS-DISCOVERY-EXPORT/QR-HASH-REFERENCE.txt"] = strToU8(
+      qrHashReferenceText(canonicalHash),
+    );
+  }
 
   // Best artifact
   if (best?.storage_bucket && best?.storage_path) {
@@ -416,7 +609,12 @@ serve(async (req) => {
     files["OASIS-DISCOVERY-EXPORT/certified_archive.pdf"] = u8;
   }
 
-  // 3) Zip and return (NO storage writes, NO DB writes)
+  // 3) SHA-256 manifest (hashes every file in the ZIP)
+  files["OASIS-DISCOVERY-EXPORT/MANIFEST-SHA256.txt"] = strToU8(
+    await buildManifest(files),
+  );
+
+  // 4) Zip and return (NO storage writes, NO DB writes)
   const zipBytes = zipSync(files);
 
   const safeLedgerId = (payload?.ledger_id ?? ledger_id ?? "record").toString();
