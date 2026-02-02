@@ -4,10 +4,17 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 type ReqBody = {
+  // UI / legacy
   hash?: string | null;
   envelope_id?: string | null;
   ledger_id?: string | null;
-  expires_in?: number | null; // seconds
+
+  // RPC-compatible (enterprise forward-compat)
+  p_hash?: string | null;
+  p_envelope_id?: string | null;
+  p_ledger_id?: string | null;
+
+  expires_in?: number | null;
 };
 
 const cors: Record<string, string> = {
@@ -37,7 +44,7 @@ if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
   throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
 }
 
-// Canonical SQL resolver RPC name
+// Canonical SQL resolver
 const RESOLVE_RPC = "resolve_verified_record";
 
 async function signUrl(
@@ -61,7 +68,6 @@ function clampExpiresIn(n: unknown) {
 }
 
 serve(async (req) => {
-  // CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: withCors() });
   }
@@ -70,7 +76,6 @@ serve(async (req) => {
     return json({ ok: false, error: "METHOD_NOT_ALLOWED" }, 405);
   }
 
-  // We accept anon/auth headers from browser, but we do ALL privileged work via service role.
   const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { persistSession: false },
     global: {
@@ -85,9 +90,20 @@ serve(async (req) => {
     return json({ ok: false, error: "INVALID_JSON" }, 400);
   }
 
-  const hash = (body.hash ?? null)?.toString().trim() || null;
-  const envelope_id = (body.envelope_id ?? null)?.toString().trim() || null;
-  const ledger_id = (body.ledger_id ?? null)?.toString().trim() || null;
+  // 🔒 ENTERPRISE INPUT NORMALIZATION (NO REGRESSION)
+  const hash =
+    (body.hash ?? body.p_hash ?? null)?.toString().trim() || null;
+
+  const envelope_id =
+    (body.envelope_id ?? body.p_envelope_id ?? null)
+      ?.toString()
+      .trim() || null;
+
+  const ledger_id =
+    (body.ledger_id ?? body.p_ledger_id ?? null)
+      ?.toString()
+      .trim() || null;
+
   const expires_in = clampExpiresIn(body.expires_in ?? 900);
 
   if (!hash && !envelope_id && !ledger_id) {
@@ -101,7 +117,7 @@ serve(async (req) => {
     );
   }
 
-  // 1) Call canonical SQL resolver
+  // 1) Canonical SQL resolver (unchanged)
   const { data: resolved, error: rpcErr } = await supabaseAdmin.rpc(
     RESOLVE_RPC,
     {
@@ -123,25 +139,21 @@ serve(async (req) => {
     );
   }
 
-  // SQL returns jsonb; supabase-js may give object or string.
   let payload: any = resolved;
   if (typeof payload === "string") {
     try {
       payload = JSON.parse(payload);
-    } catch {
-      // keep as string
-    }
+    } catch {}
   }
 
   if (!payload || payload.ok !== true) {
-    // Pass through canonical SQL error (NOT_REGISTERED / OBJECT_NOT_FOUND / etc.)
     return json(payload ?? { ok: false, error: "RESOLVE_FAILED" }, 200);
   }
 
-  // 2) Create signed URLs from returned pointers
+  // 2) Signed URLs (unchanged)
   const bestPdf = payload.best_pdf ?? null;
-  const publicPdf = payload.public_pdf ?? null; // minute book reader copy
-  const verified = payload.verified ?? null; // archive registry copy
+  const publicPdf = payload.public_pdf ?? null;
+  const verified = payload.verified ?? null;
 
   const notes: Record<string, unknown> = {};
 
@@ -149,7 +161,6 @@ serve(async (req) => {
   let minuteBookUrl: string | null = null;
   let archiveUrl: string | null = null;
 
-  // Best PDF (preferred artifact) — matches verify.html "Best PDF" + certificate.html evidence
   if (bestPdf?.storage_bucket && bestPdf?.storage_path) {
     const s = await signUrl(
       supabaseAdmin,
@@ -163,7 +174,6 @@ serve(async (req) => {
     notes.best_pdf_pointer_missing = true;
   }
 
-  // Minute Book (reader copy)
   if (publicPdf?.storage_bucket && publicPdf?.storage_path) {
     const s = await signUrl(
       supabaseAdmin,
@@ -177,7 +187,6 @@ serve(async (req) => {
     notes.minute_book_pointer_missing = true;
   }
 
-  // Certified archive (registry copy)
   if (verified?.storage_bucket && verified?.storage_path) {
     const s = await signUrl(
       supabaseAdmin,
@@ -191,7 +200,6 @@ serve(async (req) => {
     notes.archive_pointer_missing = true;
   }
 
-  // 3) Return payload + urls (verify.html + certificate.html aligned)
   return json({
     ...payload,
     expires_in,
