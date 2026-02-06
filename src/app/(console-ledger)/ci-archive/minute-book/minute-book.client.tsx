@@ -9,6 +9,17 @@ export const dynamic = "force-dynamic";
  * ✅ iPhone-first: Rail → Reader Sheet (full screen), zero double-scroll
  * ✅ Desktop: 3-column layout preserved (Domains | Entries | Evidence)
  * ✅ Lane-safe: respects RoT vs SANDBOX (via governance_ledger.is_test)
+ *
+ * Phase-2 enhancement (UI-only, NO schema/wiring drift):
+ * ✅ Discovery Export button → calls Edge Function export-discovery-package (non-mutating ZIP)
+ *    - body: { ledger_id }
+ *    - expects: { ok:true, url:<signed_zip_url> }
+ *
+ * ✅ NEW (UI-only): Promote to Verified Registry (Minute Book Entry Certification)
+ *    - calls Edge Function certify-minute-book-entry (mutating, controlled)
+ *    - body: { entry_id, is_test }  (actor resolved from JWT inside function)
+ *    - expects: { ok:true, verified_document_id }
+ *    - once promoted exists: show Verify Terminal link (verify.html with verified_id + entry_id)
  */
 
 import Link from "next/link";
@@ -72,6 +83,7 @@ type OfficialArtifact = {
   storage_path: string;
   file_name?: string | null;
   kind?: "official" | "certified" | "verified";
+  verified_document_id?: string | null; // for verify.html link
 };
 
 type DeleteResult = {
@@ -81,6 +93,32 @@ type DeleteResult = {
   deleted_storage_objects?: number;
   deleted_entry_rows?: number;
   reason?: string | null;
+};
+
+type ExportResult = {
+  ok?: boolean;
+  url?: string;
+  error?: string;
+  details?: unknown;
+};
+
+type PromoteResult = {
+  ok?: boolean;
+  entry_id?: string;
+  is_test?: boolean;
+  verified_document_id?: string;
+  reused?: boolean;
+  error?: string;
+  details?: unknown;
+};
+
+type VerifiedDocRow = {
+  id: string;
+  storage_bucket: string | null;
+  storage_path: string | null;
+  file_hash?: string | null;
+  verification_level?: string | null;
+  created_at?: string | null;
 };
 
 /* ---------------- helpers ---------------- */
@@ -163,6 +201,14 @@ function bucketCandidatesForPath(path: string) {
   candidates.push("governance_sandbox");
 
   return uniq(candidates);
+}
+
+function buildVerifyHtmlUrl(verifiedId: string, entryId: string) {
+  const base = "https://sign.oasisintlholdings.com/verify.html";
+  const u = new URL(base);
+  u.searchParams.set("verified_id", verifiedId);
+  u.searchParams.set("entry_id", entryId);
+  return u.toString();
 }
 
 const DOMAIN_ICON: Record<string, string> = {
@@ -255,6 +301,7 @@ function pickPrimaryDocByEntry(docs: SupportingDoc[]): Map<string, SupportingDoc
 
 /**
  * ✅ OFFICIAL resolver (read-only) — lane-aware (checks governance_ledger.is_test)
+ * - This is the governance-record official artifact path (existing behavior; NO regression)
  */
 async function resolveOfficialArtifact(
   _entityKey: string,
@@ -278,7 +325,7 @@ async function resolveOfficialArtifact(
 
     const { data, error } = await sb
       .from("verified_documents")
-      .select("storage_bucket,storage_path,file_hash,created_at")
+      .select("id,storage_bucket,storage_path,file_hash,created_at")
       .eq("source_record_id", ledgerId)
       .order("created_at", { ascending: false })
       .limit(1);
@@ -295,10 +342,51 @@ async function resolveOfficialArtifact(
       storage_path: path,
       file_name: (v.file_name as string) || entry.file_name || null,
       kind: "verified",
+      verified_document_id: (v.id as string) || null,
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * ✅ PROMOTED resolver (read-only) — Minute Book entry certification artifact
+ * - Looks for verified_documents where source_table='minute_book_entries' and source_record_id=entry.id
+ * - Lane is implied by storage_bucket path (governance_sandbox vs governance_truth) and matches current env
+ * - This does NOT change any existing wiring; it only reads.
+ */
+async function resolvePromotedArtifact(entryId: string, laneIsTest: boolean): Promise<OfficialArtifact | null> {
+  const sb = supabaseBrowser;
+
+  const { data, error } = await sb
+    .from("verified_documents")
+    .select("id,storage_bucket,storage_path,file_hash,verification_level,created_at")
+    .eq("source_table", "minute_book_entries")
+    .eq("source_record_id", entryId)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (error || !data?.length) return null;
+
+  const row = data[0] as unknown as VerifiedDocRow;
+
+  const bucket = (row.storage_bucket || "").toString().trim();
+  const path = (row.storage_path || "").toString().trim();
+  if (!bucket || !path) return null;
+
+  // lane gate (UI-only): sandbox bucket belongs to SANDBOX; truth bucket belongs to RoT
+  if (bucket === "governance_sandbox" && !laneIsTest) return null;
+  if (bucket === "governance_truth" && laneIsTest) return null;
+
+  const lvl = (row.verification_level || "").toLowerCase();
+  const kind: OfficialArtifact["kind"] = lvl === "certified" ? "certified" : "verified";
+
+  return {
+    bucket_id: bucket,
+    storage_path: path,
+    kind,
+    verified_document_id: row.id,
+  };
 }
 
 /**
@@ -447,6 +535,7 @@ async function bestSignedUrlForMinuteBookEvidence(
   const msg = lastErr instanceof Error ? lastErr.message : "Object not found in candidate buckets.";
   throw new Error(msg);
 }
+
 /* ---------------- UI ---------------- */
 
 export default function MinuteBookClient() {
@@ -469,6 +558,7 @@ export default function MinuteBookClient() {
 
   // evidence state (official-first)
   const [official, setOfficial] = useState<OfficialArtifact | null>(null);
+  const [promoted, setPromoted] = useState<OfficialArtifact | null>(null); // NEW: minute_book_entries certification
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [pdfBusy, setPdfBusy] = useState<boolean>(false);
   const [pdfErr, setPdfErr] = useState<string | null>(null);
@@ -490,6 +580,14 @@ export default function MinuteBookClient() {
   const [deleteReason, setDeleteReason] = useState<string>("");
   const [deleteBusy, setDeleteBusy] = useState<boolean>(false);
   const [deleteErr, setDeleteErr] = useState<string | null>(null);
+
+  // discovery export (non-mutating)
+  const [exportBusy, setExportBusy] = useState<boolean>(false);
+  const [exportErr, setExportErr] = useState<string | null>(null);
+
+  // NEW: promote → verified registry (mutating Edge Function)
+  const [promoteBusy, setPromoteBusy] = useState<boolean>(false);
+  const [promoteErr, setPromoteErr] = useState<string | null>(null);
 
   // Load domains
   useEffect(() => {
@@ -523,11 +621,18 @@ export default function MinuteBookClient() {
       setSelectedId(null);
 
       setOfficial(null);
+      setPromoted(null);
       setPreviewUrl(null);
       setPdfErr(null);
       setResolvedBucket(null);
       setResolvedPath(null);
       setMobileReaderOpen(false);
+
+      setExportErr(null);
+      setExportBusy(false);
+
+      setPromoteErr(null);
+      setPromoteBusy(false);
 
       if (!entityKey) {
         setLoading(false);
@@ -663,26 +768,38 @@ export default function MinuteBookClient() {
   const authorityBadge = useMemo(() => {
     if (!selected) return null;
     if (official) return { label: "OFFICIAL", tone: "gold" as const };
+    if (promoted) return { label: "CERTIFIED", tone: "sky" as const };
     return { label: "UPLOADED", tone: "neutral" as const };
-  }, [selected?.id, !!official]);
+  }, [selected?.id, !!official, !!promoted]);
 
-  // Resolve official artifact on selection (lane-aware)
+  // Resolve official + promoted artifact on selection (lane-aware)
   useEffect(() => {
     let alive = true;
     (async () => {
       setOfficial(null);
+      setPromoted(null);
       setPdfErr(null);
       setPreviewUrl(null);
       setResolvedBucket(null);
       setResolvedPath(null);
 
+      setExportErr(null);
+      setExportBusy(false);
+
+      setPromoteErr(null);
+      setPromoteBusy(false);
+
       if (!entityKey || !selected) return;
 
       setPdfBusy(true);
       try {
-        const off = await resolveOfficialArtifact(entityKey, selected, laneIsTest);
+        const [off, prom] = await Promise.all([
+          resolveOfficialArtifact(entityKey, selected, laneIsTest),
+          resolvePromotedArtifact(selected.id, laneIsTest),
+        ]);
         if (!alive) return;
         setOfficial(off);
+        setPromoted(prom);
       } finally {
         if (alive) setPdfBusy(false);
       }
@@ -700,10 +817,13 @@ export default function MinuteBookClient() {
     setPdfBusy(true);
 
     try {
+      // ✅ preference order: OFFICIAL (governance-linked) → PROMOTED (minute book certified) → primary upload
+      const preferred = official || promoted || null;
+
       const { signedUrl, resolvedBucket: b, resolvedPath: p } = await bestSignedUrlForMinuteBookEvidence(
         entityKey,
         selected,
-        official,
+        preferred,
         null
       );
 
@@ -726,10 +846,12 @@ export default function MinuteBookClient() {
 
     try {
       const name = selected.file_name || `${norm(selected.title, "document")}.pdf`;
+      const preferred = official || promoted || null;
+
       const { signedUrl, resolvedBucket: b, resolvedPath: p } = await bestSignedUrlForMinuteBookEvidence(
         entityKey,
         selected,
-        official,
+        preferred,
         name
       );
 
@@ -755,10 +877,12 @@ export default function MinuteBookClient() {
         return;
       }
 
+      const preferred = official || promoted || null;
+
       const { signedUrl, resolvedBucket: b, resolvedPath: p } = await bestSignedUrlForMinuteBookEvidence(
         entityKey,
         selected,
-        official,
+        preferred,
         null
       );
 
@@ -771,6 +895,91 @@ export default function MinuteBookClient() {
     } finally {
       setPdfBusy(false);
     }
+  }
+
+  // ✅ Discovery Export (non-mutating)
+  async function exportDiscoveryPackage() {
+    if (!selected) return;
+
+    setExportErr(null);
+    setExportBusy(true);
+
+    try {
+      const ledgerId = (selected.source_record_id || "").toString().trim();
+      if (!ledgerId) {
+        throw new Error("Discovery Export requires a linked governance record (missing source_record_id).");
+      }
+
+      const { data, error } = await supabaseBrowser.functions.invoke("export-discovery-package", {
+        body: { ledger_id: ledgerId },
+      });
+
+      if (error) throw error;
+
+      const res = (data ?? {}) as ExportResult;
+      if (!res.ok || !res.url) {
+        const msg = (typeof res.error === "string" && res.error) || "Export failed (no ok=true/url returned).";
+        throw new Error(msg);
+      }
+
+      window.open(res.url, "_blank", "noopener,noreferrer");
+    } catch (e: unknown) {
+      setExportErr(e instanceof Error ? e.message : "Discovery Export failed.");
+    } finally {
+      setExportBusy(false);
+    }
+  }
+
+  // ✅ NEW: Promote to Verified Registry (minute_book entry certification)
+  async function promoteToVerifiedRegistry() {
+    if (!selected) return;
+
+    setPromoteErr(null);
+    setPromoteBusy(true);
+
+    try {
+      // If it already exists, we do not force — button will be disabled anyway.
+      const { data, error } = await supabaseBrowser.functions.invoke("certify-minute-book-entry", {
+        body: {
+          entry_id: selected.id,
+          is_test: laneIsTest,
+        },
+      });
+
+      if (error) throw error;
+
+      const res = (data ?? {}) as PromoteResult;
+      if (!res.ok || !res.verified_document_id) {
+        const msg = (typeof res.error === "string" && res.error) || "Promotion failed (no ok=true/verified_document_id).";
+        throw new Error(msg);
+      }
+
+      // refresh promoted resolver (read-only)
+      const prom = await resolvePromotedArtifact(selected.id, laneIsTest);
+      setPromoted(prom);
+
+      // if we already have a preview open, keep it aligned to the now-promoted artifact
+      if (previewUrl) {
+        await ensurePreviewUrl(false);
+      }
+    } catch (e: unknown) {
+      setPromoteErr(e instanceof Error ? e.message : "Promotion failed.");
+    } finally {
+      setPromoteBusy(false);
+    }
+  }
+
+  function openVerifyTerminal() {
+    if (!selected) return;
+    const vid =
+      official?.verified_document_id ||
+      promoted?.verified_document_id ||
+      null;
+
+    if (!vid) return;
+
+    const url = buildVerifyHtmlUrl(vid, selected.id);
+    window.open(url, "_blank", "noopener,noreferrer");
   }
 
   async function runDelete() {
@@ -799,6 +1008,14 @@ export default function MinuteBookClient() {
       setResolvedBucket(null);
       setResolvedPath(null);
 
+      setExportErr(null);
+      setExportBusy(false);
+
+      setPromoteErr(null);
+      setPromoteBusy(false);
+      setPromoted(null);
+      setOfficial(null);
+
       if (entityKey) {
         const base = await loadEntries(entityKey);
         const ids = base.map((e: MinuteBookEntry) => e.id);
@@ -809,10 +1026,7 @@ export default function MinuteBookClient() {
         const laneMap = new Map<string, { is_test: boolean; status: string }>();
 
         if (recordIds.length) {
-          const { data: gl } = await supabaseBrowser
-            .from("governance_ledger")
-            .select("id,is_test,status")
-            .in("id", recordIds);
+          const { data: gl } = await supabaseBrowser.from("governance_ledger").select("id,is_test,status").in("id", recordIds);
 
           for (const r of gl ?? []) {
             laneMap.set(String((r as any).id), {
@@ -1127,9 +1341,19 @@ export default function MinuteBookClient() {
                                 </div>
                               </div>
 
-                              {official && selectedId === e.id ? (
-                                <span className="shrink-0 px-2 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-[10px] uppercase tracking-[0.18em] text-amber-200">
-                                  OFFICIAL
+                              {/* badge for current selected only (keeps list quiet) */}
+                              {selectedId === e.id && authorityBadge ? (
+                                <span
+                                  className={cx(
+                                    "shrink-0 px-2 py-1 rounded-full border text-[10px] uppercase tracking-[0.18em] font-semibold",
+                                    authorityBadge.tone === "gold"
+                                      ? "bg-amber-500/10 border-amber-500/30 text-amber-200"
+                                      : authorityBadge.tone === "sky"
+                                        ? "bg-sky-500/10 border-sky-500/30 text-sky-200"
+                                        : "bg-white/5 border-white/10 text-slate-200"
+                                  )}
+                                >
+                                  {authorityBadge.label}
                                 </span>
                               ) : null}
                             </div>
@@ -1164,7 +1388,9 @@ export default function MinuteBookClient() {
                           "px-2 py-0.5 rounded-full border text-[10px] uppercase tracking-[0.18em] font-semibold",
                           authorityBadge.tone === "gold"
                             ? "bg-amber-500/10 border-amber-500/40 text-amber-200"
-                            : "bg-white/5 border-white/10 text-slate-200"
+                            : authorityBadge.tone === "sky"
+                              ? "bg-sky-500/10 border-sky-500/30 text-sky-200"
+                              : "bg-white/5 border-white/10 text-slate-200"
                         )}
                       >
                         {authorityBadge.label}
@@ -1200,6 +1426,18 @@ export default function MinuteBookClient() {
                         {pdfErr ? (
                           <div className="mt-3 rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
                             {pdfErr}
+                          </div>
+                        ) : null}
+
+                        {exportErr ? (
+                          <div className="mt-3 rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
+                            {exportErr}
+                          </div>
+                        ) : null}
+
+                        {promoteErr ? (
+                          <div className="mt-3 rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
+                            {promoteErr}
                           </div>
                         ) : null}
 
@@ -1245,6 +1483,58 @@ export default function MinuteBookClient() {
                             Open
                           </button>
 
+                          {/* ✅ Discovery Export (non-mutating, ledger-linked only) */}
+                          <button
+                            type="button"
+                            onClick={exportDiscoveryPackage}
+                            disabled={exportBusy || !selected.source_record_id}
+                            className={cx(
+                              "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
+                              exportBusy || !selected.source_record_id
+                                ? "bg-white/5 text-slate-200/40 border-white/10"
+                                : "bg-sky-500/10 border-sky-500/30 text-sky-200 hover:bg-sky-500/15"
+                            )}
+                            title={
+                              selected.source_record_id
+                                ? "Export discovery package (ZIP)"
+                                : "Discovery Export requires a linked governance record (source_record_id)."
+                            }
+                          >
+                            {exportBusy ? "Exporting…" : "Discovery Export"}
+                          </button>
+
+                          {/* ✅ NEW: Promote to Verified Registry */}
+                          <button
+                            type="button"
+                            onClick={promoteToVerifiedRegistry}
+                            disabled={promoteBusy || !!promoted}
+                            className={cx(
+                              "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
+                              promoteBusy || !!promoted
+                                ? "bg-white/5 text-slate-200/40 border-white/10"
+                                : "bg-emerald-500/10 border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/15"
+                            )}
+                            title={promoted ? "Already promoted (certified)." : "Promote this entry into Verified Registry (certify PDF + QR)."}
+                          >
+                            {promoteBusy ? "Promoting…" : promoted ? "Promoted" : "Promote"}
+                          </button>
+
+                          {/* ✅ NEW: Verify Terminal link (only when a verified_document exists) */}
+                          <button
+                            type="button"
+                            onClick={openVerifyTerminal}
+                            disabled={!(official?.verified_document_id || promoted?.verified_document_id)}
+                            className={cx(
+                              "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
+                              !(official?.verified_document_id || promoted?.verified_document_id)
+                                ? "bg-white/5 text-slate-200/40 border-white/10"
+                                : "bg-white/5 border-amber-500/25 text-amber-200 hover:bg-white/7 hover:border-amber-500/40"
+                            )}
+                            title="Open public verify.html terminal"
+                          >
+                            Verify
+                          </button>
+
                           <button
                             type="button"
                             onClick={() => {
@@ -1281,6 +1571,7 @@ export default function MinuteBookClient() {
                           </div>
                         )}
                       </div>
+
                       {/* Metadata Zone */}
                       <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-4">
                         <div className="text-[10px] uppercase tracking-[0.25em] text-slate-500">Metadata Zone</div>
@@ -1336,10 +1627,7 @@ export default function MinuteBookClient() {
           {/* ---------------- MOBILE: Domains Sheet ---------------- */}
           {mobileDomainsOpen ? (
             <div className="sm:hidden fixed inset-0 z-[60]">
-              <div
-                className="absolute inset-0 bg-black/60"
-                onClick={() => setMobileDomainsOpen(false)}
-              />
+              <div className="absolute inset-0 bg-black/60" onClick={() => setMobileDomainsOpen(false)} />
               <div className="absolute inset-x-0 bottom-0 rounded-t-3xl border border-white/10 bg-black/70 backdrop-blur-xl">
                 <div className="px-4 py-4 border-b border-white/10">
                   <div className="flex items-center justify-between">
@@ -1366,9 +1654,7 @@ export default function MinuteBookClient() {
                     }}
                     className={cx(
                       "w-full flex items-center justify-between gap-3 px-3 py-3 rounded-2xl border transition",
-                      activeDomainKey === "all"
-                        ? "bg-amber-500/10 border-amber-500/40"
-                        : "bg-white/5 border-white/10"
+                      activeDomainKey === "all" ? "bg-amber-500/10 border-amber-500/40" : "bg-white/5 border-white/10"
                     )}
                   >
                     <span className="text-sm text-slate-100">All</span>
@@ -1447,6 +1733,18 @@ export default function MinuteBookClient() {
                         </>
                       ) : null}
                     </div>
+
+                    {exportErr ? (
+                      <div className="mt-2 rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
+                        {exportErr}
+                      </div>
+                    ) : null}
+
+                    {promoteErr ? (
+                      <div className="mt-2 rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
+                        {promoteErr}
+                      </div>
+                    ) : null}
                   </div>
 
                   <div className="shrink-0 flex items-center gap-2">
@@ -1464,6 +1762,58 @@ export default function MinuteBookClient() {
                       className="hidden sm:inline-flex rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200"
                     >
                       Tone
+                    </button>
+
+                    {/* Discovery Export */}
+                    <button
+                      type="button"
+                      onClick={exportDiscoveryPackage}
+                      disabled={exportBusy || !selected?.source_record_id}
+                      className={cx(
+                        "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase",
+                        exportBusy || !selected?.source_record_id
+                          ? "border-white/10 bg-white/5 text-slate-200/40"
+                          : "border-sky-500/30 bg-sky-500/10 text-sky-200 hover:bg-sky-500/15"
+                      )}
+                      title={
+                        selected?.source_record_id
+                          ? "Export discovery package (ZIP)"
+                          : "Discovery Export requires a linked governance record (source_record_id)."
+                      }
+                    >
+                      {exportBusy ? "Exporting…" : "Export"}
+                    </button>
+
+                    {/* Promote */}
+                    <button
+                      type="button"
+                      onClick={promoteToVerifiedRegistry}
+                      disabled={promoteBusy || !!promoted}
+                      className={cx(
+                        "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase",
+                        promoteBusy || !!promoted
+                          ? "border-white/10 bg-white/5 text-slate-200/40"
+                          : "border-emerald-500/30 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/15"
+                      )}
+                      title={promoted ? "Already promoted (certified)." : "Promote this entry into Verified Registry."}
+                    >
+                      {promoteBusy ? "Promoting…" : promoted ? "Promoted" : "Promote"}
+                    </button>
+
+                    {/* Verify link */}
+                    <button
+                      type="button"
+                      onClick={openVerifyTerminal}
+                      disabled={!(official?.verified_document_id || promoted?.verified_document_id)}
+                      className={cx(
+                        "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase",
+                        !(official?.verified_document_id || promoted?.verified_document_id)
+                          ? "border-white/10 bg-white/5 text-slate-200/40"
+                          : "border-amber-500/25 bg-white/5 text-amber-200 hover:bg-white/7 hover:border-amber-500/40"
+                      )}
+                      title="Open public verify.html terminal"
+                    >
+                      Verify
                     </button>
 
                     <button
@@ -1573,4 +1923,3 @@ export default function MinuteBookClient() {
     </Shell>
   );
 }
-
