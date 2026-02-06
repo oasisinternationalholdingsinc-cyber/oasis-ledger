@@ -64,6 +64,19 @@ function looksLikeNotFound(err: unknown) {
 }
 
 /**
+ * ✅ Lane inference for non-ledger sources (UI-only, no schema changes)
+ * Promoted Minute Book entries use source_table='minute_book_entries' and do not join governance_ledger.
+ * We infer lane from verified_documents.storage_bucket.
+ */
+function inferLaneFromBucket(bucket?: string | null): boolean | null {
+  const b = String(bucket || "").trim();
+  if (!b) return null;
+  if (b === "governance_sandbox") return true;
+  if (b === "governance_truth") return false;
+  return null;
+}
+
+/**
  * Signed URL helper (kept) — includes mild repair by listing dir & selecting best PDF candidate.
  * NO wiring change: still uses verified_documents.storage_bucket + storage_path as canonical pointers.
  */
@@ -194,7 +207,7 @@ export default function VerifiedRegistryPage() {
     };
   }, [activeEntity]);
 
-  // Load verified_documents + join lane/status (NO CHANGE)
+  // Load verified_documents + join lane/status (NO CHANGE to source; just lane-safe fix for non-ledger sources)
   useEffect(() => {
     let alive = true;
 
@@ -224,7 +237,14 @@ export default function VerifiedRegistryPage() {
         return;
       }
 
-      const recordIds = (vd ?? []).map((r: any) => r.source_record_id).filter(Boolean) as string[];
+      // ✅ Only join governance_ledger for rows that actually reference it.
+      // Historical compatibility: treat null/empty source_table as ledger-backed.
+      const ledgerBacked = (vd ?? []).filter((r: any) => {
+        const st = String(r.source_table ?? "").trim();
+        return !st || st === "governance_ledger";
+      });
+
+      const recordIds = ledgerBacked.map((r: any) => r.source_record_id).filter(Boolean) as string[];
 
       const laneMap = new Map<string, { is_test: boolean; status: string }>();
 
@@ -242,15 +262,22 @@ export default function VerifiedRegistryPage() {
       }
 
       const merged: VerifiedRow[] = (vd ?? []).map((r: any) => {
-        const m = r.source_record_id ? laneMap.get(r.source_record_id) : null;
+        const st = String(r.source_table ?? "").trim();
+        const isLedgerBacked = !st || st === "governance_ledger";
+
+        const m = isLedgerBacked && r.source_record_id ? laneMap.get(r.source_record_id) : null;
+
+        // ✅ If not ledger-backed (e.g., minute_book_entries promotion), infer lane from storage bucket
+        const inferredLane = !isLedgerBacked ? inferLaneFromBucket(r.storage_bucket) : null;
+
         return {
           ...(r as VerifiedRow),
-          lane_is_test: m?.is_test ?? null,
+          lane_is_test: m?.is_test ?? inferredLane ?? null,
           ledger_status: m?.status ?? null,
         };
       });
 
-      // Lane filter (NO CHANGE)
+      // ✅ Lane filter (NOW safe for promoted docs too)
       const laneFiltered = merged.filter((r) => {
         if (r.lane_is_test === null || r.lane_is_test === undefined) return true;
         return r.lane_is_test === laneIsTest;
@@ -281,9 +308,9 @@ export default function VerifiedRegistryPage() {
 
   /**
    * ✅ Open Verified -> Reader Sheet (iPhone-first)
-   * ✅ FIX: preview uses inline URL (no download disposition) so iframe renders.
+   * ✅ preview uses inline URL (no download disposition) so iframe renders.
    * ✅ Download uses attachment URL (with filename).
-   * NO routing. NO 404 pages. Same signedUrlForVerified() contract you already trust.
+   * NO routing. NO 404 pages.
    */
   async function openVerified(r: VerifiedRow) {
     setOpenErr(null);
@@ -314,7 +341,6 @@ export default function VerifiedRegistryPage() {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Failed to open verified document.";
       setOpenErr(msg);
-      // if reader was opened, close it cleanly
       setReaderOpen(false);
       setReaderDoc(null);
       setReaderUrl(null);
@@ -413,6 +439,7 @@ export default function VerifiedRegistryPage() {
                 {openErr}
               </div>
             ) : null}
+
             {/* iPhone-first surface: stacks; desktop: 3 columns */}
             <div className="grid grid-cols-12 gap-4">
               {/* LEFT: Filters */}
@@ -461,9 +488,9 @@ export default function VerifiedRegistryPage() {
                   <div className="mt-4 text-xs text-slate-400">{loading ? "Loading…" : `${filtered.length} result(s)`}</div>
 
                   <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-400">
-                    Lane-safe: filters by{" "}
-                    <span className="text-slate-200">governance_ledger.is_test</span> via{" "}
-                    <span className="text-slate-200">verified_documents.source_record_id</span>.
+                    Lane-safe: ledger-backed docs gate by{" "}
+                    <span className="text-slate-200">governance_ledger.is_test</span>; promoted docs gate by{" "}
+                    <span className="text-slate-200">storage_bucket</span>.
                   </div>
                 </div>
               </section>
