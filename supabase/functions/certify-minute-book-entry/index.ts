@@ -747,8 +747,10 @@ serve(async (req) => {
     const existingBucket = safeText(existingVd?.storage_bucket);
     const existingPath = safeText(existingVd?.storage_path);
 
+    // ✅ Uniqueness reality: one verified_documents row per (source_table, source_record_id)
+    const hasAny = !!existingId;
     const hasCertified = !!(existingId && existingHash && existingLevel === "certified");
-    const reissue = !!force && hasCertified;
+    const reissue = !!force && hasAny;
 
     // 5b) Strict reuse (no mutation)
     if (!force && hasCertified) {
@@ -882,12 +884,42 @@ serve(async (req) => {
       }
     }
 
-    // 10) Registry write:
-    // - If reissue (force + existing certified): INSERT new verified_documents row, link supersedes.
-    // - Else: if existing non-certified row exists, UPDATE it to certified; else INSERT.
+    // 10) Registry write (PRODUCTION / ENTERPRISE):
+    // ✅ DB enforces UNIQUE (source_table, source_record_id) for minute_book_entries
+    // - If a row exists: UPDATE it (this is BOTH certify + reissue)
+    // - Else: INSERT it (first certification)
     let verified_id: string;
 
-    if (reissue) {
+    if (existingId) {
+      verified_id = existingId;
+
+      const upd = await supabaseAdmin
+        .from("verified_documents")
+        .update({
+          entity_id,
+          entity_slug,
+          document_class,
+          title,
+          source_table: "minute_book_entries",
+          source_record_id: entryId,
+          storage_bucket: certified_bucket,
+          storage_path: certified_path,
+          file_hash: finalHash,
+          mime_type: "application/pdf",
+          verification_level: "certified",
+          is_archived: true,
+          updated_at: new Date().toISOString(),
+          updated_by: actorId,
+        } as any)
+        .eq("id", verified_id);
+
+      if (upd.error) {
+        return json(
+          { ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId } satisfies Resp,
+          500,
+        );
+      }
+    } else {
       const ins = await supabaseAdmin
         .from("verified_documents")
         .insert({
@@ -905,10 +937,6 @@ serve(async (req) => {
           is_archived: true,
           created_by: actorId,
           updated_by: actorId,
-
-          // enterprise lineage (no schema change assumed; if columns absent, Supabase will error)
-          supersedes_verified_document_id: existingId,
-          supersession_reason: "reissue",
         } as any)
         .select("id")
         .single();
@@ -919,66 +947,8 @@ serve(async (req) => {
           500,
         );
       }
+
       verified_id = String(ins.data.id);
-    } else {
-      if (existingId) {
-        verified_id = existingId;
-
-        const upd = await supabaseAdmin
-          .from("verified_documents")
-          .update({
-            entity_id,
-            entity_slug,
-            document_class,
-            title,
-            storage_bucket: certified_bucket,
-            storage_path: certified_path,
-            file_hash: finalHash,
-            mime_type: "application/pdf",
-            verification_level: "certified",
-            is_archived: true,
-            updated_at: new Date().toISOString(),
-            updated_by: actorId,
-          } as any)
-          .eq("id", verified_id);
-
-        if (upd.error) {
-          return json(
-            { ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId } satisfies Resp,
-            500,
-          );
-        }
-      } else {
-        const ins = await supabaseAdmin
-          .from("verified_documents")
-          .insert({
-            entity_id,
-            entity_slug,
-            document_class,
-            title,
-            source_table: "minute_book_entries",
-            source_record_id: entryId,
-            storage_bucket: certified_bucket,
-            storage_path: certified_path,
-            file_hash: finalHash,
-            mime_type: "application/pdf",
-            verification_level: "certified",
-            is_archived: true,
-            created_by: actorId,
-            updated_by: actorId,
-          } as any)
-          .select("id")
-          .single();
-
-        if (ins.error) {
-          return json(
-            { ok: false, error: "VERIFIED_DOC_INSERT_FAILED", details: ins.error, request_id: reqId } satisfies Resp,
-            500,
-          );
-        }
-
-        verified_id = String(ins.data.id);
-      }
     }
 
     // ✅ Best-effort audit (operator trail) — non-fatal
@@ -997,7 +967,6 @@ serve(async (req) => {
         source_path,
         reused: false,
         reissue,
-        supersedes_verified_document_id: reissue ? existingId : null,
       },
     });
 
