@@ -12,7 +12,7 @@ type ReqBody = {
   entry_id?: string; // minute_book_entries.id (required)
   actor_id?: string; // optional; resolved from JWT if missing
   is_test?: boolean; // optional; infer lane from source_record_id -> governance_ledger.is_test
-  force?: boolean; // optional (reissue/overwrite)
+  force?: boolean; // optional (reissue)
   verify_base_url?: string; // optional override (defaults to VERIFY_BASE_URL or verify.html)
 };
 
@@ -434,7 +434,13 @@ async function buildCertifiedWithAppendedPage(args: {
 
   // Verification block
   const vTop = gridTop - 98;
-  page.drawText("Verification", { x: margin, y: vTop, size: 11, font: fontBold, color: ink });
+  page.drawText("Verification", {
+    x: margin,
+    y: vTop,
+    size: 11,
+    font: fontBold,
+    color: ink,
+  });
 
   page.drawText(
     "To verify cryptographic truth (hash, certification, registry status), scan the QR code or open the verification terminal.",
@@ -528,7 +534,7 @@ async function buildCertifiedWithAppendedPage(args: {
     color: muted,
   });
 
-  // Registry attestation box (bottom-left) — now includes operator + time.
+  // Registry attestation box (bottom-left) — includes operator + time.
   const attX = margin;
   const attY = 92;
   const attW = 300;
@@ -552,7 +558,6 @@ async function buildCertifiedWithAppendedPage(args: {
     color: muted,
   });
 
-  // Operator + time (enterprise traceability)
   const opLine = `Operator: ${operatorLabel}`.slice(0, 64);
   const tsLine = `Certified At (UTC): ${certifiedAtUtc}`.slice(0, 64);
 
@@ -572,7 +577,6 @@ async function buildCertifiedWithAppendedPage(args: {
     color: ink,
   });
 
-  // Subtle signature line (keeps symmetry)
   page.drawLine({
     start: { x: attX + 12, y: attY + 10 },
     end: { x: attX + attW - 12, y: attY + 10 },
@@ -580,7 +584,6 @@ async function buildCertifiedWithAppendedPage(args: {
     color: rgb(0.30, 0.32, 0.36),
   });
 
-  // Footer microcopy
   const foot =
     "This certification page was appended to preserve original document pages. Verification resolves by hash (QR).";
   page.drawText(foot, {
@@ -593,6 +596,46 @@ async function buildCertifiedWithAppendedPage(args: {
   });
 
   return new Uint8Array(await outDoc.save());
+}
+
+/**
+ * ✅ Fetch the latest verified_document pointer for a source_record_id.
+ * Uses v_verified_latest when present (matches your new SQL view).
+ * Falls back to verified_documents ordering if view not present.
+ */
+async function fetchLatestVerifiedPointer(entryId: string) {
+  // Try v_verified_latest first
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("v_verified_latest")
+      .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
+      .eq("source_record_id", entryId)
+      .maybeSingle();
+
+    if (!error && data) return { data, via: "view" as const };
+  } catch {
+    // ignore
+  }
+
+  // Fallback: certified first, then newest created_at
+  const { data, error } = await supabaseAdmin
+    .from("verified_documents")
+    .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
+    .eq("source_table", "minute_book_entries")
+    .eq("source_record_id", entryId)
+    .order("verification_level", { ascending: true }) // not reliable ordering; keep additional sort below
+    .order("created_at", { ascending: false })
+    .limit(25);
+
+  if (error) return { data: null, via: "none" as const, error };
+
+  const rows = (data ?? []) as any[];
+  const pick =
+    rows.find((r) => String(r?.verification_level ?? "").toLowerCase() === "certified") ??
+    rows[0] ??
+    null;
+
+  return { data: pick, via: "fallback" as const };
 }
 
 serve(async (req) => {
@@ -690,117 +733,52 @@ serve(async (req) => {
 
     const source_path = src.file_path;
 
-    // 4) Certified destination pointer
+    // 4) Certified destination bucket + prefix (FINAL path becomes immutable-by-hash)
     const certified_bucket = is_test ? "governance_sandbox" : "governance_truth";
-    const certified_path = is_test
-      ? `sandbox/uploads/${entryId}.pdf`
-      : `truth/uploads/${entryId}.pdf`;
+    const certified_prefix = is_test ? "sandbox/uploads" : "truth/uploads";
 
-    // 5) Find existing verified_documents row
-    const existingVd = await supabaseAdmin
-      .from("verified_documents")
-      .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
-      .eq("source_table", "minute_book_entries")
-      .eq("source_record_id", entryId)
-      .maybeSingle();
+    // 5) Fetch latest verified pointer (certified-first), via v_verified_latest when available
+    const latest = await fetchLatestVerifiedPointer(entryId);
+    const existingVd = latest.data as any | null;
 
-    const existingId = existingVd.data?.id ? String(existingVd.data.id) : null;
-    const existingHash = safeText((existingVd.data as any)?.file_hash);
-    const existingLevel = safeText((existingVd.data as any)?.verification_level);
-    const existingBucket = safeText((existingVd.data as any)?.storage_bucket);
-    const existingPath = safeText((existingVd.data as any)?.storage_path);
+    const existingId = existingVd?.id ? String(existingVd.id) : null;
+    const existingHash = safeText(existingVd?.file_hash);
+    const existingLevel = safeText(existingVd?.verification_level)?.toLowerCase() ?? null;
+    const existingBucket = safeText(existingVd?.storage_bucket);
+    const existingPath = safeText(existingVd?.storage_path);
 
-    // 5b) Strict reuse
-    if (!force && existingId && existingHash && (existingLevel ?? "").toLowerCase() === "certified") {
-      if (existingBucket === certified_bucket && existingPath === certified_path) {
-        const verifyBase =
-          safeText(body.verify_base_url) ??
-          Deno.env.get("VERIFY_BASE_URL") ??
-          "https://sign.oasisintlholdings.com/verify.html";
+    const hasCertified = !!(existingId && existingHash && existingLevel === "certified");
+    const reissue = !!force && hasCertified;
 
-        return json<Resp>({
-          ok: true,
-          reused: true,
-          entry_id: entryId,
-          actor_id: actorId,
-          actor_email: actorEmail,
-          is_test,
-          verified_document_id: existingId,
-          verify_url: buildVerifyUrl(verifyBase, existingHash),
-          source: { bucket: source_bucket, path: source_path, file_hash: src.file_hash },
-          certified: {
-            bucket: certified_bucket,
-            path: certified_path,
-            file_hash: existingHash,
-            file_size: 0,
-          },
-          request_id: reqId,
-        });
-      }
+    // 5b) Strict reuse (no mutation)
+    if (!force && hasCertified) {
+      const verifyBase =
+        safeText(body.verify_base_url) ??
+        Deno.env.get("VERIFY_BASE_URL") ??
+        "https://sign.oasisintlholdings.com/verify.html";
+
+      return json<Resp>({
+        ok: true,
+        reused: true,
+        entry_id: entryId,
+        actor_id: actorId,
+        actor_email: actorEmail,
+        is_test,
+        verified_document_id: existingId!,
+        verify_url: buildVerifyUrl(verifyBase, existingHash!),
+        source: { bucket: source_bucket, path: source_path, file_hash: src.file_hash },
+        certified: {
+          bucket: existingBucket ?? certified_bucket,
+          path: existingPath ?? "",
+          file_hash: existingHash!,
+          file_size: 0,
+        },
+        request_id: reqId,
+      });
     }
 
-    // 6) Ensure a verified_documents row exists (update or insert)
+    // 6) Map to enum (no drift)
     const document_class = mapDocumentClass(entry_type, domain_key);
-
-    let verified_id: string;
-
-    if (existingId) {
-      verified_id = existingId;
-
-      const preUpd = await supabaseAdmin
-        .from("verified_documents")
-        .update({
-          entity_id,
-          entity_slug,
-          document_class,
-          title,
-          storage_bucket: certified_bucket,
-          storage_path: certified_path,
-          mime_type: "application/pdf",
-          verification_level: "certified",
-          is_archived: true,
-          updated_at: new Date().toISOString(),
-          updated_by: actorId,
-        } as any)
-        .eq("id", verified_id);
-
-      if (preUpd.error) {
-        return json(
-          { ok: false, error: "VERIFIED_DOC_PREUPDATE_FAILED", details: preUpd.error, request_id: reqId } satisfies Resp,
-          500,
-        );
-      }
-    } else {
-      const ins = await supabaseAdmin
-        .from("verified_documents")
-        .insert({
-          entity_id,
-          entity_slug,
-          document_class,
-          title,
-          source_table: "minute_book_entries",
-          source_record_id: entryId,
-          storage_bucket: certified_bucket,
-          storage_path: certified_path,
-          file_hash: null,
-          mime_type: "application/pdf",
-          verification_level: "certified",
-          is_archived: true,
-          created_by: actorId,
-          updated_by: actorId,
-        } as any)
-        .select("id")
-        .single();
-
-      if (ins.error) {
-        return json(
-          { ok: false, error: "VERIFIED_DOC_INSERT_FAILED", details: ins.error, request_id: reqId } satisfies Resp,
-          500,
-        );
-      }
-
-      verified_id = String(ins.data.id);
-    }
 
     // 7) Download source PDF bytes
     const dl = await supabaseAdmin.storage.from(source_bucket).download(source_path);
@@ -867,56 +845,140 @@ serve(async (req) => {
         certifiedAtUtc: certifiedAt,
       });
       const passC_hash = await sha256Hex(passC_bytes);
-
       finalBytes = passC_bytes;
       finalHash = passC_hash;
     }
 
     const finalVerifyUrl = buildVerifyUrl(verifyBase, finalHash);
 
-    // 9) Upload certified PDF (overwrite allowed)
+    // 9) Immutable certified PDF pointer (hash-derived path)
+    const certified_path = `${certified_prefix}/${entryId}-${finalHash.slice(0, 12)}.pdf`;
+
+    // Upload should be immutable (no overwrites); if the object already exists, we treat as ok.
     const up = await supabaseAdmin.storage
       .from(certified_bucket)
       .upload(
         certified_path,
         new Blob([finalBytes], { type: "application/pdf" }),
         {
-          upsert: true,
+          upsert: false,
           contentType: "application/pdf",
         },
       );
 
     if (up.error) {
-      return json(
-        { ok: false, error: "CERTIFIED_PDF_UPLOAD_FAILED", details: up.error, request_id: reqId },
-        500,
-      );
+      const msg = String((up.error as any)?.message ?? "");
+      // If already exists, proceed (idempotent by content/hash)
+      const alreadyExists =
+        msg.toLowerCase().includes("already exists") ||
+        msg.toLowerCase().includes("duplicate") ||
+        msg.toLowerCase().includes("409");
+
+      if (!alreadyExists) {
+        return json(
+          { ok: false, error: "CERTIFIED_PDF_UPLOAD_FAILED", details: up.error, request_id: reqId },
+          500,
+        );
+      }
     }
 
-    // 10) Finalize verified_documents hash + canonical pointer
-    const upd = await supabaseAdmin
-      .from("verified_documents")
-      .update({
-        entity_id,
-        entity_slug,
-        document_class,
-        title,
-        storage_bucket: certified_bucket,
-        storage_path: certified_path,
-        file_hash: finalHash,
-        mime_type: "application/pdf",
-        verification_level: "certified",
-        is_archived: true,
-        updated_at: new Date().toISOString(),
-        updated_by: actorId,
-      } as any)
-      .eq("id", verified_id);
+    // 10) Registry write:
+    // - If reissue (force + existing certified): INSERT new verified_documents row, link supersedes.
+    // - Else: if existing non-certified row exists, UPDATE it to certified; else INSERT.
+    let verified_id: string;
 
-    if (upd.error) {
-      return json(
-        { ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId },
-        500,
-      );
+    if (reissue) {
+      const ins = await supabaseAdmin
+        .from("verified_documents")
+        .insert({
+          entity_id,
+          entity_slug,
+          document_class,
+          title,
+          source_table: "minute_book_entries",
+          source_record_id: entryId,
+          storage_bucket: certified_bucket,
+          storage_path: certified_path,
+          file_hash: finalHash,
+          mime_type: "application/pdf",
+          verification_level: "certified",
+          is_archived: true,
+          created_by: actorId,
+          updated_by: actorId,
+
+          // enterprise lineage (no schema change assumed; if columns absent, Supabase will error)
+          supersedes_verified_document_id: existingId,
+          supersession_reason: "reissue",
+        } as any)
+        .select("id")
+        .single();
+
+      if (ins.error) {
+        return json(
+          { ok: false, error: "VERIFIED_DOC_INSERT_FAILED", details: ins.error, request_id: reqId } satisfies Resp,
+          500,
+        );
+      }
+      verified_id = String(ins.data.id);
+    } else {
+      if (existingId) {
+        verified_id = existingId;
+
+        const upd = await supabaseAdmin
+          .from("verified_documents")
+          .update({
+            entity_id,
+            entity_slug,
+            document_class,
+            title,
+            storage_bucket: certified_bucket,
+            storage_path: certified_path,
+            file_hash: finalHash,
+            mime_type: "application/pdf",
+            verification_level: "certified",
+            is_archived: true,
+            updated_at: new Date().toISOString(),
+            updated_by: actorId,
+          } as any)
+          .eq("id", verified_id);
+
+        if (upd.error) {
+          return json(
+            { ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId } satisfies Resp,
+            500,
+          );
+        }
+      } else {
+        const ins = await supabaseAdmin
+          .from("verified_documents")
+          .insert({
+            entity_id,
+            entity_slug,
+            document_class,
+            title,
+            source_table: "minute_book_entries",
+            source_record_id: entryId,
+            storage_bucket: certified_bucket,
+            storage_path: certified_path,
+            file_hash: finalHash,
+            mime_type: "application/pdf",
+            verification_level: "certified",
+            is_archived: true,
+            created_by: actorId,
+            updated_by: actorId,
+          } as any)
+          .select("id")
+          .single();
+
+        if (ins.error) {
+          return json(
+            { ok: false, error: "VERIFIED_DOC_INSERT_FAILED", details: ins.error, request_id: reqId } satisfies Resp,
+            500,
+          );
+        }
+
+        verified_id = String(ins.data.id);
+      }
     }
 
     // ✅ Best-effort audit (operator trail) — non-fatal
@@ -933,6 +995,9 @@ serve(async (req) => {
         certified_path,
         source_bucket,
         source_path,
+        reused: false,
+        reissue,
+        supersedes_verified_document_id: reissue ? existingId : null,
       },
     });
 
