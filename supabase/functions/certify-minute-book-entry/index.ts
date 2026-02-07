@@ -277,7 +277,10 @@ function mapDocumentClass(entryType?: string | null, domainKey?: string | null) 
 
 // -----------------------------------------------------------------------------
 // ✅ APPEND A NEW FINAL CERTIFICATION PAGE (never stamp existing last page)
+// ✅ DETERMINISTIC SAVE so fixed-point hash CONVERGES (NO mismatch)
 // -----------------------------------------------------------------------------
+const DETERMINISTIC_DATE = new Date("2020-01-01T00:00:00Z");
+
 async function buildCertifiedWithAppendedPage(args: {
   sourceBytes: Uint8Array;
   verifyUrl: string;
@@ -303,6 +306,12 @@ async function buildCertifiedWithAppendedPage(args: {
 
   const srcDoc = await PDFDocument.load(sourceBytes);
   const outDoc = await PDFDocument.create();
+
+  // ✅ make output stable across runs
+  outDoc.setCreator("Oasis Digital Parliament");
+  outDoc.setProducer("Oasis Verified Registry");
+  outDoc.setCreationDate(DETERMINISTIC_DATE);
+  outDoc.setModificationDate(DETERMINISTIC_DATE);
 
   const copiedPages = await outDoc.copyPages(srcDoc, srcDoc.getPageIndices());
   for (const p of copiedPages) outDoc.addPage(p);
@@ -560,7 +569,8 @@ async function buildCertifiedWithAppendedPage(args: {
     maxWidth: W - margin * 2,
   });
 
-  return new Uint8Array(await outDoc.save());
+  // ✅ deterministic serialization
+  return new Uint8Array(await outDoc.save({ useObjectStreams: false }));
 }
 
 /**
@@ -601,6 +611,7 @@ async function fetchLatestVerifiedPointer(entryId: string) {
 /**
  * ✅ FIXED-POINT HASH STABILIZATION:
  * embed hash -> hash -> repeat until stable
+ * (now converges because PDF output is deterministic)
  */
 async function buildCertifiedFixedPoint(args: {
   sourceBytes: Uint8Array;
@@ -623,33 +634,15 @@ async function buildCertifiedFixedPoint(args: {
     certifiedAtUtc,
   } = args;
 
-  // start with placeholder
   let current = "pending";
-  let bytes = await buildCertifiedWithAppendedPage({
-    sourceBytes,
-    verifyUrl: buildVerifyUrl(verifyBase, current),
-    finalHashText: current,
-    title,
-    entitySlug,
-    laneLabel,
-    documentClass,
-    operatorLabel,
-    certifiedAtUtc,
-  });
+  let lastBytes = new Uint8Array();
+  let lastHash = "";
 
-  let h = await sha256Hex(bytes);
-
-  // iterate until stable (max 6 tries)
-  for (let i = 0; i < 6; i++) {
-    if (h === current) {
-      return { bytes, hash: h, verify_url: buildVerifyUrl(verifyBase, h) };
-    }
-
-    current = h;
-    bytes = await buildCertifiedWithAppendedPage({
+  for (let i = 0; i < 10; i++) {
+    const bytes = await buildCertifiedWithAppendedPage({
       sourceBytes,
       verifyUrl: buildVerifyUrl(verifyBase, current),
-      finalHashText: current, // ✅ printed hash == resolve hash
+      finalHashText: current,
       title,
       entitySlug,
       laneLabel,
@@ -657,11 +650,25 @@ async function buildCertifiedFixedPoint(args: {
       operatorLabel,
       certifiedAtUtc,
     });
-    h = await sha256Hex(bytes);
+
+    const h = await sha256Hex(bytes);
+
+    lastBytes = bytes;
+    lastHash = h;
+
+    if (h === current) {
+      return { bytes, hash: h, verify_url: buildVerifyUrl(verifyBase, h) };
+    }
+
+    current = h;
   }
 
-  // if we somehow didn't converge, still return last (should be extremely rare)
-  return { bytes, hash: h, verify_url: buildVerifyUrl(verifyBase, h), non_converged: true };
+  return {
+    bytes: lastBytes,
+    hash: lastHash,
+    verify_url: buildVerifyUrl(verifyBase, lastHash),
+    non_converged: true,
+  };
 }
 
 serve(async (req) => {
@@ -894,7 +901,7 @@ serve(async (req) => {
       verified_id = existingId;
 
       if (existingLevel === "certified") {
-        // ✅ immutable certified row: pointer-only update (no updated_at, no updated_by)
+        // ✅ immutable certified row: pointer-only update
         const upd = await supabaseAdmin
           .from("verified_documents")
           .update({
@@ -911,7 +918,6 @@ serve(async (req) => {
           );
         }
       } else {
-        // not certified yet: promote to certified
         const upd = await supabaseAdmin
           .from("verified_documents")
           .update({
