@@ -3,6 +3,9 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
+/* ============================
+   Types
+============================ */
 type ReqBody = {
   // UI / legacy
   hash?: string | null;
@@ -17,6 +20,9 @@ type ReqBody = {
   expires_in?: number | null;
 };
 
+/* ============================
+   CORS
+============================ */
 const cors: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST,OPTIONS",
@@ -35,6 +41,9 @@ const json = (x: unknown, status = 200) =>
     headers: withCors({ "Content-Type": "application/json" }),
   });
 
+/* ============================
+   Env
+============================ */
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
 const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
@@ -43,9 +52,12 @@ if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
   throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
 }
 
-// Canonical SQL resolver (do not rename)
+// Canonical SQL resolver (DO NOT RENAME)
 const RESOLVE_RPC = "resolve_verified_record";
 
+/* ============================
+   Helpers
+============================ */
 function clampExpiresIn(n: unknown) {
   const v = Number(n);
   if (!Number.isFinite(v)) return 900;
@@ -77,7 +89,10 @@ function isTestFromBucket(bucket: string) {
   return b === "governance_sandbox" || b.includes("sandbox");
 }
 
-// Build a verify.html-compatible payload using ONLY verified_documents (hash-first)
+/* ============================
+   Hash-first resolver (Verified Registry only)
+   ✅ Canonical for verify.html?hash=...
+============================ */
 async function buildHashFirstPayload(args: {
   supabaseAdmin: ReturnType<typeof createClient>;
   hash: string;
@@ -85,7 +100,6 @@ async function buildHashFirstPayload(args: {
 }) {
   const { supabaseAdmin, hash, expires_in } = args;
 
-  // verified_documents lookup (NO schema drift: uses existing columns you already rely on)
   const { data: vd, error: vdErr } = await supabaseAdmin
     .from("verified_documents")
     .select(
@@ -104,7 +118,7 @@ async function buildHashFirstPayload(args: {
     return { ok: false, error: "NOT_REGISTERED" };
   }
 
-  // entity hydration (best-effort, no hardcoding)
+  // entity hydration (best-effort)
   const entId = safeText((vd as any).entity_id);
   const entSlug = safeText((vd as any).entity_slug);
 
@@ -129,30 +143,22 @@ async function buildHashFirstPayload(args: {
   const path = String((vd as any).storage_path);
 
   const signed = await signUrl(supabaseAdmin, bucket, path, expires_in);
-
   const is_test = isTestFromBucket(bucket);
 
-  // IMPORTANT: verify.html expects:
-  // - ok:true
-  // - hash (or verified.file_hash)
-  // - verified.storage_bucket/storage_path
-  // - urls.best_pdf at minimum to render iframe/open/download
   return {
     ok: true,
     hash: (vd as any).file_hash,
     verified_document_id: (vd as any).id,
 
-    // Ledger/envelope not available in pure hash-only path (that’s fine)
     ledger_id: null,
     envelope_id: null,
 
     entity:
-      ent ??
-      ({
+      ent ?? {
         id: entId ?? null,
         name: ent?.name ?? "—",
         slug: ent?.slug ?? entSlug ?? "—",
-      } as any),
+      },
 
     ledger: {
       id: null,
@@ -173,7 +179,8 @@ async function buildHashFirstPayload(args: {
       storage_path: path,
       file_hash: (vd as any).file_hash,
       created_at: (vd as any).created_at ?? null,
-      // keep envelope/ledger absent in hash-only
+      source_table: (vd as any).source_table ?? null,
+      source_record_id: (vd as any).source_record_id ?? null,
     },
 
     best_pdf: {
@@ -197,6 +204,9 @@ async function buildHashFirstPayload(args: {
   };
 }
 
+/* ============================
+   Handler
+============================ */
 serve(async (req) => {
   const reqId = req.headers.get("x-sb-request-id") ?? null;
 
@@ -210,7 +220,10 @@ serve(async (req) => {
 
   const supabaseAdmin = createClient(SUPABASE_URL!, SERVICE_ROLE_KEY!, {
     auth: { persistSession: false },
-    global: { fetch, headers: { "x-client-info": "odp-verify/resolve-verified-record" } },
+    global: {
+      fetch,
+      headers: { "x-client-info": "odp-verify/resolve-verified-record" },
+    },
   });
 
   let body: ReqBody = {};
@@ -220,16 +233,10 @@ serve(async (req) => {
     return json({ ok: false, error: "INVALID_JSON", request_id: reqId }, 400);
   }
 
-  // ✅ ENTERPRISE INPUT NORMALIZATION (NO REGRESSION)
-  const hash =
-    safeText(body.hash ?? body.p_hash)?.toLowerCase() ?? null;
-
-  const envelope_id =
-    safeText(body.envelope_id ?? body.p_envelope_id) ?? null;
-
-  const ledger_id =
-    safeText(body.ledger_id ?? body.p_ledger_id) ?? null;
-
+  // ENTERPRISE INPUT NORMALIZATION (NO REGRESSION)
+  const hash = safeText(body.hash ?? body.p_hash)?.toLowerCase() ?? null;
+  const envelope_id = safeText(body.envelope_id ?? body.p_envelope_id) ?? null;
+  const ledger_id = safeText(body.ledger_id ?? body.p_ledger_id) ?? null;
   const expires_in = clampExpiresIn(body.expires_in ?? 900);
 
   if (!hash && !envelope_id && !ledger_id) {
@@ -244,21 +251,28 @@ serve(async (req) => {
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // 1) Canonical SQL resolver (unchanged call)
-  // ---------------------------------------------------------------------------
+  // ✅ LOCKED: HASH-FIRST MUST NEVER BE BLOCKED BY ledger_id_required
+  if (hash) {
+    const fb = await buildHashFirstPayload({ supabaseAdmin, hash, expires_in });
+    // If hash resolves, return immediately (canonical verify.html path)
+    if ((fb as any).ok === true) return json({ ...(fb as any), request_id: reqId }, 200);
+
+    // If hash did not resolve and caller didn't provide any other identifier,
+    // return NOT_REGISTERED (no RPC, no ledger_id_required)
+    if (!envelope_id && !ledger_id) {
+      return json({ ...(fb as any), request_id: reqId }, 200);
+    }
+    // Else: allow legacy RPC to try envelope_id / ledger_id
+  }
+
+  // 2) Canonical SQL resolver (legacy paths)
   const { data: resolved, error: rpcErr } = await supabaseAdmin.rpc(RESOLVE_RPC, {
-    p_hash: hash,
+    p_hash: null, // important: we already handled hash-first above
     p_envelope_id: envelope_id,
     p_ledger_id: ledger_id,
   });
 
-  // If RPC hard-fails, we still allow hash-first fallback (if hash present)
   if (rpcErr) {
-    if (hash) {
-      const fb = await buildHashFirstPayload({ supabaseAdmin, hash, expires_in });
-      return json({ ...fb, request_id: reqId }, 200);
-    }
     return json(
       {
         ok: false,
@@ -276,45 +290,21 @@ serve(async (req) => {
     try {
       payload = JSON.parse(payload);
     } catch {
-      // ignore
+      // keep as-is
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // 1b) ✅ ENTERPRISE HASH-FIRST FALLBACK (NO DRIFT)
-  // If SQL is still ledger-centric and returns "ledger_id required" (or NOT_REGISTERED),
-  // we must still allow hash-only resolution via verified_documents.
-  // ---------------------------------------------------------------------------
-  const rpcErrStr = String(payload?.error ?? "").toLowerCase();
-  const needsHashFallback =
-    !!hash &&
-    payload &&
-    payload.ok !== true &&
-    (rpcErrStr === "not_registered" ||
-      rpcErrStr.includes("ledger_id required") ||
-      rpcErrStr.includes("ledger_id is required") ||
-      rpcErrStr.includes("ledger_id"));
-
-  if (needsHashFallback) {
-    const fb = await buildHashFirstPayload({ supabaseAdmin, hash, expires_in });
-    // If fallback succeeds, return it; otherwise return original payload (no regression)
-    if ((fb as any).ok === true) return json({ ...(fb as any), request_id: reqId }, 200);
-    return json({ ...(payload ?? { ok: false, error: "NOT_REGISTERED" }), request_id: reqId }, 200);
-  }
-
-  // ---------------------------------------------------------------------------
-  // 2) Normal signed URL enrichment (NO REGRESSION)
-  // ---------------------------------------------------------------------------
+  // If RPC failed to resolve, surface it (hash path already handled above)
   if (!payload || payload.ok !== true) {
     return json({ ...(payload ?? { ok: false, error: "RESOLVE_FAILED" }), request_id: reqId }, 200);
   }
 
+  // 3) Signed URL enrichment
   const bestPdf = payload.best_pdf ?? null;
   const publicPdf = payload.public_pdf ?? null;
   const verified = payload.verified ?? null;
 
   const notes: Record<string, unknown> = {};
-
   let bestUrl: string | null = null;
   let minuteBookUrl: string | null = null;
   let archiveUrl: string | null = null;
@@ -328,9 +318,7 @@ serve(async (req) => {
     );
     bestUrl = s.url;
     if (s.error) notes.best_pdf_sign_error = s.error;
-  } else {
-    notes.best_pdf_pointer_missing = true;
-  }
+  } else notes.best_pdf_pointer_missing = true;
 
   if (publicPdf?.storage_bucket && publicPdf?.storage_path) {
     const s = await signUrl(
@@ -341,9 +329,7 @@ serve(async (req) => {
     );
     minuteBookUrl = s.url;
     if (s.error) notes.minute_book_sign_error = s.error;
-  } else {
-    notes.minute_book_pointer_missing = true;
-  }
+  } else notes.minute_book_pointer_missing = true;
 
   if (verified?.storage_bucket && verified?.storage_path) {
     const s = await signUrl(
@@ -354,9 +340,7 @@ serve(async (req) => {
     );
     archiveUrl = s.url;
     if (s.error) notes.archive_sign_error = s.error;
-  } else {
-    notes.archive_pointer_missing = true;
-  }
+  } else notes.archive_pointer_missing = true;
 
   return json(
     {
