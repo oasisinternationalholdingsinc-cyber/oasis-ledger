@@ -216,7 +216,9 @@ function qrPngBytes(
  * minute_book_entries.source_record_id -> governance_ledger.is_test
  * (prevents lane mistakes, no schema changes)
  */
-async function inferLaneIsTestFromEntrySource(entrySourceRecordId: string | null): Promise<boolean | null> {
+async function inferLaneIsTestFromEntrySource(
+  entrySourceRecordId: string | null,
+): Promise<boolean | null> {
   const id = safeText(entrySourceRecordId);
   if (!id || !isUuid(id)) return null;
 
@@ -253,288 +255,275 @@ function mapDocumentClass(entryType?: string | null, domainKey?: string | null) 
 }
 
 // -----------------------------------------------------------------------------
-// ✅ ENTERPRISE: Append an OS-style certification page (matches Execution Certificate aesthetic)
-// - Dark header band
-// - Structured 2-column facts
-// - Large whitespace
-// - QR as bottom-right seal
-// - Prints hash + shows hash-first terminal line
+// ✅ ENTERPRISE: Produce a brand-new FINAL certification page (the “last page”)
+// - MATCHES OS / Execution Certificate vibe: dark header band + teal title,
+//   structured metadata, calm whitespace, QR bottom-right.
 // -----------------------------------------------------------------------------
 async function buildCertifiedWithAppendedPage(args: {
   sourceBytes: Uint8Array;
   verifyUrl: string;
   finalHashText: string;
   title: string;
-  entityName: string; // display name (nice)
-  entitySlug: string; // slug (canonical)
+  entitySlug: string;
   laneLabel: string; // "SANDBOX" or "TRUTH"
-  documentClassLabel: string; // "Report" / "Minutes" etc (human display)
+  documentClass: string;
 }): Promise<Uint8Array> {
-  const {
-    sourceBytes,
-    verifyUrl,
-    finalHashText,
-    title,
-    entityName,
-    entitySlug,
-    laneLabel,
-    documentClassLabel,
-  } = args;
+  const { sourceBytes, verifyUrl, finalHashText, title, entitySlug, laneLabel, documentClass } = args;
 
   const srcDoc = await PDFDocument.load(sourceBytes);
   const outDoc = await PDFDocument.create();
 
-  // Copy all existing pages untouched
+  // Copy original pages untouched
   const copiedPages = await outDoc.copyPages(srcDoc, srcDoc.getPageIndices());
   for (const p of copiedPages) outDoc.addPage(p);
 
-  // Append our certification page as the guaranteed NEW LAST page
-  const page = outDoc.addPage([612, 792]); // US Letter portrait
-
+  // Append certification page
+  const page = outDoc.addPage([612, 792]); // US Letter
   const font = await outDoc.embedFont(StandardFonts.Helvetica);
   const fontBold = await outDoc.embedFont(StandardFonts.HelveticaBold);
 
+  // Palette (matches your dark band + green/teal title)
+  const ink = rgb(0.12, 0.14, 0.18);
+  const muted = rgb(0.45, 0.48, 0.55);
+  const hair = rgb(0.86, 0.88, 0.91);
+  const band = rgb(0.06, 0.09, 0.12);           // near-black
+  const teal = rgb(0.10, 0.78, 0.72);           // green/teal signal
+  const paper = rgb(1, 1, 1);
+
+  const margin = 56;
   const W = page.getWidth();
   const H = page.getHeight();
-  const M = 50;
 
-  // Palette (matches your certificate vibe)
-  const ink = rgb(0.10, 0.12, 0.16);
-  const muted = rgb(0.45, 0.48, 0.55);
-  const rule = rgb(0.86, 0.88, 0.91);
-  const band = rgb(0.06, 0.08, 0.11);
-  const accent = rgb(0.06, 0.70, 0.62); // teal/green headline like your example
+  // Background
+  page.drawRectangle({ x: 0, y: 0, width: W, height: H, color: paper });
 
-  // Outer frame (subtle)
-  page.drawRectangle({
-    x: 36,
-    y: 36,
-    width: W - 72,
-    height: H - 72,
-    borderColor: rgb(0.88, 0.90, 0.93),
-    borderWidth: 1,
-    color: rgb(1, 1, 1),
-  });
-
-  // Top authority band
-  page.drawRectangle({
-    x: 36,
-    y: H - 36 - 72,
-    width: W - 72,
-    height: 72,
-    color: band,
-  });
+  // Dark header band
+  const bandH = 92;
+  page.drawRectangle({ x: 0, y: H - bandH, width: W, height: bandH, color: band });
 
   page.drawText("Oasis Digital Parliament", {
-    x: M,
-    y: H - 36 - 32,
+    x: margin,
+    y: H - 42,
     size: 14,
     font: fontBold,
-    color: accent,
+    color: teal,
   });
 
   page.drawText("Certification Record", {
-    x: M,
-    y: H - 36 - 54,
+    x: margin,
+    y: H - 64,
     size: 10,
     font,
-    color: rgb(0.78, 0.82, 0.86),
+    color: rgb(0.86, 0.88, 0.90),
   });
 
-  const issuedBy = "Issued by the Oasis Verified Registry";
-  const issuedW = font.widthOfTextAtSize(issuedBy, 9);
-  page.drawText(issuedBy, {
-    x: W - M - issuedW,
-    y: H - 36 - 52,
+  const issuerText = "Issued by the Oasis Verified Registry";
+  const issuerW = font.widthOfTextAtSize(issuerText, 9);
+  page.drawText(issuerText, {
+    x: W - margin - issuerW,
+    y: H - 60,
     size: 9,
     font,
     color: rgb(0.78, 0.82, 0.86),
   });
 
   // Intro
-  page.drawText("This certification confirms the archival integrity of the following document:", {
-    x: M,
-    y: H - 36 - 118,
-    size: 9,
-    font,
-    color: muted,
-  });
+  const introY = H - bandH - 48;
+  page.drawText(
+    "This certification confirms the archival integrity of the following document:",
+    {
+      x: margin,
+      y: introY,
+      size: 9.5,
+      font,
+      color: muted,
+    },
+  );
 
-  // Title block
-  const safeTitle = (title ?? "Minute Book Filing").slice(0, 140);
+  const safeTitle = (title ?? "Minute Book Entry").slice(0, 120);
   page.drawText(safeTitle, {
-    x: M,
-    y: H - 36 - 150,
+    x: margin,
+    y: introY - 34,
     size: 14,
     font: fontBold,
     color: ink,
   });
 
-  page.drawText(entityName || entitySlug, {
-    x: M,
-    y: H - 36 - 170,
-    size: 9,
+  page.drawText(`${entitySlug}`, {
+    x: margin,
+    y: introY - 54,
+    size: 10,
     font,
     color: muted,
   });
 
-  // Two-column facts (matches the certificate layout)
-  const leftX = M;
-  const rightX = 315;
-  let y = H - 36 - 220;
+  // Metadata grid (two columns like your execution certificate)
+  const gridTop = introY - 96;
+  const leftX = margin;
+  const midX = margin + 250;
 
-  const row = (label: string, value: string, col: "L" | "R") => {
-    const x = col === "L" ? leftX : rightX;
+  const row = (label: string, value: string, x: number, y: number) => {
     page.drawText(label, { x, y, size: 9, font: fontBold, color: ink });
-    page.drawText(value, { x: x + 105, y, size: 9, font, color: muted });
-    y -= 16;
+    page.drawText(value, { x: x + 110, y, size: 9, font, color: muted });
   };
 
-  // Left column
-  row("Entity:", entityName || entitySlug, "L");
-  row("Entity Slug:", entitySlug, "L");
-  row("Lane:", laneLabel, "L");
-  row("Document:", documentClassLabel, "L");
+  row("Entity Slug:", entitySlug, leftX, gridTop);
+  row("Lane:", laneLabel, leftX, gridTop - 16);
+  row("Document:", documentClass, leftX, gridTop - 32);
 
-  // Right column (hash + terminal)
-  y = H - 36 - 220;
-  row("Hash (SHA-256):", finalHashText.slice(0, 18) + "…", "R");
-  row("Verification:", "Scan QR / open terminal", "R");
+  const hashShort = finalHashText.length > 16 ? `${finalHashText.slice(0, 16)}…` : finalHashText;
+  row("Hash (SHA-256):", hashShort, midX, gridTop);
+  row("Verification:", "Scan QR / open terminal", midX, gridTop - 16);
 
-  // Divider rule
+  // Divider
   page.drawLine({
-    start: { x: M, y: H - 36 - 295 },
-    end: { x: W - M, y: H - 36 - 295 },
-    thickness: 0.6,
-    color: rule,
+    start: { x: margin, y: gridTop - 58 },
+    end: { x: W - margin, y: gridTop - 58 },
+    thickness: 0.7,
+    color: hair,
   });
 
-  // Verification section text
-  page.drawText("Verification", {
-    x: M,
-    y: H - 36 - 330,
-    size: 10,
-    font: fontBold,
-    color: ink,
-  });
+  // Verification block
+  const vTop = gridTop - 98;
+  page.drawText("Verification", { x: margin, y: vTop, size: 11, font: fontBold, color: ink });
 
   page.drawText(
     "To verify cryptographic truth (hash, certification, registry status), scan the QR code or open the verification terminal.",
     {
-      x: M,
-      y: H - 36 - 350,
+      x: margin,
+      y: vTop - 18,
       size: 8.5,
       font,
       color: muted,
-      maxWidth: W - M * 2 - 160,
+      maxWidth: W - margin * 2,
       lineHeight: 11,
     },
   );
 
   page.drawText("Authority is conferred exclusively by the Oasis Verified Registry.", {
-    x: M,
-    y: H - 36 - 375,
+    x: margin,
+    y: vTop - 34,
     size: 8.5,
     font,
     color: muted,
   });
 
-  // Hash box (clean, not “form input”)
-  const boxY = 260;
+  // Certificate hash box
+  const boxY = vTop - 90;
   page.drawText("Certificate Hash (SHA-256)", {
-    x: M,
-    y: boxY + 66,
+    x: margin,
+    y: boxY + 44,
     size: 9,
     font: fontBold,
     color: ink,
   });
 
   page.drawRectangle({
-    x: M,
-    y: boxY + 38,
-    width: W - M * 2 - 160,
-    height: 24,
-    borderColor: rule,
+    x: margin,
+    y: boxY,
+    width: W - margin * 2,
+    height: 34,
+    borderColor: hair,
     borderWidth: 1,
-    color: rgb(0.98, 0.98, 0.99),
+    color: rgb(0.97, 0.97, 0.98),
   });
 
+  // print full hash (fits with smaller size)
   page.drawText(finalHashText, {
-    x: M + 10,
-    y: boxY + 46,
-    size: 8.5,
+    x: margin + 12,
+    y: boxY + 12,
+    size: 8.2,
     font,
-    color: rgb(0.22, 0.24, 0.30),
+    color: ink,
   });
 
-  // Terminal line
+  // Verify URL line
+  const urlY = boxY - 54;
   page.drawText("Verification Terminal (hash-first)", {
-    x: M,
-    y: boxY + 18,
+    x: margin,
+    y: urlY + 20,
     size: 9,
     font: fontBold,
     color: ink,
   });
 
-  const terminalLine =
-    verifyUrl.length > 92 ? `${verifyUrl.slice(0, 92)}…` : verifyUrl;
-
-  page.drawText(terminalLine, {
-    x: M,
-    y: boxY + 4,
-    size: 7.8,
+  const urlLine = verifyUrl.length > 108 ? `${verifyUrl.slice(0, 108)}…` : verifyUrl;
+  page.drawText(urlLine, {
+    x: margin,
+    y: urlY,
+    size: 8,
     font,
     color: muted,
   });
 
-  // QR seal bottom-right (like your example)
+  // QR bottom-right (like execution certificate)
   const qrPng = qrPngBytes(verifyUrl, { size: 256, margin: 2, ecc: "M" });
   const qrImg = await outDoc.embedPng(qrPng);
 
-  const qrSize = 120;
-  const qrX = W - M - qrSize;
-  const qrY = 80;
+  const qrSize = 112;
+  const qrX = W - margin - qrSize;
+  const qrY = 92;
 
+  // QR container
   page.drawRectangle({
-    x: qrX - 10,
-    y: qrY - 10,
-    width: qrSize + 20,
-    height: qrSize + 28,
-    borderColor: rule,
+    x: qrX - 12,
+    y: qrY - 18,
+    width: qrSize + 24,
+    height: qrSize + 36,
+    borderColor: hair,
     borderWidth: 1,
     color: rgb(0.99, 0.99, 1),
   });
 
   page.drawImage(qrImg, { x: qrX, y: qrY, width: qrSize, height: qrSize });
 
-  const scan = "Scan to verify";
-  const scanW = font.widthOfTextAtSize(scan, 8);
-  page.drawText(scan, {
+  const scanText = "Scan to verify";
+  const scanW = font.widthOfTextAtSize(scanText, 8);
+  page.drawText(scanText, {
     x: qrX + (qrSize - scanW) / 2,
-    y: qrY - 14,
+    y: qrY - 10,
     size: 8,
     font,
     color: muted,
   });
 
-  // Footer
-  page.drawLine({
-    start: { x: M, y: 64 },
-    end: { x: W - M, y: 64 },
-    thickness: 0.6,
-    color: rule,
+  // Optional “signature capture” placeholder (keeps symmetry with your exec cert)
+  // (Minute Book certification is registry authority; we keep this minimal.)
+  page.drawRectangle({
+    x: margin,
+    y: 92,
+    width: 260,
+    height: 72,
+    borderColor: hair,
+    borderWidth: 1,
+    color: rgb(0.99, 0.99, 1),
   });
 
-  page.drawText(
-    "This certification page was appended to preserve original document pages. Verification resolves by hash (QR).",
-    {
-      x: M,
-      y: 44,
-      size: 8,
-      font,
-      color: muted,
-    },
-  );
+  page.drawText("Registry Attestation", {
+    x: margin + 12,
+    y: 92 + 52,
+    size: 8.5,
+    font: fontBold,
+    color: muted,
+  });
+
+  page.drawLine({
+    start: { x: margin + 12, y: 92 + 26 },
+    end: { x: margin + 248, y: 92 + 26 },
+    thickness: 0.8,
+    color: rgb(0.30, 0.32, 0.36),
+  });
+
+  // Footer microcopy
+  const foot = "This certification page was appended to preserve original document pages. Verification resolves by hash (QR).";
+  page.drawText(foot, {
+    x: margin,
+    y: 44,
+    size: 7.5,
+    font,
+    color: rgb(0.60, 0.64, 0.70),
+    maxWidth: W - margin * 2,
+  });
 
   return new Uint8Array(await outDoc.save());
 }
@@ -587,10 +576,10 @@ serve(async (req) => {
       is_test = typeof inferred === "boolean" ? inferred : false;
     }
 
-    // 2) Map entity_key -> entities (no hardcoding)
+    // 2) Map entity_key -> entities.id via entities.slug (no hardcoding)
     const ent = await supabaseAdmin
       .from("entities")
-      .select("id, slug, name")
+      .select("id, slug")
       .eq("slug", entity_key)
       .maybeSingle();
 
@@ -609,7 +598,6 @@ serve(async (req) => {
 
     const entity_id = String((ent.data as any).id);
     const entity_slug = String((ent.data as any).slug);
-    const entity_name = safeText((ent.data as any).name) ?? entity_slug;
 
     // 3) Resolve source PDF from minute_book (primary supporting doc)
     const source_bucket = "minute_book";
@@ -633,7 +621,7 @@ serve(async (req) => {
     const certified_bucket = is_test ? "governance_sandbox" : "governance_truth";
     const certified_path = is_test ? `sandbox/uploads/${entryId}.pdf` : `truth/uploads/${entryId}.pdf`;
 
-    // 5) Find existing verified_documents row
+    // 5) Find existing verified_documents row (UNIQUE by source_table+source_record_id)
     const existingVd = await supabaseAdmin
       .from("verified_documents")
       .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
@@ -647,7 +635,7 @@ serve(async (req) => {
     const existingBucket = safeText((existingVd.data as any)?.storage_bucket);
     const existingPath = safeText((existingVd.data as any)?.storage_path);
 
-    // 5b) Strict reuse
+    // 5b) Strict reuse: if already certified AND canonical pointer matches AND not forcing
     if (!force && existingId && existingHash && (existingLevel ?? "").toLowerCase() === "certified") {
       if (existingBucket === certified_bucket && existingPath === certified_path) {
         const verifyBase =
@@ -671,7 +659,7 @@ serve(async (req) => {
       }
     }
 
-    // 6) Ensure verified_documents row exists (UPDATE if exists, else INSERT)
+    // 6) Ensure a verified_documents row exists (ENTERPRISE: UPDATE if exists, else INSERT)
     const document_class = mapDocumentClass(entry_type, domain_key);
 
     let verified_id: string;
@@ -741,7 +729,7 @@ serve(async (req) => {
     }
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // 8) Build certification page as the NEW FINAL PAGE (2-pass stabilization)
+    // 8) Build certification page as the NEW FINAL PAGE (stabilized passes so QR + printed hash match)
     const verifyBase =
       safeText(body.verify_base_url) ??
       Deno.env.get("VERIFY_BASE_URL") ??
@@ -749,63 +737,53 @@ serve(async (req) => {
 
     const laneLabel = is_test ? "SANDBOX" : "TRUTH";
 
-    const docLabel =
-      document_class === "minutes" ? "Minutes" :
-      document_class === "resolution" ? "Resolution" :
-      document_class === "tax_filing" ? "Tax Filing" :
-      document_class === "invoice" ? "Invoice" :
-      document_class === "certificate" ? "Certificate" :
-      document_class === "report" ? "Report" : "Document";
-
     // Pass A: placeholder
     const passA_bytes = await buildCertifiedWithAppendedPage({
       sourceBytes,
       verifyUrl: buildVerifyUrl(verifyBase, "pending"),
       finalHashText: "pending",
       title,
-      entityName: entity_name,
       entitySlug: entity_slug,
       laneLabel,
-      documentClassLabel: docLabel,
+      documentClass: document_class,
     });
     const passA_hash = await sha256Hex(passA_bytes);
 
-    // Pass B: embed passA hash
+    // Pass B: embed hash
     const passB_bytes = await buildCertifiedWithAppendedPage({
       sourceBytes,
       verifyUrl: buildVerifyUrl(verifyBase, passA_hash),
       finalHashText: passA_hash,
       title,
-      entityName: entity_name,
       entitySlug: entity_slug,
       laneLabel,
-      documentClassLabel: docLabel,
+      documentClass: document_class,
     });
     const passB_hash = await sha256Hex(passB_bytes);
 
     let finalBytes = passB_bytes;
     let finalHash = passB_hash;
 
-    // Stabilization pass (so QR + printed hash match final bytes)
+    // Stabilize once more if needed
     if (passB_hash !== passA_hash) {
       const passC_bytes = await buildCertifiedWithAppendedPage({
         sourceBytes,
         verifyUrl: buildVerifyUrl(verifyBase, passB_hash),
         finalHashText: passB_hash,
         title,
-        entityName: entity_name,
         entitySlug: entity_slug,
         laneLabel,
-        documentClassLabel: docLabel,
+        documentClass: document_class,
       });
       const passC_hash = await sha256Hex(passC_bytes);
+
       finalBytes = passC_bytes;
       finalHash = passC_hash;
     }
 
     const finalVerifyUrl = buildVerifyUrl(verifyBase, finalHash);
 
-    // 9) Upload certified PDF
+    // 9) Upload certified PDF (overwrite allowed)
     const up = await supabaseAdmin.storage
       .from(certified_bucket)
       .upload(certified_path, new Blob([finalBytes], { type: "application/pdf" }), {
