@@ -26,7 +26,6 @@ type Resp = {
   verified_document_id?: string;
   reused?: boolean;
 
-  // ✅ verify terminal URL (hash-first)
   verify_url?: string;
 
   source?: { bucket: string; path: string; file_hash?: string | null };
@@ -76,7 +75,6 @@ function safeText(v: unknown): string | null {
 }
 
 function utcStampISO(): string {
-  // "2026-02-07T23:59:59Z"
   return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
@@ -88,10 +86,6 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return hex;
 }
 
-/**
- * ✅ HASH-FIRST verify terminal URL.
- * Keep verify.html untouched. Resolver prioritizes hash.
- */
 function buildVerifyUrl(base: string, sha256: string) {
   const u = new URL(base);
   u.searchParams.set("hash", sha256);
@@ -124,9 +118,7 @@ async function resolveActorEmail(actorId: string): Promise<string | null> {
 }
 
 /**
- * ✅ Best-effort audit log (NO drift):
- * - If actions_log exists and insert works → great.
- * - If not, we swallow errors (never block certification).
+ * ✅ Best-effort audit log (never blocks)
  */
 async function bestEffortActionsLog(args: {
   actor_uid: string;
@@ -144,16 +136,12 @@ async function bestEffortActionsLog(args: {
       details_json: args.details_json ?? {},
     } as any);
   } catch {
-    // intentionally non-fatal
+    // non-fatal
   }
 }
 
 /**
- * ✅ Resolve a PDF pointer for a minute_book entry
- * - contract: supporting_documents contains entry_id + file_path/hash/etc
- * - choose registry_visible first, then latest version/uploaded_at
- *
- * NOTE: This does NOT assume storage bucket column exists. We treat file_path as a bucket path in minute_book.
+ * ✅ Resolve primary PDF pointer for entry from supporting_documents
  */
 async function resolveEntryPrimaryPdf(entryId: string) {
   const { data, error } = await supabaseAdmin
@@ -252,9 +240,7 @@ function qrPngBytes(
 }
 
 /**
- * If caller doesn't pass is_test, infer from:
- * minute_book_entries.source_record_id -> governance_ledger.is_test
- * (prevents lane mistakes, no schema changes)
+ * Infer is_test from minute_book_entries.source_record_id -> governance_ledger.is_test
  */
 async function inferLaneIsTestFromEntrySource(
   entrySourceRecordId: string | null,
@@ -275,10 +261,7 @@ async function inferLaneIsTestFromEntrySource(
 }
 
 /**
- * ✅ Map minute book entry signals into the EXISTING verified_documents.document_class enum.
- * Allowed: resolution | invoice | certificate | report | minutes | tax_filing | other
- *
- * NO schema changes. NO enum changes.
+ * Map minute book entry -> verified_documents.document_class enum (NO changes)
  */
 function mapDocumentClass(entryType?: string | null, domainKey?: string | null) {
   const t = (entryType ?? "").toLowerCase().trim();
@@ -289,15 +272,11 @@ function mapDocumentClass(entryType?: string | null, domainKey?: string | null) 
   if (d.includes("tax")) return "tax_filing";
   if (d.includes("invoice")) return "invoice";
   if (d.includes("certificate")) return "certificate";
-
-  // Corporate profiles / formation / filings default best to "report"
   return "report";
 }
 
 // -----------------------------------------------------------------------------
-// ✅ ENTERPRISE: Produce a brand-new FINAL certification page (the “last page”)
-// - MUST append a NEW page (no stamping the existing last page)
-// - Includes operator identity + UTC timestamp in Registry Attestation.
+// ✅ APPEND A NEW FINAL CERTIFICATION PAGE (never stamp existing last page)
 // -----------------------------------------------------------------------------
 async function buildCertifiedWithAppendedPage(args: {
   sourceBytes: Uint8Array;
@@ -305,11 +284,10 @@ async function buildCertifiedWithAppendedPage(args: {
   finalHashText: string;
   title: string;
   entitySlug: string;
-  laneLabel: string; // "SANDBOX" or "TRUTH"
+  laneLabel: string;
   documentClass: string;
-
-  operatorLabel: string; // e.g. email or actor uuid
-  certifiedAtUtc: string; // ISO string
+  operatorLabel: string;
+  certifiedAtUtc: string;
 }): Promise<Uint8Array> {
   const {
     sourceBytes,
@@ -326,16 +304,13 @@ async function buildCertifiedWithAppendedPage(args: {
   const srcDoc = await PDFDocument.load(sourceBytes);
   const outDoc = await PDFDocument.create();
 
-  // Copy original pages untouched
   const copiedPages = await outDoc.copyPages(srcDoc, srcDoc.getPageIndices());
   for (const p of copiedPages) outDoc.addPage(p);
 
-  // Append certification page (US Letter)
-  const page = outDoc.addPage([612, 792]);
+  const page = outDoc.addPage([612, 792]); // Letter
   const font = await outDoc.embedFont(StandardFonts.Helvetica);
   const fontBold = await outDoc.embedFont(StandardFonts.HelveticaBold);
 
-  // Palette
   const ink = rgb(0.12, 0.14, 0.18);
   const muted = rgb(0.45, 0.48, 0.55);
   const hair = rgb(0.86, 0.88, 0.91);
@@ -347,10 +322,8 @@ async function buildCertifiedWithAppendedPage(args: {
   const W = page.getWidth();
   const H = page.getHeight();
 
-  // Background
   page.drawRectangle({ x: 0, y: 0, width: W, height: H, color: paper });
 
-  // Header band
   const bandH = 92;
   page.drawRectangle({ x: 0, y: H - bandH, width: W, height: bandH, color: band });
 
@@ -380,7 +353,6 @@ async function buildCertifiedWithAppendedPage(args: {
     color: rgb(0.78, 0.82, 0.86),
   });
 
-  // Intro
   const introY = H - bandH - 48;
   page.drawText(
     "This certification confirms the archival integrity of the following document:",
@@ -404,7 +376,6 @@ async function buildCertifiedWithAppendedPage(args: {
     color: muted,
   });
 
-  // Metadata grid
   const gridTop = introY - 96;
   const leftX = margin;
   const midX = margin + 250;
@@ -423,7 +394,6 @@ async function buildCertifiedWithAppendedPage(args: {
   row("Hash (SHA-256):", hashShort, midX, gridTop);
   row("Verification:", "Scan QR / open terminal", midX, gridTop - 16);
 
-  // Divider
   page.drawLine({
     start: { x: margin, y: gridTop - 58 },
     end: { x: W - margin, y: gridTop - 58 },
@@ -431,7 +401,6 @@ async function buildCertifiedWithAppendedPage(args: {
     color: hair,
   });
 
-  // Verification block
   const vTop = gridTop - 98;
   page.drawText("Verification", {
     x: margin,
@@ -462,7 +431,6 @@ async function buildCertifiedWithAppendedPage(args: {
     color: muted,
   });
 
-  // Hash box
   const boxY = vTop - 90;
   page.drawText("Certificate Hash (SHA-256)", {
     x: margin,
@@ -482,6 +450,7 @@ async function buildCertifiedWithAppendedPage(args: {
     color: rgb(0.97, 0.97, 0.98),
   });
 
+  // ✅ MUST print the EXACT hash that the file resolves by
   page.drawText(finalHashText, {
     x: margin + 12,
     y: boxY + 12,
@@ -490,7 +459,6 @@ async function buildCertifiedWithAppendedPage(args: {
     color: ink,
   });
 
-  // Verify URL line
   const urlY = boxY - 54;
   page.drawText("Verification Terminal (hash-first)", {
     x: margin,
@@ -503,7 +471,6 @@ async function buildCertifiedWithAppendedPage(args: {
   const urlLine = verifyUrl.length > 108 ? `${verifyUrl.slice(0, 108)}…` : verifyUrl;
   page.drawText(urlLine, { x: margin, y: urlY, size: 8, font, color: muted });
 
-  // QR bottom-right
   const qrPng = qrPngBytes(verifyUrl, { size: 256, margin: 2, ecc: "M" });
   const qrImg = await outDoc.embedPng(qrPng);
 
@@ -533,7 +500,6 @@ async function buildCertifiedWithAppendedPage(args: {
     color: muted,
   });
 
-  // Attestation (bottom-left)
   const attX = margin;
   const attY = 92;
   const attW = 300;
@@ -598,11 +564,9 @@ async function buildCertifiedWithAppendedPage(args: {
 }
 
 /**
- * ✅ Fetch existing verified_document pointer for this minute_book entry.
- * Uses v_verified_latest if present, else falls back to verified_documents.
+ * ✅ Fetch existing verified pointer for this entry (prefer v_verified_latest)
  */
 async function fetchLatestVerifiedPointer(entryId: string) {
-  // Try v_verified_latest first
   try {
     const { data, error } = await supabaseAdmin
       .from("v_verified_latest")
@@ -615,7 +579,6 @@ async function fetchLatestVerifiedPointer(entryId: string) {
     // ignore
   }
 
-  // Fallback: newest created_at, prefer certified if present
   const { data, error } = await supabaseAdmin
     .from("verified_documents")
     .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
@@ -633,6 +596,72 @@ async function fetchLatestVerifiedPointer(entryId: string) {
     null;
 
   return { data: pick, via: "fallback" as const };
+}
+
+/**
+ * ✅ FIXED-POINT HASH STABILIZATION:
+ * embed hash -> hash -> repeat until stable
+ */
+async function buildCertifiedFixedPoint(args: {
+  sourceBytes: Uint8Array;
+  verifyBase: string;
+  title: string;
+  entitySlug: string;
+  laneLabel: string;
+  documentClass: string;
+  operatorLabel: string;
+  certifiedAtUtc: string;
+}) {
+  const {
+    sourceBytes,
+    verifyBase,
+    title,
+    entitySlug,
+    laneLabel,
+    documentClass,
+    operatorLabel,
+    certifiedAtUtc,
+  } = args;
+
+  // start with placeholder
+  let current = "pending";
+  let bytes = await buildCertifiedWithAppendedPage({
+    sourceBytes,
+    verifyUrl: buildVerifyUrl(verifyBase, current),
+    finalHashText: current,
+    title,
+    entitySlug,
+    laneLabel,
+    documentClass,
+    operatorLabel,
+    certifiedAtUtc,
+  });
+
+  let h = await sha256Hex(bytes);
+
+  // iterate until stable (max 6 tries)
+  for (let i = 0; i < 6; i++) {
+    if (h === current) {
+      return { bytes, hash: h, verify_url: buildVerifyUrl(verifyBase, h) };
+    }
+
+    current = h;
+    bytes = await buildCertifiedWithAppendedPage({
+      sourceBytes,
+      verifyUrl: buildVerifyUrl(verifyBase, current),
+      finalHashText: current, // ✅ printed hash == resolve hash
+      title,
+      entitySlug,
+      laneLabel,
+      documentClass,
+      operatorLabel,
+      certifiedAtUtc,
+    });
+    h = await sha256Hex(bytes);
+  }
+
+  // if we somehow didn't converge, still return last (should be extremely rare)
+  return { bytes, hash: h, verify_url: buildVerifyUrl(verifyBase, h), non_converged: true };
 }
 
 serve(async (req) => {
@@ -661,7 +690,7 @@ serve(async (req) => {
     const actorEmail = await resolveActorEmail(actorId);
     const force = !!body.force;
 
-    // 1) Load minute_book entry (include source_record_id for lane inference)
+    // 1) Load entry
     const entry = await supabaseAdmin
       .from("minute_book_entries")
       .select("id,entity_key,domain_key,entry_type,title,notes,created_at,created_by,source_record_id")
@@ -677,7 +706,7 @@ serve(async (req) => {
     const title = safeText((entry.data as any).title) ?? "Minute Book Filing";
     const source_record_id = safeText((entry.data as any).source_record_id);
 
-    // 1b) Lane resolution
+    // lane
     let is_test: boolean;
     if (typeof body.is_test === "boolean") {
       is_test = body.is_test;
@@ -686,7 +715,7 @@ serve(async (req) => {
       is_test = typeof inferred === "boolean" ? inferred : false;
     }
 
-    // 2) Map entity_key -> entities.id via entities.slug (no hardcoding)
+    // 2) entities lookup
     const ent = await supabaseAdmin
       .from("entities")
       .select("id, slug")
@@ -704,7 +733,7 @@ serve(async (req) => {
     const entity_id = String((ent.data as any).id);
     const entity_slug = String((ent.data as any).slug);
 
-    // 3) Resolve source PDF from minute_book (primary supporting doc)
+    // 3) source pdf pointer
     const source_bucket = "minute_book";
     const src = await resolveEntryPrimaryPdf(entryId);
 
@@ -719,14 +748,13 @@ serve(async (req) => {
         404,
       );
     }
-
     const source_path = src.file_path;
 
-    // 4) Certified destination bucket + prefix (hash-derived immutable path)
+    // 4) destination
     const certified_bucket = is_test ? "governance_sandbox" : "governance_truth";
     const certified_prefix = is_test ? "sandbox/uploads" : "truth/uploads";
 
-    // 5) Fetch existing verified pointer
+    // 5) existing verified pointer
     const latest = await fetchLatestVerifiedPointer(entryId);
     const existingVd = latest.data as any | null;
 
@@ -739,7 +767,7 @@ serve(async (req) => {
     const hasCertified = !!(existingId && existingHash && existingLevel === "certified");
     const reissue = !!force && !!existingId;
 
-    // 5b) Strict reuse if already certified and not forcing
+    // strict reuse
     if (!force && hasCertified) {
       const verifyBase =
         safeText(body.verify_base_url) ??
@@ -766,10 +794,10 @@ serve(async (req) => {
       });
     }
 
-    // 6) Map to enum (no drift)
+    // 6) doc class
     const document_class = mapDocumentClass(entry_type, domain_key);
 
-    // 7) Download source PDF bytes
+    // 7) download source bytes
     const dl = await supabaseAdmin.storage.from(source_bucket).download(source_path);
     if (dl.error || !dl.data) {
       return json(
@@ -779,7 +807,7 @@ serve(async (req) => {
     }
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // 8) Build certification page as the NEW FINAL PAGE (hash-stable passes)
+    // 8) build fixed-point certified pdf
     const verifyBase =
       safeText(body.verify_base_url) ??
       Deno.env.get("VERIFY_BASE_URL") ??
@@ -789,11 +817,9 @@ serve(async (req) => {
     const certifiedAt = utcStampISO();
     const operatorLabel = safeText(actorEmail) ?? actorId;
 
-    // Pass A: placeholder
-    const passA_bytes = await buildCertifiedWithAppendedPage({
+    const built = await buildCertifiedFixedPoint({
       sourceBytes,
-      verifyUrl: buildVerifyUrl(verifyBase, "pending"),
-      finalHashText: "pending",
+      verifyBase,
       title,
       entitySlug: entity_slug,
       laneLabel,
@@ -801,49 +827,14 @@ serve(async (req) => {
       operatorLabel,
       certifiedAtUtc: certifiedAt,
     });
-    const passA_hash = await sha256Hex(passA_bytes);
 
-    // Pass B: embed hash
-    const passB_bytes = await buildCertifiedWithAppendedPage({
-      sourceBytes,
-      verifyUrl: buildVerifyUrl(verifyBase, passA_hash),
-      finalHashText: passA_hash,
-      title,
-      entitySlug: entity_slug,
-      laneLabel,
-      documentClass: document_class,
-      operatorLabel,
-      certifiedAtUtc: certifiedAt,
-    });
-    const passB_hash = await sha256Hex(passB_bytes);
+    const finalBytes = built.bytes;
+    const finalHash = built.hash;
+    const finalVerifyUrl = built.verify_url;
 
-    let finalBytes = passB_bytes;
-    let finalHash = passB_hash;
-
-    // Stabilize once more if needed
-    if (passB_hash !== passA_hash) {
-      const passC_bytes = await buildCertifiedWithAppendedPage({
-        sourceBytes,
-        verifyUrl: buildVerifyUrl(verifyBase, passB_hash),
-        finalHashText: passB_hash,
-        title,
-        entitySlug: entity_slug,
-        laneLabel,
-        documentClass: document_class,
-        operatorLabel,
-        certifiedAtUtc: certifiedAt,
-      });
-      const passC_hash = await sha256Hex(passC_bytes);
-      finalBytes = passC_bytes;
-      finalHash = passC_hash;
-    }
-
-    const finalVerifyUrl = buildVerifyUrl(verifyBase, finalHash);
-
-    // 9) Immutable certified PDF pointer (hash-derived path)
+    // 9) path by hash
     const certified_path = `${certified_prefix}/${entryId}-${finalHash.slice(0, 12)}.pdf`;
 
-    // Upload is immutable; if already exists, continue
     const up = await supabaseAdmin.storage
       .from(certified_bucket)
       .upload(certified_path, new Blob([finalBytes], { type: "application/pdf" }), {
@@ -866,15 +857,10 @@ serve(async (req) => {
       }
     }
 
-    // 10) Registry write (MATCHES your immutability trigger)
-    // - If NO row: INSERT full certified row
-    // - If row exists AND is already certified: service_role may ONLY update pointer fields:
-    //     storage_bucket, storage_path, file_hash
-    // - If row exists BUT NOT certified yet: UPDATE full row to certified (allowed because OLD not certified)
+    // 10) verified_documents write
     let verified_id: string;
 
     if (!existingId) {
-      // First certification
       const ins = await supabaseAdmin
         .from("verified_documents")
         .insert({
@@ -908,7 +894,7 @@ serve(async (req) => {
       verified_id = existingId;
 
       if (existingLevel === "certified") {
-        // ✅ Certified row is immutable — pointer-only update (matches trigger)
+        // ✅ immutable certified row: pointer-only update (no updated_at, no updated_by)
         const upd = await supabaseAdmin
           .from("verified_documents")
           .update({
@@ -925,7 +911,7 @@ serve(async (req) => {
           );
         }
       } else {
-        // ✅ Not certified yet — safe to update full row to certified
+        // not certified yet: promote to certified
         const upd = await supabaseAdmin
           .from("verified_documents")
           .update({
@@ -955,7 +941,6 @@ serve(async (req) => {
       }
     }
 
-    // ✅ Best-effort audit (non-fatal)
     await bestEffortActionsLog({
       actor_uid: actorId,
       action: "CERTIFY_MINUTE_BOOK_ENTRY",
@@ -971,6 +956,7 @@ serve(async (req) => {
         source_path,
         reused: false,
         reissue,
+        non_converged: (built as any).non_converged ?? false,
       },
     });
 
