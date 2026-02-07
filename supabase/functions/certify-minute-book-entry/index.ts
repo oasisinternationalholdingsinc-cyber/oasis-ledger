@@ -12,7 +12,7 @@ type ReqBody = {
   entry_id?: string; // minute_book_entries.id (required)
   actor_id?: string; // optional; resolved from JWT if missing
   is_test?: boolean; // optional; infer lane from source_record_id -> governance_ledger.is_test
-  force?: boolean; // optional
+  force?: boolean; // optional (reissue/overwrite)
   verify_base_url?: string; // optional override (defaults to VERIFY_BASE_URL or verify.html)
 };
 
@@ -291,7 +291,6 @@ serve(async (req) => {
     const domain_key = safeText((entry.data as any).domain_key);
     const entry_type = safeText((entry.data as any).entry_type) ?? "filing";
     const title = safeText((entry.data as any).title) ?? "Minute Book Filing";
-    const created_at = safeText((entry.data as any).created_at);
     const source_record_id = safeText((entry.data as any).source_record_id);
 
     // 1b) Lane resolution (caller override wins; otherwise infer; otherwise default false)
@@ -304,12 +303,21 @@ serve(async (req) => {
     }
 
     // 2) Map entity_key -> entities.id via entities.slug (no hardcoding)
-    const ent = await supabaseAdmin.from("entities").select("id, slug").eq("slug", entity_key).maybeSingle();
+    const ent = await supabaseAdmin
+      .from("entities")
+      .select("id, slug")
+      .eq("slug", entity_key)
+      .maybeSingle();
 
     if (ent.error) return json({ ok: false, error: ent.error.message, request_id: reqId }, 400);
     if (!ent.data?.id) {
       return json(
-        { ok: false, error: "ENTITY_NOT_FOUND", details: `No entities row found for slug=${entity_key}`, request_id: reqId },
+        {
+          ok: false,
+          error: "ENTITY_NOT_FOUND",
+          details: `No entities row found for slug=${entity_key}`,
+          request_id: reqId,
+        },
         404,
       );
     }
@@ -339,14 +347,12 @@ serve(async (req) => {
     const certified_bucket = is_test ? "governance_sandbox" : "governance_truth";
     const certified_path = is_test ? `sandbox/uploads/${entryId}.pdf` : `truth/uploads/${entryId}.pdf`;
 
-    // 5) Idempotency: reuse existing verified_documents if already certified (unless force)
+    // 5) Find existing verified_documents row (UNIQUE by source_table+source_record_id)
     const existingVd = await supabaseAdmin
       .from("verified_documents")
       .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
       .eq("source_table", "minute_book_entries")
       .eq("source_record_id", entryId)
-      .order("created_at", { ascending: false })
-      .limit(1)
       .maybeSingle();
 
     const existingId = existingVd.data?.id ? String(existingVd.data.id) : null;
@@ -355,6 +361,7 @@ serve(async (req) => {
     const existingBucket = safeText((existingVd.data as any)?.storage_bucket);
     const existingPath = safeText((existingVd.data as any)?.storage_path);
 
+    // 5b) Strict reuse: if already certified AND canonical pointer matches AND not forcing
     if (!force && existingId && existingHash && (existingLevel ?? "").toLowerCase() === "certified") {
       if (existingBucket === certified_bucket && existingPath === certified_path) {
         const verifyBase =
@@ -378,55 +385,78 @@ serve(async (req) => {
       }
     }
 
-    // 6) If a verified doc exists but points somewhere wrong (old bad run), DELETE IT (unless force wants reuse)
-    //    This matches your instruction: "delete that verified one cuz it's wrong".
-    //    We only delete when it exists and is NOT already certified to our canonical pointer.
-    if (existingId && (!existingHash || (existingLevel ?? "").toLowerCase() !== "certified")) {
-      await supabaseAdmin.from("verified_documents").delete().eq("id", existingId);
-    }
-
-    // 7) Create fresh verified_documents row (valid enum)
+    // 6) Ensure a verified_documents row exists (ENTERPRISE: UPDATE if exists, else INSERT)
     const document_class = mapDocumentClass(entry_type, domain_key);
 
-    const ins = await supabaseAdmin
-      .from("verified_documents")
-      .insert({
-        entity_id,
-        entity_slug,
-        document_class,
-        title,
-        source_table: "minute_book_entries",
-        source_record_id: entryId,
-        storage_bucket: certified_bucket,
-        storage_path: certified_path,
-        file_hash: null,
-        mime_type: "application/pdf",
-        verification_level: "certified",
-        is_archived: true,
-        created_by: actorId,
-        updated_by: actorId,
-      } as any)
-      .select("id")
-      .single();
+    let verified_id: string;
 
-    if (ins.error) {
-      return json({ ok: false, error: "VERIFIED_DOC_INSERT_FAILED", details: ins.error, request_id: reqId } satisfies Resp, 500);
+    if (existingId) {
+      verified_id = existingId;
+
+      // Keep it lane-safe + canonical pointers even before upload/hash lands
+      const preUpd = await supabaseAdmin
+        .from("verified_documents")
+        .update({
+          entity_id,
+          entity_slug,
+          document_class,
+          title,
+          storage_bucket: certified_bucket,
+          storage_path: certified_path,
+          mime_type: "application/pdf",
+          verification_level: "certified",
+          is_archived: true,
+          updated_at: new Date().toISOString(),
+          updated_by: actorId,
+        } as any)
+        .eq("id", verified_id);
+
+      if (preUpd.error) {
+        return json(
+          { ok: false, error: "VERIFIED_DOC_PREUPDATE_FAILED", details: preUpd.error, request_id: reqId } satisfies Resp,
+          500,
+        );
+      }
+    } else {
+      const ins = await supabaseAdmin
+        .from("verified_documents")
+        .insert({
+          entity_id,
+          entity_slug,
+          document_class,
+          title,
+          source_table: "minute_book_entries",
+          source_record_id: entryId,
+          storage_bucket: certified_bucket,
+          storage_path: certified_path,
+          file_hash: null,
+          mime_type: "application/pdf",
+          verification_level: "certified",
+          is_archived: true,
+          created_by: actorId,
+          updated_by: actorId,
+        } as any)
+        .select("id")
+        .single();
+
+      if (ins.error) {
+        return json(
+          { ok: false, error: "VERIFIED_DOC_INSERT_FAILED", details: ins.error, request_id: reqId } satisfies Resp,
+          500,
+        );
+      }
+
+      verified_id = String(ins.data.id);
     }
 
-    const verified_id = String(ins.data.id);
-
-    // 8) Download source PDF bytes
+    // 7) Download source PDF bytes
     const dl = await supabaseAdmin.storage.from(source_bucket).download(source_path);
     if (dl.error || !dl.data) {
       return json({ ok: false, error: "SOURCE_PDF_DOWNLOAD_FAILED", details: dl.error, request_id: reqId }, 500);
     }
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // 9) Load PDF and stamp QR on LAST page (enterprise-consistent with certify-governance-record)
-    //    Hash-first verify URL depends on FINAL bytes, so we do a 2-pass stamp like governance:
-    //    Pass A: stamp with placeholder -> hashA
-    //    Pass B: stamp with hashA -> bytesB -> hashB
-    //    If hash changes between A and B, stamp once more with hashB so QR matches final hash.
+    // 8) Stamp QR on LAST page (2-pass like governance) to ensure QR matches FINAL hash
     const verifyBase =
       safeText(body.verify_base_url) ??
       Deno.env.get("VERIFY_BASE_URL") ??
@@ -441,7 +471,6 @@ serve(async (req) => {
       const qrPng = qrPngBytes(url, { size: 256, margin: 2, ecc: "M" });
       const qrImage = await pdfDoc.embedPng(qrPng);
 
-      // match governance-style placement: bottom-right, modest size, neutral label
       const qrSize = 92;
       const margin = 50;
       const x = last.getWidth() - margin - qrSize;
@@ -477,7 +506,7 @@ serve(async (req) => {
 
     const finalVerifyUrl = buildVerifyUrl(verifyBase, finalHash);
 
-    // 10) Upload certified PDF
+    // 9) Upload certified PDF (overwrite allowed)
     const up = await supabaseAdmin.storage
       .from(certified_bucket)
       .upload(certified_path, new Blob([finalBytes], { type: "application/pdf" }), {
@@ -489,12 +518,13 @@ serve(async (req) => {
       return json({ ok: false, error: "CERTIFIED_PDF_UPLOAD_FAILED", details: up.error, request_id: reqId }, 500);
     }
 
-    // 11) Update verified_documents canonical pointer + hash
+    // 10) Finalize verified_documents hash + canonical pointer
     const upd = await supabaseAdmin
       .from("verified_documents")
       .update({
         entity_id,
         entity_slug,
+        document_class,
         title,
         storage_bucket: certified_bucket,
         storage_path: certified_path,
