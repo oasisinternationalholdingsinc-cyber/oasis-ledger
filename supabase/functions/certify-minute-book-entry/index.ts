@@ -122,7 +122,9 @@ async function resolveActorEmail(actorId: string): Promise<string | null> {
 async function resolveEntryPrimaryPdf(entryId: string) {
   const { data, error } = await supabaseAdmin
     .from("supporting_documents")
-    .select("id,entry_id,file_path,file_name,file_hash,file_size,mime_type,registry_visible,version,uploaded_at")
+    .select(
+      "id,entry_id,file_path,file_name,file_hash,file_size,mime_type,registry_visible,version,uploaded_at",
+    )
     .eq("entry_id", entryId)
     .order("registry_visible", { ascending: false })
     .order("version", { ascending: false })
@@ -134,7 +136,9 @@ async function resolveEntryPrimaryPdf(entryId: string) {
   const rows = (data ?? []) as any[];
 
   const pick =
-    rows.find((r) => r.registry_visible === true && safeText(r.file_path)?.toLowerCase().endsWith(".pdf")) ??
+    rows.find(
+      (r) => r.registry_visible === true && safeText(r.file_path)?.toLowerCase().endsWith(".pdf"),
+    ) ??
     rows.find((r) => safeText(r.file_path)?.toLowerCase().endsWith(".pdf")) ??
     rows[0];
 
@@ -248,23 +252,34 @@ function mapDocumentClass(entryType?: string | null, domainKey?: string | null) 
   return "report";
 }
 
-/* ============================================================
-   ✅ OS-MATCHING CERTIFICATION PAGE (APPENDED LAST PAGE)
-   - Authority tone: "Certification Record"
-   - Registry issuer
-   - Hash treated as Certificate ID
-   - QR treated as Registry Seal
-   - Does NOT touch source pages (preserves wet ink)
-============================================================ */
+// -----------------------------------------------------------------------------
+// ✅ ENTERPRISE: Append an OS-style certification page (matches Execution Certificate aesthetic)
+// - Dark header band
+// - Structured 2-column facts
+// - Large whitespace
+// - QR as bottom-right seal
+// - Prints hash + shows hash-first terminal line
+// -----------------------------------------------------------------------------
 async function buildCertifiedWithAppendedPage(args: {
   sourceBytes: Uint8Array;
-  verifyUrl: string; // hash-first URL (placeholder in pass A)
-  finalHashText: string; // hash to print on the certification page
+  verifyUrl: string;
+  finalHashText: string;
   title: string;
-  entitySlug: string;
+  entityName: string; // display name (nice)
+  entitySlug: string; // slug (canonical)
   laneLabel: string; // "SANDBOX" or "TRUTH"
+  documentClassLabel: string; // "Report" / "Minutes" etc (human display)
 }): Promise<Uint8Array> {
-  const { sourceBytes, verifyUrl, finalHashText, title, entitySlug, laneLabel } = args;
+  const {
+    sourceBytes,
+    verifyUrl,
+    finalHashText,
+    title,
+    entityName,
+    entitySlug,
+    laneLabel,
+    documentClassLabel,
+  } = args;
 
   const srcDoc = await PDFDocument.load(sourceBytes);
   const outDoc = await PDFDocument.create();
@@ -273,200 +288,251 @@ async function buildCertifiedWithAppendedPage(args: {
   const copiedPages = await outDoc.copyPages(srcDoc, srcDoc.getPageIndices());
   for (const p of copiedPages) outDoc.addPage(p);
 
-  // Append certification page (guaranteed new LAST page)
+  // Append our certification page as the guaranteed NEW LAST page
   const page = outDoc.addPage([612, 792]); // US Letter portrait
+
   const font = await outDoc.embedFont(StandardFonts.Helvetica);
   const fontBold = await outDoc.embedFont(StandardFonts.HelveticaBold);
 
   const W = page.getWidth();
   const H = page.getHeight();
-  const margin = 54;
+  const M = 50;
 
-  // Outer frame (quiet authority)
+  // Palette (matches your certificate vibe)
+  const ink = rgb(0.10, 0.12, 0.16);
+  const muted = rgb(0.45, 0.48, 0.55);
+  const rule = rgb(0.86, 0.88, 0.91);
+  const band = rgb(0.06, 0.08, 0.11);
+  const accent = rgb(0.06, 0.70, 0.62); // teal/green headline like your example
+
+  // Outer frame (subtle)
   page.drawRectangle({
     x: 36,
     y: 36,
     width: W - 72,
     height: H - 72,
-    borderColor: rgb(0.86, 0.87, 0.9),
+    borderColor: rgb(0.88, 0.90, 0.93),
     borderWidth: 1,
     color: rgb(1, 1, 1),
   });
 
-  // Top header rail (OS-like)
+  // Top authority band
+  page.drawRectangle({
+    x: 36,
+    y: H - 36 - 72,
+    width: W - 72,
+    height: 72,
+    color: band,
+  });
+
   page.drawText("Oasis Digital Parliament", {
-    x: margin,
-    y: H - 66,
-    size: 12,
+    x: M,
+    y: H - 36 - 32,
+    size: 14,
     font: fontBold,
-    color: rgb(0.10, 0.12, 0.16),
+    color: accent,
   });
 
   page.drawText("Certification Record", {
-    x: margin,
-    y: H - 92,
-    size: 18,
-    font: fontBold,
-    color: rgb(0.08, 0.10, 0.13),
+    x: M,
+    y: H - 36 - 54,
+    size: 10,
+    font,
+    color: rgb(0.78, 0.82, 0.86),
   });
 
-  page.drawText("Issued by the Oasis Verified Registry", {
-    x: margin,
-    y: H - 112,
+  const issuedBy = "Issued by the Oasis Verified Registry";
+  const issuedW = font.widthOfTextAtSize(issuedBy, 9);
+  page.drawText(issuedBy, {
+    x: W - M - issuedW,
+    y: H - 36 - 52,
     size: 9,
     font,
-    color: rgb(0.40, 0.44, 0.52),
+    color: rgb(0.78, 0.82, 0.86),
   });
 
-  // Divider
-  page.drawLine({
-    start: { x: margin, y: H - 132 },
-    end: { x: W - margin, y: H - 132 },
-    thickness: 0.6,
-    color: rgb(0.88, 0.9, 0.93),
+  // Intro
+  page.drawText("This certification confirms the archival integrity of the following document:", {
+    x: M,
+    y: H - 36 - 118,
+    size: 9,
+    font,
+    color: muted,
   });
 
-  // Left column meta (structured)
-  const clamp = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
-  const safeTitle = clamp(title || "Minute Book Entry", 120);
-
-  const metaY = H - 170;
-  const rowGap = 18;
-
-  const label = (t: string, x: number, y: number) =>
-    page.drawText(t, { x, y, size: 9, font, color: rgb(0.46, 0.50, 0.58) });
-
-  const value = (t: string, x: number, y: number) =>
-    page.drawText(t, { x, y, size: 11, font: fontBold, color: rgb(0.12, 0.14, 0.18) });
-
-  label("Entity", margin, metaY);
-  value(entitySlug, margin, metaY - 12);
-
-  label("Lane", margin, metaY - rowGap);
-  value(laneLabel, margin, metaY - rowGap - 12);
-
-  label("Document", margin, metaY - rowGap * 2);
+  // Title block
+  const safeTitle = (title ?? "Minute Book Filing").slice(0, 140);
   page.drawText(safeTitle, {
-    x: margin,
-    y: metaY - rowGap * 2 - 12,
+    x: M,
+    y: H - 36 - 150,
+    size: 14,
+    font: fontBold,
+    color: ink,
+  });
+
+  page.drawText(entityName || entitySlug, {
+    x: M,
+    y: H - 36 - 170,
+    size: 9,
+    font,
+    color: muted,
+  });
+
+  // Two-column facts (matches the certificate layout)
+  const leftX = M;
+  const rightX = 315;
+  let y = H - 36 - 220;
+
+  const row = (label: string, value: string, col: "L" | "R") => {
+    const x = col === "L" ? leftX : rightX;
+    page.drawText(label, { x, y, size: 9, font: fontBold, color: ink });
+    page.drawText(value, { x: x + 105, y, size: 9, font, color: muted });
+    y -= 16;
+  };
+
+  // Left column
+  row("Entity:", entityName || entitySlug, "L");
+  row("Entity Slug:", entitySlug, "L");
+  row("Lane:", laneLabel, "L");
+  row("Document:", documentClassLabel, "L");
+
+  // Right column (hash + terminal)
+  y = H - 36 - 220;
+  row("Hash (SHA-256):", finalHashText.slice(0, 18) + "…", "R");
+  row("Verification:", "Scan QR / open terminal", "R");
+
+  // Divider rule
+  page.drawLine({
+    start: { x: M, y: H - 36 - 295 },
+    end: { x: W - M, y: H - 36 - 295 },
+    thickness: 0.6,
+    color: rule,
+  });
+
+  // Verification section text
+  page.drawText("Verification", {
+    x: M,
+    y: H - 36 - 330,
     size: 10,
     font: fontBold,
-    color: rgb(0.12, 0.14, 0.18),
-    maxWidth: 320,
+    color: ink,
   });
 
-  // Right-side seal block (QR as registry seal)
-  const qrBoxW = 174;
-  const qrBoxH = 220;
-  const qrBoxX = W - margin - qrBoxW;
-  const qrBoxY = H - 132 - 20 - qrBoxH;
+  page.drawText(
+    "To verify cryptographic truth (hash, certification, registry status), scan the QR code or open the verification terminal.",
+    {
+      x: M,
+      y: H - 36 - 350,
+      size: 8.5,
+      font,
+      color: muted,
+      maxWidth: W - M * 2 - 160,
+      lineHeight: 11,
+    },
+  );
+
+  page.drawText("Authority is conferred exclusively by the Oasis Verified Registry.", {
+    x: M,
+    y: H - 36 - 375,
+    size: 8.5,
+    font,
+    color: muted,
+  });
+
+  // Hash box (clean, not “form input”)
+  const boxY = 260;
+  page.drawText("Certificate Hash (SHA-256)", {
+    x: M,
+    y: boxY + 66,
+    size: 9,
+    font: fontBold,
+    color: ink,
+  });
 
   page.drawRectangle({
-    x: qrBoxX,
-    y: qrBoxY,
-    width: qrBoxW,
-    height: qrBoxH,
-    borderColor: rgb(0.86, 0.87, 0.9),
+    x: M,
+    y: boxY + 38,
+    width: W - M * 2 - 160,
+    height: 24,
+    borderColor: rule,
     borderWidth: 1,
     color: rgb(0.98, 0.98, 0.99),
   });
 
-  page.drawText("Registry Seal", {
-    x: qrBoxX + 14,
-    y: qrBoxY + qrBoxH - 26,
-    size: 10,
-    font: fontBold,
-    color: rgb(0.12, 0.14, 0.18),
-  });
-
-  page.drawText("Scan to verify", {
-    x: qrBoxX + 14,
-    y: qrBoxY + qrBoxH - 42,
-    size: 8,
+  page.drawText(finalHashText, {
+    x: M + 10,
+    y: boxY + 46,
+    size: 8.5,
     font,
-    color: rgb(0.45, 0.48, 0.55),
+    color: rgb(0.22, 0.24, 0.30),
   });
 
+  // Terminal line
+  page.drawText("Verification Terminal (hash-first)", {
+    x: M,
+    y: boxY + 18,
+    size: 9,
+    font: fontBold,
+    color: ink,
+  });
+
+  const terminalLine =
+    verifyUrl.length > 92 ? `${verifyUrl.slice(0, 92)}…` : verifyUrl;
+
+  page.drawText(terminalLine, {
+    x: M,
+    y: boxY + 4,
+    size: 7.8,
+    font,
+    color: muted,
+  });
+
+  // QR seal bottom-right (like your example)
   const qrPng = qrPngBytes(verifyUrl, { size: 256, margin: 2, ecc: "M" });
   const qrImg = await outDoc.embedPng(qrPng);
 
-  const qrSize = 132;
-  const qrX = qrBoxX + Math.round((qrBoxW - qrSize) / 2);
-  const qrY = qrBoxY + 58;
+  const qrSize = 120;
+  const qrX = W - M - qrSize;
+  const qrY = 80;
+
+  page.drawRectangle({
+    x: qrX - 10,
+    y: qrY - 10,
+    width: qrSize + 20,
+    height: qrSize + 28,
+    borderColor: rule,
+    borderWidth: 1,
+    color: rgb(0.99, 0.99, 1),
+  });
 
   page.drawImage(qrImg, { x: qrX, y: qrY, width: qrSize, height: qrSize });
 
-  // Certificate Hash block (treated like ID)
-  const hashTitleY = qrBoxY - 44;
-  page.drawText("Certificate Hash (SHA-256)", {
-    x: margin,
-    y: hashTitleY,
-    size: 10,
-    font: fontBold,
-    color: rgb(0.12, 0.14, 0.18),
-  });
-
-  const hashBoxX = margin;
-  const hashBoxY = hashTitleY - 46;
-  const hashBoxW = W - margin * 2;
-  const hashBoxH = 40;
-
-  page.drawRectangle({
-    x: hashBoxX,
-    y: hashBoxY,
-    width: hashBoxW,
-    height: hashBoxH,
-    borderColor: rgb(0.86, 0.87, 0.9),
-    borderWidth: 1,
-    color: rgb(0.97, 0.97, 0.98),
-  });
-
-  // Hash text
-  page.drawText(finalHashText, {
-    x: hashBoxX + 12,
-    y: hashBoxY + 14,
-    size: 9,
-    font,
-    color: rgb(0.12, 0.14, 0.18),
-  });
-
-  // Verification URL (short)
-  const urlY = hashBoxY - 26;
-  page.drawText("Verification Terminal (hash-first)", {
-    x: margin,
-    y: urlY,
-    size: 9,
-    font: fontBold,
-    color: rgb(0.12, 0.14, 0.18),
-  });
-
-  const urlLine = verifyUrl.length > 112 ? `${verifyUrl.slice(0, 112)}…` : verifyUrl;
-  page.drawText(urlLine, {
-    x: margin,
-    y: urlY - 14,
+  const scan = "Scan to verify";
+  const scanW = font.widthOfTextAtSize(scan, 8);
+  page.drawText(scan, {
+    x: qrX + (qrSize - scanW) / 2,
+    y: qrY - 14,
     size: 8,
     font,
-    color: rgb(0.45, 0.48, 0.55),
+    color: muted,
   });
 
-  // Bottom note (quiet)
+  // Footer
   page.drawLine({
-    start: { x: margin, y: 74 },
-    end: { x: W - margin, y: 74 },
+    start: { x: M, y: 64 },
+    end: { x: W - M, y: 64 },
     thickness: 0.6,
-    color: rgb(0.90, 0.92, 0.94),
+    color: rule,
   });
 
   page.drawText(
     "This certification page was appended to preserve original document pages. Verification resolves by hash (QR).",
     {
-      x: margin,
-      y: 56,
+      x: M,
+      y: 44,
       size: 8,
       font,
-      color: rgb(0.46, 0.50, 0.58),
-      maxWidth: W - margin * 2,
-      lineHeight: 10,
+      color: muted,
     },
   );
 
@@ -521,8 +587,12 @@ serve(async (req) => {
       is_test = typeof inferred === "boolean" ? inferred : false;
     }
 
-    // 2) Map entity_key -> entities.id via entities.slug (no hardcoding)
-    const ent = await supabaseAdmin.from("entities").select("id, slug").eq("slug", entity_key).maybeSingle();
+    // 2) Map entity_key -> entities (no hardcoding)
+    const ent = await supabaseAdmin
+      .from("entities")
+      .select("id, slug, name")
+      .eq("slug", entity_key)
+      .maybeSingle();
 
     if (ent.error) return json({ ok: false, error: ent.error.message, request_id: reqId }, 400);
     if (!ent.data?.id) {
@@ -539,6 +609,7 @@ serve(async (req) => {
 
     const entity_id = String((ent.data as any).id);
     const entity_slug = String((ent.data as any).slug);
+    const entity_name = safeText((ent.data as any).name) ?? entity_slug;
 
     // 3) Resolve source PDF from minute_book (primary supporting doc)
     const source_bucket = "minute_book";
@@ -562,7 +633,7 @@ serve(async (req) => {
     const certified_bucket = is_test ? "governance_sandbox" : "governance_truth";
     const certified_path = is_test ? `sandbox/uploads/${entryId}.pdf` : `truth/uploads/${entryId}.pdf`;
 
-    // 5) Find existing verified_documents row (UNIQUE by source_table+source_record_id)
+    // 5) Find existing verified_documents row
     const existingVd = await supabaseAdmin
       .from("verified_documents")
       .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
@@ -576,7 +647,7 @@ serve(async (req) => {
     const existingBucket = safeText((existingVd.data as any)?.storage_bucket);
     const existingPath = safeText((existingVd.data as any)?.storage_path);
 
-    // 5b) Strict reuse: if already certified AND canonical pointer matches AND not forcing
+    // 5b) Strict reuse
     if (!force && existingId && existingHash && (existingLevel ?? "").toLowerCase() === "certified") {
       if (existingBucket === certified_bucket && existingPath === certified_path) {
         const verifyBase =
@@ -600,7 +671,7 @@ serve(async (req) => {
       }
     }
 
-    // 6) Ensure a verified_documents row exists (ENTERPRISE: UPDATE if exists, else INSERT)
+    // 6) Ensure verified_documents row exists (UPDATE if exists, else INSERT)
     const document_class = mapDocumentClass(entry_type, domain_key);
 
     let verified_id: string;
@@ -678,40 +749,54 @@ serve(async (req) => {
 
     const laneLabel = is_test ? "SANDBOX" : "TRUTH";
 
+    const docLabel =
+      document_class === "minutes" ? "Minutes" :
+      document_class === "resolution" ? "Resolution" :
+      document_class === "tax_filing" ? "Tax Filing" :
+      document_class === "invoice" ? "Invoice" :
+      document_class === "certificate" ? "Certificate" :
+      document_class === "report" ? "Report" : "Document";
+
     // Pass A: placeholder
     const passA_bytes = await buildCertifiedWithAppendedPage({
       sourceBytes,
       verifyUrl: buildVerifyUrl(verifyBase, "pending"),
       finalHashText: "pending",
       title,
+      entityName: entity_name,
       entitySlug: entity_slug,
       laneLabel,
+      documentClassLabel: docLabel,
     });
     const passA_hash = await sha256Hex(passA_bytes);
 
-    // Pass B: embed passA hash into URL + printed hash
+    // Pass B: embed passA hash
     const passB_bytes = await buildCertifiedWithAppendedPage({
       sourceBytes,
       verifyUrl: buildVerifyUrl(verifyBase, passA_hash),
       finalHashText: passA_hash,
       title,
+      entityName: entity_name,
       entitySlug: entity_slug,
       laneLabel,
+      documentClassLabel: docLabel,
     });
     const passB_hash = await sha256Hex(passB_bytes);
 
     let finalBytes = passB_bytes;
     let finalHash = passB_hash;
 
-    // Stabilize once more if needed (ensures QR+printed hash match final bytes)
+    // Stabilization pass (so QR + printed hash match final bytes)
     if (passB_hash !== passA_hash) {
       const passC_bytes = await buildCertifiedWithAppendedPage({
         sourceBytes,
         verifyUrl: buildVerifyUrl(verifyBase, passB_hash),
         finalHashText: passB_hash,
         title,
+        entityName: entity_name,
         entitySlug: entity_slug,
         laneLabel,
+        documentClassLabel: docLabel,
       });
       const passC_hash = await sha256Hex(passC_bytes);
       finalBytes = passC_bytes;
@@ -720,7 +805,7 @@ serve(async (req) => {
 
     const finalVerifyUrl = buildVerifyUrl(verifyBase, finalHash);
 
-    // 9) Upload certified PDF (overwrite allowed)
+    // 9) Upload certified PDF
     const up = await supabaseAdmin.storage
       .from(certified_bucket)
       .upload(certified_path, new Blob([finalBytes], { type: "application/pdf" }), {
