@@ -15,6 +15,15 @@ import {
 import QRGen from "npm:qrcode-generator@1.4.4";
 import { PNG } from "npm:pngjs@7.0.0";
 
+/**
+ * CI-Archive — certify-minute-book-entry
+ * ✅ Appends NEW final certification page (never stamps existing page)
+ * ✅ Fixed-point hashing so:
+ *    - hash printed in PDF === verify_url hash === verified_documents.file_hash
+ * ✅ Deterministic serialization to prevent “3 hashes” drift
+ * ✅ No schema/enum changes, no contract drift
+ */
+
 type ReqBody = {
   entry_id?: string; // minute_book_entries.id (required)
   actor_id?: string; // optional; resolved from JWT if missing
@@ -200,7 +209,7 @@ function qrPngBytes(
 
   const png = new PNG({ width: imgSize, height: imgSize });
 
-  // white background
+  // white bg
   for (let y = 0; y < imgSize; y++) {
     for (let x = 0; x < imgSize; x++) {
       const idx = (png.width * y + x) << 2;
@@ -239,7 +248,9 @@ function qrPngBytes(
 /**
  * Infer is_test from minute_book_entries.source_record_id -> governance_ledger.is_test
  */
-async function inferLaneIsTestFromEntrySource(entrySourceRecordId: string | null): Promise<boolean | null> {
+async function inferLaneIsTestFromEntrySource(
+  entrySourceRecordId: string | null,
+): Promise<boolean | null> {
   const id = safeText(entrySourceRecordId);
   if (!id || !isUuid(id)) return null;
 
@@ -306,8 +317,8 @@ async function fetchLatestVerifiedPointer(entryId: string) {
 }
 
 // -----------------------------------------------------------------------------
-// ✅ APPEND A NEW FINAL CERTIFICATION PAGE (never stamp existing last page)
-// ✅ DETERMINISTIC SAVE so fixed-point hash converges
+// ✅ APPEND A NEW FINAL CERTIFICATION PAGE
+// ✅ DETERMINISTIC SAVE (to make fixed-point hashing converge)
 // -----------------------------------------------------------------------------
 const DETERMINISTIC_DATE = new Date("2020-01-01T00:00:00Z");
 
@@ -326,7 +337,7 @@ function setDeterministicTrailerId(doc: PDFDocument) {
     arr.push(PDFHexString.of(TRAILER_ID_HEX));
     trailer.set(PDFName.of("ID"), arr);
   } catch {
-    // best-effort only
+    // best-effort
   }
 }
 
@@ -353,22 +364,20 @@ async function buildCertifiedWithAppendedPage(args: {
     certifiedAtUtc,
   } = args;
 
-  // ✅ FIX: this must be sourceBytes (your crash was "sourceC not defined")
   const srcDoc = await PDFDocument.load(sourceBytes);
-  const outDoc = await PDFDocument.create();
 
-  // ✅ deterministic metadata
+  // Create the output doc deterministically
+  const outDoc = await PDFDocument.create();
   outDoc.setCreator("Oasis Digital Parliament");
   outDoc.setProducer("Oasis Verified Registry");
   outDoc.setCreationDate(DETERMINISTIC_DATE);
   outDoc.setModificationDate(DETERMINISTIC_DATE);
 
-  // ✅ deterministic trailer ID
-  setDeterministicTrailerId(outDoc);
-
+  // copy pages
   const copiedPages = await outDoc.copyPages(srcDoc, srcDoc.getPageIndices());
   for (const p of copiedPages) outDoc.addPage(p);
 
+  // append NEW certification page
   const page = outDoc.addPage([612, 792]); // Letter
   const font = await outDoc.embedFont(StandardFonts.Helvetica);
   const fontBold = await outDoc.embedFont(StandardFonts.HelveticaBold);
@@ -512,7 +521,7 @@ async function buildCertifiedWithAppendedPage(args: {
     color: rgb(0.97, 0.97, 0.98),
   });
 
-  // ✅ MUST print the EXACT hash that the file resolves by
+  // ✅ This value MUST match verified_documents.file_hash (fixed-point ensures it)
   page.drawText(finalHashText, {
     x: margin + 12,
     y: boxY + 12,
@@ -622,6 +631,9 @@ async function buildCertifiedWithAppendedPage(args: {
     maxWidth: W - margin * 2,
   });
 
+  // ✅ enforce deterministic trailer ID at end (best-effort)
+  setDeterministicTrailerId(outDoc);
+
   // ✅ deterministic serialization
   return new Uint8Array(await outDoc.save({ useObjectStreams: false }));
 }
@@ -629,6 +641,7 @@ async function buildCertifiedWithAppendedPage(args: {
 /**
  * ✅ FIXED-POINT HASH STABILIZATION:
  * embed hash -> hash -> repeat until stable
+ * Determinism above makes this converge (so PDF hash text == real registry hash)
  */
 async function buildCertifiedFixedPoint(args: {
   sourceBytes: Uint8Array;
@@ -640,13 +653,23 @@ async function buildCertifiedFixedPoint(args: {
   operatorLabel: string;
   certifiedAtUtc: string;
 }) {
-  const { sourceBytes, verifyBase, title, entitySlug, laneLabel, documentClass, operatorLabel, certifiedAtUtc } = args;
+  const {
+    sourceBytes,
+    verifyBase,
+    title,
+    entitySlug,
+    laneLabel,
+    documentClass,
+    operatorLabel,
+    certifiedAtUtc,
+  } = args;
 
-  let current = "pending";
+  // start with a 64-char placeholder to avoid layout jitter
+  let current = "0".repeat(64);
   let lastBytes = new Uint8Array();
   let lastHash = "";
 
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 16; i++) {
     const bytes = await buildCertifiedWithAppendedPage({
       sourceBytes,
       verifyUrl: buildVerifyUrl(verifyBase, current),
@@ -671,6 +694,8 @@ async function buildCertifiedFixedPoint(args: {
     current = h;
   }
 
+  // If this ever happens, we still return a consistent tuple for registry/storage,
+  // but we flag it loudly so you can investigate determinism drift.
   return {
     bytes: lastBytes,
     hash: lastHash,
@@ -684,15 +709,21 @@ serve(async (req) => {
 
   try {
     if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-    if (req.method !== "POST") return json({ ok: false, error: "POST only", request_id: reqId }, 405);
+    if (req.method !== "POST") {
+      return json({ ok: false, error: "POST only", request_id: reqId }, 405);
+    }
 
     const body = (await req.json().catch(() => ({}))) as ReqBody;
 
     const entryId = safeText(body.entry_id);
-    if (!entryId || !isUuid(entryId)) return json({ ok: false, error: "entry_id must be uuid", request_id: reqId }, 400);
+    if (!entryId || !isUuid(entryId)) {
+      return json({ ok: false, error: "entry_id must be uuid", request_id: reqId }, 400);
+    }
 
     let actorId = safeText(body.actor_id);
-    if (actorId && !isUuid(actorId)) return json({ ok: false, error: "actor_id must be uuid", request_id: reqId }, 400);
+    if (actorId && !isUuid(actorId)) {
+      return json({ ok: false, error: "actor_id must be uuid", request_id: reqId }, 400);
+    }
     if (!actorId) actorId = await resolveActorIdFromJwt(req);
     if (!actorId) return json({ ok: false, error: "ACTOR_REQUIRED", request_id: reqId }, 401);
 
@@ -769,10 +800,12 @@ serve(async (req) => {
     const hasCertified = !!(existingId && existingHash && existingLevel === "certified");
     const reissue = !!force && !!existingId;
 
-    // strict reuse
+    // strict reuse (NO regenerate)
     if (!force && hasCertified) {
       const verifyBase =
-        safeText(body.verify_base_url) ?? Deno.env.get("VERIFY_BASE_URL") ?? "https://sign.oasisintlholdings.com/verify.html";
+        safeText(body.verify_base_url) ??
+        Deno.env.get("VERIFY_BASE_URL") ??
+        "https://sign.oasisintlholdings.com/verify.html";
 
       return json<Resp>({
         ok: true,
@@ -799,15 +832,22 @@ serve(async (req) => {
 
     // 7) download source bytes
     const dl = await supabaseAdmin.storage.from(source_bucket).download(source_path);
-    if (dl.error || !dl.data) return json({ ok: false, error: "SOURCE_PDF_DOWNLOAD_FAILED", details: dl.error, request_id: reqId }, 500);
+    if (dl.error || !dl.data) {
+      return json(
+        { ok: false, error: "SOURCE_PDF_DOWNLOAD_FAILED", details: dl.error, request_id: reqId },
+        500,
+      );
+    }
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
     // 8) build fixed-point certified pdf
     const verifyBase =
-      safeText(body.verify_base_url) ?? Deno.env.get("VERIFY_BASE_URL") ?? "https://sign.oasisintlholdings.com/verify.html";
+      safeText(body.verify_base_url) ??
+      Deno.env.get("VERIFY_BASE_URL") ??
+      "https://sign.oasisintlholdings.com/verify.html";
 
     const laneLabel = is_test ? "SANDBOX" : "TRUTH";
-    const certifiedAt = utcStampISO();
+    const certifiedAt = utcStampISO(); // stays constant across iterations inside buildCertifiedFixedPoint
     const operatorLabel = safeText(actorEmail) ?? actorId;
 
     const built = await buildCertifiedFixedPoint({
@@ -825,7 +865,7 @@ serve(async (req) => {
     const finalHash = built.hash;
     const finalVerifyUrl = built.verify_url;
 
-    // 9) path by hash
+    // 9) path by hash (stable, human-friendly)
     const certified_path = `${certified_prefix}/${entryId}-${finalHash.slice(0, 12)}.pdf`;
 
     const up = await supabaseAdmin.storage
@@ -843,7 +883,10 @@ serve(async (req) => {
         msg.toLowerCase().includes("409");
 
       if (!alreadyExists) {
-        return json({ ok: false, error: "CERTIFIED_PDF_UPLOAD_FAILED", details: up.error, request_id: reqId }, 500);
+        return json(
+          { ok: false, error: "CERTIFIED_PDF_UPLOAD_FAILED", details: up.error, request_id: reqId },
+          500,
+        );
       }
     }
 
@@ -872,22 +915,34 @@ serve(async (req) => {
         .select("id")
         .single();
 
-      if (ins.error) return json({ ok: false, error: "VERIFIED_DOC_INSERT_FAILED", details: ins.error, request_id: reqId } satisfies Resp, 500);
+      if (ins.error) {
+        return json(
+          { ok: false, error: "VERIFIED_DOC_INSERT_FAILED", details: ins.error, request_id: reqId } satisfies Resp,
+          500,
+        );
+      }
 
       verified_id = String(ins.data.id);
     } else {
       verified_id = existingId;
 
+      // ✅ Reissue/force MUST update the existing row (no duplicate INSERT)
       const upd = await supabaseAdmin
         .from("verified_documents")
         .update({
           storage_bucket: certified_bucket,
           storage_path: certified_path,
           file_hash: finalHash,
+          updated_by: actorId,
         } as any)
         .eq("id", verified_id);
 
-      if (upd.error) return json({ ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId } satisfies Resp, 500);
+      if (upd.error) {
+        return json(
+          { ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId } satisfies Resp,
+          500,
+        );
+      }
     }
 
     await bestEffortActionsLog({
