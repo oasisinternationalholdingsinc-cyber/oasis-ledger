@@ -19,9 +19,13 @@ import { PNG } from "npm:pngjs@7.0.0";
  * CI-Archive — certify-minute-book-entry
  * ✅ Appends NEW final certification page (never stamps existing page)
  * ✅ Fixed-point hashing so:
- *    - hash printed in PDF === verify_url hash === verified_documents.file_hash
+ *    - verify_url hash === verified_documents.file_hash
  * ✅ Deterministic serialization to prevent “3 hashes” drift
  * ✅ No schema/enum changes, no contract drift
+ *
+ * NOTE (LOCKED):
+ * ❌ Do NOT print/embed hash in the PDF.
+ * ✅ Hash authority lives in Verified Registry (verified_documents.file_hash) + verify terminal.
  */
 
 type ReqBody = {
@@ -344,7 +348,7 @@ function setDeterministicTrailerId(doc: PDFDocument) {
 async function buildCertifiedWithAppendedPage(args: {
   sourceBytes: Uint8Array;
   verifyUrl: string;
-  finalHashText: string;
+  finalHashText: string; // still used for fixed-point; NOT printed in PDF
   title: string;
   entitySlug: string;
   laneLabel: string;
@@ -355,7 +359,7 @@ async function buildCertifiedWithAppendedPage(args: {
   const {
     sourceBytes,
     verifyUrl,
-    finalHashText,
+    finalHashText, // intentionally unused in rendering (NO hash in PDF)
     title,
     entitySlug,
     laneLabel,
@@ -363,6 +367,8 @@ async function buildCertifiedWithAppendedPage(args: {
     operatorLabel,
     certifiedAtUtc,
   } = args;
+
+  void finalHashText; // explicit: keep param for fixed-point hashing, do not render
 
   const srcDoc = await PDFDocument.load(sourceBytes);
 
@@ -460,10 +466,9 @@ async function buildCertifiedWithAppendedPage(args: {
   row("Lane:", laneLabel, leftX, gridTop - 16);
   row("Document:", documentClass, leftX, gridTop - 32);
 
-  const hashShort =
-    finalHashText.length > 16 ? `${finalHashText.slice(0, 16)}…` : finalHashText;
-  row("Hash (SHA-256):", hashShort, midX, gridTop);
-  row("Verification:", "Scan QR / open terminal", midX, gridTop - 16);
+  // ✅ NO hash printed in PDF
+  row("Verification:", "Scan QR / open terminal", midX, gridTop);
+  row("Authority:", "Verified Registry", midX, gridTop - 16);
 
   page.drawLine({
     start: { x: margin, y: gridTop - 58 },
@@ -502,35 +507,7 @@ async function buildCertifiedWithAppendedPage(args: {
     color: muted,
   });
 
-  const boxY = vTop - 90;
-  page.drawText("Certificate Hash (SHA-256)", {
-    x: margin,
-    y: boxY + 44,
-    size: 9,
-    font: fontBold,
-    color: ink,
-  });
-
-  page.drawRectangle({
-    x: margin,
-    y: boxY,
-    width: W - margin * 2,
-    height: 34,
-    borderColor: hair,
-    borderWidth: 1,
-    color: rgb(0.97, 0.97, 0.98),
-  });
-
-  // ✅ This value MUST match verified_documents.file_hash (fixed-point ensures it)
-  page.drawText(finalHashText, {
-    x: margin + 12,
-    y: boxY + 12,
-    size: 8.2,
-    font,
-    color: ink,
-  });
-
-  const urlY = boxY - 54;
+  const urlY = vTop - 88;
   page.drawText("Verification Terminal (hash-first)", {
     x: margin,
     y: urlY + 20,
@@ -621,7 +598,7 @@ async function buildCertifiedWithAppendedPage(args: {
   });
 
   const foot =
-    "This certification page was appended to preserve original document pages. Verification resolves by hash (QR).";
+    "This certification page was appended to preserve original document pages. Verification is authoritative via the Verified Registry terminal.";
   page.drawText(foot, {
     x: margin,
     y: 44,
@@ -641,7 +618,11 @@ async function buildCertifiedWithAppendedPage(args: {
 /**
  * ✅ FIXED-POINT HASH STABILIZATION:
  * embed hash -> hash -> repeat until stable
- * Determinism above makes this converge (so PDF hash text == real registry hash)
+ * Determinism above makes this converge.
+ *
+ * IMPORTANT:
+ * - We DO NOT print/embed the hash in the PDF anymore.
+ * - Fixed-point is still used because verify_url must be hash-first and match registry hash.
  */
 async function buildCertifiedFixedPoint(args: {
   sourceBytes: Uint8Array;
@@ -664,7 +645,7 @@ async function buildCertifiedFixedPoint(args: {
     certifiedAtUtc,
   } = args;
 
-  // start with a 64-char placeholder to avoid layout jitter
+  // start with placeholder
   let current = "0".repeat(64);
   let lastBytes = new Uint8Array();
   let lastHash = "";
@@ -694,8 +675,6 @@ async function buildCertifiedFixedPoint(args: {
     current = h;
   }
 
-  // If this ever happens, we still return a consistent tuple for registry/storage,
-  // but we flag it loudly so you can investigate determinism drift.
   return {
     bytes: lastBytes,
     hash: lastHash,
@@ -847,7 +826,7 @@ serve(async (req) => {
       "https://sign.oasisintlholdings.com/verify.html";
 
     const laneLabel = is_test ? "SANDBOX" : "TRUTH";
-    const certifiedAt = utcStampISO(); // stays constant across iterations inside buildCertifiedFixedPoint
+    const certifiedAt = utcStampISO();
     const operatorLabel = safeText(actorEmail) ?? actorId;
 
     const built = await buildCertifiedFixedPoint({
