@@ -53,7 +53,8 @@ const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
 const cors: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Allow-Headers":
+    "authorization, apikey, content-type, x-client-info",
   "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
@@ -64,12 +65,19 @@ const json = (x: unknown, status = 200) =>
   });
 
 const isUuid = (s: string) =>
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    s,
+  );
 
 function safeText(v: unknown): string | null {
   if (v == null) return null;
   const t = String(v).trim();
   return t.length ? t : null;
+}
+
+function utcStampISO(): string {
+  // "2026-02-07T23:59:59Z"
+  return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -91,7 +99,8 @@ function buildVerifyUrl(base: string, sha256: string) {
 }
 
 async function resolveActorIdFromJwt(req: Request): Promise<string | null> {
-  const authHeader = req.headers.get("authorization") ?? req.headers.get("Authorization");
+  const authHeader =
+    req.headers.get("authorization") ?? req.headers.get("Authorization");
   const jwt = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
   if (!jwt) return null;
 
@@ -104,11 +113,38 @@ async function resolveActorIdFromJwt(req: Request): Promise<string | null> {
 
 async function resolveActorEmail(actorId: string): Promise<string | null> {
   try {
-    const { data, error } = await (supabaseAdmin as any).auth.admin.getUserById(actorId);
+    const { data, error } = await (supabaseAdmin as any).auth.admin.getUserById(
+      actorId,
+    );
     if (error) return null;
     return (data?.user?.email as string) ?? null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * ✅ Best-effort audit log (NO drift):
+ * - If actions_log exists and insert works → great.
+ * - If not, we swallow errors (never block certification).
+ */
+async function bestEffortActionsLog(args: {
+  actor_uid: string;
+  action: string;
+  target_table: string;
+  target_id: string;
+  details_json?: Record<string, unknown>;
+}) {
+  try {
+    await supabaseAdmin.from("actions_log").insert({
+      actor_uid: args.actor_uid,
+      action: args.action as any,
+      target_table: args.target_table,
+      target_id: args.target_id,
+      details_json: args.details_json ?? {},
+    } as any);
+  } catch {
+    // intentionally non-fatal
   }
 }
 
@@ -137,7 +173,9 @@ async function resolveEntryPrimaryPdf(entryId: string) {
 
   const pick =
     rows.find(
-      (r) => r.registry_visible === true && safeText(r.file_path)?.toLowerCase().endsWith(".pdf"),
+      (r) =>
+        r.registry_visible === true &&
+        safeText(r.file_path)?.toLowerCase().endsWith(".pdf"),
     ) ??
     rows.find((r) => safeText(r.file_path)?.toLowerCase().endsWith(".pdf")) ??
     rows[0];
@@ -149,7 +187,9 @@ async function resolveEntryPrimaryPdf(entryId: string) {
     file_path,
     file_name: safeText(pick?.file_name),
     file_hash: safeText(pick?.file_hash),
-    file_size: Number.isFinite(Number(pick?.file_size)) ? Number(pick?.file_size) : null,
+    file_size: Number.isFinite(Number(pick?.file_size))
+      ? Number(pick?.file_size)
+      : null,
     mime_type: safeText(pick?.mime_type) ?? "application/pdf",
   };
 }
@@ -258,6 +298,7 @@ function mapDocumentClass(entryType?: string | null, domainKey?: string | null) 
 // ✅ ENTERPRISE: Produce a brand-new FINAL certification page (the “last page”)
 // - MATCHES OS / Execution Certificate vibe: dark header band + teal title,
 //   structured metadata, calm whitespace, QR bottom-right.
+// - ADJUSTMENT: include operator identity + UTC timestamp in Registry Attestation.
 // -----------------------------------------------------------------------------
 async function buildCertifiedWithAppendedPage(args: {
   sourceBytes: Uint8Array;
@@ -267,8 +308,21 @@ async function buildCertifiedWithAppendedPage(args: {
   entitySlug: string;
   laneLabel: string; // "SANDBOX" or "TRUTH"
   documentClass: string;
+
+  operatorLabel: string; // e.g. email or actor uuid
+  certifiedAtUtc: string; // ISO string
 }): Promise<Uint8Array> {
-  const { sourceBytes, verifyUrl, finalHashText, title, entitySlug, laneLabel, documentClass } = args;
+  const {
+    sourceBytes,
+    verifyUrl,
+    finalHashText,
+    title,
+    entitySlug,
+    laneLabel,
+    documentClass,
+    operatorLabel,
+    certifiedAtUtc,
+  } = args;
 
   const srcDoc = await PDFDocument.load(sourceBytes);
   const outDoc = await PDFDocument.create();
@@ -286,8 +340,8 @@ async function buildCertifiedWithAppendedPage(args: {
   const ink = rgb(0.12, 0.14, 0.18);
   const muted = rgb(0.45, 0.48, 0.55);
   const hair = rgb(0.86, 0.88, 0.91);
-  const band = rgb(0.06, 0.09, 0.12);           // near-black
-  const teal = rgb(0.10, 0.78, 0.72);           // green/teal signal
+  const band = rgb(0.06, 0.09, 0.12); // near-black
+  const teal = rgb(0.10, 0.78, 0.72); // green/teal signal
   const paper = rgb(1, 1, 1);
 
   const margin = 56;
@@ -331,13 +385,7 @@ async function buildCertifiedWithAppendedPage(args: {
   const introY = H - bandH - 48;
   page.drawText(
     "This certification confirms the archival integrity of the following document:",
-    {
-      x: margin,
-      y: introY,
-      size: 9.5,
-      font,
-      color: muted,
-    },
+    { x: margin, y: introY, size: 9.5, font, color: muted },
   );
 
   const safeTitle = (title ?? "Minute Book Entry").slice(0, 120);
@@ -357,7 +405,7 @@ async function buildCertifiedWithAppendedPage(args: {
     color: muted,
   });
 
-  // Metadata grid (two columns like your execution certificate)
+  // Metadata grid (two columns)
   const gridTop = introY - 96;
   const leftX = margin;
   const midX = margin + 250;
@@ -371,7 +419,8 @@ async function buildCertifiedWithAppendedPage(args: {
   row("Lane:", laneLabel, leftX, gridTop - 16);
   row("Document:", documentClass, leftX, gridTop - 32);
 
-  const hashShort = finalHashText.length > 16 ? `${finalHashText.slice(0, 16)}…` : finalHashText;
+  const hashShort =
+    finalHashText.length > 16 ? `${finalHashText.slice(0, 16)}…` : finalHashText;
   row("Hash (SHA-256):", hashShort, midX, gridTop);
   row("Verification:", "Scan QR / open terminal", midX, gridTop - 16);
 
@@ -428,7 +477,6 @@ async function buildCertifiedWithAppendedPage(args: {
     color: rgb(0.97, 0.97, 0.98),
   });
 
-  // print full hash (fits with smaller size)
   page.drawText(finalHashText, {
     x: margin + 12,
     y: boxY + 12,
@@ -448,15 +496,9 @@ async function buildCertifiedWithAppendedPage(args: {
   });
 
   const urlLine = verifyUrl.length > 108 ? `${verifyUrl.slice(0, 108)}…` : verifyUrl;
-  page.drawText(urlLine, {
-    x: margin,
-    y: urlY,
-    size: 8,
-    font,
-    color: muted,
-  });
+  page.drawText(urlLine, { x: margin, y: urlY, size: 8, font, color: muted });
 
-  // QR bottom-right (like execution certificate)
+  // QR bottom-right
   const qrPng = qrPngBytes(verifyUrl, { size: 256, margin: 2, ecc: "M" });
   const qrImg = await outDoc.embedPng(qrPng);
 
@@ -464,7 +506,6 @@ async function buildCertifiedWithAppendedPage(args: {
   const qrX = W - margin - qrSize;
   const qrY = 92;
 
-  // QR container
   page.drawRectangle({
     x: qrX - 12,
     y: qrY - 18,
@@ -487,35 +528,61 @@ async function buildCertifiedWithAppendedPage(args: {
     color: muted,
   });
 
-  // Optional “signature capture” placeholder (keeps symmetry with your exec cert)
-  // (Minute Book certification is registry authority; we keep this minimal.)
+  // Registry attestation box (bottom-left) — now includes operator + time.
+  const attX = margin;
+  const attY = 92;
+  const attW = 300;
+  const attH = 72;
+
   page.drawRectangle({
-    x: margin,
-    y: 92,
-    width: 260,
-    height: 72,
+    x: attX,
+    y: attY,
+    width: attW,
+    height: attH,
     borderColor: hair,
     borderWidth: 1,
     color: rgb(0.99, 0.99, 1),
   });
 
   page.drawText("Registry Attestation", {
-    x: margin + 12,
-    y: 92 + 52,
+    x: attX + 12,
+    y: attY + attH - 20,
     size: 8.5,
     font: fontBold,
     color: muted,
   });
 
+  // Operator + time (enterprise traceability)
+  const opLine = `Operator: ${operatorLabel}`.slice(0, 64);
+  const tsLine = `Certified At (UTC): ${certifiedAtUtc}`.slice(0, 64);
+
+  page.drawText(opLine, {
+    x: attX + 12,
+    y: attY + 34,
+    size: 8.2,
+    font,
+    color: ink,
+  });
+
+  page.drawText(tsLine, {
+    x: attX + 12,
+    y: attY + 20,
+    size: 8.2,
+    font,
+    color: ink,
+  });
+
+  // Subtle signature line (keeps symmetry)
   page.drawLine({
-    start: { x: margin + 12, y: 92 + 26 },
-    end: { x: margin + 248, y: 92 + 26 },
+    start: { x: attX + 12, y: attY + 10 },
+    end: { x: attX + attW - 12, y: attY + 10 },
     thickness: 0.8,
     color: rgb(0.30, 0.32, 0.36),
   });
 
   // Footer microcopy
-  const foot = "This certification page was appended to preserve original document pages. Verification resolves by hash (QR).";
+  const foot =
+    "This certification page was appended to preserve original document pages. Verification resolves by hash (QR).";
   page.drawText(foot, {
     x: margin,
     y: 44,
@@ -533,7 +600,9 @@ serve(async (req) => {
 
   try {
     if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-    if (req.method !== "POST") return json({ ok: false, error: "POST only", request_id: reqId }, 405);
+    if (req.method !== "POST") {
+      return json({ ok: false, error: "POST only", request_id: reqId }, 405);
+    }
 
     const body = (await req.json().catch(() => ({}))) as ReqBody;
 
@@ -549,12 +618,15 @@ serve(async (req) => {
     if (!actorId) actorId = await resolveActorIdFromJwt(req);
     if (!actorId) return json({ ok: false, error: "ACTOR_REQUIRED", request_id: reqId }, 401);
 
+    const actorEmail = await resolveActorEmail(actorId);
     const force = !!body.force;
 
     // 1) Load minute_book entry (include source_record_id for lane inference)
     const entry = await supabaseAdmin
       .from("minute_book_entries")
-      .select("id,entity_key,domain_key,entry_type,title,notes,created_at,created_by,source_record_id")
+      .select(
+        "id,entity_key,domain_key,entry_type,title,notes,created_at,created_by,source_record_id",
+      )
       .eq("id", entryId)
       .maybeSingle();
 
@@ -567,7 +639,7 @@ serve(async (req) => {
     const title = safeText((entry.data as any).title) ?? "Minute Book Filing";
     const source_record_id = safeText((entry.data as any).source_record_id);
 
-    // 1b) Lane resolution (caller override wins; otherwise infer; otherwise default false)
+    // 1b) Lane resolution
     let is_test: boolean;
     if (typeof body.is_test === "boolean") {
       is_test = body.is_test;
@@ -608,7 +680,8 @@ serve(async (req) => {
         {
           ok: false,
           error: "SOURCE_PDF_NOT_FOUND",
-          details: "No primary supporting_documents PDF pointer found for this entry_id (file_path missing).",
+          details:
+            "No primary supporting_documents PDF pointer found for this entry_id (file_path missing).",
           request_id: reqId,
         } satisfies Resp,
         404,
@@ -617,11 +690,13 @@ serve(async (req) => {
 
     const source_path = src.file_path;
 
-    // 4) Certified destination pointer (separate buckets; no schema changes)
+    // 4) Certified destination pointer
     const certified_bucket = is_test ? "governance_sandbox" : "governance_truth";
-    const certified_path = is_test ? `sandbox/uploads/${entryId}.pdf` : `truth/uploads/${entryId}.pdf`;
+    const certified_path = is_test
+      ? `sandbox/uploads/${entryId}.pdf`
+      : `truth/uploads/${entryId}.pdf`;
 
-    // 5) Find existing verified_documents row (UNIQUE by source_table+source_record_id)
+    // 5) Find existing verified_documents row
     const existingVd = await supabaseAdmin
       .from("verified_documents")
       .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
@@ -635,7 +710,7 @@ serve(async (req) => {
     const existingBucket = safeText((existingVd.data as any)?.storage_bucket);
     const existingPath = safeText((existingVd.data as any)?.storage_path);
 
-    // 5b) Strict reuse: if already certified AND canonical pointer matches AND not forcing
+    // 5b) Strict reuse
     if (!force && existingId && existingHash && (existingLevel ?? "").toLowerCase() === "certified") {
       if (existingBucket === certified_bucket && existingPath === certified_path) {
         const verifyBase =
@@ -648,18 +723,23 @@ serve(async (req) => {
           reused: true,
           entry_id: entryId,
           actor_id: actorId,
-          actor_email: await resolveActorEmail(actorId),
+          actor_email: actorEmail,
           is_test,
           verified_document_id: existingId,
           verify_url: buildVerifyUrl(verifyBase, existingHash),
           source: { bucket: source_bucket, path: source_path, file_hash: src.file_hash },
-          certified: { bucket: certified_bucket, path: certified_path, file_hash: existingHash, file_size: 0 },
+          certified: {
+            bucket: certified_bucket,
+            path: certified_path,
+            file_hash: existingHash,
+            file_size: 0,
+          },
           request_id: reqId,
         });
       }
     }
 
-    // 6) Ensure a verified_documents row exists (ENTERPRISE: UPDATE if exists, else INSERT)
+    // 6) Ensure a verified_documents row exists (update or insert)
     const document_class = mapDocumentClass(entry_type, domain_key);
 
     let verified_id: string;
@@ -725,17 +805,22 @@ serve(async (req) => {
     // 7) Download source PDF bytes
     const dl = await supabaseAdmin.storage.from(source_bucket).download(source_path);
     if (dl.error || !dl.data) {
-      return json({ ok: false, error: "SOURCE_PDF_DOWNLOAD_FAILED", details: dl.error, request_id: reqId }, 500);
+      return json(
+        { ok: false, error: "SOURCE_PDF_DOWNLOAD_FAILED", details: dl.error, request_id: reqId },
+        500,
+      );
     }
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // 8) Build certification page as the NEW FINAL PAGE (stabilized passes so QR + printed hash match)
+    // 8) Build certification page as the NEW FINAL PAGE (stabilized passes)
     const verifyBase =
       safeText(body.verify_base_url) ??
       Deno.env.get("VERIFY_BASE_URL") ??
       "https://sign.oasisintlholdings.com/verify.html";
 
     const laneLabel = is_test ? "SANDBOX" : "TRUTH";
+    const certifiedAt = utcStampISO();
+    const operatorLabel = safeText(actorEmail) ?? actorId;
 
     // Pass A: placeholder
     const passA_bytes = await buildCertifiedWithAppendedPage({
@@ -746,6 +831,8 @@ serve(async (req) => {
       entitySlug: entity_slug,
       laneLabel,
       documentClass: document_class,
+      operatorLabel,
+      certifiedAtUtc: certifiedAt,
     });
     const passA_hash = await sha256Hex(passA_bytes);
 
@@ -758,6 +845,8 @@ serve(async (req) => {
       entitySlug: entity_slug,
       laneLabel,
       documentClass: document_class,
+      operatorLabel,
+      certifiedAtUtc: certifiedAt,
     });
     const passB_hash = await sha256Hex(passB_bytes);
 
@@ -774,6 +863,8 @@ serve(async (req) => {
         entitySlug: entity_slug,
         laneLabel,
         documentClass: document_class,
+        operatorLabel,
+        certifiedAtUtc: certifiedAt,
       });
       const passC_hash = await sha256Hex(passC_bytes);
 
@@ -786,13 +877,20 @@ serve(async (req) => {
     // 9) Upload certified PDF (overwrite allowed)
     const up = await supabaseAdmin.storage
       .from(certified_bucket)
-      .upload(certified_path, new Blob([finalBytes], { type: "application/pdf" }), {
-        upsert: true,
-        contentType: "application/pdf",
-      });
+      .upload(
+        certified_path,
+        new Blob([finalBytes], { type: "application/pdf" }),
+        {
+          upsert: true,
+          contentType: "application/pdf",
+        },
+      );
 
     if (up.error) {
-      return json({ ok: false, error: "CERTIFIED_PDF_UPLOAD_FAILED", details: up.error, request_id: reqId }, 500);
+      return json(
+        { ok: false, error: "CERTIFIED_PDF_UPLOAD_FAILED", details: up.error, request_id: reqId },
+        500,
+      );
     }
 
     // 10) Finalize verified_documents hash + canonical pointer
@@ -815,14 +913,34 @@ serve(async (req) => {
       .eq("id", verified_id);
 
     if (upd.error) {
-      return json({ ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId }, 500);
+      return json(
+        { ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId },
+        500,
+      );
     }
+
+    // ✅ Best-effort audit (operator trail) — non-fatal
+    await bestEffortActionsLog({
+      actor_uid: actorId,
+      action: "CERTIFY_MINUTE_BOOK_ENTRY",
+      target_table: "minute_book_entries",
+      target_id: entryId,
+      details_json: {
+        verified_document_id: verified_id,
+        file_hash: finalHash,
+        is_test,
+        certified_bucket,
+        certified_path,
+        source_bucket,
+        source_path,
+      },
+    });
 
     return json<Resp>({
       ok: true,
       entry_id: entryId,
       actor_id: actorId,
-      actor_email: await resolveActorEmail(actorId),
+      actor_email: actorEmail,
       is_test,
       verified_document_id: verified_id,
       verify_url: finalVerifyUrl,
