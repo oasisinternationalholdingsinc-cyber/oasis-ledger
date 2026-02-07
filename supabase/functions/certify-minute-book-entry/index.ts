@@ -2,7 +2,14 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { PDFDocument, rgb, StandardFonts } from "https://esm.sh/pdf-lib@1.17.1";
+import {
+  PDFDocument,
+  rgb,
+  StandardFonts,
+  PDFName,
+  PDFHexString,
+  PDFArray,
+} from "https://esm.sh/pdf-lib@1.17.1";
 
 // ✅ Edge-safe QR (NO canvas / NO wasm)
 import QRGen from "npm:qrcode-generator@1.4.4";
@@ -13,7 +20,7 @@ type ReqBody = {
   actor_id?: string; // optional; resolved from JWT if missing
   is_test?: boolean; // optional; infer lane from source_record_id -> governance_ledger.is_test
   force?: boolean; // optional (reissue)
-  verify_base_url?: string; // optional override (defaults to VERIFY_BASE_URL or verify.html)
+  verify_base_url?: string; // optional override
 };
 
 type Resp = {
@@ -26,7 +33,6 @@ type Resp = {
   verified_document_id?: string;
   reused?: boolean;
 
-  // ✅ Now points to entry_id (stable), not self-hash
   verify_url?: string;
 
   source?: { bucket: string; path: string; file_hash?: string | null };
@@ -53,8 +59,7 @@ const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
 const cors: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers":
-    "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
   "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
@@ -65,9 +70,7 @@ const json = (x: unknown, status = 200) =>
   });
 
 const isUuid = (s: string) =>
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    s,
-  );
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
 
 function safeText(v: unknown): string | null {
   if (v == null) return null;
@@ -87,18 +90,14 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return hex;
 }
 
-/**
- * ✅ Stable verify URL: resolve by entry_id (NOT by hash inside same file)
- */
-function buildVerifyUrlByEntry(base: string, entryId: string) {
+function buildVerifyUrl(base: string, sha256: string) {
   const u = new URL(base);
-  u.searchParams.set("entry_id", entryId);
+  u.searchParams.set("hash", sha256);
   return u.toString();
 }
 
 async function resolveActorIdFromJwt(req: Request): Promise<string | null> {
-  const authHeader =
-    req.headers.get("authorization") ?? req.headers.get("Authorization");
+  const authHeader = req.headers.get("authorization") ?? req.headers.get("Authorization");
   const jwt = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
   if (!jwt) return null;
 
@@ -111,9 +110,7 @@ async function resolveActorIdFromJwt(req: Request): Promise<string | null> {
 
 async function resolveActorEmail(actorId: string): Promise<string | null> {
   try {
-    const { data, error } = await (supabaseAdmin as any).auth.admin.getUserById(
-      actorId,
-    );
+    const { data, error } = await (supabaseAdmin as any).auth.admin.getUserById(actorId);
     if (error) return null;
     return (data?.user?.email as string) ?? null;
   } catch {
@@ -165,9 +162,7 @@ async function resolveEntryPrimaryPdf(entryId: string) {
 
   const pick =
     rows.find(
-      (r) =>
-        r.registry_visible === true &&
-        safeText(r.file_path)?.toLowerCase().endsWith(".pdf"),
+      (r) => r.registry_visible === true && safeText(r.file_path)?.toLowerCase().endsWith(".pdf"),
     ) ??
     rows.find((r) => safeText(r.file_path)?.toLowerCase().endsWith(".pdf")) ??
     rows[0];
@@ -179,9 +174,7 @@ async function resolveEntryPrimaryPdf(entryId: string) {
     file_path,
     file_name: safeText(pick?.file_name),
     file_hash: safeText(pick?.file_hash),
-    file_size: Number.isFinite(Number(pick?.file_size))
-      ? Number(pick?.file_size)
-      : null,
+    file_size: Number.isFinite(Number(pick?.file_size)) ? Number(pick?.file_size) : null,
     mime_type: safeText(pick?.mime_type) ?? "application/pdf",
   };
 }
@@ -246,9 +239,7 @@ function qrPngBytes(
 /**
  * Infer is_test from minute_book_entries.source_record_id -> governance_ledger.is_test
  */
-async function inferLaneIsTestFromEntrySource(
-  entrySourceRecordId: string | null,
-): Promise<boolean | null> {
+async function inferLaneIsTestFromEntrySource(entrySourceRecordId: string | null): Promise<boolean | null> {
   const id = safeText(entrySourceRecordId);
   if (!id || !isUuid(id)) return null;
 
@@ -279,34 +270,101 @@ function mapDocumentClass(entryType?: string | null, domainKey?: string | null) 
   return "report";
 }
 
+/**
+ * ✅ Fetch existing verified pointer for this entry (prefer v_verified_latest)
+ */
+async function fetchLatestVerifiedPointer(entryId: string) {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("v_verified_latest")
+      .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
+      .eq("source_record_id", entryId)
+      .maybeSingle();
+
+    if (!error && data) return { data, via: "view" as const };
+  } catch {
+    // ignore
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("verified_documents")
+    .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
+    .eq("source_table", "minute_book_entries")
+    .eq("source_record_id", entryId)
+    .order("created_at", { ascending: false })
+    .limit(25);
+
+  if (error) return { data: null, via: "none" as const, error };
+
+  const rows = (data ?? []) as any[];
+  const pick =
+    rows.find((r) => String(r?.verification_level ?? "").toLowerCase() === "certified") ??
+    rows[0] ??
+    null;
+
+  return { data: pick, via: "fallback" as const };
+}
+
 // -----------------------------------------------------------------------------
-// ✅ APPEND NEW FINAL CERTIFICATION PAGE (NO self-hash)
+// ✅ APPEND A NEW FINAL CERTIFICATION PAGE (never stamp existing last page)
+// ✅ DETERMINISTIC SAVE so fixed-point hash converges
 // -----------------------------------------------------------------------------
+const DETERMINISTIC_DATE = new Date("2020-01-01T00:00:00Z");
+
+// constant deterministic trailer ID (32 hex chars = 16 bytes)
+const TRAILER_ID_HEX = "00112233445566778899aabbccddeeff";
+
+function setDeterministicTrailerId(doc: PDFDocument) {
+  try {
+    const ctx = (doc as any).context;
+    const trailer = ctx?.trailer;
+    if (!trailer) return;
+
+    const arr = PDFArray.withContext(ctx);
+    // PDF spec wants two IDs; keep both identical for determinism
+    arr.push(PDFHexString.of(TRAILER_ID_HEX));
+    arr.push(PDFHexString.of(TRAILER_ID_HEX));
+    trailer.set(PDFName.of("ID"), arr);
+  } catch {
+    // best-effort only
+  }
+}
+
 async function buildCertifiedWithAppendedPage(args: {
   sourceBytes: Uint8Array;
-  verifyUrl: string; // ✅ now stable (entry_id)
+  verifyUrl: string;
+  finalHashText: string;
   title: string;
   entitySlug: string;
   laneLabel: string;
   documentClass: string;
   operatorLabel: string;
   certifiedAtUtc: string;
-  entryId: string; // ✅ stable identifier printed
 }): Promise<Uint8Array> {
   const {
     sourceBytes,
     verifyUrl,
+    finalHashText,
     title,
     entitySlug,
     laneLabel,
     documentClass,
     operatorLabel,
     certifiedAtUtc,
-    entryId,
   } = args;
 
+  // ✅ FIX: this must be sourceBytes (your crash was "sourceC not defined")
   const srcDoc = await PDFDocument.load(sourceBytes);
   const outDoc = await PDFDocument.create();
+
+  // ✅ deterministic metadata
+  outDoc.setCreator("Oasis Digital Parliament");
+  outDoc.setProducer("Oasis Verified Registry");
+  outDoc.setCreationDate(DETERMINISTIC_DATE);
+  outDoc.setModificationDate(DETERMINISTIC_DATE);
+
+  // ✅ deterministic trailer ID
+  setDeterministicTrailerId(outDoc);
 
   const copiedPages = await outDoc.copyPages(srcDoc, srcDoc.getPageIndices());
   for (const p of copiedPages) outDoc.addPage(p);
@@ -393,9 +451,9 @@ async function buildCertifiedWithAppendedPage(args: {
   row("Lane:", laneLabel, leftX, gridTop - 16);
   row("Document:", documentClass, leftX, gridTop - 32);
 
-  // ✅ Stable identifier printed (not self-hash)
-  const entryShort = entryId.length > 18 ? `${entryId.slice(0, 8)}…${entryId.slice(-8)}` : entryId;
-  row("Entry ID:", entryShort, midX, gridTop);
+  const hashShort =
+    finalHashText.length > 16 ? `${finalHashText.slice(0, 16)}…` : finalHashText;
+  row("Hash (SHA-256):", hashShort, midX, gridTop);
   row("Verification:", "Scan QR / open terminal", midX, gridTop - 16);
 
   page.drawLine({
@@ -415,7 +473,7 @@ async function buildCertifiedWithAppendedPage(args: {
   });
 
   page.drawText(
-    "To verify cryptographic truth (registry status, certified hash, signed URLs), scan the QR code or open the verification terminal.",
+    "To verify cryptographic truth (hash, certification, registry status), scan the QR code or open the verification terminal.",
     {
       x: margin,
       y: vTop - 18,
@@ -436,7 +494,7 @@ async function buildCertifiedWithAppendedPage(args: {
   });
 
   const boxY = vTop - 90;
-  page.drawText("Registry Reference (Entry ID)", {
+  page.drawText("Certificate Hash (SHA-256)", {
     x: margin,
     y: boxY + 44,
     size: 9,
@@ -454,7 +512,8 @@ async function buildCertifiedWithAppendedPage(args: {
     color: rgb(0.97, 0.97, 0.98),
   });
 
-  page.drawText(entryId, {
+  // ✅ MUST print the EXACT hash that the file resolves by
+  page.drawText(finalHashText, {
     x: margin + 12,
     y: boxY + 12,
     size: 8.2,
@@ -463,7 +522,7 @@ async function buildCertifiedWithAppendedPage(args: {
   });
 
   const urlY = boxY - 54;
-  page.drawText("Verification Terminal", {
+  page.drawText("Verification Terminal (hash-first)", {
     x: margin,
     y: urlY + 20,
     size: 9,
@@ -545,8 +604,15 @@ async function buildCertifiedWithAppendedPage(args: {
     color: ink,
   });
 
+  page.drawLine({
+    start: { x: attX + 12, y: attY + 10 },
+    end: { x: attX + attW - 12, y: attY + 10 },
+    thickness: 0.8,
+    color: rgb(0.30, 0.32, 0.36),
+  });
+
   const foot =
-    "This certification page was appended to preserve original pages. The certified hash is resolved by the registry.";
+    "This certification page was appended to preserve original document pages. Verification resolves by hash (QR).";
   page.drawText(foot, {
     x: margin,
     y: 44,
@@ -556,42 +622,61 @@ async function buildCertifiedWithAppendedPage(args: {
     maxWidth: W - margin * 2,
   });
 
-  return new Uint8Array(await outDoc.save());
+  // ✅ deterministic serialization
+  return new Uint8Array(await outDoc.save({ useObjectStreams: false }));
 }
 
 /**
- * ✅ Fetch existing verified pointer for this entry (prefer v_verified_latest)
+ * ✅ FIXED-POINT HASH STABILIZATION:
+ * embed hash -> hash -> repeat until stable
  */
-async function fetchLatestVerifiedPointer(entryId: string) {
-  try {
-    const { data, error } = await supabaseAdmin
-      .from("v_verified_latest")
-      .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
-      .eq("source_record_id", entryId)
-      .maybeSingle();
+async function buildCertifiedFixedPoint(args: {
+  sourceBytes: Uint8Array;
+  verifyBase: string;
+  title: string;
+  entitySlug: string;
+  laneLabel: string;
+  documentClass: string;
+  operatorLabel: string;
+  certifiedAtUtc: string;
+}) {
+  const { sourceBytes, verifyBase, title, entitySlug, laneLabel, documentClass, operatorLabel, certifiedAtUtc } = args;
 
-    if (!error && data) return { data, via: "view" as const };
-  } catch {
-    // ignore
+  let current = "pending";
+  let lastBytes = new Uint8Array();
+  let lastHash = "";
+
+  for (let i = 0; i < 12; i++) {
+    const bytes = await buildCertifiedWithAppendedPage({
+      sourceBytes,
+      verifyUrl: buildVerifyUrl(verifyBase, current),
+      finalHashText: current,
+      title,
+      entitySlug,
+      laneLabel,
+      documentClass,
+      operatorLabel,
+      certifiedAtUtc,
+    });
+
+    const h = await sha256Hex(bytes);
+
+    lastBytes = bytes;
+    lastHash = h;
+
+    if (h === current) {
+      return { bytes, hash: h, verify_url: buildVerifyUrl(verifyBase, h) };
+    }
+
+    current = h;
   }
 
-  const { data, error } = await supabaseAdmin
-    .from("verified_documents")
-    .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
-    .eq("source_table", "minute_book_entries")
-    .eq("source_record_id", entryId)
-    .order("created_at", { ascending: false })
-    .limit(25);
-
-  if (error) return { data: null, via: "none" as const, error };
-
-  const rows = (data ?? []) as any[];
-  const pick =
-    rows.find((r) => String(r?.verification_level ?? "").toLowerCase() === "certified") ??
-    rows[0] ??
-    null;
-
-  return { data: pick, via: "fallback" as const };
+  return {
+    bytes: lastBytes,
+    hash: lastHash,
+    verify_url: buildVerifyUrl(verifyBase, lastHash),
+    non_converged: true,
+  };
 }
 
 serve(async (req) => {
@@ -599,21 +684,15 @@ serve(async (req) => {
 
   try {
     if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-    if (req.method !== "POST") {
-      return json({ ok: false, error: "POST only", request_id: reqId }, 405);
-    }
+    if (req.method !== "POST") return json({ ok: false, error: "POST only", request_id: reqId }, 405);
 
     const body = (await req.json().catch(() => ({}))) as ReqBody;
 
     const entryId = safeText(body.entry_id);
-    if (!entryId || !isUuid(entryId)) {
-      return json({ ok: false, error: "entry_id must be uuid", request_id: reqId }, 400);
-    }
+    if (!entryId || !isUuid(entryId)) return json({ ok: false, error: "entry_id must be uuid", request_id: reqId }, 400);
 
     let actorId = safeText(body.actor_id);
-    if (actorId && !isUuid(actorId)) {
-      return json({ ok: false, error: "actor_id must be uuid", request_id: reqId }, 400);
-    }
+    if (actorId && !isUuid(actorId)) return json({ ok: false, error: "actor_id must be uuid", request_id: reqId }, 400);
     if (!actorId) actorId = await resolveActorIdFromJwt(req);
     if (!actorId) return json({ ok: false, error: "ACTOR_REQUIRED", request_id: reqId }, 401);
 
@@ -638,20 +717,14 @@ serve(async (req) => {
 
     // lane
     let is_test: boolean;
-    if (typeof body.is_test === "boolean") {
-      is_test = body.is_test;
-    } else {
+    if (typeof body.is_test === "boolean") is_test = body.is_test;
+    else {
       const inferred = await inferLaneIsTestFromEntrySource(source_record_id);
       is_test = typeof inferred === "boolean" ? inferred : false;
     }
 
     // 2) entities lookup
-    const ent = await supabaseAdmin
-      .from("entities")
-      .select("id, slug")
-      .eq("slug", entity_key)
-      .maybeSingle();
-
+    const ent = await supabaseAdmin.from("entities").select("id, slug").eq("slug", entity_key).maybeSingle();
     if (ent.error) return json({ ok: false, error: ent.error.message, request_id: reqId }, 400);
     if (!ent.data?.id) {
       return json(
@@ -663,10 +736,9 @@ serve(async (req) => {
     const entity_id = String((ent.data as any).id);
     const entity_slug = String((ent.data as any).slug);
 
-    // 3) source pdf pointer
+    // 3) source pdf pointer (supporting_documents)
     const source_bucket = "minute_book";
     const src = await resolveEntryPrimaryPdf(entryId);
-
     if (!src?.file_path) {
       return json(
         {
@@ -678,9 +750,9 @@ serve(async (req) => {
         404,
       );
     }
-    const source_pathc = src.file_path;
+    const source_path = src.file_path;
 
-    // 4) destination
+    // 4) destination bucket
     const certified_bucket = is_test ? "governance_sandbox" : "governance_truth";
     const certified_prefix = is_test ? "sandbox/uploads" : "truth/uploads";
 
@@ -697,12 +769,10 @@ serve(async (req) => {
     const hasCertified = !!(existingId && existingHash && existingLevel === "certified");
     const reissue = !!force && !!existingId;
 
-    // ✅ strict reuse: return existing registry hash + stable entry resolver url
+    // strict reuse
     if (!force && hasCertified) {
       const verifyBase =
-        safeText(body.verify_base_url) ??
-        Deno.env.get("VERIFY_BASE_URL") ??
-        "https://sign.oasisintlholdings.com/verify.html";
+        safeText(body.verify_base_url) ?? Deno.env.get("VERIFY_BASE_URL") ?? "https://sign.oasisintlholdings.com/verify.html";
 
       return json<Resp>({
         ok: true,
@@ -712,8 +782,8 @@ serve(async (req) => {
         actor_email: actorEmail,
         is_test,
         verified_document_id: existingId!,
-        verify_url: buildVerifyUrlByEntry(verifyBase, entryId),
-        source: { bucket: source_bucket, path: sourceC, file_hash: src.file_hash },
+        verify_url: buildVerifyUrl(verifyBase, existingHash!),
+        source: { bucket: source_bucket, path: source_path, file_hash: src.file_hash },
         certified: {
           bucket: existingBucket ?? certified_bucket,
           path: existingPath ?? "",
@@ -728,41 +798,34 @@ serve(async (req) => {
     const document_class = mapDocumentClass(entry_type, domain_key);
 
     // 7) download source bytes
-    const dl = await supabaseAdmin.storage.from(source_bucket).download(sourceC);
-    if (dl.error || !dl.data) {
-      return json(
-        { ok: false, error: "SOURCE_PDF_DOWNLOAD_FAILED", details: dl.error, request_id: reqId },
-        500,
-      );
-    }
+    const dl = await supabaseAdmin.storage.from(source_bucket).download(source_path);
+    if (dl.error || !dl.data) return json({ ok: false, error: "SOURCE_PDF_DOWNLOAD_FAILED", details: dl.error, request_id: reqId }, 500);
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // 8) build certified pdf (QR resolves by entry_id)
+    // 8) build fixed-point certified pdf
     const verifyBase =
-      safeText(body.verify_base_url) ??
-      Deno.env.get("VERIFY_BASE_URL") ??
-      "https://sign.oasisintlholdings.com/verify.html";
+      safeText(body.verify_base_url) ?? Deno.env.get("VERIFY_BASE_URL") ?? "https://sign.oasisintlholdings.com/verify.html";
 
-    const finalVerifyUrl = buildVerifyUrlByEntry(verifyBase, entryId);
     const laneLabel = is_test ? "SANDBOX" : "TRUTH";
     const certifiedAt = utcStampISO();
     const operatorLabel = safeText(actorEmail) ?? actorId;
 
-    const finalBytes = await buildCertifiedWithAppendedPage({
+    const built = await buildCertifiedFixedPoint({
       sourceBytes,
-      verifyUrl: finalVerifyUrl,
+      verifyBase,
       title,
       entitySlug: entity_slug,
       laneLabel,
       documentClass: document_class,
       operatorLabel,
       certifiedAtUtc: certifiedAt,
-      entryId,
     });
 
-    const finalHash = await sha256Hex(finalBytes);
+    const finalBytes = built.bytes;
+    const finalHash = built.hash;
+    const finalVerifyUrl = built.verify_url;
 
-    // 9) path by hash (still good)
+    // 9) path by hash
     const certified_path = `${certified_prefix}/${entryId}-${finalHash.slice(0, 12)}.pdf`;
 
     const up = await supabaseAdmin.storage
@@ -780,10 +843,7 @@ serve(async (req) => {
         msg.toLowerCase().includes("409");
 
       if (!alreadyExists) {
-        return json(
-          { ok: false, error: "CERTIFIED_PDF_UPLOAD_FAILED", details: up.error, request_id: reqId },
-          500,
-        );
+        return json({ ok: false, error: "CERTIFIED_PDF_UPLOAD_FAILED", details: up.error, request_id: reqId }, 500);
       }
     }
 
@@ -812,18 +872,12 @@ serve(async (req) => {
         .select("id")
         .single();
 
-      if (ins.error) {
-        return json(
-          { ok: false, error: "VERIFIED_DOC_INSERT_FAILED", details: ins.error, request_id: reqId } satisfies Resp,
-          500,
-        );
-      }
+      if (ins.error) return json({ ok: false, error: "VERIFIED_DOC_INSERT_FAILED", details: ins.error, request_id: reqId } satisfies Resp, 500);
 
       verified_id = String(ins.data.id);
     } else {
       verified_id = existingId;
 
-      // ✅ certified rows: pointer refresh only (your SQL trigger allows service_role)
       const upd = await supabaseAdmin
         .from("verified_documents")
         .update({
@@ -833,12 +887,7 @@ serve(async (req) => {
         } as any)
         .eq("id", verified_id);
 
-      if (upd.error) {
-        return json(
-          { ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId } satisfies Resp,
-          500,
-        );
-      }
+      if (upd.error) return json({ ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId } satisfies Resp, 500);
     }
 
     await bestEffortActionsLog({
@@ -853,9 +902,10 @@ serve(async (req) => {
         certified_bucket,
         certified_path,
         source_bucket,
-        source_path: sourceC,
+        source_path,
         reused: false,
         reissue,
+        non_converged: (built as any).non_converged ?? false,
       },
     });
 
@@ -866,12 +916,12 @@ serve(async (req) => {
       actor_email: actorEmail,
       is_test,
       verified_document_id: verified_id,
-      verify_url: finalVerifyUrl, // ✅ stable
-      source: { bucket: source_bucket, path: sourceC, file_hash: src.file_hash },
+      verify_url: finalVerifyUrl,
+      source: { bucket: source_bucket, path: source_path, file_hash: src.file_hash },
       certified: {
         bucket: certified_bucket,
         path: certified_path,
-        file_hash: finalHash, // ✅ canonical registry hash
+        file_hash: finalHash,
         file_size: finalBytes.length,
       },
       request_id: reqId,
