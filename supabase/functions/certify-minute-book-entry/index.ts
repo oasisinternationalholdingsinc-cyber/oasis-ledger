@@ -216,9 +216,7 @@ function qrPngBytes(
  * minute_book_entries.source_record_id -> governance_ledger.is_test
  * (prevents lane mistakes, no schema changes)
  */
-async function inferLaneIsTestFromEntrySource(
-  entrySourceRecordId: string | null,
-): Promise<boolean | null> {
+async function inferLaneIsTestFromEntrySource(entrySourceRecordId: string | null): Promise<boolean | null> {
   const id = safeText(entrySourceRecordId);
   if (!id || !isUuid(id)) return null;
 
@@ -252,6 +250,170 @@ function mapDocumentClass(entryType?: string | null, domainKey?: string | null) 
 
   // Corporate profiles / formation / filings default best to "report"
   return "report";
+}
+
+// -----------------------------------------------------------------------------
+// ✅ ENTERPRISE: Produce a brand-new FINAL certification page (the “last page”)
+// -----------------------------------------------------------------------------
+async function buildCertifiedWithAppendedPage(args: {
+  sourceBytes: Uint8Array;
+  verifyUrl: string; // hash-first URL (we will pass hash placeholder in pass A)
+  finalHashText: string; // hash to print on the certification page
+  title: string;
+  entitySlug: string;
+  laneLabel: string; // "SANDBOX" or "TRUTH"
+}): Promise<Uint8Array> {
+  const { sourceBytes, verifyUrl, finalHashText, title, entitySlug, laneLabel } = args;
+
+  const srcDoc = await PDFDocument.load(sourceBytes);
+  const outDoc = await PDFDocument.create();
+
+  // Copy all existing pages untouched
+  const copiedPages = await outDoc.copyPages(srcDoc, srcDoc.getPageIndices());
+  for (const p of copiedPages) outDoc.addPage(p);
+
+  // Append our certification page (this is the guaranteed new LAST page)
+  const page = outDoc.addPage([612, 792]); // US Letter portrait
+  const font = await outDoc.embedFont(StandardFonts.Helvetica);
+  const fontBold = await outDoc.embedFont(StandardFonts.HelveticaBold);
+
+  // Background (subtle, enterprise)
+  page.drawRectangle({
+    x: 36,
+    y: 36,
+    width: 612 - 72,
+    height: 792 - 72,
+    borderColor: rgb(0.85, 0.85, 0.88),
+    borderWidth: 1,
+    color: rgb(1, 1, 1),
+    opacity: 1,
+  });
+
+  // Header
+  page.drawText("Certification & Verification", {
+    x: 60,
+    y: 720,
+    size: 18,
+    font: fontBold,
+    color: rgb(0.08, 0.10, 0.13),
+  });
+
+  page.drawText(`Lane: ${laneLabel}`, {
+    x: 60,
+    y: 695,
+    size: 10,
+    font,
+    color: rgb(0.30, 0.34, 0.40),
+  });
+
+  page.drawText(`Entity: ${entitySlug}`, {
+    x: 60,
+    y: 678,
+    size: 10,
+    font,
+    color: rgb(0.30, 0.34, 0.40),
+  });
+
+  // Title (clamped)
+  const safeTitle = (title ?? "").slice(0, 140);
+  page.drawText("Document:", {
+    x: 60,
+    y: 645,
+    size: 11,
+    font: fontBold,
+    color: rgb(0.12, 0.14, 0.18),
+  });
+  page.drawText(safeTitle || "Minute Book Entry", {
+    x: 60,
+    y: 628,
+    size: 11,
+    font,
+    color: rgb(0.12, 0.14, 0.18),
+  });
+
+  // QR (right side)
+  const qrPng = qrPngBytes(verifyUrl, { size: 256, margin: 2, ecc: "M" });
+  const qrImg = await outDoc.embedPng(qrPng);
+
+  const qrSize = 180;
+  const qrX = 612 - 60 - qrSize;
+  const qrY = 792 - 60 - qrSize;
+
+  page.drawImage(qrImg, { x: qrX, y: qrY, width: qrSize, height: qrSize });
+
+  page.drawText("Verify", {
+    x: qrX + 64,
+    y: qrY - 14,
+    size: 10,
+    font: fontBold,
+    color: rgb(0.30, 0.34, 0.40),
+  });
+
+  // Hash box
+  page.drawText("Certified SHA-256:", {
+    x: 60,
+    y: 560,
+    size: 11,
+    font: fontBold,
+    color: rgb(0.12, 0.14, 0.18),
+  });
+
+  const boxX = 60;
+  const boxY = 500;
+  const boxW = 612 - 120;
+  const boxH = 48;
+
+  page.drawRectangle({
+    x: boxX,
+    y: boxY,
+    width: boxW,
+    height: boxH,
+    borderColor: rgb(0.85, 0.85, 0.88),
+    borderWidth: 1,
+    color: rgb(0.97, 0.97, 0.98),
+  });
+
+  page.drawText(finalHashText, {
+    x: boxX + 12,
+    y: boxY + 18,
+    size: 10,
+    font,
+    color: rgb(0.12, 0.14, 0.18),
+  });
+
+  // Verify URL (short line)
+  page.drawText("Verification URL:", {
+    x: 60,
+    y: 465,
+    size: 11,
+    font: fontBold,
+    color: rgb(0.12, 0.14, 0.18),
+  });
+
+  const urlLine = verifyUrl.length > 110 ? `${verifyUrl.slice(0, 110)}…` : verifyUrl;
+  page.drawText(urlLine, {
+    x: 60,
+    y: 447,
+    size: 9,
+    font,
+    color: rgb(0.30, 0.34, 0.40),
+  });
+
+  // Footer note
+  page.drawText(
+    "This certification page was appended to preserve the original document pages. The QR code resolves to the hash-first verification terminal.",
+    {
+      x: 60,
+      y: 90,
+      size: 8,
+      font,
+      color: rgb(0.40, 0.44, 0.50),
+      maxWidth: 612 - 120,
+      lineHeight: 10,
+    },
+  );
+
+  return new Uint8Array(await outDoc.save());
 }
 
 serve(async (req) => {
@@ -393,7 +555,6 @@ serve(async (req) => {
     if (existingId) {
       verified_id = existingId;
 
-      // Keep it lane-safe + canonical pointers even before upload/hash lands
       const preUpd = await supabaseAdmin
         .from("verified_documents")
         .update({
@@ -456,52 +617,53 @@ serve(async (req) => {
     }
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // 8) Stamp QR on LAST page (2-pass like governance) to ensure QR matches FINAL hash
+    // 8) Build certification page as the NEW FINAL PAGE (2-pass to ensure hash matches final)
     const verifyBase =
       safeText(body.verify_base_url) ??
       Deno.env.get("VERIFY_BASE_URL") ??
       "https://sign.oasisintlholdings.com/verify.html";
 
-    const stampOnce = async (hashForQr: string) => {
-      const url = buildVerifyUrl(verifyBase, hashForQr);
-      const pdfDoc = await PDFDocument.load(sourceBytes);
-      const pages = pdfDoc.getPages();
-      const last = pages[pages.length - 1];
+    const laneLabel = is_test ? "SANDBOX" : "TRUTH";
 
-      const qrPng = qrPngBytes(url, { size: 256, margin: 2, ecc: "M" });
-      const qrImage = await pdfDoc.embedPng(qrPng);
+    // Pass A: placeholder hash text
+    const passA_bytes = await buildCertifiedWithAppendedPage({
+      sourceBytes,
+      verifyUrl: buildVerifyUrl(verifyBase, "pending"),
+      finalHashText: "pending",
+      title,
+      entitySlug: entity_slug,
+      laneLabel,
+    });
+    const passA_hash = await sha256Hex(passA_bytes);
 
-      const qrSize = 92;
-      const margin = 50;
-      const x = last.getWidth() - margin - qrSize;
-      const y = margin + 24;
+    // Pass B: embed passA hash in URL + printed hash, then compute final hash
+    const passB_bytes = await buildCertifiedWithAppendedPage({
+      sourceBytes,
+      verifyUrl: buildVerifyUrl(verifyBase, passA_hash),
+      finalHashText: passA_hash,
+      title,
+      entitySlug: entity_slug,
+      laneLabel,
+    });
+    const passB_hash = await sha256Hex(passB_bytes);
 
-      last.drawImage(qrImage, { x, y, width: qrSize, height: qrSize });
+    let finalBytes = passB_bytes;
+    let finalHash = passB_hash;
 
-      const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-      last.drawText("Verify", {
-        x: x + 24,
-        y: y - 12,
-        size: 8,
-        font,
-        color: rgb(0.35, 0.38, 0.45),
+    // If hash changed, do one more stabilization pass so QR + printed hash match final bytes
+    if (passB_hash !== passA_hash) {
+      const passC_bytes = await buildCertifiedWithAppendedPage({
+        sourceBytes,
+        verifyUrl: buildVerifyUrl(verifyBase, passB_hash),
+        finalHashText: passB_hash,
+        title,
+        entitySlug: entity_slug,
+        laneLabel,
       });
+      const passC_hash = await sha256Hex(passC_bytes);
 
-      const out = new Uint8Array(await pdfDoc.save());
-      const hash = await sha256Hex(out);
-      return { bytes: out, hash };
-    };
-
-    const passA = await stampOnce("pending");
-    const passB = await stampOnce(passA.hash);
-
-    let finalBytes = passB.bytes;
-    let finalHash = passB.hash;
-
-    if (passB.hash !== passA.hash) {
-      const passC = await stampOnce(passB.hash);
-      finalBytes = passC.bytes;
-      finalHash = passC.hash;
+      finalBytes = passC_bytes;
+      finalHash = passC_hash;
     }
 
     const finalVerifyUrl = buildVerifyUrl(verifyBase, finalHash);
