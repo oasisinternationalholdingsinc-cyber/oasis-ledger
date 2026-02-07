@@ -296,9 +296,8 @@ function mapDocumentClass(entryType?: string | null, domainKey?: string | null) 
 
 // -----------------------------------------------------------------------------
 // ✅ ENTERPRISE: Produce a brand-new FINAL certification page (the “last page”)
-// - MATCHES OS / Execution Certificate vibe: dark header band + teal title,
-//   structured metadata, calm whitespace, QR bottom-right.
-// - ADJUSTMENT: include operator identity + UTC timestamp in Registry Attestation.
+// - MUST append a NEW page (no stamping the existing last page)
+// - Includes operator identity + UTC timestamp in Registry Attestation.
 // -----------------------------------------------------------------------------
 async function buildCertifiedWithAppendedPage(args: {
   sourceBytes: Uint8Array;
@@ -331,17 +330,17 @@ async function buildCertifiedWithAppendedPage(args: {
   const copiedPages = await outDoc.copyPages(srcDoc, srcDoc.getPageIndices());
   for (const p of copiedPages) outDoc.addPage(p);
 
-  // Append certification page
-  const page = outDoc.addPage([612, 792]); // US Letter
+  // Append certification page (US Letter)
+  const page = outDoc.addPage([612, 792]);
   const font = await outDoc.embedFont(StandardFonts.Helvetica);
   const fontBold = await outDoc.embedFont(StandardFonts.HelveticaBold);
 
-  // Palette (matches your dark band + green/teal title)
+  // Palette
   const ink = rgb(0.12, 0.14, 0.18);
   const muted = rgb(0.45, 0.48, 0.55);
   const hair = rgb(0.86, 0.88, 0.91);
-  const band = rgb(0.06, 0.09, 0.12); // near-black
-  const teal = rgb(0.10, 0.78, 0.72); // green/teal signal
+  const band = rgb(0.06, 0.09, 0.12);
+  const teal = rgb(0.10, 0.78, 0.72);
   const paper = rgb(1, 1, 1);
 
   const margin = 56;
@@ -351,7 +350,7 @@ async function buildCertifiedWithAppendedPage(args: {
   // Background
   page.drawRectangle({ x: 0, y: 0, width: W, height: H, color: paper });
 
-  // Dark header band
+  // Header band
   const bandH = 92;
   page.drawRectangle({ x: 0, y: H - bandH, width: W, height: bandH, color: band });
 
@@ -405,7 +404,7 @@ async function buildCertifiedWithAppendedPage(args: {
     color: muted,
   });
 
-  // Metadata grid (two columns)
+  // Metadata grid
   const gridTop = introY - 96;
   const leftX = margin;
   const midX = margin + 250;
@@ -463,7 +462,7 @@ async function buildCertifiedWithAppendedPage(args: {
     color: muted,
   });
 
-  // Certificate hash box
+  // Hash box
   const boxY = vTop - 90;
   page.drawText("Certificate Hash (SHA-256)", {
     x: margin,
@@ -534,7 +533,7 @@ async function buildCertifiedWithAppendedPage(args: {
     color: muted,
   });
 
-  // Registry attestation box (bottom-left) — includes operator + time.
+  // Attestation (bottom-left)
   const attX = margin;
   const attY = 92;
   const attW = 300;
@@ -599,9 +598,8 @@ async function buildCertifiedWithAppendedPage(args: {
 }
 
 /**
- * ✅ Fetch the latest verified_document pointer for a source_record_id.
- * Uses v_verified_latest when present (matches your new SQL view).
- * Falls back to verified_documents ordering if view not present.
+ * ✅ Fetch existing verified_document pointer for this minute_book entry.
+ * Uses v_verified_latest if present, else falls back to verified_documents.
  */
 async function fetchLatestVerifiedPointer(entryId: string) {
   // Try v_verified_latest first
@@ -617,13 +615,12 @@ async function fetchLatestVerifiedPointer(entryId: string) {
     // ignore
   }
 
-  // Fallback: certified first, then newest created_at
+  // Fallback: newest created_at, prefer certified if present
   const { data, error } = await supabaseAdmin
     .from("verified_documents")
     .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
     .eq("source_table", "minute_book_entries")
     .eq("source_record_id", entryId)
-    .order("verification_level", { ascending: true }) // not reliable ordering; keep additional sort below
     .order("created_at", { ascending: false })
     .limit(25);
 
@@ -667,9 +664,7 @@ serve(async (req) => {
     // 1) Load minute_book entry (include source_record_id for lane inference)
     const entry = await supabaseAdmin
       .from("minute_book_entries")
-      .select(
-        "id,entity_key,domain_key,entry_type,title,notes,created_at,created_by,source_record_id",
-      )
+      .select("id,entity_key,domain_key,entry_type,title,notes,created_at,created_by,source_record_id")
       .eq("id", entryId)
       .maybeSingle();
 
@@ -701,12 +696,7 @@ serve(async (req) => {
     if (ent.error) return json({ ok: false, error: ent.error.message, request_id: reqId }, 400);
     if (!ent.data?.id) {
       return json(
-        {
-          ok: false,
-          error: "ENTITY_NOT_FOUND",
-          details: `No entities row found for slug=${entity_key}`,
-          request_id: reqId,
-        },
+        { ok: false, error: "ENTITY_NOT_FOUND", details: `No entities row found for slug=${entity_key}`, request_id: reqId },
         404,
       );
     }
@@ -723,8 +713,7 @@ serve(async (req) => {
         {
           ok: false,
           error: "SOURCE_PDF_NOT_FOUND",
-          details:
-            "No primary supporting_documents PDF pointer found for this entry_id (file_path missing).",
+          details: "No primary supporting_documents PDF pointer found for this entry_id (file_path missing).",
           request_id: reqId,
         } satisfies Resp,
         404,
@@ -733,11 +722,11 @@ serve(async (req) => {
 
     const source_path = src.file_path;
 
-    // 4) Certified destination bucket + prefix (FINAL path becomes immutable-by-hash)
+    // 4) Certified destination bucket + prefix (hash-derived immutable path)
     const certified_bucket = is_test ? "governance_sandbox" : "governance_truth";
     const certified_prefix = is_test ? "sandbox/uploads" : "truth/uploads";
 
-    // 5) Fetch latest verified pointer (certified-first), via v_verified_latest when available
+    // 5) Fetch existing verified pointer
     const latest = await fetchLatestVerifiedPointer(entryId);
     const existingVd = latest.data as any | null;
 
@@ -747,12 +736,10 @@ serve(async (req) => {
     const existingBucket = safeText(existingVd?.storage_bucket);
     const existingPath = safeText(existingVd?.storage_path);
 
-    // ✅ Uniqueness reality: one verified_documents row per (source_table, source_record_id)
-    const hasAny = !!existingId;
     const hasCertified = !!(existingId && existingHash && existingLevel === "certified");
-    const reissue = !!force && hasAny;
+    const reissue = !!force && !!existingId;
 
-    // 5b) Strict reuse (no mutation)
+    // 5b) Strict reuse if already certified and not forcing
     if (!force && hasCertified) {
       const verifyBase =
         safeText(body.verify_base_url) ??
@@ -792,7 +779,7 @@ serve(async (req) => {
     }
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // 8) Build certification page as the NEW FINAL PAGE (stabilized passes)
+    // 8) Build certification page as the NEW FINAL PAGE (hash-stable passes)
     const verifyBase =
       safeText(body.verify_base_url) ??
       Deno.env.get("VERIFY_BASE_URL") ??
@@ -856,21 +843,16 @@ serve(async (req) => {
     // 9) Immutable certified PDF pointer (hash-derived path)
     const certified_path = `${certified_prefix}/${entryId}-${finalHash.slice(0, 12)}.pdf`;
 
-    // Upload should be immutable (no overwrites); if the object already exists, we treat as ok.
+    // Upload is immutable; if already exists, continue
     const up = await supabaseAdmin.storage
       .from(certified_bucket)
-      .upload(
-        certified_path,
-        new Blob([finalBytes], { type: "application/pdf" }),
-        {
-          upsert: false,
-          contentType: "application/pdf",
-        },
-      );
+      .upload(certified_path, new Blob([finalBytes], { type: "application/pdf" }), {
+        upsert: false,
+        contentType: "application/pdf",
+      });
 
     if (up.error) {
       const msg = String((up.error as any)?.message ?? "");
-      // If already exists, proceed (idempotent by content/hash)
       const alreadyExists =
         msg.toLowerCase().includes("already exists") ||
         msg.toLowerCase().includes("duplicate") ||
@@ -884,42 +866,15 @@ serve(async (req) => {
       }
     }
 
-    // 10) Registry write (PRODUCTION / ENTERPRISE):
-    // ✅ DB enforces UNIQUE (source_table, source_record_id) for minute_book_entries
-    // - If a row exists: UPDATE it (this is BOTH certify + reissue)
-    // - Else: INSERT it (first certification)
+    // 10) Registry write (MATCHES your immutability trigger)
+    // - If NO row: INSERT full certified row
+    // - If row exists AND is already certified: service_role may ONLY update pointer fields:
+    //     storage_bucket, storage_path, file_hash
+    // - If row exists BUT NOT certified yet: UPDATE full row to certified (allowed because OLD not certified)
     let verified_id: string;
 
-    if (existingId) {
-      verified_id = existingId;
-
-      const upd = await supabaseAdmin
-        .from("verified_documents")
-        .update({
-          entity_id,
-          entity_slug,
-          document_class,
-          title,
-          source_table: "minute_book_entries",
-          source_record_id: entryId,
-          storage_bucket: certified_bucket,
-          storage_path: certified_path,
-          file_hash: finalHash,
-          mime_type: "application/pdf",
-          verification_level: "certified",
-          is_archived: true,
-          updated_at: new Date().toISOString(),
-          updated_by: actorId,
-        } as any)
-        .eq("id", verified_id);
-
-      if (upd.error) {
-        return json(
-          { ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId } satisfies Resp,
-          500,
-        );
-      }
-    } else {
+    if (!existingId) {
+      // First certification
       const ins = await supabaseAdmin
         .from("verified_documents")
         .insert({
@@ -949,9 +904,58 @@ serve(async (req) => {
       }
 
       verified_id = String(ins.data.id);
+    } else {
+      verified_id = existingId;
+
+      if (existingLevel === "certified") {
+        // ✅ Certified row is immutable — pointer-only update (matches trigger)
+        const upd = await supabaseAdmin
+          .from("verified_documents")
+          .update({
+            storage_bucket: certified_bucket,
+            storage_path: certified_path,
+            file_hash: finalHash,
+          } as any)
+          .eq("id", verified_id);
+
+        if (upd.error) {
+          return json(
+            { ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId } satisfies Resp,
+            500,
+          );
+        }
+      } else {
+        // ✅ Not certified yet — safe to update full row to certified
+        const upd = await supabaseAdmin
+          .from("verified_documents")
+          .update({
+            entity_id,
+            entity_slug,
+            document_class,
+            title,
+            source_table: "minute_book_entries",
+            source_record_id: entryId,
+            storage_bucket: certified_bucket,
+            storage_path: certified_path,
+            file_hash: finalHash,
+            mime_type: "application/pdf",
+            verification_level: "certified",
+            is_archived: true,
+            updated_at: new Date().toISOString(),
+            updated_by: actorId,
+          } as any)
+          .eq("id", verified_id);
+
+        if (upd.error) {
+          return json(
+            { ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId } satisfies Resp,
+            500,
+          );
+        }
+      }
     }
 
-    // ✅ Best-effort audit (operator trail) — non-fatal
+    // ✅ Best-effort audit (non-fatal)
     await bestEffortActionsLog({
       actor_uid: actorId,
       action: "CERTIFY_MINUTE_BOOK_ENTRY",
