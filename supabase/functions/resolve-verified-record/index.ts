@@ -1,3 +1,4 @@
+// supabase/functions/resolve-verified-record/index.ts
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -34,10 +35,10 @@ const json = (x: unknown, status = 200) =>
     headers: withCors({ "Content-Type": "application/json" }),
   });
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
 const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ??
-  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
 if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
   throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
@@ -83,9 +84,7 @@ serve(async (req) => {
 
   const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { persistSession: false },
-    global: {
-      headers: { "x-client-info": "odp-verify/resolve-verified-record" },
-    },
+    global: { headers: { "x-client-info": "odp-verify/resolve-verified-record" } },
   });
 
   let body: ReqBody = {};
@@ -100,14 +99,10 @@ serve(async (req) => {
     (body.hash ?? body.p_hash ?? null)?.toString().trim().toLowerCase() || null;
 
   const envelope_id =
-    (body.envelope_id ?? body.p_envelope_id ?? null)
-      ?.toString()
-      .trim() || null;
+    (body.envelope_id ?? body.p_envelope_id ?? null)?.toString().trim() || null;
 
   const ledger_id =
-    (body.ledger_id ?? body.p_ledger_id ?? null)
-      ?.toString()
-      .trim() || null;
+    (body.ledger_id ?? body.p_ledger_id ?? null)?.toString().trim() || null;
 
   const expires_in = clampExpiresIn(body.expires_in ?? 900);
 
@@ -125,14 +120,11 @@ serve(async (req) => {
   // ---------------------------------------------------------------------------
   // 1) Canonical SQL resolver (unchanged)
   // ---------------------------------------------------------------------------
-  const { data: resolved, error: rpcErr } = await supabaseAdmin.rpc(
-    RESOLVE_RPC,
-    {
-      p_hash: hash,
-      p_envelope_id: envelope_id,
-      p_ledger_id: ledger_id,
-    },
-  );
+  const { data: resolved, error: rpcErr } = await supabaseAdmin.rpc(RESOLVE_RPC, {
+    p_hash: hash,
+    p_envelope_id: envelope_id,
+    p_ledger_id: ledger_id,
+  });
 
   if (rpcErr) {
     return json(
@@ -216,7 +208,14 @@ serve(async (req) => {
         ledger_id: null,
         envelope_id: null,
 
-        entity: ent ?? { id: entId ?? null, name: ent?.name ?? "—", slug: ent?.slug ?? entSlug ?? "—" },
+        entity:
+          ent ??
+          {
+            id: entId ?? null,
+            name: ent?.name ?? "—",
+            slug: ent?.slug ?? entSlug ?? "—",
+          },
+
         ledger: {
           id: null,
           title: (vd as any).title ?? "Verified Document",
@@ -253,7 +252,9 @@ serve(async (req) => {
           minute_book_pdf: null,
           certified_archive_pdf: s.url,
         },
-        notes: s.error ? { archive_sign_error: s.error } : { minute_book_pointer_missing: true },
+        notes: s.error
+          ? { archive_sign_error: s.error }
+          : { minute_book_pointer_missing: true },
       });
     }
 
