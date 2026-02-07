@@ -9,10 +9,10 @@ import QRGen from "npm:qrcode-generator@1.4.4";
 import { PNG } from "npm:pngjs@7.0.0";
 
 type ReqBody = {
-  entry_id?: string;        // minute_book_entries.id (required)
-  actor_id?: string;        // optional; resolved from JWT if missing
-  is_test?: boolean;        // optional; if missing, we infer lane from source_record_id -> governance_ledger.is_test
-  force?: boolean;          // optional
+  entry_id?: string; // minute_book_entries.id (required)
+  actor_id?: string; // optional; resolved from JWT if missing
+  is_test?: boolean; // optional; infer lane from source_record_id -> governance_ledger.is_test
+  force?: boolean; // optional
   verify_base_url?: string; // optional override (defaults to VERIFY_BASE_URL or verify.html)
 };
 
@@ -26,7 +26,7 @@ type Resp = {
   verified_document_id?: string;
   reused?: boolean;
 
-  // ✅ important: verify terminal URL (hash-first)
+  // ✅ verify terminal URL (hash-first)
   verify_url?: string;
 
   source?: { bucket: string; path: string; file_hash?: string | null };
@@ -41,14 +41,16 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
 const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-if (!SUPABASE_URL || !SERVICE_ROLE_KEY) throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
+if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
+  throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
+}
 
 const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
   global: { fetch },
   auth: { persistSession: false },
 });
 
-const cors = {
+const cors: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
@@ -111,14 +113,18 @@ async function resolveActorEmail(actorId: string): Promise<string | null> {
 }
 
 /**
- * ✅ Resolve primary PDF pointer for a minute_book entry
+ * ✅ Resolve a PDF pointer for a minute_book entry
  * - contract: supporting_documents contains entry_id + file_path/hash/etc
  * - choose registry_visible first, then latest version/uploaded_at
+ *
+ * NOTE: This does NOT assume storage bucket column exists. We treat file_path as a bucket path in minute_book.
  */
 async function resolveEntryPrimaryPdf(entryId: string) {
   const { data, error } = await supabaseAdmin
     .from("supporting_documents")
-    .select("id,entry_id,file_path,file_name,file_hash,file_size,mime_type,registry_visible,version,uploaded_at")
+    .select(
+      "id,entry_id,file_path,file_name,file_hash,file_size,mime_type,registry_visible,version,uploaded_at",
+    )
     .eq("entry_id", entryId)
     .order("registry_visible", { ascending: false })
     .order("version", { ascending: false })
@@ -130,7 +136,9 @@ async function resolveEntryPrimaryPdf(entryId: string) {
   const rows = (data ?? []) as any[];
 
   const pick =
-    rows.find((r) => r.registry_visible === true && safeText(r.file_path)?.toLowerCase().endsWith(".pdf")) ??
+    rows.find(
+      (r) => r.registry_visible === true && safeText(r.file_path)?.toLowerCase().endsWith(".pdf"),
+    ) ??
     rows.find((r) => safeText(r.file_path)?.toLowerCase().endsWith(".pdf")) ??
     rows[0];
 
@@ -235,6 +243,26 @@ async function inferLaneIsTestFromEntrySource(entrySourceRecordId: string | null
   return typeof v.is_test === "boolean" ? (v.is_test as boolean) : null;
 }
 
+/**
+ * ✅ Map minute book entry signals into the EXISTING verified_documents.document_class enum.
+ * Allowed: resolution | invoice | certificate | report | minutes | tax_filing | other
+ *
+ * NO schema changes. NO enum changes.
+ */
+function mapDocumentClass(entryType?: string | null, domainKey?: string | null) {
+  const t = (entryType ?? "").toLowerCase().trim();
+  const d = (domainKey ?? "").toLowerCase().trim();
+
+  if (t === "resolution" || d.includes("resolution")) return "resolution";
+  if (t === "minutes" || d.includes("minutes")) return "minutes";
+  if (d.includes("tax")) return "tax_filing";
+  if (d.includes("invoice")) return "invoice";
+  if (d.includes("certificate")) return "certificate";
+
+  // Corporate profiles / formation / filings default best to "report"
+  return "report";
+}
+
 serve(async (req) => {
   const reqId = req.headers.get("x-sb-request-id") ?? null;
 
@@ -294,7 +322,12 @@ serve(async (req) => {
     if (ent.error) return json({ ok: false, error: ent.error.message, request_id: reqId }, 400);
     if (!ent.data?.id) {
       return json(
-        { ok: false, error: "ENTITY_NOT_FOUND", details: `No entities row found for slug=${entity_key}`, request_id: reqId },
+        {
+          ok: false,
+          error: "ENTITY_NOT_FOUND",
+          details: `No entities row found for slug=${entity_key}`,
+          request_id: reqId,
+        },
         404,
       );
     }
@@ -312,7 +345,8 @@ serve(async (req) => {
         {
           ok: false,
           error: "SOURCE_PDF_NOT_FOUND",
-          details: "No primary supporting_documents PDF pointer found for this entry_id (file_path missing).",
+          details:
+            "No primary supporting_documents PDF pointer found for this entry_id (file_path missing).",
           request_id: reqId,
         } satisfies Resp,
         404,
@@ -322,7 +356,7 @@ serve(async (req) => {
     const source_path = src.file_path;
     const source_hash = src.file_hash;
 
-    // 4) Certified destination pointer (separate bucket; no schema changes)
+    // 4) Certified destination pointer (separate buckets; no schema changes)
     const certified_bucket = is_test ? "governance_sandbox" : "governance_truth";
     const certified_path = is_test ? `sandbox/uploads/${entryId}.pdf` : `truth/uploads/${entryId}.pdf`;
 
@@ -342,7 +376,6 @@ serve(async (req) => {
     const existingBucket = safeText((existingVd.data as any)?.storage_bucket);
     const existingPath = safeText((existingVd.data as any)?.storage_path);
 
-    // If we already have a certified doc at the same pointer and a hash, we can return and build verify_url hash-first.
     if (!force && existingId && existingHash && (existingLevel ?? "").toLowerCase() === "certified") {
       if (existingBucket === certified_bucket && existingPath === certified_path) {
         const verifyBase =
@@ -366,16 +399,19 @@ serve(async (req) => {
       }
     }
 
-    // 6) Ensure verified_documents row exists (need id for registry linkage; QR will be hash-based)
+    // 6) Ensure verified_documents row exists (need id for registry linkage; QR is hash-based)
     let verified_id = existingId;
 
     if (!verified_id) {
+      // ✅ FIX: document_class must be valid enum (no "minute_book")
+      const document_class = mapDocumentClass(entry_type, domain_key);
+
       const ins = await supabaseAdmin
         .from("verified_documents")
         .insert({
           entity_id,
           entity_slug,
-          document_class: "minute_book",
+          document_class, // ✅ valid enum
           title,
           source_table: "minute_book_entries",
           source_record_id: entryId,
@@ -408,8 +444,8 @@ serve(async (req) => {
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
     // 8) Build certified PDF = COVER PAGE + original PDF (unchanged pages)
-    //    IMPORTANT: QR must point to verify.html?hash=<sha256>. That sha256 is for the final certified PDF,
-    //    so we build, hash, then build again with QR (2-pass) to avoid verify.html changes.
+    //    QR must point to verify.html?hash=<sha256>. That sha256 is for the final certified PDF.
+    //    We build, hash, then rebuild with QR (2-pass) without changing verify.html/resolver.
     const srcPdf = await PDFDocument.load(sourceBytes);
     const srcPages = srcPdf.getPages();
 
@@ -537,34 +573,33 @@ serve(async (req) => {
       return new Uint8Array(await out.save());
     }
 
-    // Build pass 1 with temporary URL (we’ll replace once we know final hash)
     const verifyBase =
       safeText(body.verify_base_url) ??
       Deno.env.get("VERIFY_BASE_URL") ??
       "https://sign.oasisintlholdings.com/verify.html";
 
+    // Pass 1
     const tempUrl = buildVerifyUrl(verifyBase, "pending");
     const pass1 = await buildCertifiedPdfBytes(tempUrl);
     const pass1Hash = await sha256Hex(pass1);
 
-    // Build pass 2 with real hash URL (final bytes/hash)
+    // Pass 2
     const verifyUrl = buildVerifyUrl(verifyBase, pass1Hash);
     const certifiedBytes = await buildCertifiedPdfBytes(verifyUrl);
     const certifiedHash = await sha256Hex(certifiedBytes);
 
-    // (tiny possibility hash changes between pass1 and pass2 because URL changed)
-    // If it did change, rebuild once more using the new hash so QR matches final hash.
+    // If hash changed (URL changed), rebuild one more time so QR matches final hash.
     let finalBytes = certifiedBytes;
     let finalHash = certifiedHash;
-    let finalVerifyUrl = buildVerifyUrl(verifyBase, finalHash);
 
     if (certifiedHash !== pass1Hash) {
-      finalVerifyUrl = buildVerifyUrl(verifyBase, certifiedHash);
-      const pass3 = await buildCertifiedPdfBytes(finalVerifyUrl);
+      const pass3Url = buildVerifyUrl(verifyBase, certifiedHash);
+      const pass3 = await buildCertifiedPdfBytes(pass3Url);
       finalBytes = pass3;
       finalHash = await sha256Hex(pass3);
-      finalVerifyUrl = buildVerifyUrl(verifyBase, finalHash);
     }
+
+    const finalVerifyUrl = buildVerifyUrl(verifyBase, finalHash);
 
     // 10) Upload certified PDF
     const up = await supabaseAdmin.storage
