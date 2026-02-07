@@ -122,9 +122,7 @@ async function resolveActorEmail(actorId: string): Promise<string | null> {
 async function resolveEntryPrimaryPdf(entryId: string) {
   const { data, error } = await supabaseAdmin
     .from("supporting_documents")
-    .select(
-      "id,entry_id,file_path,file_name,file_hash,file_size,mime_type,registry_visible,version,uploaded_at",
-    )
+    .select("id,entry_id,file_path,file_name,file_hash,file_size,mime_type,registry_visible,version,uploaded_at")
     .eq("entry_id", entryId)
     .order("registry_visible", { ascending: false })
     .order("version", { ascending: false })
@@ -136,9 +134,7 @@ async function resolveEntryPrimaryPdf(entryId: string) {
   const rows = (data ?? []) as any[];
 
   const pick =
-    rows.find(
-      (r) => r.registry_visible === true && safeText(r.file_path)?.toLowerCase().endsWith(".pdf"),
-    ) ??
+    rows.find((r) => r.registry_visible === true && safeText(r.file_path)?.toLowerCase().endsWith(".pdf")) ??
     rows.find((r) => safeText(r.file_path)?.toLowerCase().endsWith(".pdf")) ??
     rows[0];
 
@@ -252,12 +248,17 @@ function mapDocumentClass(entryType?: string | null, domainKey?: string | null) 
   return "report";
 }
 
-// -----------------------------------------------------------------------------
-// ✅ ENTERPRISE: Produce a brand-new FINAL certification page (the “last page”)
-// -----------------------------------------------------------------------------
+/* ============================================================
+   ✅ OS-MATCHING CERTIFICATION PAGE (APPENDED LAST PAGE)
+   - Authority tone: "Certification Record"
+   - Registry issuer
+   - Hash treated as Certificate ID
+   - QR treated as Registry Seal
+   - Does NOT touch source pages (preserves wet ink)
+============================================================ */
 async function buildCertifiedWithAppendedPage(args: {
   sourceBytes: Uint8Array;
-  verifyUrl: string; // hash-first URL (we will pass hash placeholder in pass A)
+  verifyUrl: string; // hash-first URL (placeholder in pass A)
   finalHashText: string; // hash to print on the certification page
   title: string;
   entitySlug: string;
@@ -272,143 +273,199 @@ async function buildCertifiedWithAppendedPage(args: {
   const copiedPages = await outDoc.copyPages(srcDoc, srcDoc.getPageIndices());
   for (const p of copiedPages) outDoc.addPage(p);
 
-  // Append our certification page (this is the guaranteed new LAST page)
+  // Append certification page (guaranteed new LAST page)
   const page = outDoc.addPage([612, 792]); // US Letter portrait
   const font = await outDoc.embedFont(StandardFonts.Helvetica);
   const fontBold = await outDoc.embedFont(StandardFonts.HelveticaBold);
 
-  // Background (subtle, enterprise)
+  const W = page.getWidth();
+  const H = page.getHeight();
+  const margin = 54;
+
+  // Outer frame (quiet authority)
   page.drawRectangle({
     x: 36,
     y: 36,
-    width: 612 - 72,
-    height: 792 - 72,
-    borderColor: rgb(0.85, 0.85, 0.88),
+    width: W - 72,
+    height: H - 72,
+    borderColor: rgb(0.86, 0.87, 0.9),
     borderWidth: 1,
     color: rgb(1, 1, 1),
-    opacity: 1,
   });
 
-  // Header
-  page.drawText("Certification & Verification", {
-    x: 60,
-    y: 720,
+  // Top header rail (OS-like)
+  page.drawText("Oasis Digital Parliament", {
+    x: margin,
+    y: H - 66,
+    size: 12,
+    font: fontBold,
+    color: rgb(0.10, 0.12, 0.16),
+  });
+
+  page.drawText("Certification Record", {
+    x: margin,
+    y: H - 92,
     size: 18,
     font: fontBold,
     color: rgb(0.08, 0.10, 0.13),
   });
 
-  page.drawText(`Lane: ${laneLabel}`, {
-    x: 60,
-    y: 695,
-    size: 10,
+  page.drawText("Issued by the Oasis Verified Registry", {
+    x: margin,
+    y: H - 112,
+    size: 9,
     font,
-    color: rgb(0.30, 0.34, 0.40),
+    color: rgb(0.40, 0.44, 0.52),
   });
 
-  page.drawText(`Entity: ${entitySlug}`, {
-    x: 60,
-    y: 678,
-    size: 10,
-    font,
-    color: rgb(0.30, 0.34, 0.40),
+  // Divider
+  page.drawLine({
+    start: { x: margin, y: H - 132 },
+    end: { x: W - margin, y: H - 132 },
+    thickness: 0.6,
+    color: rgb(0.88, 0.9, 0.93),
   });
 
-  // Title (clamped)
-  const safeTitle = (title ?? "").slice(0, 140);
-  page.drawText("Document:", {
-    x: 60,
-    y: 645,
-    size: 11,
+  // Left column meta (structured)
+  const clamp = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
+  const safeTitle = clamp(title || "Minute Book Entry", 120);
+
+  const metaY = H - 170;
+  const rowGap = 18;
+
+  const label = (t: string, x: number, y: number) =>
+    page.drawText(t, { x, y, size: 9, font, color: rgb(0.46, 0.50, 0.58) });
+
+  const value = (t: string, x: number, y: number) =>
+    page.drawText(t, { x, y, size: 11, font: fontBold, color: rgb(0.12, 0.14, 0.18) });
+
+  label("Entity", margin, metaY);
+  value(entitySlug, margin, metaY - 12);
+
+  label("Lane", margin, metaY - rowGap);
+  value(laneLabel, margin, metaY - rowGap - 12);
+
+  label("Document", margin, metaY - rowGap * 2);
+  page.drawText(safeTitle, {
+    x: margin,
+    y: metaY - rowGap * 2 - 12,
+    size: 10,
+    font: fontBold,
+    color: rgb(0.12, 0.14, 0.18),
+    maxWidth: 320,
+  });
+
+  // Right-side seal block (QR as registry seal)
+  const qrBoxW = 174;
+  const qrBoxH = 220;
+  const qrBoxX = W - margin - qrBoxW;
+  const qrBoxY = H - 132 - 20 - qrBoxH;
+
+  page.drawRectangle({
+    x: qrBoxX,
+    y: qrBoxY,
+    width: qrBoxW,
+    height: qrBoxH,
+    borderColor: rgb(0.86, 0.87, 0.9),
+    borderWidth: 1,
+    color: rgb(0.98, 0.98, 0.99),
+  });
+
+  page.drawText("Registry Seal", {
+    x: qrBoxX + 14,
+    y: qrBoxY + qrBoxH - 26,
+    size: 10,
     font: fontBold,
     color: rgb(0.12, 0.14, 0.18),
   });
-  page.drawText(safeTitle || "Minute Book Entry", {
-    x: 60,
-    y: 628,
-    size: 11,
+
+  page.drawText("Scan to verify", {
+    x: qrBoxX + 14,
+    y: qrBoxY + qrBoxH - 42,
+    size: 8,
     font,
-    color: rgb(0.12, 0.14, 0.18),
+    color: rgb(0.45, 0.48, 0.55),
   });
 
-  // QR (right side)
   const qrPng = qrPngBytes(verifyUrl, { size: 256, margin: 2, ecc: "M" });
   const qrImg = await outDoc.embedPng(qrPng);
 
-  const qrSize = 180;
-  const qrX = 612 - 60 - qrSize;
-  const qrY = 792 - 60 - qrSize;
+  const qrSize = 132;
+  const qrX = qrBoxX + Math.round((qrBoxW - qrSize) / 2);
+  const qrY = qrBoxY + 58;
 
   page.drawImage(qrImg, { x: qrX, y: qrY, width: qrSize, height: qrSize });
 
-  page.drawText("Verify", {
-    x: qrX + 64,
-    y: qrY - 14,
+  // Certificate Hash block (treated like ID)
+  const hashTitleY = qrBoxY - 44;
+  page.drawText("Certificate Hash (SHA-256)", {
+    x: margin,
+    y: hashTitleY,
     size: 10,
-    font: fontBold,
-    color: rgb(0.30, 0.34, 0.40),
-  });
-
-  // Hash box
-  page.drawText("Certified SHA-256:", {
-    x: 60,
-    y: 560,
-    size: 11,
     font: fontBold,
     color: rgb(0.12, 0.14, 0.18),
   });
 
-  const boxX = 60;
-  const boxY = 500;
-  const boxW = 612 - 120;
-  const boxH = 48;
+  const hashBoxX = margin;
+  const hashBoxY = hashTitleY - 46;
+  const hashBoxW = W - margin * 2;
+  const hashBoxH = 40;
 
   page.drawRectangle({
-    x: boxX,
-    y: boxY,
-    width: boxW,
-    height: boxH,
-    borderColor: rgb(0.85, 0.85, 0.88),
+    x: hashBoxX,
+    y: hashBoxY,
+    width: hashBoxW,
+    height: hashBoxH,
+    borderColor: rgb(0.86, 0.87, 0.9),
     borderWidth: 1,
     color: rgb(0.97, 0.97, 0.98),
   });
 
+  // Hash text
   page.drawText(finalHashText, {
-    x: boxX + 12,
-    y: boxY + 18,
-    size: 10,
+    x: hashBoxX + 12,
+    y: hashBoxY + 14,
+    size: 9,
     font,
     color: rgb(0.12, 0.14, 0.18),
   });
 
-  // Verify URL (short line)
-  page.drawText("Verification URL:", {
-    x: 60,
-    y: 465,
-    size: 11,
+  // Verification URL (short)
+  const urlY = hashBoxY - 26;
+  page.drawText("Verification Terminal (hash-first)", {
+    x: margin,
+    y: urlY,
+    size: 9,
     font: fontBold,
     color: rgb(0.12, 0.14, 0.18),
   });
 
-  const urlLine = verifyUrl.length > 110 ? `${verifyUrl.slice(0, 110)}…` : verifyUrl;
+  const urlLine = verifyUrl.length > 112 ? `${verifyUrl.slice(0, 112)}…` : verifyUrl;
   page.drawText(urlLine, {
-    x: 60,
-    y: 447,
-    size: 9,
+    x: margin,
+    y: urlY - 14,
+    size: 8,
     font,
-    color: rgb(0.30, 0.34, 0.40),
+    color: rgb(0.45, 0.48, 0.55),
   });
 
-  // Footer note
+  // Bottom note (quiet)
+  page.drawLine({
+    start: { x: margin, y: 74 },
+    end: { x: W - margin, y: 74 },
+    thickness: 0.6,
+    color: rgb(0.90, 0.92, 0.94),
+  });
+
   page.drawText(
-    "This certification page was appended to preserve the original document pages. The QR code resolves to the hash-first verification terminal.",
+    "This certification page was appended to preserve original document pages. Verification resolves by hash (QR).",
     {
-      x: 60,
-      y: 90,
+      x: margin,
+      y: 56,
       size: 8,
       font,
-      color: rgb(0.40, 0.44, 0.50),
-      maxWidth: 612 - 120,
+      color: rgb(0.46, 0.50, 0.58),
+      maxWidth: W - margin * 2,
       lineHeight: 10,
     },
   );
@@ -465,11 +522,7 @@ serve(async (req) => {
     }
 
     // 2) Map entity_key -> entities.id via entities.slug (no hardcoding)
-    const ent = await supabaseAdmin
-      .from("entities")
-      .select("id, slug")
-      .eq("slug", entity_key)
-      .maybeSingle();
+    const ent = await supabaseAdmin.from("entities").select("id, slug").eq("slug", entity_key).maybeSingle();
 
     if (ent.error) return json({ ok: false, error: ent.error.message, request_id: reqId }, 400);
     if (!ent.data?.id) {
@@ -617,7 +670,7 @@ serve(async (req) => {
     }
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // 8) Build certification page as the NEW FINAL PAGE (2-pass to ensure hash matches final)
+    // 8) Build certification page as the NEW FINAL PAGE (2-pass stabilization)
     const verifyBase =
       safeText(body.verify_base_url) ??
       Deno.env.get("VERIFY_BASE_URL") ??
@@ -625,7 +678,7 @@ serve(async (req) => {
 
     const laneLabel = is_test ? "SANDBOX" : "TRUTH";
 
-    // Pass A: placeholder hash text
+    // Pass A: placeholder
     const passA_bytes = await buildCertifiedWithAppendedPage({
       sourceBytes,
       verifyUrl: buildVerifyUrl(verifyBase, "pending"),
@@ -636,7 +689,7 @@ serve(async (req) => {
     });
     const passA_hash = await sha256Hex(passA_bytes);
 
-    // Pass B: embed passA hash in URL + printed hash, then compute final hash
+    // Pass B: embed passA hash into URL + printed hash
     const passB_bytes = await buildCertifiedWithAppendedPage({
       sourceBytes,
       verifyUrl: buildVerifyUrl(verifyBase, passA_hash),
@@ -650,7 +703,7 @@ serve(async (req) => {
     let finalBytes = passB_bytes;
     let finalHash = passB_hash;
 
-    // If hash changed, do one more stabilization pass so QR + printed hash match final bytes
+    // Stabilize once more if needed (ensures QR+printed hash match final bytes)
     if (passB_hash !== passA_hash) {
       const passC_bytes = await buildCertifiedWithAppendedPage({
         sourceBytes,
@@ -661,7 +714,6 @@ serve(async (req) => {
         laneLabel,
       });
       const passC_hash = await sha256Hex(passC_bytes);
-
       finalBytes = passC_bytes;
       finalHash = passC_hash;
     }
