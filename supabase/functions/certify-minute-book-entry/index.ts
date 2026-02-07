@@ -26,6 +26,7 @@ type Resp = {
   verified_document_id?: string;
   reused?: boolean;
 
+  // ✅ Now points to entry_id (stable), not self-hash
   verify_url?: string;
 
   source?: { bucket: string; path: string; file_hash?: string | null };
@@ -86,9 +87,12 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return hex;
 }
 
-function buildVerifyUrl(base: string, sha256: string) {
+/**
+ * ✅ Stable verify URL: resolve by entry_id (NOT by hash inside same file)
+ */
+function buildVerifyUrlByEntry(base: string, entryId: string) {
   const u = new URL(base);
-  u.searchParams.set("hash", sha256);
+  u.searchParams.set("entry_id", entryId);
   return u.toString();
 }
 
@@ -276,42 +280,33 @@ function mapDocumentClass(entryType?: string | null, domainKey?: string | null) 
 }
 
 // -----------------------------------------------------------------------------
-// ✅ APPEND A NEW FINAL CERTIFICATION PAGE (never stamp existing last page)
-// ✅ DETERMINISTIC SAVE so fixed-point hash CONVERGES (NO mismatch)
+// ✅ APPEND NEW FINAL CERTIFICATION PAGE (NO self-hash)
 // -----------------------------------------------------------------------------
-const DETERMINISTIC_DATE = new Date("2020-01-01T00:00:00Z");
-
 async function buildCertifiedWithAppendedPage(args: {
   sourceBytes: Uint8Array;
-  verifyUrl: string;
-  finalHashText: string;
+  verifyUrl: string; // ✅ now stable (entry_id)
   title: string;
   entitySlug: string;
   laneLabel: string;
   documentClass: string;
   operatorLabel: string;
   certifiedAtUtc: string;
+  entryId: string; // ✅ stable identifier printed
 }): Promise<Uint8Array> {
   const {
     sourceBytes,
     verifyUrl,
-    finalHashText,
     title,
     entitySlug,
     laneLabel,
     documentClass,
     operatorLabel,
     certifiedAtUtc,
+    entryId,
   } = args;
 
   const srcDoc = await PDFDocument.load(sourceBytes);
   const outDoc = await PDFDocument.create();
-
-  // ✅ make output stable across runs
-  outDoc.setCreator("Oasis Digital Parliament");
-  outDoc.setProducer("Oasis Verified Registry");
-  outDoc.setCreationDate(DETERMINISTIC_DATE);
-  outDoc.setModificationDate(DETERMINISTIC_DATE);
 
   const copiedPages = await outDoc.copyPages(srcDoc, srcDoc.getPageIndices());
   for (const p of copiedPages) outDoc.addPage(p);
@@ -398,9 +393,9 @@ async function buildCertifiedWithAppendedPage(args: {
   row("Lane:", laneLabel, leftX, gridTop - 16);
   row("Document:", documentClass, leftX, gridTop - 32);
 
-  const hashShort =
-    finalHashText.length > 16 ? `${finalHashText.slice(0, 16)}…` : finalHashText;
-  row("Hash (SHA-256):", hashShort, midX, gridTop);
+  // ✅ Stable identifier printed (not self-hash)
+  const entryShort = entryId.length > 18 ? `${entryId.slice(0, 8)}…${entryId.slice(-8)}` : entryId;
+  row("Entry ID:", entryShort, midX, gridTop);
   row("Verification:", "Scan QR / open terminal", midX, gridTop - 16);
 
   page.drawLine({
@@ -420,7 +415,7 @@ async function buildCertifiedWithAppendedPage(args: {
   });
 
   page.drawText(
-    "To verify cryptographic truth (hash, certification, registry status), scan the QR code or open the verification terminal.",
+    "To verify cryptographic truth (registry status, certified hash, signed URLs), scan the QR code or open the verification terminal.",
     {
       x: margin,
       y: vTop - 18,
@@ -441,7 +436,7 @@ async function buildCertifiedWithAppendedPage(args: {
   });
 
   const boxY = vTop - 90;
-  page.drawText("Certificate Hash (SHA-256)", {
+  page.drawText("Registry Reference (Entry ID)", {
     x: margin,
     y: boxY + 44,
     size: 9,
@@ -459,8 +454,7 @@ async function buildCertifiedWithAppendedPage(args: {
     color: rgb(0.97, 0.97, 0.98),
   });
 
-  // ✅ MUST print the EXACT hash that the file resolves by
-  page.drawText(finalHashText, {
+  page.drawText(entryId, {
     x: margin + 12,
     y: boxY + 12,
     size: 8.2,
@@ -469,7 +463,7 @@ async function buildCertifiedWithAppendedPage(args: {
   });
 
   const urlY = boxY - 54;
-  page.drawText("Verification Terminal (hash-first)", {
+  page.drawText("Verification Terminal", {
     x: margin,
     y: urlY + 20,
     size: 9,
@@ -551,15 +545,8 @@ async function buildCertifiedWithAppendedPage(args: {
     color: ink,
   });
 
-  page.drawLine({
-    start: { x: attX + 12, y: attY + 10 },
-    end: { x: attX + attW - 12, y: attY + 10 },
-    thickness: 0.8,
-    color: rgb(0.30, 0.32, 0.36),
-  });
-
   const foot =
-    "This certification page was appended to preserve original document pages. Verification resolves by hash (QR).";
+    "This certification page was appended to preserve original pages. The certified hash is resolved by the registry.";
   page.drawText(foot, {
     x: margin,
     y: 44,
@@ -569,8 +556,7 @@ async function buildCertifiedWithAppendedPage(args: {
     maxWidth: W - margin * 2,
   });
 
-  // ✅ deterministic serialization
-  return new Uint8Array(await outDoc.save({ useObjectStreams: false }));
+  return new Uint8Array(await outDoc.save());
 }
 
 /**
@@ -606,69 +592,6 @@ async function fetchLatestVerifiedPointer(entryId: string) {
     null;
 
   return { data: pick, via: "fallback" as const };
-}
-
-/**
- * ✅ FIXED-POINT HASH STABILIZATION:
- * embed hash -> hash -> repeat until stable
- * (now converges because PDF output is deterministic)
- */
-async function buildCertifiedFixedPoint(args: {
-  sourceBytes: Uint8Array;
-  verifyBase: string;
-  title: string;
-  entitySlug: string;
-  laneLabel: string;
-  documentClass: string;
-  operatorLabel: string;
-  certifiedAtUtc: string;
-}) {
-  const {
-    sourceBytes,
-    verifyBase,
-    title,
-    entitySlug,
-    laneLabel,
-    documentClass,
-    operatorLabel,
-    certifiedAtUtc,
-  } = args;
-
-  let current = "pending";
-  let lastBytes = new Uint8Array();
-  let lastHash = "";
-
-  for (let i = 0; i < 10; i++) {
-    const bytes = await buildCertifiedWithAppendedPage({
-      sourceBytes,
-      verifyUrl: buildVerifyUrl(verifyBase, current),
-      finalHashText: current,
-      title,
-      entitySlug,
-      laneLabel,
-      documentClass,
-      operatorLabel,
-      certifiedAtUtc,
-    });
-
-    const h = await sha256Hex(bytes);
-
-    lastBytes = bytes;
-    lastHash = h;
-
-    if (h === current) {
-      return { bytes, hash: h, verify_url: buildVerifyUrl(verifyBase, h) };
-    }
-
-    current = h;
-  }
-
-  return {
-    bytes: lastBytes,
-    hash: lastHash,
-    verify_url: buildVerifyUrl(verifyBase, lastHash),
-    non_converged: true,
-  };
 }
 
 serve(async (req) => {
@@ -755,7 +678,7 @@ serve(async (req) => {
         404,
       );
     }
-    const source_path = src.file_path;
+    const source_pathc = src.file_path;
 
     // 4) destination
     const certified_bucket = is_test ? "governance_sandbox" : "governance_truth";
@@ -774,7 +697,7 @@ serve(async (req) => {
     const hasCertified = !!(existingId && existingHash && existingLevel === "certified");
     const reissue = !!force && !!existingId;
 
-    // strict reuse
+    // ✅ strict reuse: return existing registry hash + stable entry resolver url
     if (!force && hasCertified) {
       const verifyBase =
         safeText(body.verify_base_url) ??
@@ -789,8 +712,8 @@ serve(async (req) => {
         actor_email: actorEmail,
         is_test,
         verified_document_id: existingId!,
-        verify_url: buildVerifyUrl(verifyBase, existingHash!),
-        source: { bucket: source_bucket, path: source_path, file_hash: src.file_hash },
+        verify_url: buildVerifyUrlByEntry(verifyBase, entryId),
+        source: { bucket: source_bucket, path: sourceC, file_hash: src.file_hash },
         certified: {
           bucket: existingBucket ?? certified_bucket,
           path: existingPath ?? "",
@@ -805,7 +728,7 @@ serve(async (req) => {
     const document_class = mapDocumentClass(entry_type, domain_key);
 
     // 7) download source bytes
-    const dl = await supabaseAdmin.storage.from(source_bucket).download(source_path);
+    const dl = await supabaseAdmin.storage.from(source_bucket).download(sourceC);
     if (dl.error || !dl.data) {
       return json(
         { ok: false, error: "SOURCE_PDF_DOWNLOAD_FAILED", details: dl.error, request_id: reqId },
@@ -814,32 +737,32 @@ serve(async (req) => {
     }
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // 8) build fixed-point certified pdf
+    // 8) build certified pdf (QR resolves by entry_id)
     const verifyBase =
       safeText(body.verify_base_url) ??
       Deno.env.get("VERIFY_BASE_URL") ??
       "https://sign.oasisintlholdings.com/verify.html";
 
+    const finalVerifyUrl = buildVerifyUrlByEntry(verifyBase, entryId);
     const laneLabel = is_test ? "SANDBOX" : "TRUTH";
     const certifiedAt = utcStampISO();
     const operatorLabel = safeText(actorEmail) ?? actorId;
 
-    const built = await buildCertifiedFixedPoint({
+    const finalBytes = await buildCertifiedWithAppendedPage({
       sourceBytes,
-      verifyBase,
+      verifyUrl: finalVerifyUrl,
       title,
       entitySlug: entity_slug,
       laneLabel,
       documentClass: document_class,
       operatorLabel,
       certifiedAtUtc: certifiedAt,
+      entryId,
     });
 
-    const finalBytes = built.bytes;
-    const finalHash = built.hash;
-    const finalVerifyUrl = built.verify_url;
+    const finalHash = await sha256Hex(finalBytes);
 
-    // 9) path by hash
+    // 9) path by hash (still good)
     const certified_path = `${certified_prefix}/${entryId}-${finalHash.slice(0, 12)}.pdf`;
 
     const up = await supabaseAdmin.storage
@@ -864,7 +787,7 @@ serve(async (req) => {
       }
     }
 
-    // 10) verified_documents write
+    // 10) verified_documents write (INSERT if none, else UPDATE existing id)
     let verified_id: string;
 
     if (!existingId) {
@@ -900,50 +823,21 @@ serve(async (req) => {
     } else {
       verified_id = existingId;
 
-      if (existingLevel === "certified") {
-        // ✅ immutable certified row: pointer-only update
-        const upd = await supabaseAdmin
-          .from("verified_documents")
-          .update({
-            storage_bucket: certified_bucket,
-            storage_path: certified_path,
-            file_hash: finalHash,
-          } as any)
-          .eq("id", verified_id);
+      // ✅ certified rows: pointer refresh only (your SQL trigger allows service_role)
+      const upd = await supabaseAdmin
+        .from("verified_documents")
+        .update({
+          storage_bucket: certified_bucket,
+          storage_path: certified_path,
+          file_hash: finalHash,
+        } as any)
+        .eq("id", verified_id);
 
-        if (upd.error) {
-          return json(
-            { ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId } satisfies Resp,
-            500,
-          );
-        }
-      } else {
-        const upd = await supabaseAdmin
-          .from("verified_documents")
-          .update({
-            entity_id,
-            entity_slug,
-            document_class,
-            title,
-            source_table: "minute_book_entries",
-            source_record_id: entryId,
-            storage_bucket: certified_bucket,
-            storage_path: certified_path,
-            file_hash: finalHash,
-            mime_type: "application/pdf",
-            verification_level: "certified",
-            is_archived: true,
-            updated_at: new Date().toISOString(),
-            updated_by: actorId,
-          } as any)
-          .eq("id", verified_id);
-
-        if (upd.error) {
-          return json(
-            { ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId } satisfies Resp,
-            500,
-          );
-        }
+      if (upd.error) {
+        return json(
+          { ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId } satisfies Resp,
+          500,
+        );
       }
     }
 
@@ -959,10 +853,9 @@ serve(async (req) => {
         certified_bucket,
         certified_path,
         source_bucket,
-        source_path,
+        source_path: sourceC,
         reused: false,
         reissue,
-        non_converged: (built as any).non_converged ?? false,
       },
     });
 
@@ -973,12 +866,12 @@ serve(async (req) => {
       actor_email: actorEmail,
       is_test,
       verified_document_id: verified_id,
-      verify_url: finalVerifyUrl,
-      source: { bucket: source_bucket, path: source_path, file_hash: src.file_hash },
+      verify_url: finalVerifyUrl, // ✅ stable
+      source: { bucket: source_bucket, path: sourceC, file_hash: src.file_hash },
       certified: {
         bucket: certified_bucket,
         path: certified_path,
-        file_hash: finalHash,
+        file_hash: finalHash, // ✅ canonical registry hash
         file_size: finalBytes.length,
       },
       request_id: reqId,
