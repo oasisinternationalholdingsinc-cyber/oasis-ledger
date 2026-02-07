@@ -37,15 +37,26 @@ const json = (x: unknown, status = 200) =>
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
 const SERVICE_ROLE_KEY =
-  Deno.env.get("SERVICE_ROLE_KEY") ??
-  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
 if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
   throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
 }
 
-// Canonical SQL resolver
+// Canonical SQL resolver (do not rename)
 const RESOLVE_RPC = "resolve_verified_record";
+
+function clampExpiresIn(n: unknown) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return 900;
+  return Math.max(60, Math.min(3600, v)); // 1m..60m
+}
+
+function safeText(v: unknown): string | null {
+  if (v == null) return null;
+  const t = String(v).trim();
+  return t.length ? t : null;
+}
 
 async function signUrl(
   supabaseAdmin: ReturnType<typeof createClient>,
@@ -61,48 +72,163 @@ async function signUrl(
   return { url: data?.signedUrl ?? null, error: null as string | null };
 }
 
-function clampExpiresIn(n: unknown) {
-  const v = Number(n);
-  if (!Number.isFinite(v)) return 900;
-  return Math.max(60, Math.min(3600, v)); // 1m..60m
+function isTestFromBucket(bucket: string) {
+  const b = bucket.toLowerCase();
+  return b === "governance_sandbox" || b.includes("sandbox");
 }
 
-function safeText(v: unknown): string | null {
-  if (v == null) return null;
-  const t = String(v).trim();
-  return t.length ? t : null;
+// Build a verify.html-compatible payload using ONLY verified_documents (hash-first)
+async function buildHashFirstPayload(args: {
+  supabaseAdmin: ReturnType<typeof createClient>;
+  hash: string;
+  expires_in: number;
+}) {
+  const { supabaseAdmin, hash, expires_in } = args;
+
+  // verified_documents lookup (NO schema drift: uses existing columns you already rely on)
+  const { data: vd, error: vdErr } = await supabaseAdmin
+    .from("verified_documents")
+    .select(
+      "id, entity_id, entity_slug, title, document_class, verification_level, storage_bucket, storage_path, file_hash, created_at, updated_at, source_table, source_record_id",
+    )
+    .eq("file_hash", hash)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (vdErr) {
+    return { ok: false, error: "VERIFIED_LOOKUP_FAILED", details: vdErr };
+  }
+
+  if (!vd?.id || !vd.storage_bucket || !vd.storage_path || !vd.file_hash) {
+    return { ok: false, error: "NOT_REGISTERED" };
+  }
+
+  // entity hydration (best-effort, no hardcoding)
+  const entId = safeText((vd as any).entity_id);
+  const entSlug = safeText((vd as any).entity_slug);
+
+  let ent: any = null;
+  if (entId) {
+    const r = await supabaseAdmin
+      .from("entities")
+      .select("id,name,slug")
+      .eq("id", entId)
+      .maybeSingle();
+    if (!r.error && r.data) ent = r.data;
+  } else if (entSlug) {
+    const r = await supabaseAdmin
+      .from("entities")
+      .select("id,name,slug")
+      .eq("slug", entSlug)
+      .maybeSingle();
+    if (!r.error && r.data) ent = r.data;
+  }
+
+  const bucket = String((vd as any).storage_bucket);
+  const path = String((vd as any).storage_path);
+
+  const signed = await signUrl(supabaseAdmin, bucket, path, expires_in);
+
+  const is_test = isTestFromBucket(bucket);
+
+  // IMPORTANT: verify.html expects:
+  // - ok:true
+  // - hash (or verified.file_hash)
+  // - verified.storage_bucket/storage_path
+  // - urls.best_pdf at minimum to render iframe/open/download
+  return {
+    ok: true,
+    hash: (vd as any).file_hash,
+    verified_document_id: (vd as any).id,
+
+    // Ledger/envelope not available in pure hash-only path (that’s fine)
+    ledger_id: null,
+    envelope_id: null,
+
+    entity:
+      ent ??
+      ({
+        id: entId ?? null,
+        name: ent?.name ?? "—",
+        slug: ent?.slug ?? entSlug ?? "—",
+      } as any),
+
+    ledger: {
+      id: null,
+      title: (vd as any).title ?? "Verified Document",
+      status: "ARCHIVED",
+      is_test,
+      created_at: (vd as any).created_at ?? null,
+    },
+
+    verified: {
+      id: (vd as any).id,
+      entity_id: entId ?? null,
+      entity_slug: entSlug ?? null,
+      title: (vd as any).title ?? null,
+      document_class: (vd as any).document_class ?? null,
+      verification_level: (vd as any).verification_level ?? "certified",
+      storage_bucket: bucket,
+      storage_path: path,
+      file_hash: (vd as any).file_hash,
+      created_at: (vd as any).created_at ?? null,
+      // keep envelope/ledger absent in hash-only
+    },
+
+    best_pdf: {
+      kind: "verified_archive",
+      storage_bucket: bucket,
+      storage_path: path,
+    },
+
+    public_pdf: null,
+
+    expires_in,
+    urls: {
+      best_pdf: signed.url,
+      minute_book_pdf: null,
+      certified_archive_pdf: signed.url,
+    },
+
+    notes: signed.error
+      ? { archive_sign_error: signed.error, minute_book_pointer_missing: true }
+      : { minute_book_pointer_missing: true },
+  };
 }
 
 serve(async (req) => {
+  const reqId = req.headers.get("x-sb-request-id") ?? null;
+
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: withCors() });
   }
 
   if (req.method !== "POST") {
-    return json({ ok: false, error: "METHOD_NOT_ALLOWED" }, 405);
+    return json({ ok: false, error: "METHOD_NOT_ALLOWED", request_id: reqId }, 405);
   }
 
-  const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+  const supabaseAdmin = createClient(SUPABASE_URL!, SERVICE_ROLE_KEY!, {
     auth: { persistSession: false },
-    global: { headers: { "x-client-info": "odp-verify/resolve-verified-record" } },
+    global: { fetch, headers: { "x-client-info": "odp-verify/resolve-verified-record" } },
   });
 
   let body: ReqBody = {};
   try {
     body = (await req.json()) as ReqBody;
   } catch {
-    return json({ ok: false, error: "INVALID_JSON" }, 400);
+    return json({ ok: false, error: "INVALID_JSON", request_id: reqId }, 400);
   }
 
-  // 🔒 ENTERPRISE INPUT NORMALIZATION (NO REGRESSION)
+  // ✅ ENTERPRISE INPUT NORMALIZATION (NO REGRESSION)
   const hash =
-    (body.hash ?? body.p_hash ?? null)?.toString().trim().toLowerCase() || null;
+    safeText(body.hash ?? body.p_hash)?.toLowerCase() ?? null;
 
   const envelope_id =
-    (body.envelope_id ?? body.p_envelope_id ?? null)?.toString().trim() || null;
+    safeText(body.envelope_id ?? body.p_envelope_id) ?? null;
 
   const ledger_id =
-    (body.ledger_id ?? body.p_ledger_id ?? null)?.toString().trim() || null;
+    safeText(body.ledger_id ?? body.p_ledger_id) ?? null;
 
   const expires_in = clampExpiresIn(body.expires_in ?? 900);
 
@@ -112,13 +238,14 @@ serve(async (req) => {
         ok: false,
         error: "MISSING_INPUT",
         message: "Provide hash OR envelope_id OR ledger_id.",
+        request_id: reqId,
       },
       400,
     );
   }
 
   // ---------------------------------------------------------------------------
-  // 1) Canonical SQL resolver (unchanged)
+  // 1) Canonical SQL resolver (unchanged call)
   // ---------------------------------------------------------------------------
   const { data: resolved, error: rpcErr } = await supabaseAdmin.rpc(RESOLVE_RPC, {
     p_hash: hash,
@@ -126,13 +253,19 @@ serve(async (req) => {
     p_ledger_id: ledger_id,
   });
 
+  // If RPC hard-fails, we still allow hash-first fallback (if hash present)
   if (rpcErr) {
+    if (hash) {
+      const fb = await buildHashFirstPayload({ supabaseAdmin, hash, expires_in });
+      return json({ ...fb, request_id: reqId }, 200);
+    }
     return json(
       {
         ok: false,
         error: "RPC_FAILED",
         message: rpcErr.message,
         details: rpcErr,
+        request_id: reqId,
       },
       500,
     );
@@ -148,125 +281,32 @@ serve(async (req) => {
   }
 
   // ---------------------------------------------------------------------------
-  // 1b) ENTERPRISE FALLBACK (NO DRIFT):
-  // If RPC is ledger-centric and returns NOT_REGISTERED for a valid minute_book
-  // certified hash, resolve directly from verified_documents.file_hash.
+  // 1b) ✅ ENTERPRISE HASH-FIRST FALLBACK (NO DRIFT)
+  // If SQL is still ledger-centric and returns "ledger_id required" (or NOT_REGISTERED),
+  // we must still allow hash-only resolution via verified_documents.
   // ---------------------------------------------------------------------------
-  const rpcNotRegistered =
+  const rpcErrStr = String(payload?.error ?? "").toLowerCase();
+  const needsHashFallback =
     !!hash &&
     payload &&
     payload.ok !== true &&
-    String(payload.error || "").toUpperCase() === "NOT_REGISTERED";
+    (rpcErrStr === "not_registered" ||
+      rpcErrStr.includes("ledger_id required") ||
+      rpcErrStr.includes("ledger_id is required") ||
+      rpcErrStr.includes("ledger_id"));
 
-  if (rpcNotRegistered) {
-    const { data: vd, error: vdErr } = await supabaseAdmin
-      .from("verified_documents")
-      .select(
-        "id, entity_id, entity_slug, title, document_class, verification_level, storage_bucket, storage_path, file_hash, created_at, updated_at",
-      )
-      .eq("file_hash", hash)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (!vdErr && vd?.id && vd?.storage_bucket && vd?.storage_path && vd?.file_hash) {
-      const entId = safeText((vd as any).entity_id);
-      const entSlug = safeText((vd as any).entity_slug);
-
-      let ent: any = null;
-      if (entId) {
-        const r = await supabaseAdmin
-          .from("entities")
-          .select("id,name,slug")
-          .eq("id", entId)
-          .maybeSingle();
-        if (!r.error && r.data) ent = r.data;
-      } else if (entSlug) {
-        const r = await supabaseAdmin
-          .from("entities")
-          .select("id,name,slug")
-          .eq("slug", entSlug)
-          .maybeSingle();
-        if (!r.error && r.data) ent = r.data;
-      }
-
-      const bucket = String((vd as any).storage_bucket);
-      const path = String((vd as any).storage_path);
-
-      const s = await signUrl(supabaseAdmin, bucket, path, expires_in);
-
-      // lane inference (no schema assumptions)
-      const is_test =
-        bucket === "governance_sandbox" || bucket.toLowerCase().includes("sandbox");
-
-      // Return verify.html-compatible payload
-      return json({
-        ok: true,
-        // verify.html reads canonical hash from verified.file_hash or payload.hash
-        hash: (vd as any).file_hash,
-        verified_document_id: (vd as any).id,
-        ledger_id: null,
-        envelope_id: null,
-
-        entity:
-          ent ??
-          {
-            id: entId ?? null,
-            name: ent?.name ?? "—",
-            slug: ent?.slug ?? entSlug ?? "—",
-          },
-
-        ledger: {
-          id: null,
-          title: (vd as any).title ?? "Verified Document",
-          status: "ARCHIVED",
-          is_test,
-          created_at: (vd as any).created_at ?? null,
-        },
-
-        // These fields feed your badges
-        verified: {
-          id: (vd as any).id,
-          entity_id: entId ?? null,
-          entity_slug: entSlug ?? null,
-          title: (vd as any).title ?? null,
-          document_class: (vd as any).document_class ?? null,
-          verification_level: (vd as any).verification_level ?? "certified",
-          storage_bucket: bucket,
-          storage_path: path,
-          file_hash: (vd as any).file_hash,
-          created_at: (vd as any).created_at ?? null,
-        },
-
-        // best_pdf/public_pdf shape expected by verify.html
-        best_pdf: {
-          kind: "verified_archive",
-          storage_bucket: bucket,
-          storage_path: path,
-        },
-        public_pdf: null,
-
-        expires_in,
-        urls: {
-          best_pdf: s.url,
-          minute_book_pdf: null,
-          certified_archive_pdf: s.url,
-        },
-        notes: s.error
-          ? { archive_sign_error: s.error }
-          : { minute_book_pointer_missing: true },
-      });
-    }
-
-    // If fallback can't find it, return RPC payload as-is (NO REGRESSION)
-    return json(payload ?? { ok: false, error: "NOT_REGISTERED" }, 200);
+  if (needsHashFallback) {
+    const fb = await buildHashFirstPayload({ supabaseAdmin, hash, expires_in });
+    // If fallback succeeds, return it; otherwise return original payload (no regression)
+    if ((fb as any).ok === true) return json({ ...(fb as any), request_id: reqId }, 200);
+    return json({ ...(payload ?? { ok: false, error: "NOT_REGISTERED" }), request_id: reqId }, 200);
   }
 
   // ---------------------------------------------------------------------------
-  // 2) Normal signed URL enrichment (unchanged)
+  // 2) Normal signed URL enrichment (NO REGRESSION)
   // ---------------------------------------------------------------------------
   if (!payload || payload.ok !== true) {
-    return json(payload ?? { ok: false, error: "RESOLVE_FAILED" }, 200);
+    return json({ ...(payload ?? { ok: false, error: "RESOLVE_FAILED" }), request_id: reqId }, 200);
   }
 
   const bestPdf = payload.best_pdf ?? null;
@@ -318,14 +358,18 @@ serve(async (req) => {
     notes.archive_pointer_missing = true;
   }
 
-  return json({
-    ...payload,
-    expires_in,
-    urls: {
-      best_pdf: bestUrl,
-      minute_book_pdf: minuteBookUrl,
-      certified_archive_pdf: archiveUrl,
+  return json(
+    {
+      ...payload,
+      expires_in,
+      urls: {
+        best_pdf: bestUrl,
+        minute_book_pdf: minuteBookUrl,
+        certified_archive_pdf: archiveUrl,
+      },
+      notes: Object.keys(notes).length ? notes : undefined,
+      request_id: reqId,
     },
-    notes: Object.keys(notes).length ? notes : undefined,
-  });
+    200,
+  );
 });
