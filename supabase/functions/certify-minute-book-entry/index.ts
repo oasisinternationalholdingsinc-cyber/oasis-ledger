@@ -211,23 +211,14 @@ function qrPngBytes(
   return PNG.sync.write(png);
 }
 
-function fmtIsoDate(iso?: string | null) {
-  if (!iso) return "—";
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return "—";
-  const d = new Date(t);
-  const yyyy = d.getUTCFullYear();
-  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
-}
-
 /**
  * If caller doesn't pass is_test, infer from:
  * minute_book_entries.source_record_id -> governance_ledger.is_test
  * (prevents lane mistakes, no schema changes)
  */
-async function inferLaneIsTestFromEntrySource(entrySourceRecordId: string | null): Promise<boolean | null> {
+async function inferLaneIsTestFromEntrySource(
+  entrySourceRecordId: string | null,
+): Promise<boolean | null> {
   const id = safeText(entrySourceRecordId);
   if (!id || !isUuid(id)) return null;
 
@@ -313,28 +304,18 @@ serve(async (req) => {
     }
 
     // 2) Map entity_key -> entities.id via entities.slug (no hardcoding)
-    const ent = await supabaseAdmin
-      .from("entities")
-      .select("id, slug, name")
-      .eq("slug", entity_key)
-      .maybeSingle();
+    const ent = await supabaseAdmin.from("entities").select("id, slug").eq("slug", entity_key).maybeSingle();
 
     if (ent.error) return json({ ok: false, error: ent.error.message, request_id: reqId }, 400);
     if (!ent.data?.id) {
       return json(
-        {
-          ok: false,
-          error: "ENTITY_NOT_FOUND",
-          details: `No entities row found for slug=${entity_key}`,
-          request_id: reqId,
-        },
+        { ok: false, error: "ENTITY_NOT_FOUND", details: `No entities row found for slug=${entity_key}`, request_id: reqId },
         404,
       );
     }
 
     const entity_id = String((ent.data as any).id);
     const entity_slug = String((ent.data as any).slug);
-    const entity_name = safeText((ent.data as any).name) ?? entity_slug;
 
     // 3) Resolve source PDF from minute_book (primary supporting doc)
     const source_bucket = "minute_book";
@@ -345,8 +326,7 @@ serve(async (req) => {
         {
           ok: false,
           error: "SOURCE_PDF_NOT_FOUND",
-          details:
-            "No primary supporting_documents PDF pointer found for this entry_id (file_path missing).",
+          details: "No primary supporting_documents PDF pointer found for this entry_id (file_path missing).",
           request_id: reqId,
         } satisfies Resp,
         404,
@@ -354,7 +334,6 @@ serve(async (req) => {
     }
 
     const source_path = src.file_path;
-    const source_hash = src.file_hash;
 
     // 4) Certified destination pointer (separate buckets; no schema changes)
     const certified_bucket = is_test ? "governance_sandbox" : "governance_truth";
@@ -392,211 +371,108 @@ serve(async (req) => {
           is_test,
           verified_document_id: existingId,
           verify_url: buildVerifyUrl(verifyBase, existingHash),
-          source: { bucket: source_bucket, path: source_path, file_hash: source_hash },
+          source: { bucket: source_bucket, path: source_path, file_hash: src.file_hash },
           certified: { bucket: certified_bucket, path: certified_path, file_hash: existingHash, file_size: 0 },
           request_id: reqId,
         });
       }
     }
 
-    // 6) Ensure verified_documents row exists (need id for registry linkage; QR is hash-based)
-    let verified_id = existingId;
-
-    if (!verified_id) {
-      // ✅ FIX: document_class must be valid enum (no "minute_book")
-      const document_class = mapDocumentClass(entry_type, domain_key);
-
-      const ins = await supabaseAdmin
-        .from("verified_documents")
-        .insert({
-          entity_id,
-          entity_slug,
-          document_class, // ✅ valid enum
-          title,
-          source_table: "minute_book_entries",
-          source_record_id: entryId,
-          storage_bucket: certified_bucket,
-          storage_path: certified_path,
-          file_hash: null,
-          mime_type: "application/pdf",
-          verification_level: "certified",
-          is_archived: true,
-          created_by: actorId,
-          updated_by: actorId,
-        } as any)
-        .select("id")
-        .single();
-
-      if (ins.error) {
-        return json(
-          { ok: false, error: "VERIFIED_DOC_INSERT_FAILED", details: ins.error, request_id: reqId } satisfies Resp,
-          500,
-        );
-      }
-      verified_id = String(ins.data.id);
+    // 6) If a verified doc exists but points somewhere wrong (old bad run), DELETE IT (unless force wants reuse)
+    //    This matches your instruction: "delete that verified one cuz it's wrong".
+    //    We only delete when it exists and is NOT already certified to our canonical pointer.
+    if (existingId && (!existingHash || (existingLevel ?? "").toLowerCase() !== "certified")) {
+      await supabaseAdmin.from("verified_documents").delete().eq("id", existingId);
     }
 
-    // 7) Download source PDF bytes
+    // 7) Create fresh verified_documents row (valid enum)
+    const document_class = mapDocumentClass(entry_type, domain_key);
+
+    const ins = await supabaseAdmin
+      .from("verified_documents")
+      .insert({
+        entity_id,
+        entity_slug,
+        document_class,
+        title,
+        source_table: "minute_book_entries",
+        source_record_id: entryId,
+        storage_bucket: certified_bucket,
+        storage_path: certified_path,
+        file_hash: null,
+        mime_type: "application/pdf",
+        verification_level: "certified",
+        is_archived: true,
+        created_by: actorId,
+        updated_by: actorId,
+      } as any)
+      .select("id")
+      .single();
+
+    if (ins.error) {
+      return json({ ok: false, error: "VERIFIED_DOC_INSERT_FAILED", details: ins.error, request_id: reqId } satisfies Resp, 500);
+    }
+
+    const verified_id = String(ins.data.id);
+
+    // 8) Download source PDF bytes
     const dl = await supabaseAdmin.storage.from(source_bucket).download(source_path);
     if (dl.error || !dl.data) {
       return json({ ok: false, error: "SOURCE_PDF_DOWNLOAD_FAILED", details: dl.error, request_id: reqId }, 500);
     }
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // 8) Build certified PDF = COVER PAGE + original PDF (unchanged pages)
-    //    QR must point to verify.html?hash=<sha256>. That sha256 is for the final certified PDF.
-    //    We build, hash, then rebuild with QR (2-pass) without changing verify.html/resolver.
-    const srcPdf = await PDFDocument.load(sourceBytes);
-    const srcPages = srcPdf.getPages();
-
-    const w = srcPages[0]?.getWidth?.() ?? 612;
-    const h = srcPages[0]?.getHeight?.() ?? 792;
-
-    async function buildCertifiedPdfBytes(verifyUrl: string) {
-      const out = await PDFDocument.create();
-      const cover = out.addPage([w, h]);
-
-      const font = await out.embedFont(StandardFonts.Helvetica);
-      const fontBold = await out.embedFont(StandardFonts.HelveticaBold);
-
-      const pad = 42;
-      cover.drawRectangle({
-        x: pad,
-        y: pad,
-        width: w - pad * 2,
-        height: h - pad * 2,
-        borderColor: rgb(0.78, 0.65, 0.38),
-        borderWidth: 1.2,
-        color: rgb(0.04, 0.05, 0.07),
-        opacity: 0.98,
-      });
-
-      cover.drawText("OASIS DIGITAL PARLIAMENT", {
-        x: pad + 18,
-        y: h - pad - 38,
-        size: 12,
-        font: fontBold,
-        color: rgb(0.92, 0.86, 0.72),
-      });
-
-      cover.drawText("Certified Filing • Minute Book", {
-        x: pad + 18,
-        y: h - pad - 60,
-        size: 10,
-        font,
-        color: rgb(0.72, 0.75, 0.80),
-      });
-
-      const leftX = pad + 18;
-      let y = h - pad - 110;
-
-      const line = (label: string, value: string) => {
-        cover.drawText(label.toUpperCase(), {
-          x: leftX,
-          y,
-          size: 8,
-          font: fontBold,
-          color: rgb(0.55, 0.58, 0.64),
-        });
-        cover.drawText(value, {
-          x: leftX,
-          y: y - 16,
-          size: 11,
-          font,
-          color: rgb(0.93, 0.93, 0.94),
-        });
-        y -= 44;
-      };
-
-      line("Entity", entity_name);
-      line("Title", title);
-      line("Domain", domain_key ?? "—");
-      line("Entry Type", entry_type);
-      line("Filed Date", fmtIsoDate(created_at));
-      line("Entry ID", entryId);
-
-      const actorEmail = await resolveActorEmail(actorId);
-      const operatorLine = actorEmail ? `${actorEmail} • ${actorId}` : actorId;
-
-      cover.drawText("REGISTERED BY (OPERATOR)", {
-        x: leftX,
-        y: y - 4,
-        size: 8,
-        font: fontBold,
-        color: rgb(0.55, 0.58, 0.64),
-      });
-      cover.drawText(operatorLine, {
-        x: leftX,
-        y: y - 22,
-        size: 10,
-        font,
-        color: rgb(0.93, 0.93, 0.94),
-      });
-      y -= 58;
-
-      cover.drawText("SOURCE EVIDENCE HASH (SHA-256)", {
-        x: leftX,
-        y: y - 4,
-        size: 8,
-        font: fontBold,
-        color: rgb(0.55, 0.58, 0.64),
-      });
-      cover.drawText(source_hash ?? "—", {
-        x: leftX,
-        y: y - 22,
-        size: 9,
-        font,
-        color: rgb(0.86, 0.87, 0.88),
-        maxWidth: w - leftX - 170,
-      });
-
-      // QR bottom-right (hash-first verify URL)
-      const qrPng = qrPngBytes(verifyUrl, { size: 256, margin: 2, ecc: "M" });
-      const qrImg = await out.embedPng(qrPng);
-
-      const qrSize = 110;
-      const qrX = w - pad - qrSize - 18;
-      const qrY = pad + 24;
-
-      cover.drawImage(qrImg, { x: qrX, y: qrY, width: qrSize, height: qrSize });
-      cover.drawText("Verify", {
-        x: qrX + 30,
-        y: qrY - 12,
-        size: 8,
-        font,
-        color: rgb(0.55, 0.58, 0.64),
-      });
-
-      const copied = await out.copyPages(srcPdf, srcPdf.getPageIndices());
-      for (const p of copied) out.addPage(p);
-
-      return new Uint8Array(await out.save());
-    }
-
+    // 9) Load PDF and stamp QR on LAST page (enterprise-consistent with certify-governance-record)
+    //    Hash-first verify URL depends on FINAL bytes, so we do a 2-pass stamp like governance:
+    //    Pass A: stamp with placeholder -> hashA
+    //    Pass B: stamp with hashA -> bytesB -> hashB
+    //    If hash changes between A and B, stamp once more with hashB so QR matches final hash.
     const verifyBase =
       safeText(body.verify_base_url) ??
       Deno.env.get("VERIFY_BASE_URL") ??
       "https://sign.oasisintlholdings.com/verify.html";
 
-    // Pass 1
-    const tempUrl = buildVerifyUrl(verifyBase, "pending");
-    const pass1 = await buildCertifiedPdfBytes(tempUrl);
-    const pass1Hash = await sha256Hex(pass1);
+    const stampOnce = async (hashForQr: string) => {
+      const url = buildVerifyUrl(verifyBase, hashForQr);
+      const pdfDoc = await PDFDocument.load(sourceBytes);
+      const pages = pdfDoc.getPages();
+      const last = pages[pages.length - 1];
 
-    // Pass 2
-    const verifyUrl = buildVerifyUrl(verifyBase, pass1Hash);
-    const certifiedBytes = await buildCertifiedPdfBytes(verifyUrl);
-    const certifiedHash = await sha256Hex(certifiedBytes);
+      const qrPng = qrPngBytes(url, { size: 256, margin: 2, ecc: "M" });
+      const qrImage = await pdfDoc.embedPng(qrPng);
 
-    // If hash changed (URL changed), rebuild one more time so QR matches final hash.
-    let finalBytes = certifiedBytes;
-    let finalHash = certifiedHash;
+      // match governance-style placement: bottom-right, modest size, neutral label
+      const qrSize = 92;
+      const margin = 50;
+      const x = last.getWidth() - margin - qrSize;
+      const y = margin + 24;
 
-    if (certifiedHash !== pass1Hash) {
-      const pass3Url = buildVerifyUrl(verifyBase, certifiedHash);
-      const pass3 = await buildCertifiedPdfBytes(pass3Url);
-      finalBytes = pass3;
-      finalHash = await sha256Hex(pass3);
+      last.drawImage(qrImage, { x, y, width: qrSize, height: qrSize });
+
+      const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+      last.drawText("Verify", {
+        x: x + 24,
+        y: y - 12,
+        size: 8,
+        font,
+        color: rgb(0.35, 0.38, 0.45),
+      });
+
+      const out = new Uint8Array(await pdfDoc.save());
+      const hash = await sha256Hex(out);
+      return { bytes: out, hash };
+    };
+
+    const passA = await stampOnce("pending");
+    const passB = await stampOnce(passA.hash);
+
+    let finalBytes = passB.bytes;
+    let finalHash = passB.hash;
+
+    if (passB.hash !== passA.hash) {
+      const passC = await stampOnce(passB.hash);
+      finalBytes = passC.bytes;
+      finalHash = passC.hash;
     }
 
     const finalVerifyUrl = buildVerifyUrl(verifyBase, finalHash);
@@ -635,17 +511,15 @@ serve(async (req) => {
       return json({ ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId }, 500);
     }
 
-    const actorEmail = await resolveActorEmail(actorId);
-
     return json<Resp>({
       ok: true,
       entry_id: entryId,
       actor_id: actorId,
-      actor_email: actorEmail,
+      actor_email: await resolveActorEmail(actorId),
       is_test,
-      verified_document_id: verified_id!,
+      verified_document_id: verified_id,
       verify_url: finalVerifyUrl,
-      source: { bucket: source_bucket, path: source_path, file_hash: source_hash },
+      source: { bucket: source_bucket, path: source_path, file_hash: src.file_hash },
       certified: {
         bucket: certified_bucket,
         path: certified_path,
