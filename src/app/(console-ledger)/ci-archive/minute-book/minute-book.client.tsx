@@ -15,11 +15,14 @@ export const dynamic = "force-dynamic";
  *    - body: { ledger_id }
  *    - expects: { ok:true, url:<signed_zip_url> }
  *
- * ✅ NEW (UI-only): Promote to Verified Registry (Minute Book Entry Certification)
+ * ✅ Promote to Verified Registry (Minute Book Entry Certification)
  *    - calls Edge Function certify-minute-book-entry (mutating, controlled)
- *    - body: { entry_id, is_test }  (actor resolved from JWT inside function)
- *    - expects: { ok:true, verified_document_id }
- *    - once promoted exists: show Verify Terminal link (verify.html with verified_id + entry_id)
+ *    - body: { entry_id, is_test, force? }  (actor resolved from JWT inside function)
+ *    - expects: { ok:true, verified_document_id, reused? }
+ *
+ * ✅ NEW: Re-Promote / Reissue allowed (idempotent + safe)
+ *    - If already promoted, button becomes “Reissue” and sends { force:true }
+ *    - No deletes required; same verified_documents row/pointer is updated and PDF is overwritten (upsert)
  */
 
 import Link from "next/link";
@@ -108,6 +111,7 @@ type PromoteResult = {
   is_test?: boolean;
   verified_document_id?: string;
   reused?: boolean;
+  verify_url?: string;
   error?: string;
   details?: unknown;
 };
@@ -209,6 +213,18 @@ function buildVerifyHtmlUrl(verifiedId: string, entryId: string) {
   u.searchParams.set("verified_id", verifiedId);
   u.searchParams.set("entry_id", entryId);
   return u.toString();
+}
+
+function edgeInvokeMessage(error: any, data: any) {
+  const a =
+    (error?.context as any)?.error_description ||
+    (error?.context as any)?.message ||
+    error?.message ||
+    "";
+  const b = (data?.error as string) || "";
+  const c = (typeof data?.details === "string" ? data.details : "") || "";
+  const msg = [a, b, c].map((s) => String(s || "").trim()).filter(Boolean)[0];
+  return msg || "Request failed.";
 }
 
 const DOMAIN_ICON: Record<string, string> = {
@@ -352,7 +368,7 @@ async function resolveOfficialArtifact(
 /**
  * ✅ PROMOTED resolver (read-only) — Minute Book entry certification artifact
  * - Looks for verified_documents where source_table='minute_book_entries' and source_record_id=entry.id
- * - Lane is implied by storage_bucket path (governance_sandbox vs governance_truth) and matches current env
+ * - Lane is implied by storage_bucket and matches current env
  * - This does NOT change any existing wiring; it only reads.
  */
 async function resolvePromotedArtifact(entryId: string, laneIsTest: boolean): Promise<OfficialArtifact | null> {
@@ -558,7 +574,7 @@ export default function MinuteBookClient() {
 
   // evidence state (official-first)
   const [official, setOfficial] = useState<OfficialArtifact | null>(null);
-  const [promoted, setPromoted] = useState<OfficialArtifact | null>(null); // NEW: minute_book_entries certification
+  const [promoted, setPromoted] = useState<OfficialArtifact | null>(null); // minute_book_entries certification
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [pdfBusy, setPdfBusy] = useState<boolean>(false);
   const [pdfErr, setPdfErr] = useState<string | null>(null);
@@ -585,9 +601,15 @@ export default function MinuteBookClient() {
   const [exportBusy, setExportBusy] = useState<boolean>(false);
   const [exportErr, setExportErr] = useState<string | null>(null);
 
-  // NEW: promote → verified registry (mutating Edge Function)
+  // promote → verified registry (mutating Edge Function)
   const [promoteBusy, setPromoteBusy] = useState<boolean>(false);
   const [promoteErr, setPromoteErr] = useState<string | null>(null);
+
+  const canReissue = useMemo(() => {
+    // reissue is allowed iff there is already a promoted artifact (minute book certification)
+    // (official governance-linked verified docs are separate and should not be reissued from Minute Book)
+    return !!promoted;
+  }, [!!promoted]);
 
   // Load domains
   useEffect(() => {
@@ -914,7 +936,10 @@ export default function MinuteBookClient() {
         body: { ledger_id: ledgerId },
       });
 
-      if (error) throw error;
+      if (error) {
+        const msg = edgeInvokeMessage(error, data);
+        throw new Error(msg);
+      }
 
       const res = (data ?? {}) as ExportResult;
       if (!res.ok || !res.url) {
@@ -930,27 +955,38 @@ export default function MinuteBookClient() {
     }
   }
 
-  // ✅ NEW: Promote to Verified Registry (minute_book entry certification)
-  async function promoteToVerifiedRegistry() {
+  /**
+   * ✅ Promote / Reissue to Verified Registry (minute_book entry certification)
+   * - First-time: force=false
+   * - Reissue: force=true (allowed, idempotent, overwrites/upserts certified PDF and updates hash/pointer)
+   */
+  async function promoteToVerifiedRegistry(opts?: { force?: boolean }) {
     if (!selected) return;
+
+    const force = !!opts?.force;
 
     setPromoteErr(null);
     setPromoteBusy(true);
 
     try {
-      // If it already exists, we do not force — button will be disabled anyway.
       const { data, error } = await supabaseBrowser.functions.invoke("certify-minute-book-entry", {
         body: {
           entry_id: selected.id,
           is_test: laneIsTest,
+          force,
         },
       });
 
-      if (error) throw error;
+      if (error) {
+        const msg = edgeInvokeMessage(error, data);
+        throw new Error(msg);
+      }
 
       const res = (data ?? {}) as PromoteResult;
       if (!res.ok || !res.verified_document_id) {
-        const msg = (typeof res.error === "string" && res.error) || "Promotion failed (no ok=true/verified_document_id).";
+        const msg =
+          (typeof res.error === "string" && res.error) ||
+          "Certification failed (no ok=true/verified_document_id).";
         throw new Error(msg);
       }
 
@@ -958,12 +994,12 @@ export default function MinuteBookClient() {
       const prom = await resolvePromotedArtifact(selected.id, laneIsTest);
       setPromoted(prom);
 
-      // if we already have a preview open, keep it aligned to the now-promoted artifact
+      // keep preview aligned after reissue
       if (previewUrl) {
         await ensurePreviewUrl(false);
       }
     } catch (e: unknown) {
-      setPromoteErr(e instanceof Error ? e.message : "Promotion failed.");
+      setPromoteErr(e instanceof Error ? e.message : "Certification failed.");
     } finally {
       setPromoteBusy(false);
     }
@@ -971,11 +1007,10 @@ export default function MinuteBookClient() {
 
   function openVerifyTerminal() {
     if (!selected) return;
-    const vid =
-      official?.verified_document_id ||
-      promoted?.verified_document_id ||
-      null;
 
+    // ✅ preference: minute-book promoted cert first (since this page is Minute Book),
+    // then fallback to official governance-linked verified doc if present.
+    const vid = promoted?.verified_document_id || official?.verified_document_id || null;
     if (!vid) return;
 
     const url = buildVerifyHtmlUrl(vid, selected.id);
@@ -1503,30 +1538,36 @@ export default function MinuteBookClient() {
                             {exportBusy ? "Exporting…" : "Discovery Export"}
                           </button>
 
-                          {/* ✅ NEW: Promote to Verified Registry */}
+                          {/* ✅ Promote / Reissue (idempotent) */}
                           <button
                             type="button"
-                            onClick={promoteToVerifiedRegistry}
-                            disabled={promoteBusy || !!promoted}
+                            onClick={() => promoteToVerifiedRegistry({ force: canReissue })}
+                            disabled={promoteBusy}
                             className={cx(
                               "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
-                              promoteBusy || !!promoted
+                              promoteBusy
                                 ? "bg-white/5 text-slate-200/40 border-white/10"
-                                : "bg-emerald-500/10 border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/15"
+                                : canReissue
+                                  ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/15"
+                                  : "bg-emerald-500/10 border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/15"
                             )}
-                            title={promoted ? "Already promoted (certified)." : "Promote this entry into Verified Registry (certify PDF + QR)."}
+                            title={
+                              canReissue
+                                ? "Reissue certification (force=true). Overwrites certified PDF and updates hash/pointer."
+                                : "Promote this entry into Verified Registry (certify PDF + QR)."
+                            }
                           >
-                            {promoteBusy ? "Promoting…" : promoted ? "Promoted" : "Promote"}
+                            {promoteBusy ? (canReissue ? "Reissuing…" : "Promoting…") : canReissue ? "Reissue" : "Promote"}
                           </button>
 
-                          {/* ✅ NEW: Verify Terminal link (only when a verified_document exists) */}
+                          {/* ✅ Verify Terminal link */}
                           <button
                             type="button"
                             onClick={openVerifyTerminal}
-                            disabled={!(official?.verified_document_id || promoted?.verified_document_id)}
+                            disabled={!(promoted?.verified_document_id || official?.verified_document_id)}
                             className={cx(
                               "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
-                              !(official?.verified_document_id || promoted?.verified_document_id)
+                              !(promoted?.verified_document_id || official?.verified_document_id)
                                 ? "bg-white/5 text-slate-200/40 border-white/10"
                                 : "bg-white/5 border-amber-500/25 text-amber-200 hover:bg-white/7 hover:border-amber-500/40"
                             )}
@@ -1784,30 +1825,34 @@ export default function MinuteBookClient() {
                       {exportBusy ? "Exporting…" : "Export"}
                     </button>
 
-                    {/* Promote */}
+                    {/* Promote / Reissue */}
                     <button
                       type="button"
-                      onClick={promoteToVerifiedRegistry}
-                      disabled={promoteBusy || !!promoted}
+                      onClick={() => promoteToVerifiedRegistry({ force: canReissue })}
+                      disabled={promoteBusy}
                       className={cx(
                         "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase",
-                        promoteBusy || !!promoted
+                        promoteBusy
                           ? "border-white/10 bg-white/5 text-slate-200/40"
                           : "border-emerald-500/30 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/15"
                       )}
-                      title={promoted ? "Already promoted (certified)." : "Promote this entry into Verified Registry."}
+                      title={
+                        canReissue
+                          ? "Reissue certification (force=true). Overwrites certified PDF and updates hash/pointer."
+                          : "Promote this entry into Verified Registry."
+                      }
                     >
-                      {promoteBusy ? "Promoting…" : promoted ? "Promoted" : "Promote"}
+                      {promoteBusy ? (canReissue ? "Reissuing…" : "Promoting…") : canReissue ? "Reissue" : "Promote"}
                     </button>
 
                     {/* Verify link */}
                     <button
                       type="button"
                       onClick={openVerifyTerminal}
-                      disabled={!(official?.verified_document_id || promoted?.verified_document_id)}
+                      disabled={!(promoted?.verified_document_id || official?.verified_document_id)}
                       className={cx(
                         "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase",
-                        !(official?.verified_document_id || promoted?.verified_document_id)
+                        !(promoted?.verified_document_id || official?.verified_document_id)
                           ? "border-white/10 bg-white/5 text-slate-200/40"
                           : "border-amber-500/25 bg-white/5 text-amber-200 hover:bg-white/7 hover:border-amber-500/40"
                       )}
