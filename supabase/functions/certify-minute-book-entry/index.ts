@@ -16,12 +16,16 @@ import QRGen from "npm:qrcode-generator@1.4.4";
 import { PNG } from "npm:pngjs@7.0.0";
 
 /**
- * CI-Archive — certify-minute-book-entry
+ * CI-Archive — certify-minute-book-entry (PRODUCTION — LOCKED CONTRACT)
  * ✅ Appends NEW final certification page (never stamps existing page)
- * ✅ Hash-first verification via QR (Verified Registry is authority)
- * ✅ Removes printed hash + printed long URL (prevents “wrong URL” / 404 artifacts)
- * ✅ Deterministic serialization to prevent drift across iterations
+ * ✅ Hash-first verification (QR resolves to verify.html?hash=...)
+ * ✅ Deterministic save + fixed-point hashing to prevent drift
  * ✅ No schema/enum changes, no contract drift
+ *
+ * CHANGE (UX / NO WIRING DRIFT):
+ * ✅ DO NOT print the hash in the PDF
+ * ✅ DO NOT print the long verify URL in the PDF
+ * ✅ QR remains the terminal pointer (hash-first) + API response returns verify_url + file_hash
  */
 
 type ReqBody = {
@@ -99,53 +103,21 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return hex;
 }
 
-/**
- * ✅ Normalize verify base so PDFs never embed a “wrong path”
- * Accepts:
- *  - https://sign.oasisintlholdings.com/verify.html
- *  - https://sign.oasisintlholdings.com/verify
- *  - https://sign.oasisintlholdings.com/
- *  - https://sign.oasisintlholdings.com
- * Returns canonical .../verify.html
- */
-function normalizeVerifyBase(baseRaw: string): string {
-  const b = baseRaw.trim();
-  if (!b) return "https://sign.oasisintlholdings.com/verify.html";
-
-  let u: URL;
+function normalizeVerifyBase(base: string) {
+  // keep it conservative: do not rewrite domains; only handle common path mistake
+  // If someone passes ".../verify" instead of ".../verify.html", fix locally.
   try {
-    u = new URL(b);
+    const u = new URL(base);
+    if (u.pathname.endsWith("/verify")) u.pathname = u.pathname + ".html";
+    return u.toString();
   } catch {
-    return "https://sign.oasisintlholdings.com/verify.html";
+    return base;
   }
-
-  // drop query/fragment
-  u.search = "";
-  u.hash = "";
-
-  const p = (u.pathname || "/").replace(/\/+$/, "");
-  if (p.toLowerCase().endsWith("/verify.html")) {
-    u.pathname = p;
-    return u.toString();
-  }
-
-  if (p.toLowerCase().endsWith("/verify")) {
-    u.pathname = p + ".html";
-    return u.toString();
-  }
-
-  if (p === "" || p === "/") {
-    u.pathname = "/verify.html";
-    return u.toString();
-  }
-
-  // unknown path → append verify.html at root (safest for your deployed terminal)
-  u.pathname = "/verify.html";
-  return u.toString();
 }
 
 function buildVerifyUrl(base: string, sha256: string) {
-  const u = new URL(base);
+  const b = normalizeVerifyBase(base);
+  const u = new URL(b);
   u.searchParams.set("hash", sha256);
   return u.toString();
 }
@@ -389,6 +361,7 @@ function setDeterministicTrailerId(doc: PDFDocument) {
 async function buildCertifiedWithAppendedPage(args: {
   sourceBytes: Uint8Array;
   verifyUrl: string;
+  finalHashText: string; // kept for fixed-point convergence (QR includes hash)
   title: string;
   entitySlug: string;
   laneLabel: string;
@@ -399,6 +372,7 @@ async function buildCertifiedWithAppendedPage(args: {
   const {
     sourceBytes,
     verifyUrl,
+    // finalHashText intentionally not printed anymore (UX change)
     title,
     entitySlug,
     laneLabel,
@@ -503,7 +477,7 @@ async function buildCertifiedWithAppendedPage(args: {
   row("Lane:", laneLabel, leftX, gridTop - 16);
   row("Document:", documentClass, leftX, gridTop - 32);
 
-  // ✅ No printed hash; QR is the carrier.
+  // ✅ DO NOT print hash anymore (UX) — registry remains the authority
   row("Verification:", "Scan QR / open terminal", midX, gridTop);
   row("Authority:", "Verified Registry", midX, gridTop - 16);
 
@@ -524,7 +498,7 @@ async function buildCertifiedWithAppendedPage(args: {
   });
 
   page.drawText(
-    "To verify cryptographic truth (hash, certification, registry status), scan the QR code or open the verification terminal.",
+    "To verify cryptographic truth (hash, certification, registry status), scan the QR code to open the verification terminal.",
     {
       x: margin,
       y: vTop - 18,
@@ -544,35 +518,19 @@ async function buildCertifiedWithAppendedPage(args: {
     color: muted,
   });
 
-  // ✅ DO NOT print the long terminal URL (prevents “wrong URL” artifacts in PDF)
-  page.drawText("Verification Terminal (hash-first)", {
-    x: margin,
-    y: vTop - 62,
-    size: 9,
-    font: fontBold,
-    color: ink,
-  });
-  page.drawText("Scan QR to open the terminal.", {
-    x: margin,
-    y: vTop - 80,
-    size: 8,
-    font,
-    color: muted,
-  });
-
-  // QR block
+  // ✅ QR only (no long URL text, no printed hash)
   const qrPng = qrPngBytes(verifyUrl, { size: 256, margin: 2, ecc: "M" });
   const qrImg = await outDoc.embedPng(qrPng);
 
-  const qrSize = 112;
+  const qrSize = 132;
   const qrX = W - margin - qrSize;
-  const qrY = 92;
+  const qrY = 110;
 
   page.drawRectangle({
-    x: qrX - 12,
-    y: qrY - 18,
-    width: qrSize + 24,
-    height: qrSize + 36,
+    x: qrX - 14,
+    y: qrY - 20,
+    width: qrSize + 28,
+    height: qrSize + 44,
     borderColor: hair,
     borderWidth: 1,
     color: rgb(0.99, 0.99, 1),
@@ -584,17 +542,16 @@ async function buildCertifiedWithAppendedPage(args: {
   const scanW = font.widthOfTextAtSize(scanText, 8);
   page.drawText(scanText, {
     x: qrX + (qrSize - scanW) / 2,
-    y: qrY - 10,
+    y: qrY - 12,
     size: 8,
     font,
     color: muted,
   });
 
-  // Attestation block
   const attX = margin;
-  const attY = 92;
-  const attW = 300;
-  const attH = 72;
+  const attY = 110;
+  const attW = 320;
+  const attH = 80;
 
   page.drawRectangle({
     x: attX,
@@ -608,7 +565,7 @@ async function buildCertifiedWithAppendedPage(args: {
 
   page.drawText("Registry Attestation", {
     x: attX + 12,
-    y: attY + attH - 20,
+    y: attY + attH - 22,
     size: 8.5,
     font: fontBold,
     color: muted,
@@ -619,7 +576,7 @@ async function buildCertifiedWithAppendedPage(args: {
 
   page.drawText(opLine, {
     x: attX + 12,
-    y: attY + 34,
+    y: attY + 38,
     size: 8.2,
     font,
     color: ink,
@@ -627,21 +584,21 @@ async function buildCertifiedWithAppendedPage(args: {
 
   page.drawText(tsLine, {
     x: attX + 12,
-    y: attY + 20,
+    y: attY + 22,
     size: 8.2,
     font,
     color: ink,
   });
 
   page.drawLine({
-    start: { x: attX + 12, y: attY + 10 },
-    end: { x: attX + attW - 12, y: attY + 10 },
+    start: { x: attX + 12, y: attY + 12 },
+    end: { x: attX + attW - 12, y: attY + 12 },
     thickness: 0.8,
     color: rgb(0.30, 0.32, 0.36),
   });
 
   const foot =
-    "This certification page was appended to preserve original document pages. Verification is hash-first via QR; authority remains registry-only.";
+    "This certification page was appended to preserve original document pages. Verification is performed by the public terminal.";
   page.drawText(foot, {
     x: margin,
     y: 44,
@@ -660,10 +617,12 @@ async function buildCertifiedWithAppendedPage(args: {
 
 /**
  * ✅ FIXED-POINT HASH STABILIZATION:
- * QR encodes verify_url that includes the hash → circular dependency.
- * We iterate until the embedded hash matches the actual PDF hash.
+ * QR contains verify_url?hash=<hash>, so hash depends on bytes and bytes depend on hash.
+ * Determinism above makes this converge.
  *
- * NOTE: We no longer PRINT the hash in the PDF. QR is the carrier only.
+ * NOTE (UX change):
+ * - We no longer print the hash in the PDF,
+ * - but fixed-point is still required so the QR's hash equals verified_documents.file_hash.
  */
 async function buildCertifiedFixedPoint(args: {
   sourceBytes: Uint8Array;
@@ -686,17 +645,15 @@ async function buildCertifiedFixedPoint(args: {
     certifiedAtUtc,
   } = args;
 
-  // start with placeholder
   let current = "0".repeat(64);
   let lastBytes = new Uint8Array();
   let lastHash = "";
 
   for (let i = 0; i < 16; i++) {
-    const verifyUrl = buildVerifyUrl(verifyBase, current);
-
     const bytes = await buildCertifiedWithAppendedPage({
       sourceBytes,
-      verifyUrl,
+      verifyUrl: buildVerifyUrl(verifyBase, current),
+      finalHashText: current,
       title,
       entitySlug,
       laneLabel,
@@ -823,12 +780,10 @@ serve(async (req) => {
 
     // strict reuse (NO regenerate)
     if (!force && hasCertified) {
-      const verifyBaseRaw =
+      const verifyBase =
         safeText(body.verify_base_url) ??
         Deno.env.get("VERIFY_BASE_URL") ??
         "https://sign.oasisintlholdings.com/verify.html";
-
-      const verifyBase = normalizeVerifyBase(verifyBaseRaw);
 
       return json<Resp>({
         ok: true,
@@ -863,13 +818,11 @@ serve(async (req) => {
     }
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // 8) build fixed-point certified pdf
-    const verifyBaseRaw =
+    // 8) build fixed-point certified pdf (QR hash-first)
+    const verifyBase =
       safeText(body.verify_base_url) ??
       Deno.env.get("VERIFY_BASE_URL") ??
       "https://sign.oasisintlholdings.com/verify.html";
-
-    const verifyBase = normalizeVerifyBase(verifyBaseRaw);
 
     const laneLabel = is_test ? "SANDBOX" : "TRUTH";
     const certifiedAt = utcStampISO();
@@ -890,7 +843,7 @@ serve(async (req) => {
     const finalHash = built.hash;
     const finalVerifyUrl = built.verify_url;
 
-    // 9) path by hash (stable, human-friendly)
+    // 9) path by hash (stable)
     const certified_path = `${certified_prefix}/${entryId}-${finalHash.slice(0, 12)}.pdf`;
 
     const up = await supabaseAdmin.storage
@@ -986,7 +939,6 @@ serve(async (req) => {
         reused: false,
         reissue,
         non_converged: (built as any).non_converged ?? false,
-        verify_base: verifyBase,
       },
     });
 
