@@ -8,6 +8,7 @@ export const dynamic = "force-dynamic";
  *    - /ci-onboarding/ci-admissions
  *    - /ci-onboarding/ci-evidence
  *    - /ci-onboarding/ci-provisioning
+ * ✅ Adds (UI-only): /ci-onboarding/ci-billing (operator read-only console)
  * ✅ No RPC changes, no authority changes, no data flow changes
  * ✅ OS-matched calm launchpad pattern (cloned grammar from CI-ARCHIVE launchpad)
  * ✅ Mobile-first: 2 cols on iPhone, scales to 4 cols on desktop
@@ -41,7 +42,7 @@ export default function CiOnboardingLaunchpadPage() {
   const isSandbox = !!osEnv?.isSandbox;
   const envLabel = isSandbox ? "SANDBOX" : "RoT";
 
-  // ✅ WIRING PRESERVED (same routes)
+  // ✅ WIRING PRESERVED (same routes) + ✅ CI-Billing (operator read-only)
   const tiles: Array<{
     title: string;
     subtitle: string;
@@ -69,6 +70,15 @@ export default function CiOnboardingLaunchpadPage() {
       href: "/ci-onboarding/ci-provisioning",
       badge: "Activation",
       tone: "amber",
+    },
+
+    // ✅ NEW: Operator-only observability surface (read-only)
+    {
+      title: "CI-Billing",
+      subtitle: "Subscription state and trial visibility (operator console • read-only).",
+      href: "/ci-onboarding/ci-billing",
+      badge: "Operator",
+      tone: "slate",
     },
   ];
 
@@ -101,7 +111,7 @@ export default function CiOnboardingLaunchpadPage() {
             <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">CI • Onboarding</div>
             <h1 className="mt-1 text-lg sm:text-xl font-semibold text-slate-50">Admissions Launchpad</h1>
             <p className="mt-1 max-w-3xl text-[11px] sm:text-xs text-slate-400 leading-relaxed">
-              One intake surface. Three operator consoles. Lane-safe. Entity-scoped. OS-native.
+              One intake surface. Operator consoles. Lane-safe. Entity-scoped. OS-native.
             </p>
 
             <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
@@ -119,7 +129,7 @@ export default function CiOnboardingLaunchpadPage() {
           </div>
 
           <div className={body}>
-            {/* iPhone-first tiles: 2 cols on mobile, 4 cols on desktop (3 tiles will naturally leave one empty spot) */}
+            {/* iPhone-first tiles: 2 cols on mobile, 4 cols on desktop */}
             <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-4">
               {tiles.map((t) => (
                 <Link
@@ -177,6 +187,7 @@ export default function CiOnboardingLaunchpadPage() {
               <div className="mt-1 leading-relaxed text-slate-400">
                 CI-Onboarding inherits the OS shell. No module-owned window frames. Invite/Set-Password can grant portal
                 access for evidence submission, but Ledger activation occurs only after provisioning (entity + memberships).
+                CI-Billing is operator-only observability (read-only).
               </div>
             </div>
           </div>
