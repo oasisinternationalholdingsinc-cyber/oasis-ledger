@@ -526,16 +526,26 @@ serve(async (req) => {
     );
   }
 
-  // 1) Resolve canonically
+  // 1) Resolve canonically (REGISTRY-FIRST, NO REGRESSION)
   let resolved: any = null;
 
-  if (entry_id) {
-    // ✅ uploaded docs path: use Edge resolver (entry_id supported)
-    resolved = await resolveViaEdge({ entry_id });
-  } else {
-    // ✅ existing forge path: use canonical SQL RPC
+  // 1️⃣ HASH — strongest / registry-first
+  if (hash) {
     const { data, error } = await supabaseAdmin.rpc(RESOLVE_RPC, {
       p_hash: hash,
+      p_envelope_id: null,
+      p_ledger_id: null,
+    });
+
+    if (error) {
+      return json({ ok: false, error: "RPC_FAILED", message: error.message }, 500);
+    }
+    resolved = data;
+
+  // 2️⃣ ENVELOPE / LEDGER (Forge path)
+  } else if (envelope_id || ledger_id) {
+    const { data, error } = await supabaseAdmin.rpc(RESOLVE_RPC, {
+      p_hash: null,
       p_envelope_id: envelope_id,
       p_ledger_id: ledger_id,
     });
@@ -544,6 +554,13 @@ serve(async (req) => {
       return json({ ok: false, error: "RPC_FAILED", message: error.message }, 500);
     }
     resolved = data;
+
+  // 3️⃣ ENTRY_ID (uploaded minute book records)
+  } else if (entry_id) {
+    resolved = await resolveViaEdge({
+      entry_id,
+      expires_in: 900, // parity with verify.html
+    });
   }
 
   let payload: any = resolved;
