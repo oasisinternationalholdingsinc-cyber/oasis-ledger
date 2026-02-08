@@ -18,11 +18,15 @@ export const dynamic = "force-dynamic";
  * ✅ Promote to Verified Registry (Minute Book Entry Certification)
  *    - calls Edge Function certify-minute-book-entry (mutating, controlled)
  *    - body: { entry_id, is_test, force? }  (actor resolved from JWT inside function)
- *    - expects: { ok:true, verified_document_id, reused? }
+ *    - expects: { ok:true, verified_document_id, reused?, verify_url? }
  *
  * ✅ NEW: Re-Promote / Reissue allowed (idempotent + safe)
  *    - If already promoted, button becomes “Reissue” and sends { force:true }
- *    - No deletes required; same verified_documents row/pointer is updated and PDF is overwritten (upsert)
+ *    - No deletes required; same verified_documents row/pointer is updated and PDF is overwritten (update)
+ *
+ * ✅ IMPORTANT: verify.html is HASH-FIRST ONLY
+ *    - Verify button opens verify.html?hash=<verified_documents.file_hash>
+ *    - We never open verify by verified_id
  */
 
 import Link from "next/link";
@@ -86,7 +90,8 @@ type OfficialArtifact = {
   storage_path: string;
   file_name?: string | null;
   kind?: "official" | "certified" | "verified";
-  verified_document_id?: string | null; // for verify.html link
+  verified_document_id?: string | null; // stored, but NOT used for verify.html
+  file_hash?: string | null; // ✅ used for verify.html (hash-first)
 };
 
 type DeleteResult = {
@@ -190,6 +195,29 @@ function uniq<T>(arr: T[]) {
   return Array.from(new Set(arr));
 }
 
+async function copyToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      ta.style.top = "-9999px";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
 /**
  * Lane bucket heuristic (read-only, UI-only)
  */
@@ -207,11 +235,13 @@ function bucketCandidatesForPath(path: string) {
   return uniq(candidates);
 }
 
-function buildVerifyHtmlUrl(verifiedId: string, entryId: string) {
+/**
+ * ✅ verify.html is hash-first only
+ */
+function buildVerifyHtmlUrlFromHash(hash: string) {
   const base = "https://sign.oasisintlholdings.com/verify.html";
   const u = new URL(base);
-  u.searchParams.set("verified_id", verifiedId);
-  u.searchParams.set("entry_id", entryId);
+  u.searchParams.set("hash", hash);
   return u.toString();
 }
 
@@ -359,6 +389,7 @@ async function resolveOfficialArtifact(
       file_name: (v.file_name as string) || entry.file_name || null,
       kind: "verified",
       verified_document_id: (v.id as string) || null,
+      file_hash: (v.file_hash as string) || null,
     };
   } catch {
     return null;
@@ -402,6 +433,7 @@ async function resolvePromotedArtifact(entryId: string, laneIsTest: boolean): Pr
     storage_path: path,
     kind,
     verified_document_id: row.id,
+    file_hash: row.file_hash ?? null,
   };
 }
 
@@ -605,11 +637,22 @@ export default function MinuteBookClient() {
   const [promoteBusy, setPromoteBusy] = useState<boolean>(false);
   const [promoteErr, setPromoteErr] = useState<string | null>(null);
 
+  // small UX: copy feedback (no global toast system assumed)
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
   const canReissue = useMemo(() => {
     // reissue is allowed iff there is already a promoted artifact (minute book certification)
     // (official governance-linked verified docs are separate and should not be reissued from Minute Book)
     return !!promoted;
-  }, [!!promoted]);
+  }, [promoted]);
+
+  const certifiedHash = useMemo(() => {
+    return (promoted?.file_hash || "").toString().trim() || null;
+  }, [promoted?.file_hash]);
+
+  const officialHash = useMemo(() => {
+    return (official?.file_hash || "").toString().trim() || null;
+  }, [official?.file_hash]);
 
   // Load domains
   useEffect(() => {
@@ -655,6 +698,8 @@ export default function MinuteBookClient() {
 
       setPromoteErr(null);
       setPromoteBusy(false);
+
+      setCopiedKey(null);
 
       if (!entityKey) {
         setLoading(false);
@@ -792,7 +837,7 @@ export default function MinuteBookClient() {
     if (official) return { label: "OFFICIAL", tone: "gold" as const };
     if (promoted) return { label: "CERTIFIED", tone: "sky" as const };
     return { label: "UPLOADED", tone: "neutral" as const };
-  }, [selected?.id, !!official, !!promoted]);
+  }, [selected?.id, official, promoted]);
 
   // Resolve official + promoted artifact on selection (lane-aware)
   useEffect(() => {
@@ -810,6 +855,8 @@ export default function MinuteBookClient() {
 
       setPromoteErr(null);
       setPromoteBusy(false);
+
+      setCopiedKey(null);
 
       if (!entityKey || !selected) return;
 
@@ -984,9 +1031,7 @@ export default function MinuteBookClient() {
 
       const res = (data ?? {}) as PromoteResult;
       if (!res.ok || !res.verified_document_id) {
-        const msg =
-          (typeof res.error === "string" && res.error) ||
-          "Certification failed (no ok=true/verified_document_id).";
+        const msg = (typeof res.error === "string" && res.error) || "Certification failed (no ok=true/verified_document_id).";
         throw new Error(msg);
       }
 
@@ -1008,12 +1053,11 @@ export default function MinuteBookClient() {
   function openVerifyTerminal() {
     if (!selected) return;
 
-    // ✅ preference: minute-book promoted cert first (since this page is Minute Book),
-    // then fallback to official governance-linked verified doc if present.
-    const vid = promoted?.verified_document_id || official?.verified_document_id || null;
-    if (!vid) return;
+    // ✅ HASH-FIRST: prefer promoted (minute_book certification) hash, then official hash.
+    const hash = certifiedHash || officialHash || null;
+    if (!hash) return;
 
-    const url = buildVerifyHtmlUrl(vid, selected.id);
+    const url = buildVerifyHtmlUrlFromHash(hash);
     window.open(url, "_blank", "noopener,noreferrer");
   }
 
@@ -1050,6 +1094,8 @@ export default function MinuteBookClient() {
       setPromoteBusy(false);
       setPromoted(null);
       setOfficial(null);
+
+      setCopiedKey(null);
 
       if (entityKey) {
         const base = await loadEntries(entityKey);
@@ -1384,8 +1430,8 @@ export default function MinuteBookClient() {
                                     authorityBadge.tone === "gold"
                                       ? "bg-amber-500/10 border-amber-500/30 text-amber-200"
                                       : authorityBadge.tone === "sky"
-                                        ? "bg-sky-500/10 border-sky-500/30 text-sky-200"
-                                        : "bg-white/5 border-white/10 text-slate-200"
+                                      ? "bg-sky-500/10 border-sky-500/30 text-sky-200"
+                                      : "bg-white/5 border-white/10 text-slate-200"
                                   )}
                                 >
                                   {authorityBadge.label}
@@ -1424,8 +1470,8 @@ export default function MinuteBookClient() {
                           authorityBadge.tone === "gold"
                             ? "bg-amber-500/10 border-amber-500/40 text-amber-200"
                             : authorityBadge.tone === "sky"
-                              ? "bg-sky-500/10 border-sky-500/30 text-sky-200"
-                              : "bg-white/5 border-white/10 text-slate-200"
+                            ? "bg-sky-500/10 border-sky-500/30 text-sky-200"
+                            : "bg-white/5 border-white/10 text-slate-200"
                         )}
                       >
                         {authorityBadge.label}
@@ -1547,9 +1593,7 @@ export default function MinuteBookClient() {
                               "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
                               promoteBusy
                                 ? "bg-white/5 text-slate-200/40 border-white/10"
-                                : canReissue
-                                  ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/15"
-                                  : "bg-emerald-500/10 border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/15"
+                                : "bg-emerald-500/10 border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/15"
                             )}
                             title={
                               canReissue
@@ -1560,18 +1604,18 @@ export default function MinuteBookClient() {
                             {promoteBusy ? (canReissue ? "Reissuing…" : "Promoting…") : canReissue ? "Reissue" : "Promote"}
                           </button>
 
-                          {/* ✅ Verify Terminal link */}
+                          {/* ✅ Verify Terminal (HASH-FIRST) */}
                           <button
                             type="button"
                             onClick={openVerifyTerminal}
-                            disabled={!(promoted?.verified_document_id || official?.verified_document_id)}
+                            disabled={!(certifiedHash || officialHash)}
                             className={cx(
                               "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
-                              !(promoted?.verified_document_id || official?.verified_document_id)
+                              !(certifiedHash || officialHash)
                                 ? "bg-white/5 text-slate-200/40 border-white/10"
                                 : "bg-white/5 border-amber-500/25 text-amber-200 hover:bg-white/7 hover:border-amber-500/40"
                             )}
-                            title="Open public verify.html terminal"
+                            title="Open public verify.html terminal (hash-first)"
                           >
                             Verify
                           </button>
@@ -1624,15 +1668,47 @@ export default function MinuteBookClient() {
                               {resolvedBucket && resolvedPath
                                 ? `${resolvedBucket} • ${resolvedPath}`
                                 : selected.storage_path
-                                  ? `— • ${selected.storage_path}`
-                                  : "—"}
+                                ? `— • ${selected.storage_path}`
+                                : "—"}
                             </span>
                           </div>
 
+                          {/* Uploaded hash (supporting_documents) */}
                           <div className="flex items-center justify-between gap-3">
-                            <span className="text-slate-500">Hash</span>
+                            <span className="text-slate-500">Upload Hash</span>
                             <span className="text-slate-200 font-mono truncate max-w-[60%]">
                               {shortHash(selected.file_hash)}
+                            </span>
+                          </div>
+
+                          {/* ✅ Certified hash (verified_documents.file_hash) */}
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="text-slate-500">Certified Hash</span>
+                            <span className="flex items-center gap-2 min-w-0">
+                              <span className="text-slate-200 font-mono truncate max-w-[240px]">
+                                {certifiedHash ? shortHash(certifiedHash) : "—"}
+                              </span>
+                              <button
+                                type="button"
+                                disabled={!certifiedHash}
+                                onClick={async () => {
+                                  if (!certifiedHash) return;
+                                  const ok = await copyToClipboard(certifiedHash);
+                                  if (ok) {
+                                    setCopiedKey("cert-hash");
+                                    window.setTimeout(() => setCopiedKey((v) => (v === "cert-hash" ? null : v)), 1200);
+                                  }
+                                }}
+                                className={cx(
+                                  "rounded-full border px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase",
+                                  !certifiedHash
+                                    ? "border-white/10 bg-white/5 text-slate-200/40"
+                                    : "border-amber-500/25 bg-white/5 text-amber-200 hover:bg-white/7 hover:border-amber-500/40"
+                                )}
+                                title={certifiedHash ? "Copy certified hash (hash-first verification)" : "Not certified yet"}
+                              >
+                                {copiedKey === "cert-hash" ? "Copied" : "Copy"}
+                              </button>
                             </span>
                           </div>
 
@@ -1645,16 +1721,12 @@ export default function MinuteBookClient() {
 
                           <div className="flex items-center justify-between gap-3">
                             <span className="text-slate-500">Status</span>
-                            <span className="text-slate-200 truncate max-w-[60%]">
-                              {norm(selected.ledger_status, "—")}
-                            </span>
+                            <span className="text-slate-200 truncate max-w-[60%]">{norm(selected.ledger_status, "—")}</span>
                           </div>
 
                           <div className="flex items-center justify-between gap-3">
                             <span className="text-slate-500">Lane</span>
-                            <span className="text-slate-200 truncate max-w-[60%]">
-                              {laneIsTest ? "SANDBOX" : "RoT"}
-                            </span>
+                            <span className="text-slate-200 truncate max-w-[60%]">{laneIsTest ? "SANDBOX" : "RoT"}</span>
                           </div>
                         </div>
                       </div>
@@ -1770,7 +1842,7 @@ export default function MinuteBookClient() {
                       {showHashInReader ? (
                         <>
                           <span className="w-1 h-1 rounded-full bg-slate-700" />
-                          <span className="font-mono text-slate-300">{shortHash(selected?.file_hash ?? null)}</span>
+                          <span className="font-mono text-slate-300">{shortHash(certifiedHash || selected?.file_hash || null)}</span>
                         </>
                       ) : null}
                     </div>
@@ -1845,18 +1917,18 @@ export default function MinuteBookClient() {
                       {promoteBusy ? (canReissue ? "Reissuing…" : "Promoting…") : canReissue ? "Reissue" : "Promote"}
                     </button>
 
-                    {/* Verify link */}
+                    {/* Verify link (HASH-FIRST) */}
                     <button
                       type="button"
                       onClick={openVerifyTerminal}
-                      disabled={!(promoted?.verified_document_id || official?.verified_document_id)}
+                      disabled={!(certifiedHash || officialHash)}
                       className={cx(
                         "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase",
-                        !(promoted?.verified_document_id || official?.verified_document_id)
+                        !(certifiedHash || officialHash)
                           ? "border-white/10 bg-white/5 text-slate-200/40"
                           : "border-amber-500/25 bg-white/5 text-amber-200 hover:bg-white/7 hover:border-amber-500/40"
                       )}
-                      title="Open public verify.html terminal"
+                      title="Open public verify.html terminal (hash-first)"
                     >
                       Verify
                     </button>
@@ -1962,6 +2034,8 @@ export default function MinuteBookClient() {
             <span>Uploads remain pristine; official artifacts resolve via Verified registry.</span>
             <span className="text-slate-700">•</span>
             <span>Lane boundary enforced via governance_ledger.is_test.</span>
+            <span className="text-slate-700">•</span>
+            <span>Verification is hash-first (verify.html?hash=…).</span>
           </div>
         </>
       )}
