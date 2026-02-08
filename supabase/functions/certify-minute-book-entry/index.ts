@@ -3,12 +3,12 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
-  PDFDocument,
-  rgb,
-  StandardFonts,
-  PDFName,
-  PDFHexString,
   PDFArray,
+  PDFDocument,
+  PDFHexString,
+  PDFName,
+  StandardFonts,
+  rgb,
 } from "https://esm.sh/pdf-lib@1.17.1";
 
 // ✅ Edge-safe QR (NO canvas / NO wasm)
@@ -18,7 +18,7 @@ import { PNG } from "npm:pngjs@7.0.0";
 /**
  * CI-Archive — certify-minute-book-entry (PRODUCTION — LOCKED CONTRACT)
  * ✅ Appends NEW final certification page (never stamps existing page)
- * ✅ Registry is authority; hash is stored in verified_documents
+ * ✅ Registry is authority; hash is stored in verified_documents (file_hash)
  * ✅ QR opens verification terminal using entry_id (enterprise-safe, no self-hash loop)
  * ✅ Deterministic PDF save settings (best-effort)
  * ✅ No schema/enum changes, no contract drift
@@ -29,7 +29,7 @@ import { PNG } from "npm:pngjs@7.0.0";
  * ✅ QR is the pointer; API returns verify_url(hash) + file_hash
  *
  * Reissue:
- * ✅ force=true overwrites storage object + updates existing verified_documents row (no duplicate inserts)
+ * ✅ force=true updates existing verified_documents row (no duplicate inserts)
  */
 
 type ReqBody = {
@@ -50,6 +50,7 @@ type Resp = {
   verified_document_id?: string;
   reused?: boolean;
 
+  // ✅ API returns hash-first verify_url (for UI copy/share)
   verify_url?: string;
 
   source?: { bucket: string; path: string; file_hash?: string | null };
@@ -110,6 +111,7 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
 function normalizeVerifyBase(base: string) {
   try {
     const u = new URL(base);
+    // tolerate "/verify" mistake; keep domain untouched
     if (u.pathname.endsWith("/verify")) u.pathname = u.pathname + ".html";
     return u.toString();
   } catch {
@@ -124,7 +126,7 @@ function buildVerifyUrlByHash(base: string, sha256: string) {
   return u.toString();
 }
 
-// ✅ Enterprise-safe QR target: entry_id (NOT self-hash)
+// ✅ Enterprise QR target: entry_id (NOT self-hash)
 function buildVerifyUrlByEntryId(base: string, entryId: string) {
   const b = normalizeVerifyBase(base);
   const u = new URL(b);
@@ -154,6 +156,7 @@ async function resolveActorEmail(actorId: string): Promise<string | null> {
   }
 }
 
+/** ✅ Best-effort audit log (never blocks) */
 async function bestEffortActionsLog(args: {
   actor_uid: string;
   action: string;
@@ -174,6 +177,7 @@ async function bestEffortActionsLog(args: {
   }
 }
 
+/** ✅ Resolve primary PDF pointer for entry from supporting_documents */
 async function resolveEntryPrimaryPdf(entryId: string) {
   const { data, error } = await supabaseAdmin
     .from("supporting_documents")
@@ -209,6 +213,9 @@ async function resolveEntryPrimaryPdf(entryId: string) {
   };
 }
 
+// -----------------------------------------------------------------------------
+// ✅ QR generation (Edge-safe): URL → PNG bytes (NO wasm / NO canvas)
+// -----------------------------------------------------------------------------
 function qrPngBytes(
   text: string,
   opts?: { size?: number; margin?: number; ecc?: "L" | "M" | "Q" | "H" },
@@ -227,6 +234,7 @@ function qrPngBytes(
 
   const png = new PNG({ width: imgSize, height: imgSize });
 
+  // white background
   for (let y = 0; y < imgSize; y++) {
     for (let x = 0; x < imgSize; x++) {
       const idx = (png.width * y + x) << 2;
@@ -237,6 +245,7 @@ function qrPngBytes(
     }
   }
 
+  // black modules
   for (let r = 0; r < count; r++) {
     for (let c = 0; c < count; c++) {
       if (!qr.isDark(r, c)) continue;
@@ -261,6 +270,7 @@ function qrPngBytes(
   return PNG.sync.write(png);
 }
 
+/** Infer is_test from minute_book_entries.source_record_id -> governance_ledger.is_test */
 async function inferLaneIsTestFromEntrySource(
   entrySourceRecordId: string | null,
 ): Promise<boolean | null> {
@@ -279,6 +289,7 @@ async function inferLaneIsTestFromEntrySource(
   return typeof v.is_test === "boolean" ? (v.is_test as boolean) : null;
 }
 
+/** Map minute book entry -> verified_documents.document_class enum (NO changes) */
 function mapDocumentClass(entryType?: string | null, domainKey?: string | null) {
   const t = (entryType ?? "").toLowerCase().trim();
   const d = (domainKey ?? "").toLowerCase().trim();
@@ -291,6 +302,7 @@ function mapDocumentClass(entryType?: string | null, domainKey?: string | null) 
   return "report";
 }
 
+/** Fetch existing verified pointer for this entry (prefer v_verified_latest) */
 async function fetchLatestVerifiedPointer(entryId: string) {
   try {
     const { data, error } = await supabaseAdmin
@@ -324,7 +336,7 @@ async function fetchLatestVerifiedPointer(entryId: string) {
 }
 
 // -----------------------------------------------------------------------------
-// ✅ APPEND A NEW FINAL CERTIFICATION PAGE
+// ✅ APPEND A NEW FINAL CERTIFICATION PAGE (NO stamping existing pages)
 // -----------------------------------------------------------------------------
 const DETERMINISTIC_DATE = new Date("2020-01-01T00:00:00Z");
 const TRAILER_ID_HEX = "00112233445566778899aabbccddeeff";
@@ -346,7 +358,7 @@ function setDeterministicTrailerId(doc: PDFDocument) {
 
 async function buildCertifiedWithAppendedPage(args: {
   sourceBytes: Uint8Array;
-  qrUrl: string; // ✅ entry_id URL (not self-hash)
+  qrUrl: string; // ✅ entry_id URL
   title: string;
   entitySlug: string;
   laneLabel: string;
@@ -354,16 +366,8 @@ async function buildCertifiedWithAppendedPage(args: {
   operatorLabel: string;
   certifiedAtUtc: string;
 }): Promise<Uint8Array> {
-  const {
-    sourceBytes,
-    qrUrl,
-    title,
-    entitySlug,
-    laneLabel,
-    documentClass,
-    operatorLabel,
-    certifiedAtUtc,
-  } = args;
+  const { sourceBytes, qrUrl, title, entitySlug, laneLabel, documentClass, operatorLabel, certifiedAtUtc } =
+    args;
 
   const srcDoc = await PDFDocument.load(sourceBytes);
 
@@ -409,7 +413,7 @@ async function buildCertifiedWithAppendedPage(args: {
     y: H - 64,
     size: 10,
     font,
-    color: rgb(0.86, 0.88, 0.90),
+    color: rgb(0.86, 0.88, 0.9),
   });
 
   const issuerText = "Issued by the Oasis Verified Registry";
@@ -423,10 +427,13 @@ async function buildCertifiedWithAppendedPage(args: {
   });
 
   const introY = H - bandH - 48;
-  page.drawText(
-    "This certification confirms the archival integrity of the following document:",
-    { x: margin, y: introY, size: 9.5, font, color: muted },
-  );
+  page.drawText("This certification confirms the archival integrity of the following document:", {
+    x: margin,
+    y: introY,
+    size: 9.5,
+    font,
+    color: muted,
+  });
 
   const safeTitle = (title ?? "Minute Book Entry").slice(0, 120);
   page.drawText(safeTitle, {
@@ -457,7 +464,6 @@ async function buildCertifiedWithAppendedPage(args: {
   row("Entity Slug:", entitySlug, leftX, gridTop);
   row("Lane:", laneLabel, leftX, gridTop - 16);
   row("Document:", documentClass, leftX, gridTop - 32);
-
   row("Verification:", "Scan QR / open terminal", midX, gridTop);
   row("Authority:", "Verified Registry", midX, gridTop - 16);
 
@@ -498,6 +504,7 @@ async function buildCertifiedWithAppendedPage(args: {
     color: muted,
   });
 
+  // ✅ QR only — no printed hash, no long URL text
   const qrPng = qrPngBytes(qrUrl, { size: 256, margin: 2, ecc: "M" });
   const qrImg = await outDoc.embedPng(qrPng);
 
@@ -553,27 +560,14 @@ async function buildCertifiedWithAppendedPage(args: {
   const opLine = `Operator: ${operatorLabel}`.slice(0, 64);
   const tsLine = `Certified At (UTC): ${certifiedAtUtc}`.slice(0, 64);
 
-  page.drawText(opLine, {
-    x: attX + 12,
-    y: attY + 38,
-    size: 8.2,
-    font,
-    color: ink,
-  });
-
-  page.drawText(tsLine, {
-    x: attX + 12,
-    y: attY + 22,
-    size: 8.2,
-    font,
-    color: ink,
-  });
+  page.drawText(opLine, { x: attX + 12, y: attY + 38, size: 8.2, font, color: ink });
+  page.drawText(tsLine, { x: attX + 12, y: attY + 22, size: 8.2, font, color: ink });
 
   page.drawLine({
     start: { x: attX + 12, y: attY + 12 },
     end: { x: attX + attW - 12, y: attY + 12 },
     thickness: 0.8,
-    color: rgb(0.30, 0.32, 0.36),
+    color: rgb(0.3, 0.32, 0.36),
   });
 
   const foot =
@@ -583,12 +577,13 @@ async function buildCertifiedWithAppendedPage(args: {
     y: 44,
     size: 7.5,
     font,
-    color: rgb(0.60, 0.64, 0.70),
+    color: rgb(0.6, 0.64, 0.7),
     maxWidth: W - margin * 2,
   });
 
   setDeterministicTrailerId(outDoc);
 
+  // ✅ stable serialization settings (best-effort determinism)
   return new Uint8Array(await outDoc.save({ useObjectStreams: false }));
 }
 
@@ -596,9 +591,9 @@ serve(async (req) => {
   const reqId = req.headers.get("x-sb-request-id") ?? null;
 
   try {
-    if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
     if (req.method !== "POST") {
-      return json({ ok: false, error: "POST only", request_id: reqId }, 405);
+      return json({ ok: false, error: "METHOD_NOT_ALLOWED", request_id: reqId }, 405);
     }
 
     const body = (await req.json().catch(() => ({}))) as ReqBody;
@@ -643,21 +638,11 @@ serve(async (req) => {
     }
 
     // 2) entities lookup
-    const ent = await supabaseAdmin
-      .from("entities")
-      .select("id, slug")
-      .eq("slug", entity_key)
-      .maybeSingle();
-
+    const ent = await supabaseAdmin.from("entities").select("id, slug").eq("slug", entity_key).maybeSingle();
     if (ent.error) return json({ ok: false, error: ent.error.message, request_id: reqId }, 400);
     if (!ent.data?.id) {
       return json(
-        {
-          ok: false,
-          error: "ENTITY_NOT_FOUND",
-          details: `No entities row found for slug=${entity_key}`,
-          request_id: reqId,
-        },
+        { ok: false, error: "ENTITY_NOT_FOUND", details: `No entities row found for slug=${entity_key}`, request_id: reqId },
         404,
       );
     }
@@ -681,7 +666,7 @@ serve(async (req) => {
     }
     const source_path = src.file_path;
 
-    // 4) destination bucket
+    // 4) destination bucket (lane-safe)
     const certified_bucket = is_test ? "governance_sandbox" : "governance_truth";
     const certified_prefix = is_test ? "sandbox/uploads" : "truth/uploads";
 
@@ -696,14 +681,13 @@ serve(async (req) => {
     const existingPath = safeText(existingVd?.storage_path);
 
     const hasCertified = !!(existingId && existingHash && existingLevel === "certified");
-    const reissue = !!force && !!existingId;
 
     const verifyBase =
       safeText(body.verify_base_url) ??
       Deno.env.get("VERIFY_BASE_URL") ??
       "https://sign.oasisintlholdings.com/verify.html";
 
-    // strict reuse (NO regenerate)
+    // ✅ Reuse (no regeneration) unless force=true
     if (!force && hasCertified) {
       return json<Resp>({
         ok: true,
@@ -731,10 +715,7 @@ serve(async (req) => {
     // 7) download source bytes
     const dl = await supabaseAdmin.storage.from(source_bucket).download(source_path);
     if (dl.error || !dl.data) {
-      return json(
-        { ok: false, error: "SOURCE_PDF_DOWNLOAD_FAILED", details: dl.error, request_id: reqId },
-        500,
-      );
+      return json({ ok: false, error: "SOURCE_PDF_DOWNLOAD_FAILED", details: dl.error, request_id: reqId }, 500);
     }
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
@@ -745,7 +726,7 @@ serve(async (req) => {
     const certifiedAt = utcStampISO();
     const operatorLabel = safeText(actorEmail) ?? actorId;
 
-    // 8) build certified pdf once (no fixed-point)
+    // 8) build certified pdf once (no fixed-point / no self-hash loop)
     const finalBytes = await buildCertifiedWithAppendedPage({
       sourceBytes,
       qrUrl,
@@ -761,14 +742,16 @@ serve(async (req) => {
     const finalHash = await sha256Hex(finalBytes);
     const finalVerifyUrl = buildVerifyUrlByHash(verifyBase, finalHash);
 
-    // 10) path by hash (stable)
+    // 10) storage path by hash (stable, content-addressed)
     const certified_path = `${certified_prefix}/${entryId}-${finalHash.slice(0, 12)}.pdf`;
 
-    // upload: overwrite only on force/reissue
+    // Upload semantics:
+    // - New hash path ⇒ usually a new object.
+    // - If it already exists (same bytes), we can proceed.
     const up = await supabaseAdmin.storage
       .from(certified_bucket)
       .upload(certified_path, new Blob([finalBytes], { type: "application/pdf" }), {
-        upsert: reissue,
+        upsert: false,
         contentType: "application/pdf",
       });
 
@@ -779,25 +762,10 @@ serve(async (req) => {
         msg.toLowerCase().includes("duplicate") ||
         msg.toLowerCase().includes("409");
 
-      if (!reissue && alreadyExists) {
-        return json(
-          {
-            ok: false,
-            error: "CERTIFIED_PDF_ALREADY_EXISTS",
-            details:
-              "Certified PDF path already exists and force=false. Re-run with force=true to reissue.",
-            request_id: reqId,
-          } satisfies Resp,
-          409,
-        );
-      }
-
       if (!alreadyExists) {
-        return json(
-          { ok: false, error: "CERTIFIED_PDF_UPLOAD_FAILED", details: up.error, request_id: reqId },
-          500,
-        );
+        return json({ ok: false, error: "CERTIFIED_PDF_UPLOAD_FAILED", details: up.error, request_id: reqId }, 500);
       }
+      // else: same-path already exists (likely identical content) — safe to continue
     }
 
     // 11) verified_documents write (INSERT if none, else UPDATE existing id)
@@ -867,7 +835,7 @@ serve(async (req) => {
         certified_path,
         source_bucket,
         source_path,
-        reissue,
+        reissue: !!force,
         qr_mode: "entry_id",
       },
     });
@@ -879,7 +847,7 @@ serve(async (req) => {
       actor_email: actorEmail,
       is_test,
       verified_document_id: verified_id,
-      verify_url: finalVerifyUrl,
+      verify_url: finalVerifyUrl, // hash-first share URL
       source: { bucket: source_bucket, path: source_path, file_hash: src.file_hash },
       certified: {
         bucket: certified_bucket,
