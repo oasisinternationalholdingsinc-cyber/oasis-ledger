@@ -13,10 +13,14 @@ type ReqBody = {
   envelope_id?: string | null;
   ledger_id?: string | null;
 
+  // ✅ NEW: uploaded docs / minute book records
+  entry_id?: string | null;
+
   // forward-compat
   p_hash?: string | null;
   p_envelope_id?: string | null;
   p_ledger_id?: string | null;
+  p_entry_id?: string | null;
 };
 
 const cors: Record<string, string> = {
@@ -49,12 +53,19 @@ if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
 }
 
 const RESOLVE_RPC = "resolve_verified_record";
+const RESOLVE_EDGE_FN = "resolve-verified-record";
 
 function normalizeHash(h: string | null) {
   if (!h) return null;
   const t = h.trim();
   if (!t) return null;
   return t.toLowerCase();
+}
+
+function normalizeUuid(v: string | null) {
+  if (!v) return null;
+  const t = v.trim();
+  return t ? t : null;
 }
 
 async function downloadAsU8(
@@ -102,7 +113,7 @@ This export is intended to support:
 -----------------------------------
 
 Verification is performed by resolving a SHA-256 hash, envelope identifier,
-or ledger identifier against a registry of verified records.
+ledger identifier, or Minute Book entry identifier against a registry of verified records.
 
 The registry, not this export, is the source of truth.
 
@@ -155,8 +166,7 @@ END OF FILE
 }
 
 function qrHashReferenceText(hash: string) {
-  // NOTE: We do NOT generate QR graphics in Edge here. We provide an auditor-proof text
-  // reference page that ties the hash to the verify terminal without claiming authority.
+  // NOTE: We do NOT generate QR graphics in Edge here.
   return `OASIS DIGITAL PARLIAMENT
 QR / HASH REFERENCE (NON-AUTHORITATIVE)
 ======================================
@@ -208,7 +218,6 @@ async function buildManifest(files: Record<string, Uint8Array>) {
 type AttLine = { t: string; mono?: boolean; dim?: boolean };
 
 function jurisdictionLine(payload: any): string | null {
-  // Defensive: pull from any known field; DO NOT assume schema.
   const ent = payload?.entity ?? {};
   const led = payload?.ledger ?? {};
   const ver = payload?.verified ?? {};
@@ -236,12 +245,10 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
 
   const lines: AttLine[] = [];
 
-  // Header block
   lines.push({ t: "OASIS DIGITAL PARLIAMENT" });
   lines.push({ t: "ATTESTATION SUMMARY (NON-AUTHORITATIVE)", dim: true });
   lines.push({ t: "" });
 
-  // Jurisdiction banner (non-authoritative)
   const juris = jurisdictionLine(payload);
   if (juris) {
     lines.push({ t: `Jurisdiction (non-authoritative): ${juris}` });
@@ -253,17 +260,18 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
     lines.push({ t: "" });
   }
 
-  lines.push({
-    t: "This summary is generated from resolver output at export time.",
-  });
+  lines.push({ t: "This summary is generated from resolver output at export time." });
   lines.push({
     t: "It does not confer authority; it reports registry-derived integrity signals.",
   });
   lines.push({ t: "" });
 
-  // Identifiers
   lines.push({
     t: `Ledger ID: ${payload?.ledger_id ?? led?.id ?? "—"}`,
+    mono: true,
+  });
+  lines.push({
+    t: `Entry ID: ${payload?.entry_id ?? payload?.source?.record_id ?? "—"}`,
     mono: true,
   });
   lines.push({
@@ -276,7 +284,6 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
   });
   lines.push({ t: "" });
 
-  // Entity + lane
   lines.push({ t: `Entity: ${ent?.name ?? "—"} • ${ent?.slug ?? "—"}` });
   lines.push({
     t: `Lane: ${
@@ -287,14 +294,12 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
   lines.push({ t: `Ledger Status: ${led?.status ?? "—"}` });
   lines.push({ t: "" });
 
-  // Verification signals
   lines.push({
     t: `Verification Level: ${String(ver?.verification_level ?? "—")}`,
   });
   lines.push({ t: `Archive Registered: ${String(ver?.is_archived ?? "—")}` });
   lines.push({ t: "" });
 
-  // Pointers
   const best = payload?.best_pdf ?? null;
   const pub = payload?.public_pdf ?? null;
 
@@ -351,7 +356,6 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
     return out;
   };
 
-  // Precompute wrapped lines so pagination is deterministic
   const wrapped: AttLine[] = [];
   for (const L of lines) {
     const txt = L.t ?? "";
@@ -359,17 +363,13 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
     for (const p of parts) wrapped.push({ t: p, mono: L.mono, dim: L.dim });
   }
 
-  // Determine how many lines fit per page accounting for header/footer space
-  // Header: ~44px, Footer: ~28px
   const headerSpace = 52;
   const footerSpace = 34;
   const usable = (topY - headerSpace) - (bottomY + footerSpace);
   const linesPerPage = Math.max(1, Math.floor(usable / lh));
-
   const totalPages = Math.max(1, Math.ceil(wrapped.length / linesPerPage));
 
   const drawPageFrame = (page: any, pageNo: number) => {
-    // Subtle header line
     page.drawText("OASIS DIGITAL PARLIAMENT", {
       x: marginX,
       y: PAGE_H - 36,
@@ -385,7 +385,6 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
       opacity: 0.15,
     });
 
-    // Watermark
     const wm = "ATTESTATION (NON-AUTHORITATIVE)";
     page.drawText(wm, {
       x: 70,
@@ -397,7 +396,6 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
       rotate: { type: "degrees", angle: 20 },
     });
 
-    // Footer: page number
     page.drawLine({
       start: { x: marginX, y: bottomY + 18 },
       end: { x: PAGE_W - marginX, y: bottomY + 18 },
@@ -429,9 +427,10 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
       const isMono = !!L.mono;
       const dim = !!L.dim;
 
-      // “Title-ish” first line: slightly bolder if it matches the heading
       const useBold =
-        (!isMono && !dim && (L.t.includes("ATTESTATION SUMMARY") || L.t === "OASIS DIGITAL PARLIAMENT"));
+        (!isMono &&
+          !dim &&
+          (L.t.includes("ATTESTATION SUMMARY") || L.t === "OASIS DIGITAL PARLIAMENT"));
 
       page.drawText(L.t, {
         x: marginX,
@@ -448,8 +447,38 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
   return new Uint8Array(bytes);
 }
 
+// ✅ NEW: canonical resolve via Edge Function (supports entry_id without SQL/schema changes)
+async function resolveViaEdge(body: Record<string, unknown>) {
+  const url = `${SUPABASE_URL.replace(/\/$/, "")}/functions/v1/${RESOLVE_EDGE_FN}`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      // Service role invocation (server-to-server)
+      authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+      apikey: SERVICE_ROLE_KEY,
+      "x-client-info": "odp-verify/export-discovery-package",
+    },
+    body: JSON.stringify(body),
+  });
+
+  const txt = await res.text();
+  let data: any = null;
+  try {
+    data = JSON.parse(txt);
+  } catch {
+    data = txt;
+  }
+
+  if (!res.ok) {
+    return { ok: false, error: "EDGE_RESOLVE_FAILED", status: res.status, data };
+  }
+
+  return data;
+}
+
 serve(async (req) => {
-  // CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: withCors() });
   }
@@ -472,39 +501,49 @@ serve(async (req) => {
     return json({ ok: false, error: "INVALID_JSON" }, 400);
   }
 
-  const hash = normalizeHash(
-    ((body.hash ?? body.p_hash ?? null)?.toString() ?? null),
-  );
-  const envelope_id =
-    ((body.envelope_id ?? body.p_envelope_id ?? null)?.toString() ?? "").trim() ||
-    null;
-  const ledger_id =
-    ((body.ledger_id ?? body.p_ledger_id ?? null)?.toString() ?? "").trim() ||
-    null;
+  const hash = normalizeHash(((body.hash ?? body.p_hash ?? null)?.toString() ?? null));
 
-  if (!hash && !envelope_id && !ledger_id) {
+  const envelope_id = normalizeUuid(
+    ((body.envelope_id ?? body.p_envelope_id ?? null)?.toString() ?? null),
+  );
+
+  const ledger_id = normalizeUuid(
+    ((body.ledger_id ?? body.p_ledger_id ?? null)?.toString() ?? null),
+  );
+
+  const entry_id = normalizeUuid(
+    ((body.entry_id ?? body.p_entry_id ?? null)?.toString() ?? null),
+  );
+
+  if (!hash && !envelope_id && !ledger_id && !entry_id) {
     return json(
       {
         ok: false,
         error: "MISSING_INPUT",
-        message: "Provide hash OR envelope_id OR ledger_id.",
+        message: "Provide hash OR envelope_id OR ledger_id OR entry_id.",
       },
       400,
     );
   }
 
-  // 1) Resolve using canonical SQL (registry-first; lane-safe; entity-safe)
-  const { data: resolved, error: rpcErr } = await supabaseAdmin.rpc(RESOLVE_RPC, {
-    p_hash: hash,
-    p_envelope_id: envelope_id,
-    p_ledger_id: ledger_id,
-  });
+  // 1) Resolve canonically
+  let resolved: any = null;
 
-  if (rpcErr) {
-    return json(
-      { ok: false, error: "RPC_FAILED", message: rpcErr.message },
-      500,
-    );
+  if (entry_id) {
+    // ✅ uploaded docs path: use Edge resolver (entry_id supported)
+    resolved = await resolveViaEdge({ entry_id });
+  } else {
+    // ✅ existing forge path: use canonical SQL RPC
+    const { data, error } = await supabaseAdmin.rpc(RESOLVE_RPC, {
+      p_hash: hash,
+      p_envelope_id: envelope_id,
+      p_ledger_id: ledger_id,
+    });
+
+    if (error) {
+      return json({ ok: false, error: "RPC_FAILED", message: error.message }, 500);
+    }
+    resolved = data;
   }
 
   let payload: any = resolved;
@@ -512,7 +551,7 @@ serve(async (req) => {
     try {
       payload = JSON.parse(payload);
     } catch {
-      // keep string payload as-is
+      // keep string as-is
     }
   }
 
@@ -526,7 +565,6 @@ serve(async (req) => {
       JSON.stringify(payload ?? {}, null, 2),
     );
 
-    // Manifest should still exist even on failure (integrity of the export itself)
     const manifest = await buildManifest(base);
     base["OASIS-DISCOVERY-EXPORT/MANIFEST-SHA256.txt"] = strToU8(manifest);
 
@@ -548,7 +586,6 @@ serve(async (req) => {
     JSON.stringify(payload, null, 2),
   );
 
-  // Attestation (non-authoritative) — enterprise paginated, watermark, page numbers
   files["OASIS-DISCOVERY-EXPORT/attestation.pdf"] =
     await buildAttestationPdf(payload);
 
@@ -556,7 +593,6 @@ serve(async (req) => {
   const pub = payload.public_pdf ?? null;
   const ver = payload.verified ?? null;
 
-  // Canonical hash for reference page
   const canonicalHash =
     (payload?.hash && String(payload.hash)) ||
     (ver?.file_hash && String(ver.file_hash)) ||
@@ -609,7 +645,7 @@ serve(async (req) => {
     files["OASIS-DISCOVERY-EXPORT/certified_archive.pdf"] = u8;
   }
 
-  // 3) SHA-256 manifest (hashes every file in the ZIP)
+  // 3) SHA-256 manifest
   files["OASIS-DISCOVERY-EXPORT/MANIFEST-SHA256.txt"] = strToU8(
     await buildManifest(files),
   );
@@ -617,12 +653,15 @@ serve(async (req) => {
   // 4) Zip and return (NO storage writes, NO DB writes)
   const zipBytes = zipSync(files);
 
-  const safeLedgerId = (payload?.ledger_id ?? ledger_id ?? "record").toString();
+  const safeId =
+    (payload?.ledger_id ?? ledger_id ?? payload?.entry_id ?? entry_id ?? "record")
+      .toString();
+
   return new Response(zipBytes, {
     status: 200,
     headers: withCors({
       "Content-Type": "application/zip",
-      "Content-Disposition": `attachment; filename="Oasis-Discovery-Export-${safeLedgerId}.zip"`,
+      "Content-Disposition": `attachment; filename="Oasis-Discovery-Export-${safeId}.zip"`,
     }),
   });
 });
