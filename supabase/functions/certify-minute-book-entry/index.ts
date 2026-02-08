@@ -18,18 +18,18 @@ import { PNG } from "npm:pngjs@7.0.0";
 /**
  * CI-Archive — certify-minute-book-entry (PRODUCTION — LOCKED CONTRACT)
  * ✅ Appends NEW final certification page (never stamps existing page)
- * ✅ Hash-first verification (QR resolves to verify.html?hash=...)
- * ✅ Deterministic save + fixed-point hashing to prevent drift
+ * ✅ Registry is authority; hash is stored in verified_documents
+ * ✅ QR opens verification terminal using entry_id (enterprise-safe, no self-hash loop)
+ * ✅ Deterministic PDF save settings (best-effort)
  * ✅ No schema/enum changes, no contract drift
  *
- * CHANGE (UX / NO WIRING DRIFT):
- * ✅ DO NOT print the hash in the PDF
- * ✅ DO NOT print the long verify URL in the PDF
- * ✅ QR remains the terminal pointer (hash-first) + API response returns verify_url + file_hash
+ * UX:
+ * ✅ DO NOT print hash in the PDF
+ * ✅ DO NOT print long verify URL
+ * ✅ QR is the pointer; API returns verify_url(hash) + file_hash
  *
- * FIX (CRITICAL / NO REGRESSION):
- * ✅ Ensure QR hash ALWAYS matches verified_documents.file_hash (no mismatch)
- * ✅ Safe overwrite semantics for reissue (force) to avoid stale PDFs
+ * Reissue:
+ * ✅ force=true overwrites storage object + updates existing verified_documents row (no duplicate inserts)
  */
 
 type ReqBody = {
@@ -37,7 +37,7 @@ type ReqBody = {
   actor_id?: string; // optional; resolved from JWT if missing
   is_test?: boolean; // optional; infer lane from source_record_id -> governance_ledger.is_test
   force?: boolean; // optional (reissue)
-  verify_base_url?: string; // optional override
+  verify_base_url?: string; // optional override (verify.html)
 };
 
 type Resp = {
@@ -108,8 +108,6 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
 }
 
 function normalizeVerifyBase(base: string) {
-  // keep it conservative: do not rewrite domains; only handle common path mistake
-  // If someone passes ".../verify" instead of ".../verify.html", fix locally.
   try {
     const u = new URL(base);
     if (u.pathname.endsWith("/verify")) u.pathname = u.pathname + ".html";
@@ -119,10 +117,18 @@ function normalizeVerifyBase(base: string) {
   }
 }
 
-function buildVerifyUrl(base: string, sha256: string) {
+function buildVerifyUrlByHash(base: string, sha256: string) {
   const b = normalizeVerifyBase(base);
   const u = new URL(b);
   u.searchParams.set("hash", sha256);
+  return u.toString();
+}
+
+// ✅ Enterprise-safe QR target: entry_id (NOT self-hash)
+function buildVerifyUrlByEntryId(base: string, entryId: string) {
+  const b = normalizeVerifyBase(base);
+  const u = new URL(b);
+  u.searchParams.set("entry_id", entryId);
   return u.toString();
 }
 
@@ -148,9 +154,6 @@ async function resolveActorEmail(actorId: string): Promise<string | null> {
   }
 }
 
-/**
- * ✅ Best-effort audit log (never blocks)
- */
 async function bestEffortActionsLog(args: {
   actor_uid: string;
   action: string;
@@ -171,9 +174,6 @@ async function bestEffortActionsLog(args: {
   }
 }
 
-/**
- * ✅ Resolve primary PDF pointer for entry from supporting_documents
- */
 async function resolveEntryPrimaryPdf(entryId: string) {
   const { data, error } = await supabaseAdmin
     .from("supporting_documents")
@@ -209,9 +209,6 @@ async function resolveEntryPrimaryPdf(entryId: string) {
   };
 }
 
-// -----------------------------------------------------------------------------
-// ✅ QR generation (Edge-safe): URL → PNG bytes (NO wasm / NO canvas)
-// -----------------------------------------------------------------------------
 function qrPngBytes(
   text: string,
   opts?: { size?: number; margin?: number; ecc?: "L" | "M" | "Q" | "H" },
@@ -230,7 +227,6 @@ function qrPngBytes(
 
   const png = new PNG({ width: imgSize, height: imgSize });
 
-  // white bg
   for (let y = 0; y < imgSize; y++) {
     for (let x = 0; x < imgSize; x++) {
       const idx = (png.width * y + x) << 2;
@@ -241,7 +237,6 @@ function qrPngBytes(
     }
   }
 
-  // black modules
   for (let r = 0; r < count; r++) {
     for (let c = 0; c < count; c++) {
       if (!qr.isDark(r, c)) continue;
@@ -266,9 +261,6 @@ function qrPngBytes(
   return PNG.sync.write(png);
 }
 
-/**
- * Infer is_test from minute_book_entries.source_record_id -> governance_ledger.is_test
- */
 async function inferLaneIsTestFromEntrySource(
   entrySourceRecordId: string | null,
 ): Promise<boolean | null> {
@@ -287,9 +279,6 @@ async function inferLaneIsTestFromEntrySource(
   return typeof v.is_test === "boolean" ? (v.is_test as boolean) : null;
 }
 
-/**
- * Map minute book entry -> verified_documents.document_class enum (NO changes)
- */
 function mapDocumentClass(entryType?: string | null, domainKey?: string | null) {
   const t = (entryType ?? "").toLowerCase().trim();
   const d = (domainKey ?? "").toLowerCase().trim();
@@ -302,9 +291,6 @@ function mapDocumentClass(entryType?: string | null, domainKey?: string | null) 
   return "report";
 }
 
-/**
- * ✅ Fetch existing verified pointer for this entry (prefer v_verified_latest)
- */
 async function fetchLatestVerifiedPointer(entryId: string) {
   try {
     const { data, error } = await supabaseAdmin
@@ -339,11 +325,8 @@ async function fetchLatestVerifiedPointer(entryId: string) {
 
 // -----------------------------------------------------------------------------
 // ✅ APPEND A NEW FINAL CERTIFICATION PAGE
-// ✅ DETERMINISTIC SAVE (to make fixed-point hashing converge)
 // -----------------------------------------------------------------------------
 const DETERMINISTIC_DATE = new Date("2020-01-01T00:00:00Z");
-
-// constant deterministic trailer ID (32 hex chars = 16 bytes)
 const TRAILER_ID_HEX = "00112233445566778899aabbccddeeff";
 
 function setDeterministicTrailerId(doc: PDFDocument) {
@@ -353,7 +336,6 @@ function setDeterministicTrailerId(doc: PDFDocument) {
     if (!trailer) return;
 
     const arr = PDFArray.withContext(ctx);
-    // PDF spec wants two IDs; keep both identical for determinism
     arr.push(PDFHexString.of(TRAILER_ID_HEX));
     arr.push(PDFHexString.of(TRAILER_ID_HEX));
     trailer.set(PDFName.of("ID"), arr);
@@ -364,8 +346,7 @@ function setDeterministicTrailerId(doc: PDFDocument) {
 
 async function buildCertifiedWithAppendedPage(args: {
   sourceBytes: Uint8Array;
-  verifyUrl: string;
-  finalHashText: string; // kept for fixed-point convergence (QR includes hash)
+  qrUrl: string; // ✅ entry_id URL (not self-hash)
   title: string;
   entitySlug: string;
   laneLabel: string;
@@ -375,8 +356,7 @@ async function buildCertifiedWithAppendedPage(args: {
 }): Promise<Uint8Array> {
   const {
     sourceBytes,
-    verifyUrl,
-    // finalHashText intentionally not printed anymore (UX change)
+    qrUrl,
     title,
     entitySlug,
     laneLabel,
@@ -387,18 +367,15 @@ async function buildCertifiedWithAppendedPage(args: {
 
   const srcDoc = await PDFDocument.load(sourceBytes);
 
-  // Create the output doc deterministically
   const outDoc = await PDFDocument.create();
   outDoc.setCreator("Oasis Digital Parliament");
   outDoc.setProducer("Oasis Verified Registry");
   outDoc.setCreationDate(DETERMINISTIC_DATE);
   outDoc.setModificationDate(DETERMINISTIC_DATE);
 
-  // copy pages
   const copiedPages = await outDoc.copyPages(srcDoc, srcDoc.getPageIndices());
   for (const p of copiedPages) outDoc.addPage(p);
 
-  // append NEW certification page
   const page = outDoc.addPage([612, 792]); // Letter
   const font = await outDoc.embedFont(StandardFonts.Helvetica);
   const fontBold = await outDoc.embedFont(StandardFonts.HelveticaBold);
@@ -481,7 +458,6 @@ async function buildCertifiedWithAppendedPage(args: {
   row("Lane:", laneLabel, leftX, gridTop - 16);
   row("Document:", documentClass, leftX, gridTop - 32);
 
-  // ✅ DO NOT print hash anymore (UX) — registry remains the authority
   row("Verification:", "Scan QR / open terminal", midX, gridTop);
   row("Authority:", "Verified Registry", midX, gridTop - 16);
 
@@ -502,7 +478,7 @@ async function buildCertifiedWithAppendedPage(args: {
   });
 
   page.drawText(
-    "To verify cryptographic truth (hash, certification, registry status), scan the QR code to open the verification terminal.",
+    "Scan the QR code to open the verification terminal. The terminal resolves registry status and certified hash.",
     {
       x: margin,
       y: vTop - 18,
@@ -522,8 +498,7 @@ async function buildCertifiedWithAppendedPage(args: {
     color: muted,
   });
 
-  // ✅ QR only (no long URL text, no printed hash)
-  const qrPng = qrPngBytes(verifyUrl, { size: 256, margin: 2, ecc: "M" });
+  const qrPng = qrPngBytes(qrUrl, { size: 256, margin: 2, ecc: "M" });
   const qrImg = await outDoc.embedPng(qrPng);
 
   const qrSize = 132;
@@ -612,78 +587,9 @@ async function buildCertifiedWithAppendedPage(args: {
     maxWidth: W - margin * 2,
   });
 
-  // ✅ enforce deterministic trailer ID at end (best-effort)
   setDeterministicTrailerId(outDoc);
 
-  // ✅ deterministic serialization
   return new Uint8Array(await outDoc.save({ useObjectStreams: false }));
-}
-
-/**
- * ✅ FIXED-POINT HASH STABILIZATION (PRODUCTION-SAFE):
- * STRICT RULE:
- *   We only return when: hash(bytes) === hash_in_QR
- * Otherwise we keep iterating. If it can't converge safely, we FAIL (no bad writes).
- */
-async function buildCertifiedFixedPoint(args: {
-  sourceBytes: Uint8Array;
-  verifyBase: string;
-  title: string;
-  entitySlug: string;
-  laneLabel: string;
-  documentClass: string;
-  operatorLabel: string;
-  certifiedAtUtc: string;
-}) {
-  const {
-    sourceBytes,
-    verifyBase,
-    title,
-    entitySlug,
-    laneLabel,
-    documentClass,
-    operatorLabel,
-    certifiedAtUtc,
-  } = args;
-
-  const buildOnce = async (hashInQr: string) => {
-    const bytes = await buildCertifiedWithAppendedPage({
-      sourceBytes,
-      verifyUrl: buildVerifyUrl(verifyBase, hashInQr),
-      finalHashText: hashInQr,
-      title,
-      entitySlug,
-      laneLabel,
-      documentClass,
-      operatorLabel,
-      certifiedAtUtc,
-    });
-    const h = await sha256Hex(bytes);
-    return { bytes, computedHash: h, hashInQr };
-  };
-
-  // start seed
-  let h = "0".repeat(64);
-
-  // Deterministic build should converge fast; give it a safe cap.
-  for (let i = 0; i < 48; i++) {
-    const r = await buildOnce(h);
-
-    // ✅ fixed point achieved: QR points to the same hash as the bytes
-    if (r.computedHash === r.hashInQr) {
-      return {
-        bytes: r.bytes,
-        hash: r.computedHash,
-        verify_url: buildVerifyUrl(verifyBase, r.computedHash),
-      };
-    }
-
-    // keep iterating toward the fixed point
-    h = r.computedHash;
-  }
-
-  // If we can't hit a strict fixed point, do NOT return mismatched QR/hash.
-  throw new Error("HASH_FIXED_POINT_DID_NOT_CONVERGE");
 }
 
 serve(async (req) => {
@@ -792,13 +698,13 @@ serve(async (req) => {
     const hasCertified = !!(existingId && existingHash && existingLevel === "certified");
     const reissue = !!force && !!existingId;
 
+    const verifyBase =
+      safeText(body.verify_base_url) ??
+      Deno.env.get("VERIFY_BASE_URL") ??
+      "https://sign.oasisintlholdings.com/verify.html";
+
     // strict reuse (NO regenerate)
     if (!force && hasCertified) {
-      const verifyBase =
-        safeText(body.verify_base_url) ??
-        Deno.env.get("VERIFY_BASE_URL") ??
-        "https://sign.oasisintlholdings.com/verify.html";
-
       return json<Resp>({
         ok: true,
         reused: true,
@@ -807,7 +713,7 @@ serve(async (req) => {
         actor_email: actorEmail,
         is_test,
         verified_document_id: existingId!,
-        verify_url: buildVerifyUrl(verifyBase, existingHash!),
+        verify_url: buildVerifyUrlByHash(verifyBase, existingHash!),
         source: { bucket: source_bucket, path: source_path, file_hash: src.file_hash },
         certified: {
           bucket: existingBucket ?? certified_bucket,
@@ -832,19 +738,17 @@ serve(async (req) => {
     }
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // 8) build fixed-point certified pdf (QR hash-first)
-    const verifyBase =
-      safeText(body.verify_base_url) ??
-      Deno.env.get("VERIFY_BASE_URL") ??
-      "https://sign.oasisintlholdings.com/verify.html";
+    // ✅ QR points to entry_id resolver (enterprise-safe)
+    const qrUrl = buildVerifyUrlByEntryId(verifyBase, entryId);
 
     const laneLabel = is_test ? "SANDBOX" : "TRUTH";
     const certifiedAt = utcStampISO();
     const operatorLabel = safeText(actorEmail) ?? actorId;
 
-    const built = await buildCertifiedFixedPoint({
+    // 8) build certified pdf once (no fixed-point)
+    const finalBytes = await buildCertifiedWithAppendedPage({
       sourceBytes,
-      verifyBase,
+      qrUrl,
       title,
       entitySlug: entity_slug,
       laneLabel,
@@ -853,18 +757,18 @@ serve(async (req) => {
       certifiedAtUtc: certifiedAt,
     });
 
-    const finalBytes = built.bytes;
-    const finalHash = built.hash;
-    const finalVerifyUrl = built.verify_url;
+    // 9) hash the final bytes (authority stored in registry)
+    const finalHash = await sha256Hex(finalBytes);
+    const finalVerifyUrl = buildVerifyUrlByHash(verifyBase, finalHash);
 
-    // 9) path by hash (stable)
+    // 10) path by hash (stable)
     const certified_path = `${certified_prefix}/${entryId}-${finalHash.slice(0, 12)}.pdf`;
 
-    // ✅ Upload semantics: allow safe overwrite on reissue/force to prevent stale QR PDFs
+    // upload: overwrite only on force/reissue
     const up = await supabaseAdmin.storage
       .from(certified_bucket)
       .upload(certified_path, new Blob([finalBytes], { type: "application/pdf" }), {
-        upsert: reissue, // overwrite only on force (no regressions)
+        upsert: reissue,
         contentType: "application/pdf",
       });
 
@@ -875,14 +779,13 @@ serve(async (req) => {
         msg.toLowerCase().includes("duplicate") ||
         msg.toLowerCase().includes("409");
 
-      // If not a reissue, and the object exists, treat as a hard error because it means stale content risk
       if (!reissue && alreadyExists) {
         return json(
           {
             ok: false,
             error: "CERTIFIED_PDF_ALREADY_EXISTS",
             details:
-              "Certified PDF path already exists and force=false. This prevents drift/stale QR. Re-run with force=true to reissue.",
+              "Certified PDF path already exists and force=false. Re-run with force=true to reissue.",
             request_id: reqId,
           } satisfies Resp,
           409,
@@ -897,7 +800,7 @@ serve(async (req) => {
       }
     }
 
-    // 10) verified_documents write (INSERT if none, else UPDATE existing id)
+    // 11) verified_documents write (INSERT if none, else UPDATE existing id)
     let verified_id: string;
 
     if (!existingId) {
@@ -933,7 +836,6 @@ serve(async (req) => {
     } else {
       verified_id = existingId;
 
-      // ✅ Reissue/force MUST update the existing row (no duplicate INSERT)
       const upd = await supabaseAdmin
         .from("verified_documents")
         .update({
@@ -965,8 +867,8 @@ serve(async (req) => {
         certified_path,
         source_bucket,
         source_path,
-        reused: false,
         reissue,
+        qr_mode: "entry_id",
       },
     });
 
