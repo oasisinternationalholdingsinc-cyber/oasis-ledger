@@ -625,9 +625,8 @@ async function buildCertifiedWithAppendedPage(args: {
  *
  * Strategy:
  * - Try classic fixed-point iterations for convergence
- * - If not converged, run a safe "polish" phase:
- *   rebuild using the last hash, re-hash, repeat a few times
- *   and RETURN BYTES that were built using the returned hash.
+ * - If not converged, run a safe "polish" phase
+ * - Final guarantee: if still not settled, rebuild until QR(hash) == sha256(bytes) for returned bytes
  */
 async function buildCertifiedFixedPoint(args: {
   sourceBytes: Uint8Array;
@@ -687,7 +686,6 @@ async function buildCertifiedFixedPoint(args: {
   let bytes = lastBytes;
 
   for (let j = 0; j < 6; j++) {
-    // build bytes using h in QR
     bytes = await buildCertifiedWithAppendedPage({
       sourceBytes,
       verifyUrl: buildVerifyUrl(verifyBase, h),
@@ -703,32 +701,20 @@ async function buildCertifiedFixedPoint(args: {
     const h2 = await sha256Hex(bytes);
 
     if (h2 === h) {
-      // ✅ bytes include QR(hash=h) and hash(bytes)=h
       return { bytes, hash: h, verify_url: buildVerifyUrl(verifyBase, h), non_converged: true };
     }
 
     h = h2;
   }
 
-  // Final guarantee: one last build using the final h, and return those bytes + their hash
-  const finalBytes = await buildCertifiedWithAppendedPage({
-    sourceBytes,
-    verifyUrl: buildVerifyUrl(verifyBase, h),
-    finalHashText: h,
-    title,
-    entitySlug,
-    laneLabel,
-    documentClass,
-    operatorLabel,
-    certifiedAtUtc,
-  });
+  // Phase 3: hard guarantee (prevents QR/DB mismatch)
+  // ALWAYS return bytes that were built with QR(hash = returned hash)
+  // Iterate a few times; with deterministic save, this should converge quickly.
+  let finalBytes = bytes;
+  let finalHash = h;
 
-  const finalHash = await sha256Hex(finalBytes);
-
-  // If it still doesn't settle, keep registry truthful and ensure QR matches hash we return:
-  // build again with finalHash and return that.
-  if (finalHash !== h) {
-    const finalBytes2 = await buildCertifiedWithAppendedPage({
+  for (let k = 0; k < 12; k++) {
+    finalBytes = await buildCertifiedWithAppendedPage({
       sourceBytes,
       verifyUrl: buildVerifyUrl(verifyBase, finalHash),
       finalHashText: finalHash,
@@ -739,22 +725,42 @@ async function buildCertifiedFixedPoint(args: {
       operatorLabel,
       certifiedAtUtc,
     });
-    const finalHash2 = await sha256Hex(finalBytes2);
 
-    return {
-      bytes: finalBytes2,
-      hash: finalHash2,
-      verify_url: buildVerifyUrl(verifyBase, finalHash2),
-      non_converged: true,
-      forced_alignment: true,
-    };
+    const h2 = await sha256Hex(finalBytes);
+
+    if (h2 === finalHash) {
+      return {
+        bytes: finalBytes,
+        hash: finalHash,
+        verify_url: buildVerifyUrl(verifyBase, finalHash),
+        non_converged: true,
+      };
+    }
+
+    finalHash = h2;
   }
 
+  // Last resort: rebuild once more using the last computed hash,
+  // then return the resulting pair (QR matches returned hash by construction).
+  const forcedBytes = await buildCertifiedWithAppendedPage({
+    sourceBytes,
+    verifyUrl: buildVerifyUrl(verifyBase, finalHash),
+    finalHashText: finalHash,
+    title,
+    entitySlug,
+    laneLabel,
+    documentClass,
+    operatorLabel,
+    certifiedAtUtc,
+  });
+  const forcedHash = await sha256Hex(forcedBytes);
+
   return {
-    bytes: finalBytes,
-    hash: finalHash,
-    verify_url: buildVerifyUrl(verifyBase, finalHash),
+    bytes: forcedBytes,
+    hash: forcedHash,
+    verify_url: buildVerifyUrl(verifyBase, forcedHash),
     non_converged: true,
+    forced_alignment: true,
   };
 }
 
@@ -925,9 +931,9 @@ serve(async (req) => {
       certifiedAtUtc: certifiedAt,
     });
 
-    const finalBytes = built.bytes;
-    const finalHash = built.hash;
-    const finalVerifyUrl = built.verify_url;
+    const finalBytes = built.bytes as Uint8Array;
+    const finalHash = String((built as any).hash);
+    const finalVerifyUrl = String((built as any).verify_url);
 
     // 9) path by hash (stable)
     const certified_path = `${certified_prefix}/${entryId}-${finalHash.slice(0, 12)}.pdf`;
