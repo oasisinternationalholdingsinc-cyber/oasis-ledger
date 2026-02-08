@@ -621,12 +621,9 @@ async function buildCertifiedWithAppendedPage(args: {
 
 /**
  * ✅ FIXED-POINT HASH STABILIZATION (PRODUCTION-SAFE):
- * We guarantee the QR encodes the SAME hash that is written to verified_documents.
- *
- * Strategy:
- * - Try classic fixed-point iterations for convergence
- * - If not converged, run a safe "polish" phase
- * - Final guarantee: if still not settled, rebuild until QR(hash) == sha256(bytes) for returned bytes
+ * STRICT RULE:
+ *   We only return when: hash(bytes) === hash_in_QR
+ * Otherwise we keep iterating. If it can't converge safely, we FAIL (no bad writes).
  */
 async function buildCertifiedFixedPoint(args: {
   sourceBytes: Uint8Array;
@@ -649,16 +646,11 @@ async function buildCertifiedFixedPoint(args: {
     certifiedAtUtc,
   } = args;
 
-  let current = "0".repeat(64);
-  let lastBytes = new Uint8Array();
-  let lastHash = "";
-
-  // Phase 1: attempt convergence
-  for (let i = 0; i < 16; i++) {
+  const buildOnce = async (hashInQr: string) => {
     const bytes = await buildCertifiedWithAppendedPage({
       sourceBytes,
-      verifyUrl: buildVerifyUrl(verifyBase, current),
-      finalHashText: current,
+      verifyUrl: buildVerifyUrl(verifyBase, hashInQr),
+      finalHashText: hashInQr,
       title,
       entitySlug,
       laneLabel,
@@ -666,102 +658,32 @@ async function buildCertifiedFixedPoint(args: {
       operatorLabel,
       certifiedAtUtc,
     });
-
     const h = await sha256Hex(bytes);
+    return { bytes, computedHash: h, hashInQr };
+  };
 
-    lastBytes = bytes;
-    lastHash = h;
+  // start seed
+  let h = "0".repeat(64);
 
-    if (h === current) {
-      // ✅ QR inside `bytes` points to `current` which equals `h`
-      return { bytes, hash: h, verify_url: buildVerifyUrl(verifyBase, h) };
-    }
+  // Deterministic build should converge fast; give it a safe cap.
+  for (let i = 0; i < 48; i++) {
+    const r = await buildOnce(h);
 
-    current = h;
-  }
-
-  // Phase 2: non-converged safe polish
-  // Guarantee: returned bytes are built with verifyUrl(hash = returned hash)
-  let h = lastHash;
-  let bytes = lastBytes;
-
-  for (let j = 0; j < 6; j++) {
-    bytes = await buildCertifiedWithAppendedPage({
-      sourceBytes,
-      verifyUrl: buildVerifyUrl(verifyBase, h),
-      finalHashText: h,
-      title,
-      entitySlug,
-      laneLabel,
-      documentClass,
-      operatorLabel,
-      certifiedAtUtc,
-    });
-
-    const h2 = await sha256Hex(bytes);
-
-    if (h2 === h) {
-      return { bytes, hash: h, verify_url: buildVerifyUrl(verifyBase, h), non_converged: true };
-    }
-
-    h = h2;
-  }
-
-  // Phase 3: hard guarantee (prevents QR/DB mismatch)
-  // ALWAYS return bytes that were built with QR(hash = returned hash)
-  // Iterate a few times; with deterministic save, this should converge quickly.
-  let finalBytes = bytes;
-  let finalHash = h;
-
-  for (let k = 0; k < 12; k++) {
-    finalBytes = await buildCertifiedWithAppendedPage({
-      sourceBytes,
-      verifyUrl: buildVerifyUrl(verifyBase, finalHash),
-      finalHashText: finalHash,
-      title,
-      entitySlug,
-      laneLabel,
-      documentClass,
-      operatorLabel,
-      certifiedAtUtc,
-    });
-
-    const h2 = await sha256Hex(finalBytes);
-
-    if (h2 === finalHash) {
+    // ✅ fixed point achieved: QR points to the same hash as the bytes
+    if (r.computedHash === r.hashInQr) {
       return {
-        bytes: finalBytes,
-        hash: finalHash,
-        verify_url: buildVerifyUrl(verifyBase, finalHash),
-        non_converged: true,
+        bytes: r.bytes,
+        hash: r.computedHash,
+        verify_url: buildVerifyUrl(verifyBase, r.computedHash),
       };
     }
 
-    finalHash = h2;
+    // keep iterating toward the fixed point
+    h = r.computedHash;
   }
 
-  // Last resort: rebuild once more using the last computed hash,
-  // then return the resulting pair (QR matches returned hash by construction).
-  const forcedBytes = await buildCertifiedWithAppendedPage({
-    sourceBytes,
-    verifyUrl: buildVerifyUrl(verifyBase, finalHash),
-    finalHashText: finalHash,
-    title,
-    entitySlug,
-    laneLabel,
-    documentClass,
-    operatorLabel,
-    certifiedAtUtc,
-  });
-  const forcedHash = await sha256Hex(forcedBytes);
-
-  return {
-    bytes: forcedBytes,
-    hash: forcedHash,
-    verify_url: buildVerifyUrl(verifyBase, forcedHash),
-    non_converged: true,
-    forced_alignment: true,
-  };
+  // If we can't hit a strict fixed point, do NOT return mismatched QR/hash.
+  throw new Error("HASH_FIXED_POINT_DID_NOT_CONVERGE");
 }
 
 serve(async (req) => {
@@ -931,9 +853,9 @@ serve(async (req) => {
       certifiedAtUtc: certifiedAt,
     });
 
-    const finalBytes = built.bytes as Uint8Array;
-    const finalHash = String((built as any).hash);
-    const finalVerifyUrl = String((built as any).verify_url);
+    const finalBytes = built.bytes;
+    const finalHash = built.hash;
+    const finalVerifyUrl = built.verify_url;
 
     // 9) path by hash (stable)
     const certified_path = `${certified_prefix}/${entryId}-${finalHash.slice(0, 12)}.pdf`;
@@ -1045,8 +967,6 @@ serve(async (req) => {
         source_path,
         reused: false,
         reissue,
-        non_converged: (built as any).non_converged ?? false,
-        forced_alignment: (built as any).forced_alignment ?? false,
       },
     });
 
