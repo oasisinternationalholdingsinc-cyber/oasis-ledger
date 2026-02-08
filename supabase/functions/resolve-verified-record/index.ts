@@ -72,6 +72,12 @@ function safeText(v: unknown): string | null {
   return t.length ? t : null;
 }
 
+function isUuid(s: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    s,
+  );
+}
+
 async function signUrl(
   supabaseAdmin: ReturnType<typeof createClient>,
   bucket: string,
@@ -113,11 +119,19 @@ async function buildFromVerifiedRow(args: {
   const entSlug = safeText(vd.entity_slug);
 
   let ent: any = null;
-  if (entId) {
-    const r = await supabaseAdmin.from("entities").select("id,name,slug").eq("id", entId).maybeSingle();
+  if (entId && isUuid(entId)) {
+    const r = await supabaseAdmin
+      .from("entities")
+      .select("id,name,slug")
+      .eq("id", entId)
+      .maybeSingle();
     if (!r.error && r.data) ent = r.data;
   } else if (entSlug) {
-    const r = await supabaseAdmin.from("entities").select("id,name,slug").eq("slug", entSlug).maybeSingle();
+    const r = await supabaseAdmin
+      .from("entities")
+      .select("id,name,slug")
+      .eq("slug", entSlug)
+      .maybeSingle();
     if (!r.error && r.data) ent = r.data;
   }
 
@@ -202,7 +216,9 @@ async function buildHashFirstPayload(args: {
     .maybeSingle();
 
   if (vdErr) return { ok: false, error: "VERIFIED_LOOKUP_FAILED", details: vdErr };
-  if (!vd?.id || !vd.storage_bucket || !vd.storage_path || !vd.file_hash) return { ok: false, error: "NOT_REGISTERED" };
+  if (!vd?.id || !vd.storage_bucket || !vd.storage_path || !vd.file_hash) {
+    return { ok: false, error: "NOT_REGISTERED" };
+  }
 
   return buildFromVerifiedRow({ supabaseAdmin, vd, expires_in });
 }
@@ -217,6 +233,9 @@ async function buildEntryFirstPayload(args: {
 }) {
   const { supabaseAdmin, entry_id, expires_in } = args;
 
+  // strict UUID guard (prevents accidental junk + keeps enterprise clean)
+  if (!isUuid(entry_id)) return { ok: false, error: "BAD_ENTRY_ID" };
+
   const { data: vd, error: vdErr } = await supabaseAdmin
     .from("verified_documents")
     .select(
@@ -229,7 +248,9 @@ async function buildEntryFirstPayload(args: {
     .maybeSingle();
 
   if (vdErr) return { ok: false, error: "VERIFIED_LOOKUP_FAILED", details: vdErr };
-  if (!vd?.id || !vd.storage_bucket || !vd.storage_path || !vd.file_hash) return { ok: false, error: "NOT_REGISTERED" };
+  if (!vd?.id || !vd.storage_bucket || !vd.storage_path || !vd.file_hash) {
+    return { ok: false, error: "NOT_REGISTERED" };
+  }
 
   return buildFromVerifiedRow({
     supabaseAdmin,
@@ -310,9 +331,9 @@ serve(async (req) => {
     }
   }
 
-  // ✅ 3) Legacy SQL RPC (envelope_id / ledger_id)
+  // ✅ 3) Canonical SQL RPC (envelope_id / ledger_id / (hash handled above))
   const { data: resolved, error: rpcErr } = await supabaseAdmin.rpc(RESOLVE_RPC, {
-    p_hash: null, // important: hash handled above
+    p_hash: null, // IMPORTANT: hash handled above (registry-first)
     p_envelope_id: envelope_id,
     p_ledger_id: ledger_id,
   });
@@ -340,7 +361,10 @@ serve(async (req) => {
   }
 
   if (!payload || payload.ok !== true) {
-    return json({ ...(payload ?? { ok: false, error: "RESOLVE_FAILED" }), request_id: reqId }, 200);
+    return json(
+      { ...(payload ?? { ok: false, error: "RESOLVE_FAILED" }), request_id: reqId },
+      200,
+    );
   }
 
   // Signed URL enrichment (existing behavior)
