@@ -5,18 +5,21 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { zipSync, strToU8 } from "https://esm.sh/fflate@0.8.2";
 import { PDFDocument, StandardFonts, rgb } from "https://esm.sh/pdf-lib@1.17.1";
 
-// NOTE: Deno std has built-in crypto.subtle; we use that for SHA-256 manifest.
-// No schema writes. No storage writes. Resolver remains canonical.
+// NOTE:
+// - No schema writes.
+// - No storage writes.
+// - Resolver remains canonical.
+// - This function only packages evidence that the resolver already points to.
 
 type ReqBody = {
   hash?: string | null;
   envelope_id?: string | null;
   ledger_id?: string | null;
 
-  // ✅ NEW: uploaded docs / minute book records
+  // uploaded docs / minute book records
   entry_id?: string | null;
 
-  // forward-compat
+  // forward-compat aliases
   p_hash?: string | null;
   p_envelope_id?: string | null;
   p_ledger_id?: string | null;
@@ -84,7 +87,6 @@ async function downloadAsU8(
 }
 
 function readmeText() {
-  // Keep static. This is packaging documentation, not system state.
   return `OASIS DIGITAL PARLIAMENT
 VERIFICATION & DISCOVERY EXPORT
 ================================
@@ -166,7 +168,6 @@ END OF FILE
 }
 
 function qrHashReferenceText(hash: string) {
-  // NOTE: We do NOT generate QR graphics in Edge here.
   return `OASIS DIGITAL PARLIAMENT
 QR / HASH REFERENCE (NON-AUTHORITATIVE)
 ======================================
@@ -198,7 +199,6 @@ async function sha256Hex(u8: Uint8Array): Promise<string> {
 }
 
 async function buildManifest(files: Record<string, Uint8Array>) {
-  // Deterministic, auditor-friendly: sort paths, hash bytes, output one per line.
   const paths = Object.keys(files).slice().sort();
   const lines: string[] = [];
   lines.push("OASIS DIGITAL PARLIAMENT — SHA-256 MANIFEST");
@@ -214,7 +214,7 @@ async function buildManifest(files: Record<string, Uint8Array>) {
   return lines.join("\n");
 }
 
-// ---------- Attestation PDF (enterprise / paginated / watermark / page numbers) ----------
+// ---------- Attestation PDF ----------
 type AttLine = { t: string; mono?: boolean; dim?: boolean };
 
 function jurisdictionLine(payload: any): string | null {
@@ -336,7 +336,6 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
     dim: true,
   });
 
-  // ---------- pagination render ----------
   const PAGE_W = 612;
   const PAGE_H = 792;
 
@@ -447,7 +446,7 @@ async function buildAttestationPdf(payload: any): Promise<Uint8Array> {
   return new Uint8Array(bytes);
 }
 
-// ✅ NEW: canonical resolve via Edge Function (supports entry_id without SQL/schema changes)
+// canonical resolve via Edge Function (supports entry_id)
 async function resolveViaEdge(body: Record<string, unknown>) {
   const url = `${SUPABASE_URL.replace(/\/$/, "")}/functions/v1/${RESOLVE_EDGE_FN}`;
 
@@ -455,7 +454,6 @@ async function resolveViaEdge(body: Record<string, unknown>) {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      // Service role invocation (server-to-server)
       authorization: `Bearer ${SERVICE_ROLE_KEY}`,
       apikey: SERVICE_ROLE_KEY,
       "x-client-info": "odp-verify/export-discovery-package",
@@ -476,6 +474,44 @@ async function resolveViaEdge(body: Record<string, unknown>) {
   }
 
   return data;
+}
+
+// downloads any array of storage pointers returned by resolver (no guessing)
+async function addPointerArray(
+  supabaseAdmin: ReturnType<typeof createClient>,
+  files: Record<string, Uint8Array>,
+  baseDir: string,
+  arr: any,
+) {
+  if (!Array.isArray(arr)) return;
+  let idx = 0;
+  for (const item of arr) {
+    const b = item?.storage_bucket;
+    const p = item?.storage_path;
+    if (!b || !p) continue;
+
+    const rawName =
+      item?.filename ||
+      item?.name ||
+      item?.title ||
+      item?.kind ||
+      `artifact_${idx + 1}`;
+
+    const safeName = String(rawName)
+      .trim()
+      .replace(/[\/\\]+/g, "-")
+      .replace(/[^\w\-. ]+/g, "")
+      .replace(/\s+/g, "_")
+      .slice(0, 120) || `artifact_${idx + 1}`;
+
+    const ext =
+      typeof item?.mime === "string" && item.mime.includes("pdf") ? ".pdf" :
+      (String(p).toLowerCase().endsWith(".pdf") ? ".pdf" : "");
+
+    const u8 = await downloadAsU8(supabaseAdmin, String(b), String(p));
+    files[`${baseDir}/${safeName}${ext}`] = u8;
+    idx++;
+  }
 }
 
 serve(async (req) => {
@@ -502,50 +538,25 @@ serve(async (req) => {
   }
 
   const hash = normalizeHash(((body.hash ?? body.p_hash ?? null)?.toString() ?? null));
-
-  const envelope_id = normalizeUuid(
-    ((body.envelope_id ?? body.p_envelope_id ?? null)?.toString() ?? null),
-  );
-
-  const ledger_id = normalizeUuid(
-    ((body.ledger_id ?? body.p_ledger_id ?? null)?.toString() ?? null),
-  );
-
-  const entry_id = normalizeUuid(
-    ((body.entry_id ?? body.p_entry_id ?? null)?.toString() ?? null),
-  );
+  const envelope_id = normalizeUuid(((body.envelope_id ?? body.p_envelope_id ?? null)?.toString() ?? null));
+  const ledger_id = normalizeUuid(((body.ledger_id ?? body.p_ledger_id ?? null)?.toString() ?? null));
+  const entry_id = normalizeUuid(((body.entry_id ?? body.p_entry_id ?? null)?.toString() ?? null));
 
   if (!hash && !envelope_id && !ledger_id && !entry_id) {
     return json(
-      {
-        ok: false,
-        error: "MISSING_INPUT",
-        message: "Provide hash OR envelope_id OR ledger_id OR entry_id.",
-      },
+      { ok: false, error: "MISSING_INPUT", message: "Provide hash OR envelope_id OR ledger_id OR entry_id." },
       400,
     );
   }
 
-  // 1) Resolve canonically (REGISTRY-FIRST, NO REGRESSION)
-  let resolved: any = null;
+  // 1) Resolve canonically
+  let payload: any = null;
 
-  // 1️⃣ HASH — strongest / registry-first
-  if (hash) {
+  if (entry_id) {
+    payload = await resolveViaEdge({ entry_id });
+  } else {
     const { data, error } = await supabaseAdmin.rpc(RESOLVE_RPC, {
       p_hash: hash,
-      p_envelope_id: null,
-      p_ledger_id: null,
-    });
-
-    if (error) {
-      return json({ ok: false, error: "RPC_FAILED", message: error.message }, 500);
-    }
-    resolved = data;
-
-  // 2️⃣ ENVELOPE / LEDGER (Forge path)
-  } else if (envelope_id || ledger_id) {
-    const { data, error } = await supabaseAdmin.rpc(RESOLVE_RPC, {
-      p_hash: null,
       p_envelope_id: envelope_id,
       p_ledger_id: ledger_id,
     });
@@ -553,27 +564,30 @@ serve(async (req) => {
     if (error) {
       return json({ ok: false, error: "RPC_FAILED", message: error.message }, 500);
     }
-    resolved = data;
-
-  // 3️⃣ ENTRY_ID (uploaded minute book records)
-  } else if (entry_id) {
-    resolved = await resolveViaEdge({
-      entry_id,
-      expires_in: 900, // parity with verify.html
-    });
+    payload = data;
   }
 
-  let payload: any = resolved;
   if (typeof payload === "string") {
-    try {
-      payload = JSON.parse(payload);
-    } catch {
-      // keep string as-is
-    }
+    try { payload = JSON.parse(payload); } catch { /* keep string */ }
+  }
+
+  // ✅ SAFETY NET:
+  // If caller passed a Minute Book entry UUID in ledger_id by mistake, protect the system:
+  // - no schema changes
+  // - no guessing
+  // - only try entry_id resolution when we *know* ledger lookup failed
+  if (
+    (!entry_id && ledger_id) &&
+    payload &&
+    payload.ok === false &&
+    (payload.error === "LEDGER_NOT_FOUND" || payload.error === "NOT_FOUND")
+  ) {
+    const retry = await resolveViaEdge({ entry_id: ledger_id });
+    if (retry && retry.ok === true) payload = retry;
   }
 
   // -------------------------
-  // NO-REGRESSION FAIL-SAFE ZIP (no lying)
+  // FAIL-SAFE ZIP (no lying)
   // -------------------------
   if (!payload || payload.ok !== true) {
     const base: Record<string, Uint8Array> = {};
@@ -581,12 +595,11 @@ serve(async (req) => {
     base["OASIS-DISCOVERY-EXPORT/verification.json"] = strToU8(
       JSON.stringify(payload ?? {}, null, 2),
     );
-
-    const manifest = await buildManifest(base);
-    base["OASIS-DISCOVERY-EXPORT/MANIFEST-SHA256.txt"] = strToU8(manifest);
+    base["OASIS-DISCOVERY-EXPORT/MANIFEST-SHA256.txt"] = strToU8(
+      await buildManifest(base),
+    );
 
     const zipBytes = zipSync(base);
-
     return new Response(zipBytes, {
       status: 200,
       headers: withCors({
@@ -603,8 +616,8 @@ serve(async (req) => {
     JSON.stringify(payload, null, 2),
   );
 
-  files["OASIS-DISCOVERY-EXPORT/attestation.pdf"] =
-    await buildAttestationPdf(payload);
+  // Always generate attestation when ok:true
+  files["OASIS-DISCOVERY-EXPORT/attestation.pdf"] = await buildAttestationPdf(payload);
 
   const best = payload.best_pdf ?? null;
   const pub = payload.public_pdf ?? null;
@@ -662,12 +675,29 @@ serve(async (req) => {
     files["OASIS-DISCOVERY-EXPORT/certified_archive.pdf"] = u8;
   }
 
+  // OPTIONAL: include any extra artifacts the resolver returns (future-proof, no regression)
+  // Examples your resolver may emit in future:
+  // - payload.artifacts: [{ kind, filename, storage_bucket, storage_path, mime }]
+  // - payload.supporting_documents: [...]
+  await addPointerArray(
+    supabaseAdmin,
+    files,
+    "OASIS-DISCOVERY-EXPORT/artifacts",
+    payload?.artifacts,
+  );
+  await addPointerArray(
+    supabaseAdmin,
+    files,
+    "OASIS-DISCOVERY-EXPORT/supporting_documents",
+    payload?.supporting_documents,
+  );
+
   // 3) SHA-256 manifest
   files["OASIS-DISCOVERY-EXPORT/MANIFEST-SHA256.txt"] = strToU8(
     await buildManifest(files),
   );
 
-  // 4) Zip and return (NO storage writes, NO DB writes)
+  // 4) Zip and return
   const zipBytes = zipSync(files);
 
   const safeId =
