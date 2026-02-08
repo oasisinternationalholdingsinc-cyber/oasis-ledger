@@ -1,4 +1,3 @@
-// src/app/(console-ledger)/ci-onboarding/ci-admissions/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -18,6 +17,11 @@ export const dynamic = "force-dynamic";
  *        due_at (date), required (toggle), notes (text)
  *      while keeping preloaded chips + custom tasks.
  *    - Payload is jsonb array (objects) so portal can display Due/Required/Notes.
+ *
+ * ✅ PHASE: Commercial / Billing VISIBILITY (UI-only, read-only)
+ *    - Shows Commercial Intent (from metadata/requested_services if present)
+ *    - Shows Billing Snapshot for provisioned entity (read-only; best-effort resolver)
+ *    - NO enforcement, NO mutations, NO schema assumptions (defensive fallbacks)
  *
  * ❌ Removes any selection of non-existent columns (e.g. request_brief)
  */
@@ -47,6 +51,13 @@ function safePrettyJSON(x: any) {
   } catch {
     return "—";
   }
+}
+
+function shortUUID(u: string | null | undefined) {
+  const s = (u || "").trim();
+  if (!s) return "—";
+  if (s.length <= 10) return s;
+  return `${s.slice(0, 8)}…${s.slice(-4)}`;
 }
 
 type InboxRow = {
@@ -222,6 +233,36 @@ function dateToDueAtISO(yyyy_mm_dd: string) {
   return d + "T23:59:59.000Z";
 }
 
+// ---- Billing snapshot (read-only, best-effort) ----
+type BillingSnapshot = {
+  status?: string | null;
+  plan?: string | null;
+  provider?: string | null;
+  source?: string | null;
+  is_test?: boolean | null;
+  trial_starts_at?: string | null;
+  trial_ends_at?: string | null;
+  starts_at?: string | null;
+  ends_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  // keep extra fields if view/rpc returns more
+  [k: string]: any;
+};
+
+function formatMaybeDate(s: string | null | undefined) {
+  const v = (s || "").trim();
+  if (!v) return "—";
+  // show compact ISO-ish for operator; avoid locale drift
+  try {
+    const d = new Date(v);
+    if (isNaN(d.getTime())) return v;
+    return d.toISOString();
+  } catch {
+    return v;
+  }
+}
+
 export default function CiAdmissionsPage() {
   // ---- entity (defensive) ----
   const ec = useEntity() as any;
@@ -259,6 +300,12 @@ export default function CiAdmissionsPage() {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+
+  // ---- billing snapshot (read-only) ----
+  const [billingBusy, setBillingBusy] = useState(false);
+  const [billingErr, setBillingErr] = useState<string | null>(null);
+  const [billingEntityId, setBillingEntityId] = useState<string | null>(null);
+  const [billingActive, setBillingActive] = useState<BillingSnapshot | null>(null);
 
   // ---- modals ----
   const [modal, setModal] = useState<ModalKind>("NONE");
@@ -311,6 +358,74 @@ export default function CiAdmissionsPage() {
     const m = selected?.metadata;
     return (m && typeof m === "object" ? (m as any) : {}) as any;
   }, [selected?.metadata]);
+
+  const requestedServices = useMemo(() => {
+    const rs = selected?.requested_services;
+    return (rs && typeof rs === "object" ? (rs as any) : rs) as any;
+  }, [selected?.requested_services]);
+
+  // ---- Commercial Intent (visibility-only, best-effort) ----
+  const commercialIntent = useMemo(() => {
+    // canonical location (ideal): meta.commercial_intent (enum)
+    const fromMeta =
+      meta?.commercial_intent ??
+      meta?.billing_intent ??
+      meta?.commercial ??
+      meta?.intent ??
+      null;
+
+    // sometimes captured in requested_services
+    const fromServices =
+      requestedServices?.commercial_intent ??
+      requestedServices?.billing_intent ??
+      requestedServices?.intent ??
+      null;
+
+    const v = (fromMeta ?? fromServices ?? "").toString().trim();
+    return v || null;
+  }, [meta, requestedServices]);
+
+  const commercialNotes = useMemo(() => {
+    const n =
+      meta?.commercial_notes ??
+      meta?.billing_notes ??
+      requestedServices?.commercial_notes ??
+      requestedServices?.notes ??
+      null;
+    const v = (n ?? "").toString().trim();
+    return v || null;
+  }, [meta, requestedServices]);
+
+  const commercialRequestedPlan = useMemo(() => {
+    const p =
+      meta?.billing_plan ??
+      meta?.commercial_plan ??
+      requestedServices?.billing_plan ??
+      requestedServices?.plan ??
+      null;
+    const v = (p ?? "").toString().trim();
+    return v || null;
+  }, [meta, requestedServices]);
+
+  const provisionedEntityId = useMemo(() => {
+    // This is intentionally defensive: we do NOT assume a specific schema.
+    const candidates: Array<any> = [
+      meta?.provisioned_entity_id,
+      meta?.entity_id,
+      meta?.entity?.id,
+      meta?.provisioning?.entity_id,
+      meta?.provisioning?.entity?.id,
+      meta?.result?.entity_id,
+      meta?.result?.entity?.id,
+      meta?.identity?.entity_id,
+    ];
+    for (const c of candidates) {
+      const v = (c ?? "").toString().trim();
+      // basic uuid-ish heuristic
+      if (v && v.length >= 32) return v;
+    }
+    return null;
+  }, [meta]);
 
   // ---- preload templates (restored) ----
   const PRELOADED_TASKS: Array<{ label: string; value: string; hint: string }> = [
@@ -546,6 +661,121 @@ export default function CiAdmissionsPage() {
       return blob.includes(needle);
     });
   }, [apps, tab, intakePill, q]);
+
+  // ---------------------------
+  // Billing snapshot loader (read-only, best-effort)
+  // ---------------------------
+  async function loadBillingSnapshot(entityId: string) {
+    const eid = (entityId || "").trim();
+    if (!eid) {
+      setBillingEntityId(null);
+      setBillingActive(null);
+      setBillingErr(null);
+      return;
+    }
+
+    setBillingBusy(true);
+    setBillingErr(null);
+    setBillingEntityId(eid);
+    setBillingActive(null);
+
+    try {
+      // 1) Try RPC (if present)
+      try {
+        const { data, error } = await supabase.rpc("billing_resolve_active_subscription", {
+          p_entity_id: eid,
+          p_is_test: isTest,
+        } as any);
+
+        if (!error && data) {
+          // data could be object or array; normalize
+          const snap = (Array.isArray(data) ? data[0] : data) as any;
+          if (snap && typeof snap === "object") {
+            setBillingActive(snap as BillingSnapshot);
+            setBillingBusy(false);
+            return;
+          }
+        }
+      } catch {
+        // ignore; fall through
+      }
+
+      // 2) Try view (common pattern)
+      try {
+        const { data, error } = await supabase
+          .from("v_billing_active_subscription")
+          .select("*")
+          .eq("entity_id", eid)
+          .eq("is_test", isTest)
+          .maybeSingle();
+
+        if (!error && data) {
+          setBillingActive(data as BillingSnapshot);
+          setBillingBusy(false);
+          return;
+        }
+      } catch {
+        // ignore; fall through
+      }
+
+      // 3) Final fallback: raw table, newest row
+      try {
+        const { data, error } = await supabase
+          .from("billing_subscriptions")
+          .select("*")
+          .eq("entity_id", eid)
+          .eq("is_test", isTest)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (!error && data) {
+          setBillingActive(data as BillingSnapshot);
+          setBillingBusy(false);
+          return;
+        }
+
+        if (error && /permission|rls/i.test(error.message || "")) {
+          setBillingErr("Billing snapshot unavailable (RLS/permissions).");
+          setBillingBusy(false);
+          return;
+        }
+      } catch {
+        // ignore
+      }
+
+      // If we got here, nothing resolved (valid dormant state)
+      setBillingActive(null);
+    } catch (e: any) {
+      setBillingErr(e?.message || "Failed to resolve billing snapshot.");
+    } finally {
+      setBillingBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    // Load snapshot when selected changes and a provisioned entity id is detectable.
+    // This is READ-ONLY and does not affect admissions wiring.
+    if (!selected) {
+      setBillingEntityId(null);
+      setBillingActive(null);
+      setBillingErr(null);
+      setBillingBusy(false);
+      return;
+    }
+
+    const eid = provisionedEntityId;
+    if (!eid) {
+      setBillingEntityId(null);
+      setBillingActive(null);
+      setBillingErr(null);
+      setBillingBusy(false);
+      return;
+    }
+
+    loadBillingSnapshot(eid);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id, provisionedEntityId, isTest]);
 
   // ---------------------------
   // RPC Actions (NO REGRESSION)
@@ -961,6 +1191,27 @@ export default function CiAdmissionsPage() {
                       <Row k="Updated" v={selected.updated_at || "—"} />
                     </div>
 
+                    {/* ✅ Commercial Intent (visibility-only) */}
+                    <div className="rounded-2xl border border-white/10 bg-black/18 p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-xs font-semibold tracking-wide text-white/80">Commercial Intent</div>
+                        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/60">
+                          visibility only
+                        </span>
+                      </div>
+
+                      <div className="mt-3 space-y-3">
+                        <Row k="Intent" v={commercialIntent || "—"} />
+                        <Row k="Requested plan" v={commercialRequestedPlan || "—"} />
+                        <Row k="Notes" v={commercialNotes || "—"} />
+                        <Row k="Provisioned entity" v={provisionedEntityId ? shortUUID(provisionedEntityId) : "—"} />
+                      </div>
+
+                      <div className="mt-3 text-xs text-white/45">
+                        No enforcement. This is operator context only (Admissions truth surface).
+                      </div>
+                    </div>
+
                     <div className="rounded-2xl border border-white/10 bg-black/18 p-4">
                       <div className="flex items-center justify-between gap-3">
                         <div className="text-xs font-semibold tracking-wide text-white/80">Metadata</div>
@@ -1070,6 +1321,62 @@ export default function CiAdmissionsPage() {
                     >
                       Approve (Decision + Status)
                     </button>
+
+                    {/* ✅ Billing Snapshot (read-only) */}
+                    <div className="mt-3 rounded-2xl border border-white/10 bg-black/18 p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">Billing snapshot</div>
+                        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/60">
+                          read-only
+                        </span>
+                      </div>
+
+                      <div className="mt-3 space-y-2">
+                        <Row k="Entity ID" v={billingEntityId ? shortUUID(billingEntityId) : provisionedEntityId ? shortUUID(provisionedEntityId) : "—"} />
+                        <Row k="Lane" v={isTest ? "SANDBOX" : "RoT"} />
+                        {billingBusy ? (
+                          <div className="mt-2 text-sm text-white/55">Resolving…</div>
+                        ) : billingErr ? (
+                          <div className="mt-2 text-sm text-rose-200">{billingErr}</div>
+                        ) : billingEntityId && !billingActive ? (
+                          <div className="mt-2 text-sm text-white/55">
+                            None registered (valid dormant state).
+                          </div>
+                        ) : billingActive ? (
+                          <div className="mt-2 space-y-2">
+                            <Row k="Status" v={(billingActive.status ?? "—").toString()} />
+                            <Row k="Plan" v={(billingActive.plan ?? "—").toString()} />
+                            <Row k="Provider" v={(billingActive.provider ?? "—").toString()} />
+                            <Row k="Source" v={(billingActive.source ?? "—").toString()} />
+                            <Row k="Trial start" v={formatMaybeDate(billingActive.trial_starts_at ?? null)} />
+                            <Row k="Trial end" v={formatMaybeDate(billingActive.trial_ends_at ?? null)} />
+                            <Row k="Starts" v={formatMaybeDate(billingActive.starts_at ?? null)} />
+                            <Row k="Ends" v={formatMaybeDate(billingActive.ends_at ?? null)} />
+                          </div>
+                        ) : (
+                          <div className="mt-2 text-sm text-white/55">Provisioning not complete (no entity resolved).</div>
+                        )}
+                      </div>
+
+                      {billingEntityId ? (
+                        <button
+                          onClick={() => loadBillingSnapshot(billingEntityId)}
+                          disabled={billingBusy}
+                          className={cx(
+                            "mt-3 w-full rounded-2xl border px-4 py-2 text-xs font-semibold transition",
+                            billingBusy
+                              ? "border-white/10 bg-white/3 text-white/35"
+                              : "border-white/10 bg-white/5 text-white/75 hover:border-amber-300/18 hover:bg-white/7"
+                          )}
+                        >
+                          Refresh snapshot
+                        </button>
+                      ) : null}
+
+                      <div className="mt-3 text-xs text-white/45">
+                        No enforcement. Snapshot resolves via RPC/view if present, else falls back to latest table row.
+                      </div>
+                    </div>
 
                     {/* ✅ Lifecycle section (Archive + Hard Delete) */}
                     <div className="mt-3 rounded-2xl border border-white/10 bg-black/18 p-4">
