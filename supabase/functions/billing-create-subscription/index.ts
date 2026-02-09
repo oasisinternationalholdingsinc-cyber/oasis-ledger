@@ -13,13 +13,23 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
  *
  * Creates a new billing_subscriptions row for an entity.
  * Cleanly ends any existing active subscription for that entity + lane.
+ *
+ * NO REGRESSION:
+ * - Accepts legacy UI payloads (plan_key alias)
+ * - Defaults source to "internal" if not provided
+ * - Auth validation uses explicit token (supabase-js v2 correct pattern)
  */
 
 type ReqBody = {
   entity_id: string;
 
-  plan: string; // enum-backed in DB
-  source: string; // internal | contract | manual (enum-backed)
+  // canonical
+  plan?: string; // enum-backed in DB
+  source?: string; // internal | contract | manual (enum-backed)
+
+  // tolerated aliases (NO REGRESSION)
+  plan_key?: string;
+  planKey?: string;
 
   trial_days?: number | null;
   is_internal?: boolean | null;
@@ -28,23 +38,25 @@ type ReqBody = {
   reason: string; // REQUIRED
 };
 
-const cors = {
+const cors: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers":
-    "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
+function json(status: number, body: Record<string, any>) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...cors, "content-type": "application/json" },
+  });
+}
+
 serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: cors });
-  }
+  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
 
   if (req.method !== "POST") {
-    return new Response(JSON.stringify({ ok: false, error: "METHOD_NOT_ALLOWED" }), {
-      status: 405,
-      headers: cors,
-    });
+    return json(405, { ok: false, error: "METHOD_NOT_ALLOWED" });
   }
 
   try {
@@ -53,56 +65,57 @@ serve(async (req) => {
       Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
     if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
-      throw new Error("Missing Supabase env vars");
+      return json(500, { ok: false, error: "MISSING_ENV" });
     }
 
     // ---------- auth: operator required ----------
-    const authHeader = req.headers.get("authorization");
-    if (!authHeader) {
-      return new Response(JSON.stringify({ ok: false, error: "UNAUTHORIZED" }), {
-        status: 401,
-        headers: cors,
-      });
+    const authHeader = req.headers.get("authorization") || req.headers.get("Authorization");
+    if (!authHeader?.toLowerCase().startsWith("bearer ")) {
+      return json(401, { ok: false, error: "UNAUTHORIZED" });
     }
 
+    const token = authHeader.slice(7).trim();
+    if (!token) return json(401, { ok: false, error: "UNAUTHORIZED" });
+
+    // IMPORTANT: service_role client for DB writes, but validate operator via token explicitly
     const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-      global: { headers: { authorization: authHeader } },
+      global: { fetch },
     });
 
     const {
       data: { user },
       error: userErr,
-    } = await supabase.auth.getUser();
+    } = await supabase.auth.getUser(token);
 
     if (userErr || !user) {
-      return new Response(JSON.stringify({ ok: false, error: "INVALID_SESSION" }), {
-        status: 401,
-        headers: cors,
-      });
+      return json(401, { ok: false, error: "INVALID_SESSION" });
     }
 
     // ---------- parse + validate ----------
-    const body = (await req.json()) as ReqBody;
+    const body = (await req.json().catch(() => null)) as ReqBody | null;
+    if (!body) {
+      return json(400, { ok: false, error: "INVALID_JSON" });
+    }
 
-    const {
-      entity_id,
-      plan,
-      source,
-      trial_days,
-      is_internal,
-      is_test,
-      reason,
-    } = body;
+    const entity_id = body.entity_id;
 
-    if (!entity_id || !plan || !source || !reason?.trim()) {
-      return new Response(
-        JSON.stringify({
-          ok: false,
-          error: "MISSING_REQUIRED_FIELDS",
-          required: ["entity_id", "plan", "source", "reason"],
-        }),
-        { status: 400, headers: cors }
-      );
+    // NO REGRESSION: accept plan_key/planKey alias
+    const plan = (body.plan ?? body.plan_key ?? body.planKey ?? "").toString().trim();
+
+    // NO REGRESSION: default source if missing
+    const source = (body.source ?? "internal").toString().trim();
+
+    const trial_days = body.trial_days ?? null;
+    const is_internal = body.is_internal ?? null;
+    const is_test = Boolean(body.is_test);
+    const reason = (body.reason ?? "").toString().trim();
+
+    if (!entity_id || !plan || !source || !reason) {
+      return json(400, {
+        ok: false,
+        error: "MISSING_REQUIRED_FIELDS",
+        required: ["entity_id", "plan (or plan_key)", "source (defaults internal)", "reason"],
+      });
     }
 
     const laneIsTest = Boolean(is_test);
@@ -115,10 +128,7 @@ serve(async (req) => {
       .maybeSingle();
 
     if (entErr || !entity) {
-      return new Response(
-        JSON.stringify({ ok: false, error: "ENTITY_NOT_FOUND" }),
-        { status: 404, headers: cors }
-      );
+      return json(404, { ok: false, error: "ENTITY_NOT_FOUND" });
     }
 
     // ---------- end any existing ACTIVE subscription (same entity + lane) ----------
@@ -131,9 +141,8 @@ serve(async (req) => {
 
     if (activeErr) throw activeErr;
 
-    if (activeSubs && activeSubs.length > 0) {
+    if (activeSubs?.length) {
       const now = new Date().toISOString();
-
       const { error: endErr } = await supabase
         .from("billing_subscriptions")
         .update({
@@ -143,7 +152,7 @@ serve(async (req) => {
         })
         .in(
           "id",
-          activeSubs.map((s) => s.id)
+          activeSubs.map((s: any) => s.id)
         );
 
       if (endErr) throw endErr;
@@ -175,6 +184,10 @@ serve(async (req) => {
         metadata: {
           created_reason: reason,
           created_by_email: user.email ?? null,
+          tolerated_payload_aliases: {
+            plan_key: body.plan_key ?? null,
+            planKey: body.planKey ?? null,
+          },
         },
       })
       .select()
@@ -182,7 +195,7 @@ serve(async (req) => {
 
     if (insErr) throw insErr;
 
-    // ---------- audit log (optional table, tolerated if missing) ----------
+    // ---------- audit log (best-effort) ----------
     await supabase
       .from("actions_log")
       .insert({
@@ -200,32 +213,26 @@ serve(async (req) => {
           reason,
         },
       })
-      .throwOnError()
+      .then(() => null)
       .catch(() => {
-        /* audit is best-effort */
+        /* best-effort */
       });
 
-    // ---------- response ----------
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        subscription_id: inserted.id,
-        entity_id,
-        status: inserted.status,
-        plan: inserted.plan_key,
-        is_test: laneIsTest,
-      }),
-      { status: 200, headers: cors }
-    );
+    return json(200, {
+      ok: true,
+      subscription_id: inserted.id,
+      entity_id,
+      status: inserted.status,
+      plan: inserted.plan_key,
+      source: inserted.source,
+      is_test: laneIsTest,
+    });
   } catch (e: any) {
     console.error("billing-create-subscription failed:", e);
-    return new Response(
-      JSON.stringify({
-        ok: false,
-        error: "INTERNAL_ERROR",
-        message: e?.message ?? String(e),
-      }),
-      { status: 500, headers: cors }
-    );
+    return json(500, {
+      ok: false,
+      error: "INTERNAL_ERROR",
+      message: e?.message ?? String(e),
+    });
   }
 });
