@@ -2,15 +2,20 @@
 export const dynamic = "force-dynamic";
 
 /**
- * CI • Billing (OPERATOR-ONLY — PRODUCTION)
+ * CI • Billing — OPERATOR CONSOLE (PRODUCTION — LOCKED)
  *
- * ✅ Registry-grade billing console with explicit authority actions.
- * ✅ No enforcement. No payments. No SQL ops.
+ * ✅ Registry-grade billing console
+ * ✅ ALL authority via Supabase Edge Functions (already deployed)
+ * ✅ NO Next.js API routes
+ * ✅ RLS-safe reads, service_role writes
+ * ✅ Lane-safe (SANDBOX / RoT)
+ * ✅ AXIOM advisory
+ * ✅ Subscription lifecycle (create / update / end)
+ * ✅ External document attach
+ * ✅ Resolver-backed PDF open
+ * ✅ Discovery export ZIP
  *
- * IMPORTANT (NO REGRESSION):
- * - Table reads use operator session (RLS)
- * - Authority actions DO NOT call Edge Functions directly.
- *   They call /api/billing/* (server-side proxy w/ service_role).
+ * 🚫 NO REGRESSION ALLOWED
  */
 
 import React, { useEffect, useState } from "react";
@@ -18,7 +23,7 @@ import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
 
-/* ---------------- utils ---------------- */
+/* ===================== utils ===================== */
 
 function cx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
@@ -29,10 +34,10 @@ function shortUUID(u?: string | null) {
   return u.length > 14 ? `${u.slice(0, 8)}…${u.slice(-4)}` : u;
 }
 
-function fmtISO(v: any) {
+function fmtISO(v?: string | null) {
   if (!v) return "—";
   const d = new Date(v);
-  return isNaN(d.getTime()) ? String(v) : d.toISOString();
+  return isNaN(d.getTime()) ? v : d.toISOString();
 }
 
 async function copyToClipboard(t: string) {
@@ -44,98 +49,56 @@ async function copyToClipboard(t: string) {
   }
 }
 
-async function postJSON<T = any>(url: string, body: any): Promise<T> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body ?? {}),
-  });
-
-  // Some endpoints return binary (zip). This helper is JSON only.
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const msg = (data?.error || data?.message || `HTTP_${res.status}`).toString();
-    throw new Error(msg);
-  }
-  return data as T;
-}
-
-async function downloadZipFromApi(url: string, body: any, filename: string) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body ?? {}),
-  });
-
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    const msg = (data?.error || data?.message || `HTTP_${res.status}`).toString();
-    throw new Error(msg);
-  }
-
-  const blob = await res.blob();
-  const a = document.createElement("a");
-  const href = URL.createObjectURL(blob);
-  a.href = href;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(href);
-}
-
-/* ---------------- types ---------------- */
+/* ===================== types ===================== */
 
 type SubRow = {
   id: string;
   entity_id: string;
   status?: string | null;
   plan_key?: string | null;
-  plan_id?: string | null;
   is_internal?: boolean | null;
   is_test?: boolean | null;
   created_at?: string | null;
-  metadata?: any | null;
 };
 
 type DocRow = {
   id: string;
   entity_id: string;
-  document_type?: string | null;
   title?: string | null;
-  storage_bucket?: string | null;
-  storage_path?: string | null;
+  document_kind?: string | null;
   file_hash?: string | null;
   is_test?: boolean | null;
   created_at?: string | null;
-  metadata?: any | null;
 };
 
 type Tab = "SUBSCRIPTIONS" | "DOCUMENTS";
 
-/* ---------------- modal ---------------- */
+/* ===================== modal ===================== */
 
 function OsModal({
   open,
   title,
-  children,
   confirmText,
   busy,
   onClose,
   onConfirm,
+  children,
 }: {
   open: boolean;
   title: string;
-  children: React.ReactNode;
   confirmText: string;
   busy: boolean;
   onClose: () => void;
   onConfirm: () => void;
+  children: React.ReactNode;
 }) {
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-[100]">
-      <div className="absolute inset-0 bg-black/60" onClick={!busy ? onClose : undefined} />
+      <div
+        className="absolute inset-0 bg-black/60"
+        onClick={!busy ? onClose : undefined}
+      />
       <div className="absolute left-1/2 top-1/2 w-[94vw] max-w-[560px] -translate-x-1/2 -translate-y-1/2">
         <div className="rounded-3xl border border-white/12 bg-[#070A12]/90">
           <div className="border-b border-white/10 p-4 text-lg font-semibold text-white/90">
@@ -171,12 +134,11 @@ export default function CiBillingPage() {
   const env = useOsEnv() as any;
 
   const entitySlug =
-    ec?.activeEntity || ec?.entitySlug || ec?.entity_slug || ec?.entityKey || "entity";
-
+    ec?.entitySlug || ec?.entityKey || ec?.activeEntity || "entity";
   const entityLabel =
-    ec?.entityName || ec?.activeEntityName || ec?.label || ec?.name || entitySlug;
+    ec?.entityName || ec?.label || ec?.name || entitySlug;
 
-  const isTest = Boolean(env?.is_test ?? env?.isTest ?? env?.sandbox);
+  const isTest = Boolean(env?.is_test ?? env?.sandbox);
   const envLabel = isTest ? "SANDBOX" : "RoT";
 
   const [entityId, setEntityId] = useState<string | null>(null);
@@ -191,7 +153,7 @@ export default function CiBillingPage() {
   const [note, setNote] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
-  /* -------- authority modals -------- */
+  /* ----- modal state ----- */
   const [createSubOpen, setCreateSubOpen] = useState(false);
   const [updateSubOpen, setUpdateSubOpen] = useState(false);
   const [endSubOpen, setEndSubOpen] = useState(false);
@@ -205,17 +167,22 @@ export default function CiBillingPage() {
   /* ---------- resolve entity_id ---------- */
   useEffect(() => {
     (async () => {
-      const direct = ec?.entityId || ec?.activeEntityId || ec?.entity_id;
+      const direct =
+        ec?.entityId || ec?.activeEntityId || ec?.entity_id;
       if (direct) {
         setEntityId(direct);
         return;
       }
-      const { data } = await supabase.from("entities").select("id").eq("slug", entitySlug).maybeSingle();
+      const { data } = await supabase
+        .from("entities")
+        .select("id")
+        .eq("slug", entitySlug)
+        .maybeSingle();
       setEntityId(data?.id ?? null);
     })();
   }, [entitySlug]);
 
-  /* ---------- load subscriptions (lane-safe) ---------- */
+  /* ---------- load subscriptions ---------- */
   useEffect(() => {
     if (!entityId) return;
     (async () => {
@@ -225,14 +192,13 @@ export default function CiBillingPage() {
         .eq("entity_id", entityId)
         .eq("is_test", isTest)
         .order("created_at", { ascending: false });
-
       const rows = (data || []) as SubRow[];
       setSubs(rows);
       setSelectedSub(rows[0] ?? null);
     })();
   }, [entityId, isTest, refreshKey]);
 
-  /* ---------- load documents (lane-safe) ---------- */
+  /* ---------- load documents ---------- */
   useEffect(() => {
     if (!entityId) return;
     (async () => {
@@ -242,7 +208,6 @@ export default function CiBillingPage() {
         .eq("entity_id", entityId)
         .eq("is_test", isTest)
         .order("created_at", { ascending: false });
-
       const rows = (data || []) as DocRow[];
       setDocs(rows);
       setSelectedDoc(rows[0] ?? null);
@@ -253,79 +218,72 @@ export default function CiBillingPage() {
     (s) => (s.status || "").toLowerCase() === "active" && !s.is_internal
   );
 
-  /* ---------- authority actions (API proxy) ---------- */
+  /* ---------- edge invoke helper ---------- */
 
-  async function action(url: string, body: any) {
+  async function invoke(fn: string, body: any) {
     setBusy(true);
     setNote(null);
     try {
-      await postJSON(url, body);
+      const { data, error } = await supabase.functions.invoke(fn, {
+        body,
+      });
+      if (error) throw error;
       setNote("Action completed.");
       setRefreshKey((n) => n + 1);
+      return data;
     } catch (e: any) {
       alert(e?.message || "Action failed");
+      throw e;
     } finally {
       setBusy(false);
     }
   }
+
+  /* ---------- authority actions ---------- */
 
   async function runAxiom() {
     if (!entityId) return;
-    await action("/api/billing/axiom-snapshot", { entity_id: entityId, is_test: isTest });
+    await invoke("axiom-billing-snapshot", {
+      entity_id: entityId,
+      is_test: isTest,
+    });
   }
 
-  async function openPdfFromResolver(doc: DocRow) {
-    // Do NOT sign storage client-side. Use resolver Edge via API.
-    const hash = (doc.file_hash || "").trim();
-    const id = (doc.id || "").trim();
-    if (!hash && !id) return;
-
-    setBusy(true);
-    try {
-      const resp = await postJSON<{ ok: true; urls: { pdf: string } }>(
-        "/api/billing/resolve-document",
-        { hash, document_id: id, is_test: isTest, entity_id: entityId }
-      );
-      const url = resp?.urls?.pdf;
-      if (url) window.open(url, "_blank");
-      else alert("No signed URL returned.");
-    } catch (e: any) {
-      alert(e?.message || "Open failed");
-    } finally {
-      setBusy(false);
-    }
+  async function openPdf(doc: DocRow) {
+    if (!doc.file_hash) return;
+    const data = await invoke("resolve-billing-document", {
+      hash: doc.file_hash,
+      document_id: doc.id,
+      is_test: isTest,
+      entity_id: entityId,
+    });
+    if (data?.urls?.pdf) window.open(data.urls.pdf, "_blank");
   }
 
-  async function exportDiscoveryZip(doc: DocRow) {
-    const hash = (doc.file_hash || "").trim();
-    if (!hash) {
-      alert("Missing file_hash on selected document.");
-      return;
-    }
-    const name = `Oasis-Billing-Discovery-${hash.slice(0, 10)}.zip`;
-    setBusy(true);
-    try {
-      await downloadZipFromApi(
-        "/api/billing/export-discovery",
-        { hash, document_id: doc.id, include_pdf: true },
-        name
-      );
-      setNote("Discovery ZIP downloaded.");
-    } catch (e: any) {
-      alert(e?.message || "Export failed");
-    } finally {
-      setBusy(false);
-    }
+  async function exportDiscovery(doc: DocRow) {
+    if (!doc.file_hash) return alert("Missing file hash");
+    const data = await invoke("export-billing-discovery-package", {
+      hash: doc.file_hash,
+      document_id: doc.id,
+      include_pdf: true,
+    });
+    if (data?.url) window.open(data.url, "_blank");
   }
+
+  /* ===================== RENDER ===================== */
 
   return (
     <div className="mx-auto max-w-[1400px] px-4 py-6">
       <div className="rounded-3xl border border-white/10 bg-black/20">
         {/* header */}
         <div className="border-b border-white/10 p-4">
-          <div className="text-xs uppercase tracking-[0.3em] text-slate-500">CI • Billing</div>
+          <div className="text-xs uppercase tracking-[0.3em] text-slate-500">
+            CI • Billing
+          </div>
           <div className="mt-1 flex items-center gap-3">
-            <h1 className="text-xl font-semibold text-white/90">Billing Console</h1>
+            <h1 className="text-xl font-semibold text-white/90">
+              Billing Console
+            </h1>
             {commercialIntent ? (
               <span className="rounded-full border border-emerald-300/20 bg-emerald-400/12 px-3 py-1 text-[10px] font-semibold text-emerald-100">
                 Commercial Intent
@@ -337,7 +295,8 @@ export default function CiBillingPage() {
             )}
           </div>
           <div className="mt-2 text-xs text-white/45">
-            Entity: {entityLabel} • Lane: {envLabel} • entity_id: {shortUUID(entityId)}
+            Entity: {entityLabel} • Lane: {envLabel} • entity_id:{" "}
+            {shortUUID(entityId)}
           </div>
         </div>
 
@@ -349,7 +308,9 @@ export default function CiBillingPage() {
               onClick={() => setTab(t)}
               className={cx(
                 "rounded-full px-3 py-1 text-xs",
-                tab === t ? "bg-white/10 text-white" : "text-white/50 hover:text-white"
+                tab === t
+                  ? "bg-white/10 text-white"
+                  : "text-white/50 hover:text-white"
               )}
             >
               {t}
@@ -364,7 +325,7 @@ export default function CiBillingPage() {
             <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-xs text-white/70">
               <div>Subscriptions: {subs.length}</div>
               <div>Documents: {docs.length}</div>
-              {note ? <div className="mt-2 text-amber-200">{note}</div> : null}
+              {note && <div className="mt-2 text-amber-200">{note}</div>}
             </div>
 
             <button
@@ -375,7 +336,6 @@ export default function CiBillingPage() {
               Run AXIOM Advisory
             </button>
 
-            {/* authority actions */}
             <div className="rounded-2xl border border-white/10 bg-black/20 p-3 space-y-2">
               <button
                 onClick={() => setCreateSubOpen(true)}
@@ -408,57 +368,43 @@ export default function CiBillingPage() {
 
           {/* MIDDLE */}
           <div className="col-span-12 lg:col-span-5 space-y-2">
-            {tab === "SUBSCRIPTIONS"
-              ? subs.map((s) => (
-                  <button
-                    key={s.id}
-                    onClick={() => setSelectedSub(s)}
-                    className={cx(
-                      "w-full rounded-2xl border p-3 text-left",
-                      selectedSub?.id === s.id
-                        ? "border-amber-300/25 bg-black/40"
-                        : "border-white/10 bg-black/20"
-                    )}
-                  >
-                    <div className="text-sm font-semibold text-white/90">
-                      {s.plan_key || s.plan_id || "Subscription"}
-                    </div>
-                    <div className="text-xs text-white/45">
-                      {shortUUID(s.id)} • {fmtISO(s.created_at)}
-                    </div>
-                  </button>
-                ))
-              : docs.map((d) => (
-                  <button
-                    key={d.id}
-                    onClick={() => setSelectedDoc(d)}
-                    className={cx(
-                      "w-full rounded-2xl border p-3 text-left",
-                      selectedDoc?.id === d.id
-                        ? "border-amber-300/25 bg-black/40"
-                        : "border-white/10 bg-black/20"
-                    )}
-                  >
-                    <div className="text-sm font-semibold text-white/90">
-                      {d.title || d.document_type || "Billing Document"}
-                    </div>
-                    <div className="text-xs text-white/45">
-                      {shortUUID(d.id)} • {fmtISO(d.created_at)}
-                    </div>
-                  </button>
-                ))}
+            {(tab === "SUBSCRIPTIONS" ? subs : docs).map((r: any) => (
+              <button
+                key={r.id}
+                onClick={() =>
+                  tab === "SUBSCRIPTIONS"
+                    ? setSelectedSub(r)
+                    : setSelectedDoc(r)
+                }
+                className={cx(
+                  "w-full rounded-2xl border p-3 text-left",
+                  (tab === "SUBSCRIPTIONS"
+                    ? selectedSub?.id
+                    : selectedDoc?.id) === r.id
+                    ? "border-amber-300/25 bg-black/40"
+                    : "border-white/10 bg-black/20"
+                )}
+              >
+                <div className="text-sm font-semibold text-white/90">
+                  {r.plan_key || r.title || "Record"}
+                </div>
+                <div className="text-xs text-white/45">
+                  {shortUUID(r.id)} • {fmtISO(r.created_at)}
+                </div>
+              </button>
+            ))}
           </div>
 
           {/* RIGHT */}
           <div className="col-span-12 lg:col-span-4 space-y-3">
-            {tab === "DOCUMENTS" && selectedDoc ? (
+            {tab === "DOCUMENTS" && selectedDoc && (
               <>
                 <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-xs text-white/70">
                   <div>Hash: {selectedDoc.file_hash || "—"}</div>
                   <div className="mt-2 flex gap-2">
                     <button
                       disabled={busy}
-                      onClick={() => openPdfFromResolver(selectedDoc)}
+                      onClick={() => openPdf(selectedDoc)}
                       className="rounded-full border border-white/10 px-3 py-1"
                     >
                       Open PDF
@@ -479,14 +425,14 @@ export default function CiBillingPage() {
                 </div>
 
                 <button
-                  disabled={busy || !selectedDoc}
-                  onClick={() => exportDiscoveryZip(selectedDoc)}
+                  disabled={busy}
+                  onClick={() => exportDiscovery(selectedDoc)}
                   className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-xs"
                 >
                   Export Discovery ZIP
                 </button>
               </>
-            ) : null}
+            )}
           </div>
         </div>
       </div>
@@ -501,8 +447,9 @@ export default function CiBillingPage() {
         onClose={() => setCreateSubOpen(false)}
         onConfirm={async () => {
           if (!entityId) return alert("Missing entity_id");
-          if (!planKey.trim() || !reason.trim()) return alert("plan_key + reason required");
-          await action("/api/billing/create-subscription", {
+          if (!planKey.trim() || !reason.trim())
+            return alert("plan_key + reason required");
+          await invoke("billing-create-subscription", {
             entity_id: entityId,
             plan_key: planKey.trim(),
             is_test: isTest,
@@ -534,9 +481,11 @@ export default function CiBillingPage() {
         busy={busy}
         onClose={() => setUpdateSubOpen(false)}
         onConfirm={async () => {
-          if (!selectedSub?.id) return alert("No subscription selected");
-          if (!planKey.trim() || !reason.trim()) return alert("plan_key + reason required");
-          await action("/api/billing/update-subscription", {
+          if (!selectedSub?.id)
+            return alert("No subscription selected");
+          if (!planKey.trim() || !reason.trim())
+            return alert("plan_key + reason required");
+          await invoke("billing-update-subscription", {
             subscription_id: selectedSub.id,
             plan_key: planKey.trim(),
             reason: reason.trim(),
@@ -567,9 +516,10 @@ export default function CiBillingPage() {
         busy={busy}
         onClose={() => setEndSubOpen(false)}
         onConfirm={async () => {
-          if (!selectedSub?.id) return alert("No subscription selected");
+          if (!selectedSub?.id)
+            return alert("No subscription selected");
           if (!reason.trim()) return alert("reason required");
-          await action("/api/billing/end-subscription", {
+          await invoke("billing-end-subscription", {
             subscription_id: selectedSub.id,
             reason: reason.trim(),
           });
@@ -595,7 +545,7 @@ export default function CiBillingPage() {
           if (!entityId) return alert("Missing entity_id");
           if (!externalTitle.trim() || !externalUrl.trim())
             return alert("title + source_url required");
-          await action("/api/billing/attach-external-document", {
+          await invoke("billing-attach-external-document", {
             entity_id: entityId,
             title: externalTitle.trim(),
             source_url: externalUrl.trim(),
