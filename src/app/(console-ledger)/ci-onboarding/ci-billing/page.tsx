@@ -41,14 +41,19 @@ function fmtISO(v: any) {
 type SubRow = {
   id: string;
   entity_id: string;
+
   status: string | null;
+
+  // plan fields (schema may vary)
   plan_key?: string | null;
   plan_id?: string | null;
 
+  // provider fields (schema may vary)
   payment_provider?: string | null;
   provider_customer_id?: string | null;
   provider_subscription_id?: string | null;
 
+  // time fields (schema may vary)
   started_at?: string | null;
   current_period_start?: string | null;
   current_period_end?: string | null;
@@ -56,6 +61,7 @@ type SubRow = {
   cancel_at?: string | null;
   ended_at?: string | null;
 
+  // governance flags
   is_internal?: boolean | null;
   is_test?: boolean | null;
 
@@ -303,12 +309,10 @@ export default function CiBillingPage() {
                           <Row k="Subscriptions" v={`${subs.length}`} />
                           <Row
                             k="Active"
-                            v={
-                              (() => {
-                                const active = subs.find((s) => (s.status || "").toLowerCase() === "active");
-                                return active ? shortUUID(active.id) : "—";
-                              })()
-                            }
+                            v={(() => {
+                              const active = subs.find((s) => (s.status || "").toLowerCase() === "active");
+                              return active ? shortUUID(active.id) : "—";
+                            })()}
                           />
                           <Row k="Lane" v={envLabel} />
                           <Row k="Entity" v={entitySlug} />
@@ -336,9 +340,7 @@ export default function CiBillingPage() {
                       ) : err ? (
                         <div className="p-4 text-sm text-rose-200">{err}</div>
                       ) : subs.length === 0 ? (
-                        <div className="p-4 text-sm text-white/55">
-                          None registered (valid dormant state).
-                        </div>
+                        <div className="p-4 text-sm text-white/55">None registered (valid dormant state).</div>
                       ) : (
                         <div className="space-y-2 p-2">
                           {subs.map((s) => {
@@ -415,7 +417,9 @@ export default function CiBillingPage() {
                             <Row k="Provider cust" v={(selected.provider_customer_id ?? "—").toString()} />
                             <Row k="Provider sub" v={(selected.provider_subscription_id ?? "—").toString()} />
                             <Row k="Internal" v={(selected.is_internal ?? false) ? "true" : "false"} />
-                            {"is_test" in (selected as any) ? <Row k="Lane flag" v={String((selected as any).is_test)} /> : null}
+                            {"is_test" in (selected as any) ? (
+                              <Row k="Lane flag" v={String((selected as any).is_test)} />
+                            ) : null}
                           </div>
 
                           <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
@@ -455,7 +459,7 @@ export default function CiBillingPage() {
               </div>
             )}
 
-            {/* Optional: Monthly usage view (if present) — we keep it dormant, no regressions */}
+            {/* Optional: Monthly usage view (if present) — dormant, no regressions */}
             <div className="mt-5 rounded-3xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
               <div className="font-semibold text-slate-200">Next (Phase-2, optional)</div>
               <div className="mt-1 leading-relaxed text-slate-400">
@@ -468,7 +472,7 @@ export default function CiBillingPage() {
         </div>
 
         <div className="mt-4 text-[10px] text-white/35">
-          CI-Billing is operator-only visibility. Mutations/invoices come later via dedicated Edge Functions + archive-grade
+          CI-Billing is operator-only visibility. Mutations/invoices come later via dedicated Edge Functions + registry-grade
           receipts (lane-safe, verifiable).
         </div>
       </div>
