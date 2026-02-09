@@ -4,15 +4,11 @@ import { readJson, serviceSupabase } from "../_util";
 export async function POST(req: Request) {
   try {
     const body = await readJson(req);
-    const { entity_id, plan_key, reason, is_test = false } = body ?? {};
-
-    if (!entity_id || !plan_key || !reason) {
-      return NextResponse.json({ ok: false, error: "MISSING_FIELDS" }, { status: 400 });
-    }
-
     const supabase = serviceSupabase();
-    const { data, error } = await supabase.functions.invoke("billing-create-subscription", {
-      body: { entity_id, plan_key, reason, is_test },
+
+    // Your Edge Function name is resolve-billing-document
+    const { data, error } = await supabase.functions.invoke("resolve-billing-document", {
+      body,
     });
 
     if (error) {

@@ -4,20 +4,16 @@ export const dynamic = "force-dynamic";
 /**
  * CI • Billing (OPERATOR-ONLY — PRODUCTION)
  *
- * Registry-grade billing console with explicit authority actions.
- * No enforcement. No payments. No SQL ops.
+ * ✅ Registry-grade billing console with explicit authority actions.
+ * ✅ No enforcement. No payments. No SQL ops.
  *
- * Wired Edge Functions:
- * - billing-create-subscription
- * - billing-update-subscription
- * - billing-end-subscription
- * - billing-generate-document
- * - billing-attach-external-document
- * - export-billing-discovery-package
- * - axiom-billing-snapshot (read-only)
+ * IMPORTANT (NO REGRESSION):
+ * - Table reads use operator session (RLS)
+ * - Authority actions DO NOT call Edge Functions directly.
+ *   They call /api/billing/* (server-side proxy w/ service_role).
  */
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
@@ -46,6 +42,46 @@ async function copyToClipboard(t: string) {
   } catch {
     return false;
   }
+}
+
+async function postJSON<T = any>(url: string, body: any): Promise<T> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+
+  // Some endpoints return binary (zip). This helper is JSON only.
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = (data?.error || data?.message || `HTTP_${res.status}`).toString();
+    throw new Error(msg);
+  }
+  return data as T;
+}
+
+async function downloadZipFromApi(url: string, body: any, filename: string) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const msg = (data?.error || data?.message || `HTTP_${res.status}`).toString();
+    throw new Error(msg);
+  }
+
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  const href = URL.createObjectURL(blob);
+  a.href = href;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(href);
 }
 
 /* ---------------- types ---------------- */
@@ -174,16 +210,12 @@ export default function CiBillingPage() {
         setEntityId(direct);
         return;
       }
-      const { data } = await supabase
-        .from("entities")
-        .select("id")
-        .eq("slug", entitySlug)
-        .maybeSingle();
+      const { data } = await supabase.from("entities").select("id").eq("slug", entitySlug).maybeSingle();
       setEntityId(data?.id ?? null);
     })();
   }, [entitySlug]);
 
-  /* ---------- load subscriptions ---------- */
+  /* ---------- load subscriptions (lane-safe) ---------- */
   useEffect(() => {
     if (!entityId) return;
     (async () => {
@@ -191,13 +223,16 @@ export default function CiBillingPage() {
         .from("billing_subscriptions")
         .select("*")
         .eq("entity_id", entityId)
+        .eq("is_test", isTest)
         .order("created_at", { ascending: false });
-      setSubs((data || []) as SubRow[]);
-      setSelectedSub((data || [])[0] ?? null);
+
+      const rows = (data || []) as SubRow[];
+      setSubs(rows);
+      setSelectedSub(rows[0] ?? null);
     })();
   }, [entityId, isTest, refreshKey]);
 
-  /* ---------- load documents ---------- */
+  /* ---------- load documents (lane-safe) ---------- */
   useEffect(() => {
     if (!entityId) return;
     (async () => {
@@ -205,53 +240,92 @@ export default function CiBillingPage() {
         .from("billing_documents")
         .select("*")
         .eq("entity_id", entityId)
+        .eq("is_test", isTest)
         .order("created_at", { ascending: false });
-      setDocs((data || []) as DocRow[]);
-      setSelectedDoc((data || [])[0] ?? null);
+
+      const rows = (data || []) as DocRow[];
+      setDocs(rows);
+      setSelectedDoc(rows[0] ?? null);
     })();
   }, [entityId, isTest, refreshKey]);
 
-  /* ---------- derived ---------- */
   const commercialIntent = subs.some(
     (s) => (s.status || "").toLowerCase() === "active" && !s.is_internal
   );
 
-  /* ---------- invoke helper ---------- */
-  async function invoke(fn: string, body: any) {
+  /* ---------- authority actions (API proxy) ---------- */
+
+  async function action(url: string, body: any) {
     setBusy(true);
     setNote(null);
     try {
-      const { error } = await supabase.functions.invoke(fn, { body });
-      if (error) throw error;
+      await postJSON(url, body);
       setNote("Action completed.");
       setRefreshKey((n) => n + 1);
     } catch (e: any) {
-      alert(e.message || fn + " failed");
+      alert(e?.message || "Action failed");
     } finally {
       setBusy(false);
     }
   }
 
-  async function openStorage(bucket?: string | null, path?: string | null) {
-    if (!bucket || !path) return;
-    const { data } = await supabase.storage.from(bucket).createSignedUrl(path, 90);
-    if (data?.signedUrl) window.open(data.signedUrl, "_blank");
+  async function runAxiom() {
+    if (!entityId) return;
+    await action("/api/billing/axiom-snapshot", { entity_id: entityId, is_test: isTest });
   }
 
-  /* ================= UI ================= */
+  async function openPdfFromResolver(doc: DocRow) {
+    // Do NOT sign storage client-side. Use resolver Edge via API.
+    const hash = (doc.file_hash || "").trim();
+    const id = (doc.id || "").trim();
+    if (!hash && !id) return;
+
+    setBusy(true);
+    try {
+      const resp = await postJSON<{ ok: true; urls: { pdf: string } }>(
+        "/api/billing/resolve-document",
+        { hash, document_id: id, is_test: isTest, entity_id: entityId }
+      );
+      const url = resp?.urls?.pdf;
+      if (url) window.open(url, "_blank");
+      else alert("No signed URL returned.");
+    } catch (e: any) {
+      alert(e?.message || "Open failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function exportDiscoveryZip(doc: DocRow) {
+    const hash = (doc.file_hash || "").trim();
+    if (!hash) {
+      alert("Missing file_hash on selected document.");
+      return;
+    }
+    const name = `Oasis-Billing-Discovery-${hash.slice(0, 10)}.zip`;
+    setBusy(true);
+    try {
+      await downloadZipFromApi(
+        "/api/billing/export-discovery",
+        { hash, document_id: doc.id, include_pdf: true },
+        name
+      );
+      setNote("Discovery ZIP downloaded.");
+    } catch (e: any) {
+      alert(e?.message || "Export failed");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <div className="mx-auto max-w-[1400px] px-4 py-6">
       <div className="rounded-3xl border border-white/10 bg-black/20">
         {/* header */}
         <div className="border-b border-white/10 p-4">
-          <div className="text-xs uppercase tracking-[0.3em] text-slate-500">
-            CI • Billing
-          </div>
+          <div className="text-xs uppercase tracking-[0.3em] text-slate-500">CI • Billing</div>
           <div className="mt-1 flex items-center gap-3">
-            <h1 className="text-xl font-semibold text-white/90">
-              Billing Console
-            </h1>
+            <h1 className="text-xl font-semibold text-white/90">Billing Console</h1>
             {commercialIntent ? (
               <span className="rounded-full border border-emerald-300/20 bg-emerald-400/12 px-3 py-1 text-[10px] font-semibold text-emerald-100">
                 Commercial Intent
@@ -263,8 +337,7 @@ export default function CiBillingPage() {
             )}
           </div>
           <div className="mt-2 text-xs text-white/45">
-            Entity: {entityLabel} • Lane: {envLabel} • entity_id:{" "}
-            {shortUUID(entityId)}
+            Entity: {entityLabel} • Lane: {envLabel} • entity_id: {shortUUID(entityId)}
           </div>
         </div>
 
@@ -276,9 +349,7 @@ export default function CiBillingPage() {
               onClick={() => setTab(t)}
               className={cx(
                 "rounded-full px-3 py-1 text-xs",
-                tab === t
-                  ? "bg-white/10 text-white"
-                  : "text-white/50 hover:text-white"
+                tab === t ? "bg-white/10 text-white" : "text-white/50 hover:text-white"
               )}
             >
               {t}
@@ -298,12 +369,7 @@ export default function CiBillingPage() {
 
             <button
               disabled={!entityId || busy}
-              onClick={() =>
-                invoke("axiom-billing-snapshot", {
-                  entity_id: entityId,
-                  is_test: isTest,
-                })
-              }
+              onClick={runAxiom}
               className="w-full rounded-2xl border border-sky-300/20 bg-sky-400/12 px-4 py-2 text-xs font-semibold text-sky-100"
             >
               Run AXIOM Advisory
@@ -320,14 +386,14 @@ export default function CiBillingPage() {
               <button
                 disabled={!selectedSub}
                 onClick={() => setUpdateSubOpen(true)}
-                className="w-full rounded-xl border border-amber-300/20 bg-amber-400/12 px-3 py-2 text-xs text-amber-100"
+                className="w-full rounded-xl border border-amber-300/20 bg-amber-400/12 px-3 py-2 text-xs text-amber-100 disabled:opacity-50"
               >
                 Update Subscription
               </button>
               <button
                 disabled={!selectedSub}
                 onClick={() => setEndSubOpen(true)}
-                className="w-full rounded-xl border border-rose-300/20 bg-rose-500/12 px-3 py-2 text-xs text-rose-100"
+                className="w-full rounded-xl border border-rose-300/20 bg-rose-500/12 px-3 py-2 text-xs text-rose-100 disabled:opacity-50"
               >
                 End Subscription
               </button>
@@ -387,21 +453,18 @@ export default function CiBillingPage() {
           <div className="col-span-12 lg:col-span-4 space-y-3">
             {tab === "DOCUMENTS" && selectedDoc ? (
               <>
-                <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-xs">
+                <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-xs text-white/70">
                   <div>Hash: {selectedDoc.file_hash || "—"}</div>
                   <div className="mt-2 flex gap-2">
                     <button
-                      onClick={() =>
-                        openStorage(
-                          selectedDoc.storage_bucket,
-                          selectedDoc.storage_path
-                        )
-                      }
+                      disabled={busy}
+                      onClick={() => openPdfFromResolver(selectedDoc)}
                       className="rounded-full border border-white/10 px-3 py-1"
                     >
                       Open PDF
                     </button>
                     <button
+                      disabled={busy}
                       onClick={async () => {
                         if (selectedDoc.file_hash) {
                           await copyToClipboard(selectedDoc.file_hash);
@@ -416,15 +479,8 @@ export default function CiBillingPage() {
                 </div>
 
                 <button
-                  disabled={!selectedDoc}
-                  onClick={() =>
-                    invoke("export-billing-discovery-package", {
-                      entity_id: entityId,
-                      is_test: isTest,
-                      hash: selectedDoc.file_hash,
-                      document_id: selectedDoc.id,
-                    })
-                  }
+                  disabled={busy || !selectedDoc}
+                  onClick={() => exportDiscoveryZip(selectedDoc)}
                   className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-xs"
                 >
                   Export Discovery ZIP
@@ -443,26 +499,31 @@ export default function CiBillingPage() {
         confirmText="Create"
         busy={busy}
         onClose={() => setCreateSubOpen(false)}
-        onConfirm={() =>
-          invoke("billing-create-subscription", {
+        onConfirm={async () => {
+          if (!entityId) return alert("Missing entity_id");
+          if (!planKey.trim() || !reason.trim()) return alert("plan_key + reason required");
+          await action("/api/billing/create-subscription", {
             entity_id: entityId,
-            plan_key: planKey,
+            plan_key: planKey.trim(),
             is_test: isTest,
-            reason,
-          })
-        }
+            reason: reason.trim(),
+          });
+          setCreateSubOpen(false);
+          setPlanKey("");
+          setReason("");
+        }}
       >
         <input
           placeholder="plan_key"
           value={planKey}
           onChange={(e) => setPlanKey(e.target.value)}
-          className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm"
+          className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90"
         />
         <input
           placeholder="reason (required)"
           value={reason}
           onChange={(e) => setReason(e.target.value)}
-          className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm"
+          className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90"
         />
       </OsModal>
 
@@ -472,25 +533,30 @@ export default function CiBillingPage() {
         confirmText="Update"
         busy={busy}
         onClose={() => setUpdateSubOpen(false)}
-        onConfirm={() =>
-          invoke("billing-update-subscription", {
-            subscription_id: selectedSub?.id,
-            plan_key: planKey,
-            reason,
-          })
-        }
+        onConfirm={async () => {
+          if (!selectedSub?.id) return alert("No subscription selected");
+          if (!planKey.trim() || !reason.trim()) return alert("plan_key + reason required");
+          await action("/api/billing/update-subscription", {
+            subscription_id: selectedSub.id,
+            plan_key: planKey.trim(),
+            reason: reason.trim(),
+          });
+          setUpdateSubOpen(false);
+          setPlanKey("");
+          setReason("");
+        }}
       >
         <input
           placeholder="new plan_key"
           value={planKey}
           onChange={(e) => setPlanKey(e.target.value)}
-          className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm"
+          className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90"
         />
         <input
           placeholder="reason (required)"
           value={reason}
           onChange={(e) => setReason(e.target.value)}
-          className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm"
+          className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90"
         />
       </OsModal>
 
@@ -500,18 +566,22 @@ export default function CiBillingPage() {
         confirmText="End"
         busy={busy}
         onClose={() => setEndSubOpen(false)}
-        onConfirm={() =>
-          invoke("billing-end-subscription", {
-            subscription_id: selectedSub?.id,
-            reason,
-          })
-        }
+        onConfirm={async () => {
+          if (!selectedSub?.id) return alert("No subscription selected");
+          if (!reason.trim()) return alert("reason required");
+          await action("/api/billing/end-subscription", {
+            subscription_id: selectedSub.id,
+            reason: reason.trim(),
+          });
+          setEndSubOpen(false);
+          setReason("");
+        }}
       >
         <input
           placeholder="reason (required)"
           value={reason}
           onChange={(e) => setReason(e.target.value)}
-          className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm"
+          className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90"
         />
       </OsModal>
 
@@ -521,26 +591,32 @@ export default function CiBillingPage() {
         confirmText="Attach"
         busy={busy}
         onClose={() => setAttachOpen(false)}
-        onConfirm={() =>
-          invoke("billing-attach-external-document", {
+        onConfirm={async () => {
+          if (!entityId) return alert("Missing entity_id");
+          if (!externalTitle.trim() || !externalUrl.trim())
+            return alert("title + source_url required");
+          await action("/api/billing/attach-external-document", {
             entity_id: entityId,
-            title: externalTitle,
-            source_url: externalUrl,
+            title: externalTitle.trim(),
+            source_url: externalUrl.trim(),
             is_test: isTest,
-          })
-        }
+          });
+          setAttachOpen(false);
+          setExternalTitle("");
+          setExternalUrl("");
+        }}
       >
         <input
           placeholder="Document title"
           value={externalTitle}
           onChange={(e) => setExternalTitle(e.target.value)}
-          className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm"
+          className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90"
         />
         <input
           placeholder="Source URL"
           value={externalUrl}
           onChange={(e) => setExternalUrl(e.target.value)}
-          className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm"
+          className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90"
         />
       </OsModal>
     </div>
