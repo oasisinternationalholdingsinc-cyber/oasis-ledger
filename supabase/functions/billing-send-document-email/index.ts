@@ -1,405 +1,263 @@
-// supabase/functions/billing-send-document-email/index.ts
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
-/**
- * billing-send-document-email (OS / registry-grade)
- * ✅ Operator-triggered (JWT required) + membership-gated by entity_id
- * ✅ Lane-safe (is_test respected)
- * ✅ Non-blocking: uses EdgeRuntime.waitUntil when available
- * ✅ No schema drift: reads billing_documents defensively
- * ✅ Provider-agnostic: ships with Resend implementation (recommended)
- *
- * Expected billing_documents fields (best-effort):
- * - id (uuid)
- * - entity_id (uuid)
- * - is_test (boolean)
- * - status (text)
- * - title / document_title (text)
- * - document_number / invoice_number (text)
- * - storage_bucket (text) + storage_path (text)  OR  pdf_bucket/pdf_path
- * - file_hash / sha256 / hash (text)
- * - recipient_email / to_email / issued_to_email (text)
- * - metadata (jsonb) for extra details
- */
-
 type ReqBody = {
-  document_id?: string;
-  hash?: string;
-
-  // Optional overrides
-  to?: string;
+  document_id?: string; // uuid
+  hash?: string;        // sha256
+  to_email?: string;    // recipient
+  to_name?: string;
   subject?: string;
+
+  // optional presentation
   message?: string;
 
-  // Delivery options
-  expires_in_seconds?: number; // signed url ttl
-  include_attachment?: boolean; // default false (link-only)
+  // tolerated
+  expires_in?: number;  // not used (future)
 };
 
-const cors = {
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+const SERVICE_ROLE_KEY =
+  Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+
+const RESEND_API_KEY = Deno.env.get("RESEND_API_KEY"); // REQUIRED
+const BILLING_FROM_EMAIL = Deno.env.get("BILLING_FROM_EMAIL") || "billing@oasisintlholdings.com";
+const VERIFY_BASE_URL =
+  Deno.env.get("BILLING_VERIFY_BASE_URL") || "https://sign.oasisintlholdings.com/verify-billing.html";
+
+if (!SUPABASE_URL || !SERVICE_ROLE_KEY) throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
+
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
+
+const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
 function json(status: number, body: unknown) {
-  return new Response(JSON.stringify(body), {
+  return new Response(JSON.stringify(body, null, 2), {
     status,
-    headers: { ...cors, "content-type": "application/json; charset=utf-8" },
+    headers: { ...corsHeaders, "content-type": "application/json" },
   });
 }
 
-function pickString(...vals: Array<unknown>) {
-  for (const v of vals) {
-    if (typeof v === "string" && v.trim()) return v.trim();
-  }
-  return null;
+function isUuid(v: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+}
+function isSha256(v: string) {
+  return /^[a-f0-9]{64}$/i.test(v);
+}
+function safeText(v: unknown, fallback = "") {
+  const s = (v ?? "").toString().trim();
+  return s || fallback;
 }
 
-function safeUpper(s: unknown) {
-  if (typeof s !== "string") return "";
-  return s.trim().toUpperCase();
-}
-
-function isUUIDish(x: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(x);
-}
-
-function nowISO() {
-  return new Date().toISOString();
-}
-
-async function sendViaResend(params: {
-  apiKey: string;
-  from: string;
+async function resendSendEmail(args: {
   to: string;
   subject: string;
   html: string;
-  attachments?: Array<{ filename: string; content: string; content_type: string }>;
+  reply_to?: string;
 }) {
-  const resp = await fetch("https://api.resend.com/emails", {
+  if (!RESEND_API_KEY) throw new Error("RESEND_API_KEY missing");
+
+  const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${params.apiKey}`,
+      "Authorization": `Bearer ${RESEND_API_KEY}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      from: params.from,
-      to: [params.to],
-      subject: params.subject,
-      html: params.html,
-      attachments: params.attachments,
+      from: BILLING_FROM_EMAIL,
+      to: [args.to],
+      subject: args.subject,
+      html: args.html,
+      ...(args.reply_to ? { reply_to: args.reply_to } : {}),
     }),
   });
 
-  const text = await resp.text();
-  if (!resp.ok) {
-    throw new Error(`RESEND_FAILED: ${resp.status} ${text}`);
-  }
+  const text = await res.text();
+  let data: any = null;
+  try { data = JSON.parse(text); } catch {}
 
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { ok: true };
+  if (!res.ok) {
+    const msg = data?.message || text || `HTTP ${res.status}`;
+    throw new Error(`RESEND_FAILED: ${msg}`);
   }
+  return data; // typically { id: "..." }
 }
 
 serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-
-  if (req.method !== "POST") {
-    return json(405, { ok: false, error: "METHOD_NOT_ALLOWED" });
-  }
-
-  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-  const SERVICE_ROLE_KEY =
-    Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-
-  if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
-    return json(500, { ok: false, error: "MISSING_SUPABASE_ENV" });
-  }
-
-  // Email provider (Resend recommended)
-  const RESEND_API_KEY = Deno.env.get("RESEND_API_KEY");
-  const RESEND_FROM = Deno.env.get("RESEND_FROM") || "Oasis Digital Parliament <no-reply@oasisintlholdings.com>";
-
-  // Operator JWT required (do NOT allow anonymous to trigger email sends)
-  const authz = req.headers.get("authorization") || "";
-  const jwt = authz.toLowerCase().startsWith("bearer ") ? authz.slice(7).trim() : "";
-  if (!jwt) return json(401, { ok: false, error: "MISSING_AUTH" });
-
-  let body: ReqBody;
   try {
-    body = (await req.json()) as ReqBody;
-  } catch {
-    return json(400, { ok: false, error: "INVALID_JSON" });
-  }
+    if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+    if (req.method !== "POST") return json(405, { ok: false, error: "METHOD_NOT_ALLOWED" });
 
-  const documentId = pickString(body.document_id);
-  const hash = pickString(body.hash);
+    const body = (await req.json().catch(() => ({}))) as ReqBody;
 
-  if (!documentId && !hash) {
-    return json(400, { ok: false, error: "MISSING_IDENTIFIER", details: "Provide document_id or hash." });
-  }
-  if (documentId && !isUUIDish(documentId)) {
-    return json(400, { ok: false, error: "INVALID_DOCUMENT_ID" });
-  }
+    const document_id = safeText(body.document_id);
+    const hash = safeText(body.hash).toLowerCase();
+    const to_email = safeText(body.to_email);
+    const to_name = safeText(body.to_name);
+    const subjectOverride = safeText(body.subject);
+    const message = safeText(body.message);
 
-  const ttl = Math.max(60, Math.min(Number(body.expires_in_seconds ?? 60 * 60 * 24 * 7), 60 * 60 * 24 * 30)); // 1m..30d
-  const includeAttachment = Boolean(body.include_attachment);
+    if (!document_id && !hash) {
+      return json(400, { ok: false, error: "MISSING_IDENTIFIER", message: "Provide document_id OR hash." });
+    }
+    if (document_id && !isUuid(document_id)) {
+      return json(400, { ok: false, error: "INVALID_DOCUMENT_ID" });
+    }
+    if (hash && !isSha256(hash)) {
+      return json(400, { ok: false, error: "INVALID_HASH" });
+    }
+    if (!to_email) {
+      return json(400, { ok: false, error: "MISSING_TO_EMAIL" });
+    }
 
-  const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
+    // Resolve billing document
+    let doc: any | null = null;
 
-  // 1) Resolve actor (JWT) using service role auth
-  const { data: userRes, error: userErr } = await admin.auth.getUser(jwt);
-  const actor = userRes?.user ?? null;
-  if (userErr || !actor?.id) {
-    return json(401, { ok: false, error: "INVALID_SESSION" });
-  }
+    if (document_id) {
+      const { data, error } = await supabase
+        .from("billing_documents")
+        .select("*")
+        .eq("id", document_id)
+        .maybeSingle();
+      if (error) return json(500, { ok: false, error: "DB_ERROR", details: error.message });
+      doc = data;
+    } else {
+      const { data, error } = await supabase
+        .from("billing_documents")
+        .select("*")
+        .eq("file_hash", hash)
+        .neq("status", "void")
+        .order("issued_at", { ascending: false, nullsFirst: false })
+        .limit(1);
+      if (error) return json(500, { ok: false, error: "DB_ERROR", details: error.message });
+      doc = data?.[0] ?? null;
+    }
 
-  // 2) Load billing document
-  const docQuery = admin.from("billing_documents").select("*").limit(1);
+    if (!doc) {
+      return json(404, { ok: false, error: "NOT_REGISTERED", message: "Billing document not found." });
+    }
 
-  let docResp;
-  if (documentId) docResp = await docQuery.eq("id", documentId).maybeSingle();
-  else docResp = await docQuery.or(`file_hash.eq.${hash},sha256.eq.${hash},hash.eq.${hash}`).maybeSingle();
+    const canonicalHash = safeText(doc.file_hash).toLowerCase();
+    if (!canonicalHash || !isSha256(canonicalHash)) {
+      return json(500, {
+        ok: false,
+        error: "MISSING_CANONICAL_HASH",
+        message: "billing_documents.file_hash missing/invalid.",
+      });
+    }
 
-  if (docResp.error) {
-    return json(500, { ok: false, error: "DOC_LOOKUP_FAILED", details: docResp.error.message });
-  }
+    // Best-effort entity snapshot
+    let entity: any | null = null;
+    if (doc.entity_id) {
+      const { data: ent } = await supabase
+        .from("entities")
+        .select("id, slug, name")
+        .eq("id", doc.entity_id)
+        .maybeSingle();
+      entity = ent ?? null;
+    }
 
-  const doc: any = docResp.data;
-  if (!doc) return json(404, { ok: false, error: "DOC_NOT_FOUND" });
+    const lane = (typeof doc.is_test === "boolean") ? (doc.is_test ? "SANDBOX" : "RoT") : "—";
+    const title = safeText(doc.document_number) || safeText(doc.external_reference) || "Billing Document";
 
-  const entityId = pickString(doc.entity_id);
-  const laneIsTest = Boolean(doc.is_test);
+    const verifyUrl = `${VERIFY_BASE_URL}?hash=${canonicalHash}`;
 
-  if (!entityId) return json(500, { ok: false, error: "DOC_MISSING_ENTITY_ID" });
+    const subject =
+      subjectOverride ||
+      `Oasis Billing • ${title} • ${lane}`;
 
-  // 3) Membership gate (mirrors OS operator model)
-  // memberships: (user_id uuid, entity_id uuid, role text, is_admin boolean)
-  const { data: mem, error: memErr } = await admin
-    .from("memberships")
-    .select("user_id,entity_id,role,is_admin")
-    .eq("user_id", actor.id)
-    .eq("entity_id", entityId)
-    .limit(1)
-    .maybeSingle();
+    const html = `
+<div style="font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;line-height:1.5;color:#0b1220">
+  <div style="max-width:640px;margin:0 auto;padding:24px">
+    <div style="border:1px solid rgba(15,23,42,.12);border-radius:16px;padding:18px 18px 14px;background:#ffffff">
+      <div style="font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:rgba(15,23,42,.55)">
+        Oasis Digital Parliament • Billing
+      </div>
+      <h2 style="margin:10px 0 8px 0;font-size:18px;color:#0b1220">${title}</h2>
 
-  if (memErr) {
-    return json(500, { ok: false, error: "MEMBERSHIP_CHECK_FAILED", details: memErr.message });
-  }
-
-  const role = (mem?.role || "").toString().toLowerCase();
-  const isAdmin = Boolean(mem?.is_admin) || ["owner", "admin", "operator"].includes(role);
-  if (!isAdmin) {
-    return json(403, { ok: false, error: "FORBIDDEN" });
-  }
-
-  // 4) Resolve storage pointer (defensive)
-  const storageBucket =
-    pickString(doc.storage_bucket, doc.pdf_bucket, doc.bucket, doc.source_bucket) || "billing";
-  const storagePath =
-    pickString(doc.storage_path, doc.pdf_path, doc.path, doc.source_path) || null;
-
-  if (!storagePath) {
-    return json(409, {
-      ok: false,
-      error: "DOC_NOT_SEALED",
-      details: "No storage_path found on billing_documents. Generate/seal document first.",
-    });
-  }
-
-  // 5) Create signed URL
-  const { data: signed, error: signedErr } = await admin.storage
-    .from(storageBucket)
-    .createSignedUrl(storagePath, ttl);
-
-  if (signedErr || !signed?.signedUrl) {
-    return json(500, {
-      ok: false,
-      error: "SIGNED_URL_FAILED",
-      details: signedErr?.message || "Unknown error",
-    });
-  }
-
-  // 6) Resolve recipient + subject
-  const meta = (doc.metadata && typeof doc.metadata === "object") ? doc.metadata : {};
-  const recipient =
-    pickString(
-      body.to,
-      doc.recipient_email,
-      doc.to_email,
-      doc.issued_to_email,
-      doc.contact_email,
-      meta?.recipient_email,
-      meta?.to,
-      meta?.email
-    ) || null;
-
-  if (!recipient) {
-    return json(409, {
-      ok: false,
-      error: "MISSING_RECIPIENT",
-      details: "No recipient email found on document or request body.",
-    });
-  }
-
-  const docNo = pickString(doc.document_number, doc.invoice_number, meta?.document_number, meta?.invoice_number);
-  const title = pickString(doc.title, doc.document_title, meta?.title) || "Billing Document";
-  const status = pickString(doc.status) || "issued";
-
-  const subject =
-    pickString(body.subject) ||
-    `Oasis ODP • ${title}${docNo ? ` • ${docNo}` : ""}${laneIsTest ? " • SANDBOX" : ""}`;
-
-  const message =
-    pickString(body.message) ||
-    "Your billing document is ready. Use the secure link below to view/download the PDF.";
-
-  // 7) Prepare email HTML (OS-grade minimal)
-  const hashValue = pickString(doc.file_hash, doc.sha256, doc.hash, meta?.file_hash, meta?.sha256, hash) || "—";
-  const verifyHint =
-    pickString(meta?.verify_url) ||
-    (hashValue !== "—"
-      ? `https://sign.oasisintlholdings.com/verify-billing.html?hash=${encodeURIComponent(hashValue)}`
-      : null);
-
-  const html = `
-  <div style="font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; background:#05070c; padding:24px;">
-    <div style="max-width:640px; margin:0 auto; border:1px solid rgba(255,255,255,.10); border-radius:24px; overflow:hidden; background:rgba(12,18,30,.70);">
-      <div style="padding:18px 20px; border-bottom:1px solid rgba(255,255,255,.08);">
-        <div style="letter-spacing:.28em; text-transform:uppercase; font-size:11px; color:rgba(255,255,255,.55);">
-          Oasis Digital Parliament • Billing
-        </div>
-        <div style="margin-top:8px; font-size:18px; font-weight:700; color:rgba(255,255,255,.92);">
-          ${title}${docNo ? ` — ${docNo}` : ""}
-        </div>
-        <div style="margin-top:6px; font-size:12px; color:rgba(255,255,255,.60);">
-          Status: ${status} • Lane: ${laneIsTest ? "SANDBOX" : "RoT"}
-        </div>
+      <div style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono','Courier New',monospace;
+                  font-size:12px;color:rgba(15,23,42,.78);margin:0 0 12px 0">
+        Lane: <b>${lane}</b><br/>
+        Hash: <b>${canonicalHash}</b><br/>
+        ${entity ? `Entity: <b>${entity.name || entity.slug}</b><br/>` : ""}
       </div>
 
-      <div style="padding:18px 20px;">
-        <div style="font-size:13px; line-height:1.6; color:rgba(255,255,255,.82);">
-          ${message}
-        </div>
+      ${message ? `<div style="margin:12px 0 14px 0;color:rgba(15,23,42,.86)">${message}</div>` : ""}
 
-        <div style="margin-top:16px; padding:14px; border-radius:16px; border:1px solid rgba(255,255,255,.10); background:rgba(255,255,255,.04);">
-          <div style="font-size:11px; letter-spacing:.22em; text-transform:uppercase; color:rgba(255,255,255,.55);">Secure download</div>
-          <div style="margin-top:10px;">
-            <a href="${signed.signedUrl}"
-              style="display:inline-block; padding:10px 14px; border-radius:999px; text-decoration:none;
-                     border:1px solid rgba(255,214,128,.22); background:rgba(255,214,128,.12); color:rgba(255,244,214,.92);
-                     font-weight:700; font-size:12px; letter-spacing:.12em; text-transform:uppercase;">
-              Download PDF
-            </a>
-          </div>
-          <div style="margin-top:10px; font-size:12px; color:rgba(255,255,255,.55);">
-            Link expires in ${Math.round(ttl / 3600)} hours.
-          </div>
-        </div>
+      <a href="${verifyUrl}"
+         style="display:inline-block;padding:12px 14px;border-radius:12px;
+                text-decoration:none;border:1px solid rgba(245,158,11,.35);
+                background:linear-gradient(180deg, rgba(245,158,11,.16), rgba(15,23,42,.02));
+                color:#7a4a00;font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:12px">
+        Verify / View Document
+      </a>
 
-        ${
-          verifyHint
-            ? `
-          <div style="margin-top:14px; font-size:12px; color:rgba(255,255,255,.60);">
-            Verification: <a href="${verifyHint}" style="color:rgba(255,214,128,.92); text-decoration:none;">open verifier</a>
-          </div>`
-            : ""
-        }
-
-        <div style="margin-top:14px; font-size:11px; color:rgba(255,255,255,.45);">
-          Hash: <span style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas; color:rgba(255,255,255,.65);">${hashValue}</span>
-        </div>
-      </div>
-
-      <div style="padding:14px 20px; border-top:1px solid rgba(255,255,255,.08); font-size:11px; color:rgba(255,255,255,.45);">
-        Operator-triggered delivery • Registry-grade document pointers • ${nowISO()}
+      <div style="margin-top:14px;font-size:12px;color:rgba(15,23,42,.58)">
+        This email does not carry authority. The Billing Registry and Verification Terminal remain canonical.
       </div>
     </div>
+
+    <div style="margin-top:10px;font-size:11px;color:rgba(15,23,42,.48)">
+      If you received this in error, you may ignore it. Verification is hash-anchored.
+    </div>
   </div>
-  `;
+</div>
+`;
 
-  // 8) Email provider check
-  if (!RESEND_API_KEY) {
-    return json(500, {
-      ok: false,
-      error: "MISSING_EMAIL_PROVIDER",
-      details: "Set RESEND_API_KEY (and optionally RESEND_FROM) in Supabase Edge env.",
-    });
-  }
+    // send (best effort)
+    let provider_message_id: string | null = null;
+    let sendStatus = "sent";
+    let sendError: string | null = null;
 
-  // 9) Optional attachment (fetch + base64) — default OFF for performance
-  async function buildAttachments() {
-    if (!includeAttachment) return undefined;
-
-    const obj = await admin.storage.from(storageBucket).download(storagePath);
-    if (obj.error || !obj.data) throw new Error(`ATTACHMENT_DOWNLOAD_FAILED: ${obj.error?.message || "no data"}`);
-
-    const bytes = new Uint8Array(await obj.data.arrayBuffer());
-    // base64 encode
-    let bin = "";
-    const chunk = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunk) {
-      bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
-    }
-    const b64 = btoa(bin);
-
-    const filename = `${(docNo || "billing-document").toString().replace(/[^\w.-]+/g, "_")}.pdf`;
-    return [{ filename, content: b64, content_type: "application/pdf" }];
-  }
-
-  // 10) Non-blocking send (preferred)
-  const work = (async () => {
-    const attachments = await buildAttachments();
-    const result = await sendViaResend({
-      apiKey: RESEND_API_KEY!,
-      from: RESEND_FROM,
-      to: recipient,
-      subject,
-      html,
-      attachments,
-    });
-
-    // Optional: record an audit event if you already have a table for it.
-    // We do NOT assume schema here (no insert by default).
-    return result;
-  })();
-
-  // If runtime supports waitUntil, return immediately (async/non-blocking).
-  // Otherwise, await normally.
-  const anyRT: any = (globalThis as any).EdgeRuntime;
-  if (anyRT?.waitUntil) {
     try {
-      anyRT.waitUntil(work);
-      return json(200, {
-        ok: true,
-        queued: true,
+      const r = await resendSendEmail({ to: to_email, subject, html });
+      provider_message_id = r?.id ? String(r.id) : null;
+    } catch (e) {
+      sendStatus = "failed";
+      sendError = e?.message ? String(e.message) : String(e);
+    }
+
+    // audit log (never block response)
+    try {
+      await supabase.from("billing_delivery_events").insert({
+        entity_id: doc.entity_id ?? null,
+        is_test: (typeof doc.is_test === "boolean") ? doc.is_test : null,
         document_id: doc.id,
-        entity_id: entityId,
-        is_test: laneIsTest,
-        to: recipient,
+        file_hash: canonicalHash,
+        channel: "email",
+        recipient: to_email,
+        status: sendStatus,
         provider: "resend",
+        provider_message_id,
+        error: sendError,
+        metadata: {
+          subject,
+          to_name: to_name || null,
+          verify_url: verifyUrl,
+        },
+        created_by: doc.created_by ?? null,
       });
     } catch {
-      // fall through to await
+      // intentionally ignore
     }
-  }
 
-  // Fallback: blocking send (still safe)
-  const sendResult = await work;
-  return json(200, {
-    ok: true,
-    queued: false,
-    document_id: doc.id,
-    entity_id: entityId,
-    is_test: laneIsTest,
-    to: recipient,
-    provider: "resend",
-    result: sendResult ?? null,
-  });
+    return json(200, {
+      ok: sendStatus === "sent",
+      status: sendStatus,
+      document_id: doc.id,
+      file_hash: canonicalHash,
+      lane,
+      verify_url: verifyUrl,
+      provider: "resend",
+      provider_message_id,
+      error: sendError,
+    });
+  } catch (e) {
+    return json(500, { ok: false, error: "SEND_FAILED", details: e?.message ? String(e.message) : String(e) });
+  }
 });
