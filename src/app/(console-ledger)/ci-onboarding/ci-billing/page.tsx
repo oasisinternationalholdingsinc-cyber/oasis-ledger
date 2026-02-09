@@ -2,12 +2,18 @@
 export const dynamic = "force-dynamic";
 
 /**
- * CI • Billing (OPERATOR-ONLY — READ ONLY)
+ * CI • Billing (OPERATOR-ONLY — VISIBILITY + CONTROLLED ACTIONS)
  * ✅ OS-aligned 3-pane console
  * ✅ Contamination-safe: NEVER hardcode corp names
  * ✅ Entity-safe: requires entity_id (uuid), resolves from OS context OR entities.slug
  * ✅ Lane-safe: filters by is_test when column exists, falls back if not
- * ✅ No mutations. No enforcement. No payment actions.
+ * ✅ No enforcement. No payment actions.
+ *
+ * Operator capabilities (PRODUCTION SAFE):
+ * ✅ Read subscriptions (table)
+ * ✅ Read billing documents (table) + open PDF + copy hash
+ * ✅ Generate billing document (Edge Function, service_role)
+ * ✅ Export billing discovery package (Edge Function, non-mutating ZIP)
  */
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -38,22 +44,37 @@ function fmtISO(v: any) {
   }
 }
 
+function safeJson(x: any) {
+  try {
+    if (x == null) return "—";
+    return JSON.stringify(x, null, 2);
+  } catch {
+    return "—";
+  }
+}
+
+async function copyToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 type SubRow = {
   id: string;
   entity_id: string;
 
   status: string | null;
 
-  // plan fields (schema may vary)
   plan_key?: string | null;
   plan_id?: string | null;
 
-  // provider fields (schema may vary)
   payment_provider?: string | null;
   provider_customer_id?: string | null;
   provider_subscription_id?: string | null;
 
-  // time fields (schema may vary)
   started_at?: string | null;
   current_period_start?: string | null;
   current_period_end?: string | null;
@@ -61,7 +82,6 @@ type SubRow = {
   cancel_at?: string | null;
   ended_at?: string | null;
 
-  // governance flags
   is_internal?: boolean | null;
   is_test?: boolean | null;
 
@@ -72,11 +92,115 @@ type SubRow = {
   metadata?: any | null;
 };
 
+type DocRow = {
+  id: string;
+  entity_id: string;
+
+  // expected registry-like fields (your checkpoint says billing_documents is registry-grade)
+  document_type?: string | null; // if present
+  title?: string | null; // if present
+  storage_bucket: string | null;
+  storage_path: string | null;
+  file_hash: string | null;
+
+  // lane + timestamps
+  is_test?: boolean | null;
+  created_at?: string | null;
+  created_by?: string | null;
+
+  metadata?: any | null;
+};
+
+type Tab = "SUBSCRIPTIONS" | "DOCUMENTS";
+
 function Row({ k, v }: { k: string; v: string }) {
   return (
     <div className="flex items-start justify-between gap-4">
       <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">{k}</div>
       <div className="max-w-[72%] text-right text-sm text-white/80 break-words">{v}</div>
+    </div>
+  );
+}
+
+/** Minimal OS Modal (same style family as your other consoles) */
+function OsModal({
+  open,
+  title,
+  subtitle,
+  children,
+  confirmText = "Confirm",
+  cancelText = "Cancel",
+  danger,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  open: boolean;
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
+  confirmText?: string;
+  cancelText?: string;
+  danger?: boolean;
+  busy?: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-[100]">
+      <div
+        className="absolute inset-0 bg-black/60 backdrop-blur-[6px]"
+        onClick={busy ? undefined : onClose}
+      />
+      <div className="absolute left-1/2 top-1/2 w-[94vw] max-w-[620px] -translate-x-1/2 -translate-y-1/2">
+        <div className="relative overflow-hidden rounded-3xl border border-white/12 bg-[#070A12]/80 shadow-[0_40px_160px_rgba(0,0,0,0.70)]">
+          <div className="pointer-events-none absolute inset-0 opacity-60 [background:radial-gradient(900px_500px_at_70%_-20%,rgba(250,204,21,0.14),transparent_55%),radial-gradient(700px_420px_at_10%_0%,rgba(56,189,248,0.10),transparent_50%)]" />
+          <div className="relative border-b border-white/10 p-5">
+            <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">Authority • Action</div>
+            <div className="mt-2 text-xl font-semibold text-white/90">{title}</div>
+            {subtitle ? <div className="mt-1 text-sm text-white/55">{subtitle}</div> : null}
+          </div>
+
+          <div className="relative p-5">{children}</div>
+
+          <div className="relative flex items-center justify-end gap-2 border-t border-white/10 p-4">
+            <button
+              disabled={busy}
+              onClick={onClose}
+              className={cx(
+                "rounded-full border px-4 py-2 text-xs font-semibold transition",
+                busy
+                  ? "border-white/10 bg-white/3 text-white/35"
+                  : "border-white/10 bg-white/5 text-white/75 hover:bg-white/7 hover:border-white/15"
+              )}
+            >
+              {cancelText}
+            </button>
+            <button
+              disabled={busy}
+              onClick={onConfirm}
+              className={cx(
+                "rounded-full border px-4 py-2 text-xs font-semibold transition",
+                danger
+                  ? busy
+                    ? "border-rose-300/15 bg-rose-500/10 text-rose-200/40"
+                    : "border-rose-300/20 bg-rose-500/12 text-rose-100 hover:bg-rose-500/16"
+                  : busy
+                  ? "border-amber-300/15 bg-amber-400/10 text-amber-100/40"
+                  : "border-amber-300/20 bg-amber-400/12 text-amber-100 hover:bg-amber-400/16"
+              )}
+            >
+              {confirmText}
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-3 text-center text-[10px] text-white/35">
+          Mutations only via Edge Functions • Lane-safe • Entity-safe • No enforcement
+        </div>
+      </div>
     </div>
   );
 }
@@ -112,16 +236,41 @@ export default function CiBillingPage() {
   const [entityId, setEntityId] = useState<string | null>(null);
   const [entityIdErr, setEntityIdErr] = useState<string | null>(null);
 
-  // data
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
-  const [subs, setSubs] = useState<SubRow[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // UI
+  const [tab, setTab] = useState<Tab>("SUBSCRIPTIONS");
   const [refreshKey, setRefreshKey] = useState(0);
 
-  const selected = useMemo(
-    () => subs.find((s) => s.id === selectedId) || null,
-    [subs, selectedId]
+  // Subscriptions
+  const [subsLoading, setSubsLoading] = useState(true);
+  const [subsErr, setSubsErr] = useState<string | null>(null);
+  const [subs, setSubs] = useState<SubRow[]>([]);
+  const [selectedSubId, setSelectedSubId] = useState<string | null>(null);
+
+  // Documents
+  const [docsLoading, setDocsLoading] = useState(true);
+  const [docsErr, setDocsErr] = useState<string | null>(null);
+  const [docs, setDocs] = useState<DocRow[]>([]);
+  const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
+
+  // Actions
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  // Modals
+  const [genOpen, setGenOpen] = useState(false);
+  const [genTitle, setGenTitle] = useState("Invoice");
+  const [genMeta, setGenMeta] = useState<string>("{}");
+
+  const [exportOpen, setExportOpen] = useState(false);
+
+  const selectedSub = useMemo(
+    () => subs.find((s) => s.id === selectedSubId) || null,
+    [subs, selectedSubId]
+  );
+
+  const selectedDoc = useMemo(
+    () => docs.find((d) => d.id === selectedDocId) || null,
+    [docs, selectedDocId]
   );
 
   async function resolveEntityId(): Promise<string | null> {
@@ -138,12 +287,7 @@ export default function CiBillingPage() {
 
     // 2) fallback resolver: entities table by slug
     try {
-      const { data, error } = await supabase
-        .from("entities")
-        .select("id")
-        .eq("slug", entitySlug)
-        .maybeSingle();
-
+      const { data, error } = await supabase.from("entities").select("id").eq("slug", entitySlug).maybeSingle();
       if (error) throw error;
       if (data?.id) return data.id as string;
 
@@ -169,23 +313,22 @@ export default function CiBillingPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entitySlug]);
 
-  // Load subscriptions (read-only)
+  // Load subscriptions
   useEffect(() => {
     let alive = true;
 
     (async () => {
-      setLoading(true);
-      setErr(null);
+      setSubsLoading(true);
+      setSubsErr(null);
 
       if (!entityId) {
         setSubs([]);
-        setSelectedId(null);
-        setLoading(false);
+        setSelectedSubId(null);
+        setSubsLoading(false);
         return;
       }
 
       try {
-        // Try with is_test (lane-safe) then fallback if column missing
         const tryWithLane = async () => {
           const { data, error } = await supabase
             .from("billing_subscriptions")
@@ -209,23 +352,19 @@ export default function CiBillingPage() {
         if (res.error && /is_test|42703|undefined column/i.test(res.error.message)) {
           res = await tryWithoutLane();
         }
-
         if (res.error) throw res.error;
 
         const list = (res.data || []) as SubRow[];
         if (!alive) return;
 
         setSubs(list);
-        setSelectedId((prev) => {
-          if (prev && list.some((x) => x.id === prev)) return prev;
-          return list[0]?.id ?? null;
-        });
+        setSelectedSubId((prev) => (prev && list.some((x) => x.id === prev) ? prev : list[0]?.id ?? null));
       } catch (e: any) {
         if (!alive) return;
-        setErr(e?.message || "Failed to load billing_subscriptions.");
+        setSubsErr(e?.message || "Failed to load billing_subscriptions.");
       } finally {
         if (!alive) return;
-        setLoading(false);
+        setSubsLoading(false);
       }
     })();
 
@@ -234,11 +373,164 @@ export default function CiBillingPage() {
     };
   }, [entityId, isTest, refreshKey]);
 
+  // Load documents
+  useEffect(() => {
+    let alive = true;
+
+    (async () => {
+      setDocsLoading(true);
+      setDocsErr(null);
+
+      if (!entityId) {
+        setDocs([]);
+        setSelectedDocId(null);
+        setDocsLoading(false);
+        return;
+      }
+
+      try {
+        const tryWithLane = async () => {
+          const { data, error } = await supabase
+            .from("billing_documents")
+            .select("*")
+            .eq("entity_id", entityId)
+            .eq("is_test", isTest)
+            .order("created_at", { ascending: false });
+          return { data, error };
+        };
+
+        const tryWithoutLane = async () => {
+          const { data, error } = await supabase
+            .from("billing_documents")
+            .select("*")
+            .eq("entity_id", entityId)
+            .order("created_at", { ascending: false });
+          return { data, error };
+        };
+
+        let res = await tryWithLane();
+        if (res.error && /is_test|42703|undefined column/i.test(res.error.message)) {
+          res = await tryWithoutLane();
+        }
+        if (res.error) throw res.error;
+
+        const list = (res.data || []) as DocRow[];
+        if (!alive) return;
+
+        setDocs(list);
+        setSelectedDocId((prev) => (prev && list.some((x) => x.id === prev) ? prev : list[0]?.id ?? null));
+      } catch (e: any) {
+        if (!alive) return;
+        setDocsErr(e?.message || "Failed to load billing_documents.");
+      } finally {
+        if (!alive) return;
+        setDocsLoading(false);
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, [entityId, isTest, refreshKey]);
+
+  // ---- Actions ----
+
+  async function openStorage(bucket: string, path: string) {
+    const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, 90);
+    if (error || !data?.signedUrl) {
+      alert(error?.message || "Could not create signed URL.");
+      return;
+    }
+    window.open(data.signedUrl, "_blank", "noopener,noreferrer");
+  }
+
+  async function actionGenerateDocument() {
+    if (!entityId) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      let parsedMeta: any = {};
+      try {
+        parsedMeta = genMeta?.trim() ? JSON.parse(genMeta) : {};
+      } catch {
+        parsedMeta = { note: "invalid_json_metadata_input" };
+      }
+
+      // SAFE payload: minimal required fields + optional subscription anchor if selected.
+      const body: any = {
+        entity_id: entityId,
+        is_test: isTest,
+        title: genTitle?.trim() || "Invoice",
+        subscription_id: selectedSub?.id ?? null,
+        metadata: parsedMeta,
+      };
+
+      const { data, error } = await supabase.functions.invoke("billing-generate-document", { body });
+      if (error) throw error;
+
+      setNote((data && (data.message || data.detail)) || "Billing document generation requested.");
+      setGenOpen(false);
+
+      // refresh docs after generation
+      setRefreshKey((n) => n + 1);
+    } catch (e: any) {
+      alert(e?.message || "billing-generate-document failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function actionExportDiscovery() {
+    if (!entityId) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      // hash-first (ideal), then doc_id as fallback; never guess ledger concepts here.
+      const body: any = {
+        entity_id: entityId,
+        is_test: isTest,
+        hash: selectedDoc?.file_hash ?? null,
+        document_id: selectedDoc?.id ?? null,
+      };
+
+      const { data, error } = await supabase.functions.invoke("export-billing-discovery-package", { body });
+      if (error) throw error;
+
+      const url =
+        data?.url || data?.signed_url || data?.signedUrl || data?.download_url || data?.downloadUrl || null;
+
+      if (url && typeof url === "string") {
+        window.open(url, "_blank", "noopener,noreferrer");
+        setNote("Discovery package exported.");
+      } else {
+        setNote((data && (data.message || data.detail)) || "Export completed (no URL returned).");
+      }
+
+      setExportOpen(false);
+    } catch (e: any) {
+      alert(e?.message || "export-billing-discovery-package failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const shell =
     "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden";
   const header =
     "border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent px-4 sm:px-6 py-4 sm:py-5";
   const body = "px-4 sm:px-6 py-5 sm:py-6";
+
+  const TabBtn = ({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) => (
+    <button
+      onClick={onClick}
+      className={cx(
+        "rounded-full px-3 py-1 text-[11px] font-medium transition",
+        active ? "bg-white/8 text-white/85 ring-1 ring-white/12" : "text-white/55 hover:text-white/80"
+      )}
+    >
+      {children}
+    </button>
+  );
 
   return (
     <div className="w-full">
@@ -248,10 +540,10 @@ export default function CiBillingPage() {
             <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">CI • Billing</div>
             <h1 className="mt-1 text-lg sm:text-xl font-semibold text-slate-50">Billing Console</h1>
             <p className="mt-1 max-w-3xl text-[11px] sm:text-xs text-slate-400 leading-relaxed">
-              Operator visibility only. No enforcement. No mutations.
+              Operator visibility + controlled registry actions. No enforcement. No payment actions.
             </p>
 
-            <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
+            <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-2 text-[11px] text-slate-400">
               <span>
                 Entity: <span className="text-emerald-300 font-medium">{entityLabel}</span>
               </span>
@@ -262,16 +554,58 @@ export default function CiBillingPage() {
               </span>
               <span className="text-slate-700">•</span>
               <span>
-                entity_id:{" "}
-                <span className="text-slate-200 font-semibold">{entityId ? shortUUID(entityId) : "—"}</span>
+                entity_id: <span className="text-slate-200 font-semibold">{entityId ? shortUUID(entityId) : "—"}</span>
               </span>
 
               <span className="ml-auto" />
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setRefreshKey((n) => n + 1)}
+                  className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+                >
+                  Refresh
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <TabBtn active={tab === "SUBSCRIPTIONS"} onClick={() => setTab("SUBSCRIPTIONS")}>
+                Subscriptions
+              </TabBtn>
+              <TabBtn active={tab === "DOCUMENTS"} onClick={() => setTab("DOCUMENTS")}>
+                Documents
+              </TabBtn>
+
+              <span className="ml-auto" />
+
+              {/* Operator actions (safe) */}
               <button
-                onClick={() => setRefreshKey((n) => n + 1)}
-                className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+                onClick={() => setGenOpen(true)}
+                disabled={!entityId || busy}
+                className={cx(
+                  "rounded-full border px-4 py-2 text-[10px] font-semibold tracking-[0.14em] uppercase transition",
+                  entityId && !busy
+                    ? "border-amber-300/20 bg-amber-400/12 text-amber-100 hover:bg-amber-400/16"
+                    : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
+                )}
+                title="Generates a billing PDF + registry row via Edge Function"
               >
-                Refresh
+                Generate Document
+              </button>
+
+              <button
+                onClick={() => setExportOpen(true)}
+                disabled={!entityId || busy || !selectedDoc}
+                className={cx(
+                  "rounded-full border px-4 py-2 text-[10px] font-semibold tracking-[0.14em] uppercase transition",
+                  entityId && !busy && !!selectedDoc
+                    ? "border-white/10 bg-white/5 text-white/85 hover:border-amber-300/18 hover:bg-white/7"
+                    : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
+                )}
+                title="Exports a non-mutating discovery ZIP via Edge Function"
+              >
+                Export Discovery
               </button>
             </div>
           </div>
@@ -286,7 +620,7 @@ export default function CiBillingPage() {
                 </div>
                 {entityIdErr ? <div className="mt-2 text-rose-200">{entityIdErr}</div> : null}
                 <div className="mt-3 text-[11px] text-white/45">
-                  Contamination-safe • Lane-safe • Read-only • No mutations
+                  Contamination-safe • Lane-safe • Operator-only
                 </div>
               </div>
             ) : (
@@ -296,62 +630,132 @@ export default function CiBillingPage() {
                   <div className="rounded-3xl border border-white/10 bg-black/20 overflow-hidden">
                     <div className="border-b border-white/10 p-4">
                       <div className="text-xs font-semibold tracking-wide text-white/80">Summary</div>
-                      <div className="mt-1 text-[11px] text-white/45">Read-only billing state</div>
+                      <div className="mt-1 text-[11px] text-white/45">Registry state (operator visibility)</div>
                     </div>
 
                     <div className="p-4 space-y-3">
-                      {loading ? (
-                        <div className="text-sm text-white/55">Loading…</div>
-                      ) : err ? (
-                        <div className="text-sm text-rose-200">{err}</div>
-                      ) : (
-                        <>
-                          <Row k="Subscriptions" v={`${subs.length}`} />
-                          <Row
-                            k="Active"
-                            v={(() => {
-                              const active = subs.find((s) => (s.status || "").toLowerCase() === "active");
-                              return active ? shortUUID(active.id) : "—";
-                            })()}
-                          />
-                          <Row k="Lane" v={envLabel} />
-                          <Row k="Entity" v={entitySlug} />
-                        </>
-                      )}
+                      <Row k="Lane" v={envLabel} />
+                      <Row k="Entity" v={entitySlug} />
+                      <Row k="Subscriptions" v={`${subs.length}`} />
+                      <Row k="Documents" v={`${docs.length}`} />
+
+                      <Row
+                        k="Active sub"
+                        v={(() => {
+                          const active = subs.find((s) => (s.status || "").toLowerCase() === "active");
+                          return active ? shortUUID(active.id) : "—";
+                        })()}
+                      />
+                      <Row
+                        k="Latest doc"
+                        v={(() => {
+                          const top = docs[0];
+                          return top ? shortUUID(top.id) : "—";
+                        })()}
+                      />
+
+                      {note ? (
+                        <div className="rounded-2xl border border-white/10 bg-black/25 p-3 text-xs text-white/70">
+                          {note}
+                        </div>
+                      ) : null}
                     </div>
 
                     <div className="border-t border-white/10 p-3 text-[10px] text-white/35">
-                      Source: public.billing_subscriptions • entity_id={shortUUID(entityId)} • lane={envLabel}
+                      Entity-safe • Lane-safe • No enforcement
+                    </div>
+                  </div>
+
+                  <div className="mt-4 rounded-3xl border border-white/10 bg-black/20 p-4">
+                    <div className="text-xs font-semibold tracking-wide text-white/80">Operator notes</div>
+                    <div className="mt-2 text-[11px] leading-relaxed text-white/45">
+                      Documents are registry-grade (bucket/path + SHA-256). Export is non-mutating. Generation is Edge-only.
                     </div>
                   </div>
                 </div>
 
-                {/* MIDDLE: Subscriptions */}
+                {/* MIDDLE: List */}
                 <div className="col-span-12 lg:col-span-5">
                   <div className="rounded-3xl border border-white/10 bg-black/20 overflow-hidden">
                     <div className="border-b border-white/10 p-4">
-                      <div className="text-xs font-semibold tracking-wide text-white/80">Subscriptions</div>
-                      <div className="mt-1 text-[11px] text-white/45">Newest first • select to inspect</div>
+                      <div className="text-xs font-semibold tracking-wide text-white/80">
+                        {tab === "SUBSCRIPTIONS" ? "Subscriptions" : "Documents"}
+                      </div>
+                      <div className="mt-1 text-[11px] text-white/45">
+                        Newest first • select to inspect
+                      </div>
                     </div>
 
                     <div className="max-h-[560px] overflow-auto p-2">
-                      {loading ? (
+                      {tab === "SUBSCRIPTIONS" ? (
+                        subsLoading ? (
+                          <div className="p-4 text-sm text-white/55">Loading…</div>
+                        ) : subsErr ? (
+                          <div className="p-4 text-sm text-rose-200">{subsErr}</div>
+                        ) : subs.length === 0 ? (
+                          <div className="p-4 text-sm text-white/55">None registered (valid dormant state).</div>
+                        ) : (
+                          <div className="space-y-2 p-2">
+                            {subs.map((s) => {
+                              const active = s.id === selectedSubId;
+                              const st = (s.status || "—").toString();
+                              const plan = (s.plan_key || s.plan_id || "—").toString();
+
+                              return (
+                                <button
+                                  key={s.id}
+                                  onClick={() => setSelectedSubId(s.id)}
+                                  className={cx(
+                                    "w-full rounded-2xl border p-4 text-left transition",
+                                    active
+                                      ? "border-amber-300/25 bg-black/35 shadow-[0_0_0_1px_rgba(250,204,21,0.10)]"
+                                      : "border-white/10 bg-black/15 hover:border-white/16 hover:bg-black/22"
+                                  )}
+                                >
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div className="min-w-0">
+                                      <div className="truncate text-sm font-semibold text-white/88">
+                                        {plan === "—" ? "Subscription" : plan}
+                                      </div>
+                                      <div className="mt-1 truncate text-xs text-white/45">
+                                        {shortUUID(s.id)} • {fmtISO(s.created_at)}
+                                      </div>
+                                    </div>
+
+                                    <span
+                                      className={cx(
+                                        "rounded-full border px-3 py-1 text-[11px] font-medium",
+                                        st.toLowerCase() === "active"
+                                          ? "border-emerald-300/18 bg-emerald-400/10 text-emerald-100/90"
+                                          : "border-white/10 bg-white/5 text-white/70"
+                                      )}
+                                    >
+                                      {st}
+                                    </span>
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )
+                      ) : docsLoading ? (
                         <div className="p-4 text-sm text-white/55">Loading…</div>
-                      ) : err ? (
-                        <div className="p-4 text-sm text-rose-200">{err}</div>
-                      ) : subs.length === 0 ? (
-                        <div className="p-4 text-sm text-white/55">None registered (valid dormant state).</div>
+                      ) : docsErr ? (
+                        <div className="p-4 text-sm text-rose-200">{docsErr}</div>
+                      ) : docs.length === 0 ? (
+                        <div className="p-4 text-sm text-white/55">No billing documents yet (valid dormant state).</div>
                       ) : (
                         <div className="space-y-2 p-2">
-                          {subs.map((s) => {
-                            const active = s.id === selectedId;
-                            const st = (s.status || "—").toString();
-                            const plan = (s.plan_key || s.plan_id || "—").toString();
+                          {docs.map((d) => {
+                            const active = d.id === selectedDocId;
+                            const title =
+                              (d.title || d.document_type || "Billing Document").toString();
+                            const hash = d.file_hash || "—";
 
                             return (
                               <button
-                                key={s.id}
-                                onClick={() => setSelectedId(s.id)}
+                                key={d.id}
+                                onClick={() => setSelectedDocId(d.id)}
                                 className={cx(
                                   "w-full rounded-2xl border p-4 text-left transition",
                                   active
@@ -361,23 +765,17 @@ export default function CiBillingPage() {
                               >
                                 <div className="flex items-start justify-between gap-3">
                                   <div className="min-w-0">
-                                    <div className="truncate text-sm font-semibold text-white/88">
-                                      {plan === "—" ? "Subscription" : plan}
-                                    </div>
+                                    <div className="truncate text-sm font-semibold text-white/88">{title}</div>
                                     <div className="mt-1 truncate text-xs text-white/45">
-                                      {shortUUID(s.id)} • {fmtISO(s.created_at)}
+                                      {shortUUID(d.id)} • {fmtISO(d.created_at)}
+                                    </div>
+                                    <div className="mt-1 truncate text-[11px] text-white/35 font-mono">
+                                      {hash === "—" ? "—" : `${hash.slice(0, 14)}…${hash.slice(-10)}`}
                                     </div>
                                   </div>
 
-                                  <span
-                                    className={cx(
-                                      "rounded-full border px-3 py-1 text-[11px] font-medium",
-                                      st.toLowerCase() === "active"
-                                        ? "border-emerald-300/18 bg-emerald-400/10 text-emerald-100/90"
-                                        : "border-white/10 bg-white/5 text-white/70"
-                                    )}
-                                  >
-                                    {st}
+                                  <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-white/70">
+                                    {d.file_hash ? "HASHED" : "PENDING"}
                                   </span>
                                 </div>
                               </button>
@@ -388,7 +786,7 @@ export default function CiBillingPage() {
                     </div>
 
                     <div className="border-t border-white/10 p-3 text-[10px] text-white/35">
-                      Read-only • No enforcement • No mutations
+                      Read-only browsing • Controlled actions via Edge (Generate / Export)
                     </div>
                   </div>
                 </div>
@@ -399,83 +797,269 @@ export default function CiBillingPage() {
                     <div className="border-b border-white/10 p-4">
                       <div className="text-xs font-semibold tracking-wide text-white/80">Details</div>
                       <div className="mt-1 text-[11px] text-white/45">
-                        {selected ? "Subscription details" : "Select a subscription"}
+                        {tab === "SUBSCRIPTIONS"
+                          ? selectedSub
+                            ? "Subscription details"
+                            : "Select a subscription"
+                          : selectedDoc
+                          ? "Document details"
+                          : "Select a document"}
                       </div>
                     </div>
 
                     <div className="p-4">
-                      {!selected ? (
-                        <div className="text-sm text-white/55">Select a row to inspect subscription details.</div>
+                      {tab === "SUBSCRIPTIONS" ? (
+                        !selectedSub ? (
+                          <div className="text-sm text-white/55">Select a subscription to inspect.</div>
+                        ) : (
+                          <div className="space-y-3">
+                            <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
+                              <Row k="Subscription ID" v={selectedSub.id} />
+                              <Row k="Status" v={(selectedSub.status ?? "—").toString()} />
+                              <Row k="Plan key" v={(selectedSub.plan_key ?? "—").toString()} />
+                              <Row k="Plan id" v={(selectedSub.plan_id ?? "—").toString()} />
+                              <Row k="Provider" v={(selectedSub.payment_provider ?? "—").toString()} />
+                              <Row k="Provider cust" v={(selectedSub.provider_customer_id ?? "—").toString()} />
+                              <Row k="Provider sub" v={(selectedSub.provider_subscription_id ?? "—").toString()} />
+                              <Row k="Internal" v={(selectedSub.is_internal ?? false) ? "true" : "false"} />
+                              {"is_test" in (selectedSub as any) ? (
+                                <Row k="Lane flag" v={String((selectedSub as any).is_test)} />
+                              ) : null}
+                            </div>
+
+                            <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
+                              <Row k="Started" v={fmtISO(selectedSub.started_at)} />
+                              <Row k="Period start" v={fmtISO(selectedSub.current_period_start)} />
+                              <Row k="Period end" v={fmtISO(selectedSub.current_period_end)} />
+                              <Row k="Trial ends" v={fmtISO(selectedSub.trial_ends_at)} />
+                              <Row k="Cancel at" v={fmtISO(selectedSub.cancel_at)} />
+                              <Row k="Ended at" v={fmtISO(selectedSub.ended_at)} />
+                            </div>
+
+                            <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                              <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">metadata</div>
+                              <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-5 text-white/70">
+                                {safeJson(selectedSub.metadata ?? {})}
+                              </pre>
+                            </div>
+                          </div>
+                        )
+                      ) : !selectedDoc ? (
+                        <div className="text-sm text-white/55">Select a billing document to inspect.</div>
                       ) : (
                         <div className="space-y-3">
                           <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
-                            <Row k="Subscription ID" v={selected.id} />
-                            <Row k="Status" v={(selected.status ?? "—").toString()} />
-                            <Row k="Plan key" v={(selected.plan_key ?? "—").toString()} />
-                            <Row k="Plan id" v={(selected.plan_id ?? "—").toString()} />
-                            <Row k="Provider" v={(selected.payment_provider ?? "—").toString()} />
-                            <Row k="Provider cust" v={(selected.provider_customer_id ?? "—").toString()} />
-                            <Row k="Provider sub" v={(selected.provider_subscription_id ?? "—").toString()} />
-                            <Row k="Internal" v={(selected.is_internal ?? false) ? "true" : "false"} />
-                            {"is_test" in (selected as any) ? (
-                              <Row k="Lane flag" v={String((selected as any).is_test)} />
+                            <Row k="Document ID" v={selectedDoc.id} />
+                            <Row k="Type" v={(selectedDoc.document_type ?? selectedDoc.title ?? "—").toString()} />
+                            <Row k="Created" v={fmtISO(selectedDoc.created_at)} />
+                            <Row k="Hash" v={(selectedDoc.file_hash ?? "—").toString()} />
+                            <Row
+                              k="Storage"
+                              v={
+                                selectedDoc.storage_bucket && selectedDoc.storage_path
+                                  ? `${selectedDoc.storage_bucket}/${selectedDoc.storage_path}`
+                                  : "—"
+                              }
+                            />
+                            {"is_test" in (selectedDoc as any) ? (
+                              <Row k="Lane flag" v={String((selectedDoc as any).is_test)} />
                             ) : null}
                           </div>
 
-                          <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
-                            <Row k="Started" v={fmtISO(selected.started_at)} />
-                            <Row k="Period start" v={fmtISO(selected.current_period_start)} />
-                            <Row k="Period end" v={fmtISO(selected.current_period_end)} />
-                            <Row k="Trial ends" v={fmtISO(selected.trial_ends_at)} />
-                            <Row k="Cancel at" v={fmtISO(selected.cancel_at)} />
-                            <Row k="Ended at" v={fmtISO(selected.ended_at)} />
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              onClick={() =>
+                                selectedDoc.storage_bucket && selectedDoc.storage_path
+                                  ? openStorage(selectedDoc.storage_bucket, selectedDoc.storage_path)
+                                  : null
+                              }
+                              disabled={!selectedDoc.storage_bucket || !selectedDoc.storage_path}
+                              className={cx(
+                                "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
+                                selectedDoc.storage_bucket && selectedDoc.storage_path
+                                  ? "border-white/10 bg-white/5 text-white/85 hover:border-amber-300/20 hover:bg-white/7"
+                                  : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
+                              )}
+                            >
+                              Open PDF
+                            </button>
+
+                            <button
+                              onClick={async () => {
+                                const txt = selectedDoc.file_hash || "";
+                                if (!txt) return;
+                                const ok = await copyToClipboard(txt);
+                                setNote(ok ? "Hash copied." : "Copy failed.");
+                              }}
+                              disabled={!selectedDoc.file_hash}
+                              className={cx(
+                                "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
+                                selectedDoc.file_hash
+                                  ? "border-amber-300/15 bg-amber-300/10 text-amber-100 hover:bg-amber-300/14"
+                                  : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
+                              )}
+                            >
+                              Copy Hash
+                            </button>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              onClick={async () => {
+                                const ptr =
+                                  selectedDoc.storage_bucket && selectedDoc.storage_path
+                                    ? `${selectedDoc.storage_bucket}/${selectedDoc.storage_path}`
+                                    : "";
+                                if (!ptr) return;
+                                const ok = await copyToClipboard(ptr);
+                                setNote(ok ? "Storage pointer copied." : "Copy failed.");
+                              }}
+                              disabled={!selectedDoc.storage_bucket || !selectedDoc.storage_path}
+                              className={cx(
+                                "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
+                                selectedDoc.storage_bucket && selectedDoc.storage_path
+                                  ? "border-white/10 bg-white/5 text-white/85 hover:border-amber-300/18 hover:bg-white/7"
+                                  : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
+                              )}
+                            >
+                              Copy Pointer
+                            </button>
+
+                            <button
+                              onClick={() => setExportOpen(true)}
+                              disabled={busy || !selectedDoc}
+                              className={cx(
+                                "rounded-2xl border px-4 py-3 text-sm font-semibold transition",
+                                !busy && selectedDoc
+                                  ? "border-white/10 bg-white/5 text-white/85 hover:border-amber-300/18 hover:bg-white/7"
+                                  : "cursor-not-allowed border-white/10 bg-white/3 text-white/35"
+                              )}
+                            >
+                              Export ZIP
+                            </button>
                           </div>
 
                           <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
                             <div className="text-[10px] uppercase tracking-[0.22em] text-white/35">metadata</div>
                             <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-5 text-white/70">
-                              {(() => {
-                                try {
-                                  return JSON.stringify(selected.metadata ?? {}, null, 2);
-                                } catch {
-                                  return "—";
-                                }
-                              })()}
+                              {safeJson(selectedDoc.metadata ?? {})}
                             </pre>
                           </div>
 
                           <div className="text-[10px] text-white/35">
-                            Entity-safe • Lane-safe • No hardcoded names • Read-only
+                            Registry-grade: hash-first verification model • Operator-only
                           </div>
                         </div>
                       )}
                     </div>
 
                     <div className="border-t border-white/10 p-3 text-[10px] text-white/35">
-                      Source: public.billing_subscriptions • entity_id={shortUUID(entityId)} • lane={envLabel}
+                      Entity-safe • Lane-safe • No hardcoded names • No enforcement
                     </div>
                   </div>
                 </div>
               </div>
             )}
 
-            {/* Optional: Monthly usage view (if present) — dormant, no regressions */}
+            {/* Phase-2 hint (kept calm, no drift) */}
             <div className="mt-5 rounded-3xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
-              <div className="font-semibold text-slate-200">Next (Phase-2, optional)</div>
+              <div className="font-semibold text-slate-200">Next (optional)</div>
               <div className="mt-1 leading-relaxed text-slate-400">
-                You already have <span className="text-slate-200 font-semibold">v_billing_usage_monthly</span>. We can
-                surface it as a History tab once entity_id resolution is stable everywhere. No enforcement until you
-                explicitly turn it on.
+                Surface <span className="text-slate-200 font-semibold">billing_documents</span> verification (public
+                verify-billing) once you want external proof. Still no enforcement until you explicitly turn it on.
               </div>
             </div>
           </div>
         </div>
 
         <div className="mt-4 text-[10px] text-white/35">
-          CI-Billing is operator-only visibility. Mutations/invoices come later via dedicated Edge Functions + registry-grade
-          receipts (lane-safe, verifiable).
+          CI-Billing is internal operator tooling. Generation + export are Edge-only. No payments, no enforcement, no SQL required for daily ops.
         </div>
       </div>
+
+      {/* Generate document modal */}
+      <OsModal
+        open={genOpen}
+        title="Generate billing document"
+        subtitle={`${entityLabel} • ${envLabel}${selectedSub ? ` • sub:${shortUUID(selectedSub.id)}` : ""}`}
+        confirmText={busy ? "Working…" : "Generate"}
+        cancelText="Cancel"
+        busy={busy}
+        onClose={() => (!busy ? setGenOpen(false) : null)}
+        onConfirm={actionGenerateDocument}
+      >
+        <div className="space-y-3">
+          <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+            <div className="text-sm text-white/80">
+              This calls <span className="font-semibold">billing-generate-document</span> (Edge). It generates a PDF and registers it.
+            </div>
+            <div className="mt-2 text-xs text-white/45">
+              No enforcement. No payment. Lane-safe via <span className="font-mono">is_test</span>.
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+            <div className="text-xs uppercase tracking-[0.22em] text-white/35">title</div>
+            <input
+              value={genTitle}
+              onChange={(e) => setGenTitle(e.target.value)}
+              className="mt-2 w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white/85 outline-none focus:border-amber-300/25"
+              placeholder="Invoice"
+            />
+            <div className="mt-2 text-xs text-white/45">
+              This is operator-visible metadata only (does not alter enforcement).
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+            <div className="text-xs uppercase tracking-[0.22em] text-white/35">metadata (json)</div>
+            <textarea
+              value={genMeta}
+              onChange={(e) => setGenMeta(e.target.value)}
+              className="mt-2 w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white/85 outline-none focus:border-amber-300/25 font-mono"
+              rows={5}
+              placeholder='{"note":"internal test"}'
+            />
+            <div className="mt-2 text-xs text-white/45">
+              Safe payload. If invalid JSON, generation still proceeds with a minimal fallback marker.
+            </div>
+          </div>
+        </div>
+      </OsModal>
+
+      {/* Export modal */}
+      <OsModal
+        open={exportOpen}
+        title="Export billing discovery package"
+        subtitle={selectedDoc ? `${selectedDoc.document_type || "Document"} • ${shortUUID(selectedDoc.id)}` : `${entityLabel} • ${envLabel}`}
+        confirmText={busy ? "Working…" : "Export"}
+        cancelText="Cancel"
+        busy={busy}
+        onClose={() => (!busy ? setExportOpen(false) : null)}
+        onConfirm={actionExportDiscovery}
+      >
+        <div className="space-y-3">
+          <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+            <div className="text-sm text-white/80">
+              This calls <span className="font-semibold">export-billing-discovery-package</span> (Edge).
+            </div>
+            <div className="mt-2 text-xs text-white/45">
+              Hash-first when available (<span className="font-mono">file_hash</span>). Non-mutating ZIP.
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-black/20 p-4 space-y-2">
+            <Row k="entity_id" v={entityId ? entityId : "—"} />
+            <Row k="lane" v={envLabel} />
+            <Row k="document_id" v={selectedDoc ? selectedDoc.id : "—"} />
+            <Row k="hash" v={selectedDoc?.file_hash || "—"} />
+          </div>
+
+          <div className="text-[11px] text-white/45">
+            If your Edge function expects different keys, it will return a clear error and we’ll align the payload — no SQL required.
+          </div>
+        </div>
+      </OsModal>
     </div>
   );
 }
