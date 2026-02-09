@@ -7,6 +7,7 @@ type ReqBody = {
   hash?: string;        // sha256 hex
   document_id?: string; // uuid
   include_pdf?: boolean;
+
   // tolerated (future-proofing)
   expires_in?: number;
 };
@@ -87,11 +88,15 @@ serve(async (req) => {
     // Resolve billing document (registry)
     // -------------------------
     // IMPORTANT: This assumes billing_documents has:
-    // id, entity_id, is_test, status, title, document_number/invoice_number (optional),
+    // id, entity_id, is_test, status, document_number (optional),
     // issued_at (optional), total_amount (optional),
     // file_hash (sha256), storage_bucket, storage_path
     //
-    // If your column names differ, tell me and I’ll adjust EXACTLY.
+    // Columns confirmed in your screenshot:
+    // id, entity_id, is_test, subscription_id, document_type, status, document_number,
+    // external_reference, period_start, period_end, issued_at, voided_at, currency,
+    // subtotal_amount, tax_amount, total_amount, storage_bucket, storage_path, file_hash,
+    // content_type, file_size_bytes, line_items, metadata, created_by, created_at, updated_at
     let doc: any | null = null;
 
     if (document_id) {
@@ -162,15 +167,16 @@ serve(async (req) => {
     // -------------------------
     const nowIso = new Date().toISOString();
     const lane = (typeof doc.is_test === "boolean") ? (doc.is_test ? "SANDBOX" : "RoT") : "—";
-    const title =
-      doc.title ||
-      doc.invoice_title ||
-      doc.document_number ||
-      doc.invoice_number ||
-      "Billing Document";
+
+    // Enterprise: stable, schema-aligned title (never assume doc.title exists)
+    const title = (() => {
+      const dt = doc.document_type ? String(doc.document_type) : "billing_document";
+      const num = doc.document_number ? String(doc.document_number) : null;
+      return num ? `${dt} ${num}` : dt;
+    })();
 
     const baseName = safeFileName(
-      (doc.document_number || doc.invoice_number || "") ? `${doc.document_number || doc.invoice_number}` : title,
+      (doc.document_number ? String(doc.document_number) : "") || title,
     );
 
     const verification = {
@@ -178,14 +184,33 @@ serve(async (req) => {
       kind: "billing_document",
       file_hash: canonicalHash,
       document_id: doc.id,
-      entity_id: doc.entity_id || null,
+      subscription_id: doc.subscription_id ?? null,
+      entity_id: doc.entity_id ?? null,
       is_test: (typeof doc.is_test === "boolean") ? doc.is_test : null,
       lane,
-      status: doc.status || null,
-      issued_at: doc.issued_at || null,
+      status: doc.status ?? null,
+      document_type: doc.document_type ?? null,
+      document_number: doc.document_number ?? null,
+      period_start: doc.period_start ?? null,
+      period_end: doc.period_end ?? null,
+      issued_at: doc.issued_at ?? null,
+      voided_at: doc.voided_at ?? null,
+      currency: doc.currency ?? null,
+      subtotal_amount: doc.subtotal_amount ?? null,
+      tax_amount: doc.tax_amount ?? null,
+      total_amount: doc.total_amount ?? null,
       exported_at: nowIso,
       verifier: "Oasis Digital Parliament • Billing Registry",
+      // NOTE: This is Step-4 surface you’re about to add. Keeping it here is fine (non-breaking).
       verify_url: `https://sign.oasisintlholdings.com/verify-billing.html?hash=${canonicalHash}`,
+      storage: include_pdf
+        ? {
+            bucket: storage_bucket,
+            path: storage_path,
+            content_type: doc.content_type ?? null,
+            size_bytes: doc.file_size_bytes ?? null,
+          }
+        : null,
     };
 
     const manifest = {
@@ -196,20 +221,25 @@ serve(async (req) => {
       document: {
         id: doc.id,
         title,
-        status: doc.status || null,
+        status: doc.status ?? null,
+        document_type: doc.document_type ?? null,
+        document_number: doc.document_number ?? null,
+        external_reference: doc.external_reference ?? null,
+        subscription_id: doc.subscription_id ?? null,
         is_test: (typeof doc.is_test === "boolean") ? doc.is_test : null,
-        entity_id: doc.entity_id || null,
-        issued_at: doc.issued_at || null,
-        total_amount: doc.total_amount ?? null,
+        entity_id: doc.entity_id ?? null,
+        period_start: doc.period_start ?? null,
+        period_end: doc.period_end ?? null,
+        issued_at: doc.issued_at ?? null,
+        voided_at: doc.voided_at ?? null,
         currency: doc.currency ?? null,
+        subtotal_amount: doc.subtotal_amount ?? null,
+        tax_amount: doc.tax_amount ?? null,
+        total_amount: doc.total_amount ?? null,
         file_hash: canonicalHash,
-        storage: include_pdf
-          ? { bucket: storage_bucket, path: storage_path }
-          : null,
+        storage: include_pdf ? { bucket: storage_bucket, path: storage_path } : null,
       },
-      entity: entity
-        ? { id: entity.id, slug: entity.slug, name: entity.name }
-        : null,
+      entity: entity ? { id: entity.id, slug: entity.slug, name: entity.name } : null,
       files: [
         { path: "README.txt", type: "text/plain" },
         { path: "manifest.json", type: "application/json" },
@@ -220,6 +250,9 @@ serve(async (req) => {
       notes: [
         "This ZIP is non-mutating and registry-derived.",
         "Canonical integrity is anchored by verification.json.file_hash.",
+        include_pdf
+          ? "billing.pdf is fetched from private storage using service_role and included for court-grade export."
+          : "PDF was not included (include_pdf=false).",
       ],
     };
 
@@ -255,7 +288,7 @@ Lane
 Exported At
 -----------
 - ${nowIso}
-`;
+`.trim();
 
     const zipFiles: Record<string, Uint8Array> = {
       "README.txt": strToU8(readme),
@@ -265,7 +298,7 @@ Exported At
     };
 
     if (include_pdf) {
-      const pdfBytes = await downloadPdf(storage_bucket, storage_path);
+      const pdfBytes = await downloadPdf(String(storage_bucket), String(storage_path));
       zipFiles["billing.pdf"] = pdfBytes;
     }
 
