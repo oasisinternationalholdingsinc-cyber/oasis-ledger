@@ -1,188 +1,220 @@
+// supabase/functions/billing-end-subscription/index.ts
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 /**
- * billing-end-subscription
+ * billing-end-subscription (PRODUCTION — LOCKED)
  *
- * OPERATOR-ONLY
- * REGISTRY-GRADE
- * NO DELETES
- * NO PAYMENTS
- * NO AUTO-REPLACEMENT
+ * ✅ OPERATOR-ONLY (requires valid user session)
+ * ✅ REGISTRY-GRADE
+ * ✅ NO DELETES
+ * ✅ NO PAYMENTS
+ * ✅ NO AUTO-REPLACEMENT
+ * ✅ Idempotent (if already ended, returns ok)
  *
- * Explicitly ends a billing subscription.
- * Preserves full history.
+ * Ends a billing subscription explicitly and preserves full history.
  */
 
 type ReqBody = {
-  subscription_id: string;      // REQUIRED
-  ended_at?: string | null;     // optional ISO (defaults to now)
-  reason: string;               // REQUIRED
+  subscription_id: string;  // REQUIRED
+  ended_at?: string | null; // optional ISO (defaults to now)
+  reason: string;           // REQUIRED
+  trigger?: string;         // tolerated
 };
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers":
-    "authorization, apikey, content-type, x-client-info",
+    "authorization, Authorization, apikey, content-type, x-client-info",
+  "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
-serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: cors });
-  }
+function json(status: number, body: unknown) {
+  return new Response(JSON.stringify(body, null, 2), {
+    status,
+    headers: { ...cors, "content-type": "application/json; charset=utf-8" },
+  });
+}
+
+function pickBearer(req: Request) {
+  const h = req.headers.get("authorization") || req.headers.get("Authorization") || "";
+  return h.startsWith("Bearer ") ? h : "";
+}
+
+function safeIso(input?: string | null) {
+  if (!input?.trim()) return null;
+  const d = new Date(input);
+  if (isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
+serve(async (req: Request) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+  const request_id = req.headers.get("x-sb-request-id");
 
   if (req.method !== "POST") {
-    return new Response(
-      JSON.stringify({ ok: false, error: "METHOD_NOT_ALLOWED" }),
-      { status: 405, headers: cors }
-    );
+    return json(405, { ok: false, error: "METHOD_NOT_ALLOWED", request_id });
   }
 
   try {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+    const ANON_KEY =
+      Deno.env.get("SUPABASE_ANON_KEY") ??
+      Deno.env.get("SUPABASE_ANON_KEY_PUBLIC");
     const SERVICE_ROLE_KEY =
       Deno.env.get("SERVICE_ROLE_KEY") ??
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-    if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
-      throw new Error("Missing Supabase env vars");
+    if (!SUPABASE_URL || !ANON_KEY || !SERVICE_ROLE_KEY) {
+      return json(500, { ok: false, error: "MISSING_ENV", request_id });
     }
 
-    // ---------- auth (operator required) ----------
-    const authHeader = req.headers.get("authorization");
-    if (!authHeader) {
-      return new Response(
-        JSON.stringify({ ok: false, error: "UNAUTHORIZED" }),
-        { status: 401, headers: cors }
-      );
+    // -----------------------------
+    // Auth: operator required
+    // (validate session using ANON)
+    // -----------------------------
+    const bearer = pickBearer(req);
+    if (!bearer) {
+      return json(401, { ok: false, error: "UNAUTHORIZED", request_id });
     }
 
-    const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-      global: { headers: { authorization: authHeader } },
+    const userClient = createClient(SUPABASE_URL, ANON_KEY, {
+      global: { headers: { Authorization: bearer } }, // NOTE: proper casing
+      auth: { persistSession: false },
     });
 
-    const {
-      data: { user },
-      error: userErr,
-    } = await supabase.auth.getUser();
+    const { data: userRes, error: userErr } = await userClient.auth.getUser();
+    if (userErr || !userRes?.user?.id) {
+      return json(401, { ok: false, error: "INVALID_SESSION", request_id });
+    }
+    const actor_id = userRes.user.id;
+    const actor_email = userRes.user.email ?? null;
 
-    if (userErr || !user) {
-      return new Response(
-        JSON.stringify({ ok: false, error: "INVALID_SESSION" }),
-        { status: 401, headers: cors }
-      );
+    // -----------------------------
+    // Parse + validate input
+    // -----------------------------
+    const body = (await req.json().catch(() => ({}))) as ReqBody;
+    const subscription_id = (body.subscription_id || "").trim();
+    const reason = (body.reason || "").trim();
+
+    if (!subscription_id || !reason) {
+      return json(400, {
+        ok: false,
+        error: "MISSING_REQUIRED_FIELDS",
+        required: ["subscription_id", "reason"],
+        request_id,
+      });
     }
 
-    // ---------- parse + validate ----------
-    const body = (await req.json()) as ReqBody;
-    const { subscription_id, ended_at, reason } = body;
+    const endedAt =
+      safeIso(body.ended_at) ?? new Date().toISOString();
+    const now = new Date().toISOString();
 
-    if (!subscription_id || !reason?.trim()) {
-      return new Response(
-        JSON.stringify({
-          ok: false,
-          error: "MISSING_REQUIRED_FIELDS",
-          required: ["subscription_id", "reason"],
-        }),
-        { status: 400, headers: cors }
-      );
-    }
+    // -----------------------------
+    // Service client: registry writes
+    // -----------------------------
+    const svc = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+      global: { fetch },
+      auth: { persistSession: false },
+    });
 
-    // ---------- load subscription ----------
-    const { data: sub, error: subErr } = await supabase
+    // Load subscription (include metadata so we merge, not overwrite)
+    const { data: sub, error: subErr } = await svc
       .from("billing_subscriptions")
-      .select("id, status, entity_id, is_test")
+      .select("id, status, entity_id, is_test, metadata")
       .eq("id", subscription_id)
       .maybeSingle();
 
-    if (subErr) throw subErr;
+    if (subErr) {
+      return json(500, {
+        ok: false,
+        error: "FAILED",
+        details: subErr.message,
+        request_id,
+      });
+    }
 
     if (!sub) {
-      return new Response(
-        JSON.stringify({ ok: false, error: "SUBSCRIPTION_NOT_FOUND" }),
-        { status: 404, headers: cors }
-      );
+      return json(404, {
+        ok: false,
+        error: "SUBSCRIPTION_NOT_FOUND",
+        request_id,
+      });
     }
 
-    // Already ended? Idempotent-safe exit
-    if (String(sub.status).toLowerCase() === "ended") {
-      return new Response(
-        JSON.stringify({
-          ok: true,
-          subscription_id: sub.id,
-          status: "ended",
-          note: "Subscription already ended (no action taken).",
-        }),
-        { status: 200, headers: cors }
-      );
+    // Idempotent: already ended
+    if ((sub.status || "").toLowerCase() === "ended") {
+      return json(200, {
+        ok: true,
+        subscription_id: sub.id,
+        status: "ended",
+        note: "Subscription already ended (no action taken).",
+        request_id,
+      });
     }
 
-    const endAt =
-      ended_at && ended_at.trim()
-        ? new Date(ended_at).toISOString()
-        : new Date().toISOString();
+    // Update subscription (preserve existing metadata)
+    const mergedMeta = {
+      ...(sub.metadata ?? {}),
+      ended_reason: reason,
+      ended_at: endedAt,
+      ended_by: actor_id,
+      ended_by_email: actor_email,
+      trigger: body.trigger ?? null,
+    };
 
-    const now = new Date().toISOString();
-
-    // ---------- end subscription ----------
-    const { error: updErr } = await supabase
+    const { error: updErr } = await svc
       .from("billing_subscriptions")
       .update({
         status: "ended",
-        ended_at: endAt,
+        ended_at: endedAt,
         updated_at: now,
-        metadata: {
-          ...(sub as any)?.metadata,
-          ended_reason: reason,
-          ended_by: user.id,
-          ended_by_email: user.email ?? null,
-        },
+        metadata: mergedMeta,
       })
       .eq("id", subscription_id);
 
-    if (updErr) throw updErr;
+    if (updErr) {
+      return json(500, {
+        ok: false,
+        error: "FAILED",
+        details: updErr.message,
+        request_id,
+      });
+    }
 
-    // ---------- audit log (best-effort) ----------
-    await supabase
+    // Best-effort audit
+    await svc
       .from("actions_log")
       .insert({
-        actor_uid: user.id,
+        actor_uid: actor_id,
         action: "BILLING_END_SUBSCRIPTION",
         target_table: "billing_subscriptions",
         target_id: subscription_id,
         details_json: {
           entity_id: sub.entity_id,
           is_test: sub.is_test,
-          ended_at: endAt,
+          ended_at: endedAt,
           reason,
+          trigger: body.trigger ?? null,
         },
       })
       .throwOnError()
-      .catch(() => {
-        /* audit is best-effort */
-      });
+      .catch(() => {});
 
-    // ---------- response ----------
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        subscription_id,
-        status: "ended",
-        ended_at: endAt,
-      }),
-      { status: 200, headers: cors }
-    );
+    return json(200, {
+      ok: true,
+      subscription_id,
+      status: "ended",
+      ended_at: endedAt,
+      request_id,
+    });
   } catch (e: any) {
-    console.error("billing-end-subscription failed:", e);
-    return new Response(
-      JSON.stringify({
-        ok: false,
-        error: "INTERNAL_ERROR",
-        message: e?.message ?? String(e),
-      }),
-      { status: 500, headers: cors }
-    );
+    return json(500, {
+      ok: false,
+      error: "INTERNAL_ERROR",
+      message: e?.message ?? String(e),
+    });
   }
 });
