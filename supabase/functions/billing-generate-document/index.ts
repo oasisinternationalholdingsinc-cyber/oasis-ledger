@@ -22,6 +22,12 @@ import { PNG } from "npm:pngjs@7.0.0";
  *    is_test=true  -> billing_sandbox
  *    is_test=false -> billing_truth
  *
+ * Idempotency (enterprise, no regression):
+ * - If invoice_number provided: UPSERT by (entity_id,is_test,invoice_number) and overwrite pointers/hash.
+ * - Else if document_number provided: UPSERT by (entity_id,is_test,document_number).
+ * - Else: UPSERT by file_hash (unique).
+ * - Storage upload uses upsert:true to avoid 409 on repeated clicks.
+ *
  * IMPORTANT:
  * - Writes ONLY columns that EXIST on billing_documents (per your screenshots).
  * - Uses entity_id as canonical issuer scope.
@@ -108,10 +114,10 @@ function getRequestId(req: Request) {
 
 function json(status: number, body: unknown, req: Request) {
   const request_id = getRequestId(req);
-  return new Response(JSON.stringify({ ...(body as any), request_id } satisfies Resp, null, 2), {
-    status,
-    headers: { ...cors, "content-type": "application/json; charset=utf-8" },
-  });
+  return new Response(
+    JSON.stringify({ ...(body as any), request_id } satisfies Resp, null, 2),
+    { status, headers: { ...cors, "content-type": "application/json; charset=utf-8" } },
+  );
 }
 
 function pickBearer(req: Request) {
@@ -162,6 +168,15 @@ function winAnsiSafe(input: unknown): string {
     .replaceAll("\u00A0", " ");
   out = out.replace(/[^\x09\x0A\x0D\x20-\x7E]/g, "");
   return out;
+}
+
+function slugSafe(input: string) {
+  return winAnsiSafe(input)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
 }
 
 // -----------------------------------------------------------------------------
@@ -235,7 +250,7 @@ function sumLineItems(items: LineItem[]) {
     subtotal += amt;
 
     return {
-      description: desc.slice(0, 160),
+      description: desc.slice(0, 240),
       quantity: qty,
       unit_price: unit,
       amount: amt,
@@ -252,7 +267,48 @@ function money(currency: string, major: number) {
 }
 
 // -----------------------------------------------------------------------------
-// PDF builder (enterprise style)
+// Text wrapping (simple, stable)
+// -----------------------------------------------------------------------------
+function wrapText(
+  text: string,
+  font: any,
+  size: number,
+  maxWidth: number,
+  maxLines: number,
+): string[] {
+  const s = winAnsiSafe(text).trim();
+  if (!s) return ["—"];
+
+  const words = s.split(/\s+/g);
+  const lines: string[] = [];
+  let line = "";
+
+  const fits = (t: string) => font.widthOfTextAtSize(t, size) <= maxWidth;
+
+  for (const w of words) {
+    const candidate = line ? `${line} ${w}` : w;
+    if (fits(candidate)) {
+      line = candidate;
+      continue;
+    }
+    if (line) lines.push(line);
+    line = w;
+
+    if (lines.length >= maxLines) break;
+  }
+  if (lines.length < maxLines && line) lines.push(line);
+
+  // hard truncate if still too wide (single long token)
+  return lines.slice(0, maxLines).map((ln) => {
+    if (fits(ln)) return ln;
+    let out = ln;
+    while (out.length > 1 && !fits(out + "...")) out = out.slice(0, -1);
+    return out.length < ln.length ? out + "..." : out;
+  });
+}
+
+// -----------------------------------------------------------------------------
+// PDF builder (enterprise style — improved)
 // -----------------------------------------------------------------------------
 async function buildOasisBillingPdf(args: {
   docType: string;
@@ -303,16 +359,29 @@ async function buildOasisBillingPdf(args: {
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
 
+  // Palette (quiet authority)
   const ink = rgb(0.12, 0.14, 0.18);
-  const muted = rgb(0.45, 0.48, 0.55);
+  const muted = rgb(0.42, 0.46, 0.54);
+  const faint = rgb(0.62, 0.66, 0.72);
   const hair = rgb(0.86, 0.88, 0.91);
   const band = rgb(0.06, 0.09, 0.12);
   const teal = rgb(0.1, 0.78, 0.72);
   const paper = rgb(1, 1, 1);
+  const panel = rgb(0.99, 0.99, 1);
 
   page.drawRectangle({ x: 0, y: 0, width: W, height: H, color: paper });
 
-  const bandH = 92;
+  // Subtle watermark (OS-style, not decorative)
+  page.drawText(winAnsiSafe("ODP"), {
+    x: margin + 10,
+    y: 250,
+    size: 120,
+    font: bold,
+    color: rgb(0.94, 0.95, 0.97),
+  });
+
+  // Header band
+  const bandH = 96;
   page.drawRectangle({ x: 0, y: H - bandH, width: W, height: bandH, color: band });
 
   page.drawText(winAnsiSafe("Oasis Digital Parliament"), {
@@ -331,7 +400,7 @@ async function buildOasisBillingPdf(args: {
     color: rgb(0.86, 0.88, 0.9),
   });
 
-  const rightTop = winAnsiSafe(`${docType.toUpperCase()} - ${laneLabel}`);
+  const rightTop = winAnsiSafe(`${docType.toUpperCase()}  •  ${laneLabel}`);
   const rightW = font.widthOfTextAtSize(rightTop, 9);
   page.drawText(rightTop, {
     x: W - margin - rightW,
@@ -341,12 +410,30 @@ async function buildOasisBillingPdf(args: {
     color: rgb(0.78, 0.82, 0.86),
   });
 
-  const title = winAnsiSafe(docType === "invoice" ? "Invoice" : "Billing Document");
-  const topY = H - bandH - 48;
+  // Title block (stronger identity)
+  const topY = H - bandH - 44;
+  const title =
+    docType === "invoice"
+      ? "Invoice"
+      : docType === "contract"
+        ? "Contract"
+        : docType === "statement"
+          ? "Statement"
+          : docType === "receipt"
+            ? "Receipt"
+            : docType === "credit_note"
+              ? "Credit Note"
+              : "Billing Document";
 
-  page.drawText(title, { x: margin, y: topY, size: 16, font: bold, color: ink });
+  page.drawText(winAnsiSafe(title), {
+    x: margin,
+    y: topY,
+    size: 17,
+    font: bold,
+    color: ink,
+  });
 
-  page.drawText(winAnsiSafe(`Issuer: ${providerLabel}`.slice(0, 140)), {
+  page.drawText(winAnsiSafe(`Issuer: ${providerLabel}`.slice(0, 150)), {
     x: margin,
     y: topY - 18,
     size: 9.5,
@@ -354,70 +441,70 @@ async function buildOasisBillingPdf(args: {
     color: muted,
   });
 
-  const rx = margin;
-  const ry = topY - 70;
-  const rw = 300;
-  const rh = 78;
+  // Two cards: Bill To + Meta
+  const cardY = topY - 78;
+  const cardH = 86;
+
+  const billX = margin;
+  const billW = 318;
 
   page.drawRectangle({
-    x: rx,
-    y: ry,
-    width: rw,
-    height: rh,
+    x: billX,
+    y: cardY,
+    width: billW,
+    height: cardH,
     borderColor: hair,
     borderWidth: 1,
-    color: rgb(0.99, 0.99, 1),
+    color: panel,
   });
 
   page.drawText(winAnsiSafe("Bill To"), {
-    x: rx + 12,
-    y: ry + rh - 22,
+    x: billX + 14,
+    y: cardY + cardH - 24,
     size: 9,
     font: bold,
     color: muted,
   });
 
   page.drawText(winAnsiSafe((recipientName ?? "—").slice(0, 64)), {
-    x: rx + 12,
-    y: ry + 36,
-    size: 10,
+    x: billX + 14,
+    y: cardY + 42,
+    size: 10.5,
     font: bold,
     color: ink,
   });
 
-  page.drawText(winAnsiSafe((recipientEmail ?? "—").slice(0, 64)), {
-    x: rx + 12,
-    y: ry + 20,
+  page.drawText(winAnsiSafe((recipientEmail ?? "—").slice(0, 72)), {
+    x: billX + 14,
+    y: cardY + 24,
     size: 9,
     font,
     color: muted,
   });
 
-  const mx = margin + 320;
-  const my = ry;
-  const mw = W - margin - mx;
-  const mh = rh;
+  const metaX = margin + billW + 16;
+  const metaW = W - margin - metaX;
 
   page.drawRectangle({
-    x: mx,
-    y: my,
-    width: mw,
-    height: mh,
+    x: metaX,
+    y: cardY,
+    width: metaW,
+    height: cardH,
     borderColor: hair,
     borderWidth: 1,
-    color: rgb(0.99, 0.99, 1),
+    color: panel,
   });
 
   const metaRow = (label: string, value: string, y: number) => {
     page.drawText(winAnsiSafe(label), {
-      x: mx + 12,
+      x: metaX + 14,
       y,
       size: 8.5,
       font: bold,
       color: muted,
     });
-    page.drawText(winAnsiSafe(value.slice(0, 40)), {
-      x: mx + 130,
+    page.drawText(winAnsiSafe(value.slice(0, 42)), {
+      x: metaX + 120,
       y,
       size: 8.5,
       font,
@@ -425,19 +512,22 @@ async function buildOasisBillingPdf(args: {
     });
   };
 
-  metaRow("Issued:", issuedAtIso.slice(0, 10), my + mh - 22);
-  metaRow("Due:", dueAtIso ? dueAtIso.slice(0, 10) : "—", my + mh - 38);
-  metaRow("Currency:", currency, my + mh - 54);
-  metaRow("Invoice #:", invoiceNumber ?? "—", my + mh - 70);
+  metaRow("Issued:", issuedAtIso.slice(0, 10), cardY + cardH - 24);
+  metaRow("Due:", dueAtIso ? dueAtIso.slice(0, 10) : "—", cardY + cardH - 40);
+  metaRow("Currency:", currency, cardY + cardH - 56);
+  metaRow("Invoice #:", invoiceNumber ?? "—", cardY + cardH - 72);
 
+  // Secondary meta line (doc # / period)
+  let subMetaY = cardY - 18;
   if (documentNumber) {
-    page.drawText(winAnsiSafe(`Doc #: ${documentNumber}`.slice(0, 64)), {
+    page.drawText(winAnsiSafe(`Doc #: ${documentNumber}`.slice(0, 90)), {
       x: margin,
-      y: ry - 18,
+      y: subMetaY,
       size: 8.5,
       font,
       color: muted,
     });
+    subMetaY -= 12;
   }
 
   const period =
@@ -446,70 +536,92 @@ async function buildOasisBillingPdf(args: {
       : null;
 
   if (period) {
-    page.drawText(winAnsiSafe(`Period: ${period}`.slice(0, 72)), {
+    page.drawText(winAnsiSafe(`Period: ${period}`.slice(0, 96)), {
       x: margin,
-      y: ry - 32,
+      y: subMetaY,
       size: 8.5,
       font,
       color: muted,
     });
+    subMetaY -= 12;
   }
 
-  const lineY = ry - 50;
+  // Divider
+  const lineY = subMetaY - 10;
   page.drawLine({
     start: { x: margin, y: lineY },
     end: { x: W - margin, y: lineY },
-    thickness: 0.7,
+    thickness: 0.8,
     color: hair,
   });
 
+  // Table header
   const { items } = sumLineItems(lineItems);
 
-  let y = lineY - 26;
+  let y = lineY - 28;
 
   const colDesc = margin;
-  const colQty = W - margin - 160;
-  const colUnit = W - margin - 110;
+  const colQty = W - margin - 170;
+  const colUnit = W - margin - 118;
   const colAmt = W - margin;
 
   page.drawText(winAnsiSafe("Description"), { x: colDesc, y, size: 9, font: bold, color: muted });
   page.drawText(winAnsiSafe("Qty"), { x: colQty, y, size: 9, font: bold, color: muted });
   page.drawText(winAnsiSafe("Unit"), { x: colUnit, y, size: 9, font: bold, color: muted });
-  page.drawText(winAnsiSafe("Amount"), { x: colAmt - 44, y, size: 9, font: bold, color: muted });
+
+  const amtLabel = winAnsiSafe("Amount");
+  const amtLabelW = bold.widthOfTextAtSize(amtLabel, 9);
+  page.drawText(amtLabel, { x: colAmt - amtLabelW, y, size: 9, font: bold, color: muted });
 
   y -= 14;
+  page.drawLine({ start: { x: margin, y }, end: { x: W - margin, y }, thickness: 0.8, color: hair });
+  y -= 16;
 
-  page.drawLine({
-    start: { x: margin, y },
-    end: { x: W - margin, y },
-    thickness: 0.7,
-    color: hair,
-  });
+  // Table rows (wrap + calmer rhythm)
+  const maxRows = 12;
+  const rowPad = 10;
+  const rowLine = 12;
 
-  y -= 14;
-
-  for (let i = 0; i < Math.min(items.length, 18); i++) {
+  for (let i = 0; i < Math.min(items.length, maxRows); i++) {
     const it = items[i];
+    const descLines = wrapText(it.description, font, 9, colQty - colDesc - 12, 2);
 
-    page.drawText(winAnsiSafe(it.description), { x: colDesc, y, size: 9, font, color: ink });
+    // row baseline
+    const rowTop = y;
+
+    // zebra hairline
+    page.drawLine({
+      start: { x: margin, y: rowTop - 6 },
+      end: { x: W - margin, y: rowTop - 6 },
+      thickness: 0.5,
+      color: rgb(0.92, 0.93, 0.95),
+    });
+
+    // description (2 lines max)
+    page.drawText(descLines[0], { x: colDesc, y: rowTop, size: 9, font, color: ink });
+    if (descLines[1]) {
+      page.drawText(descLines[1], { x: colDesc, y: rowTop - rowLine, size: 9, font, color: ink });
+    }
 
     const qtyText = winAnsiSafe(String(it.quantity));
     const unitText = winAnsiSafe(money(currency, it.unit_price));
     const amtText = winAnsiSafe(money(currency, it.amount));
 
-    page.drawText(qtyText, { x: colQty, y, size: 9, font, color: muted });
-    page.drawText(unitText, { x: colUnit, y, size: 9, font, color: muted });
+    page.drawText(qtyText, { x: colQty, y: rowTop, size: 9, font, color: muted });
+    page.drawText(unitText, { x: colUnit, y: rowTop, size: 9, font, color: muted });
 
     const amtW = font.widthOfTextAtSize(amtText, 9);
-    page.drawText(amtText, { x: colAmt - amtW, y, size: 9, font, color: ink });
+    page.drawText(amtText, { x: colAmt - amtW, y: rowTop, size: 9, font, color: ink });
 
-    y -= 14;
+    // advance Y by row height (2-line rows)
+    y -= rowPad + (descLines[1] ? rowLine : 0);
   }
 
-  const tx = W - margin - 240;
-  const ty = 110;
-  const tw = 240;
-  const th = 88;
+  // Summary panel (bottom-right)
+  const tx = W - margin - 252;
+  const ty = 116;
+  const tw = 252;
+  const th = 104;
 
   page.drawRectangle({
     x: tx,
@@ -518,69 +630,113 @@ async function buildOasisBillingPdf(args: {
     height: th,
     borderColor: hair,
     borderWidth: 1,
-    color: rgb(0.99, 0.99, 1),
+    color: panel,
   });
 
-  page.drawText(winAnsiSafe("Summary"), { x: tx + 12, y: ty + th - 22, size: 9, font: bold, color: muted });
+  page.drawText(winAnsiSafe("Summary"), {
+    x: tx + 14,
+    y: ty + th - 24,
+    size: 9,
+    font: bold,
+    color: muted,
+  });
 
-  const row = (label: string, value: string, y: number, strong?: boolean) => {
-    page.drawText(winAnsiSafe(label), { x: tx + 12, y, size: strong ? 10 : 9, font: strong ? bold : font, color: strong ? ink : muted });
+  const row = (label: string, value: string, y2: number, strong?: boolean) => {
+    page.drawText(winAnsiSafe(label), {
+      x: tx + 14,
+      y: y2,
+      size: strong ? 10 : 9,
+      font: strong ? bold : font,
+      color: strong ? ink : muted,
+    });
     const vw = (strong ? bold : font).widthOfTextAtSize(value, strong ? 10 : 9);
-    page.drawText(winAnsiSafe(value), { x: tx + tw - 12 - vw, y, size: strong ? 10 : 9, font: strong ? bold : font, color: ink });
+    page.drawText(winAnsiSafe(value), {
+      x: tx + tw - 14 - vw,
+      y: y2,
+      size: strong ? 10 : 9,
+      font: strong ? bold : font,
+      color: ink,
+    });
   };
 
-  row("Subtotal:", money(currency, totalsMajor.subtotal), ty + 46);
-  row("Tax:", money(currency, totalsMajor.tax), ty + 30);
-  page.drawLine({ start: { x: tx + 12, y: ty + 22 }, end: { x: tx + tw - 12, y: ty + 22 }, thickness: 0.7, color: hair });
-  row("Total:", money(currency, totalsMajor.total), ty + 8, true);
+  row("Subtotal:", money(currency, totalsMajor.subtotal), ty + 56);
+  row("Tax:", money(currency, totalsMajor.tax), ty + 40);
 
-  if (notes?.trim()) {
-    const nx = margin;
-    const ny = 110;
-    const nw = 320;
-    const nh = 88;
+  page.drawLine({
+    start: { x: tx + 14, y: ty + 30 },
+    end: { x: tx + tw - 14, y: ty + 30 },
+    thickness: 0.8,
+    color: hair,
+  });
 
-    page.drawRectangle({
-      x: nx,
-      y: ny,
-      width: nw,
-      height: nh,
-      borderColor: hair,
-      borderWidth: 1,
-      color: rgb(0.99, 0.99, 1),
-    });
+  row("Total:", money(currency, totalsMajor.total), ty + 12, true);
 
-    page.drawText(winAnsiSafe("Notes"), { x: nx + 12, y: ny + nh - 22, size: 9, font: bold, color: muted });
-    page.drawText(winAnsiSafe(notes.trim().slice(0, 260)), {
-      x: nx + 12,
-      y: ny + 52,
-      size: 8.5,
-      font,
-      color: muted,
-      maxWidth: nw - 24,
-      lineHeight: 11,
-    });
+  // Notes panel (bottom-left)
+  const notesX = margin;
+  const notesY = 116;
+  const notesW = (tx - margin) - 16;
+  const notesH = 104;
+
+  page.drawRectangle({
+    x: notesX,
+    y: notesY,
+    width: notesW,
+    height: notesH,
+    borderColor: hair,
+    borderWidth: 1,
+    color: panel,
+  });
+
+  page.drawText(winAnsiSafe("Notes"), {
+    x: notesX + 14,
+    y: notesY + notesH - 24,
+    size: 9,
+    font: bold,
+    color: muted,
+  });
+
+  const notesBody =
+    safeText(notes) ??
+    "Registry artifact generated to validate billing document generation, storage, hashing, and registry workflows. No commercial charge applied.";
+
+  const notesLines = wrapText(notesBody, font, 8.5, notesW - 28, 5);
+  let ny = notesY + notesH - 44;
+  for (const ln of notesLines) {
+    page.drawText(ln, { x: notesX + 14, y: ny, size: 8.5, font, color: faint });
+    ny -= 11;
   }
 
   // Internal QR (NOT a public certification claim)
   const qr = qrPngBytes(internalRef, { size: 256, margin: 2, ecc: "M" });
   const qrImg = await pdf.embedPng(qr);
 
-  const qrSize = 92;
+  const qrSize = 94;
   const qrX = W - margin - qrSize;
-  const qrY = 36;
+  const qrY = 34;
 
   page.drawRectangle({
     x: qrX - 10,
     y: qrY - 10,
     width: qrSize + 20,
-    height: qrSize + 20,
+    height: qrSize + 26,
     borderColor: hair,
     borderWidth: 1,
-    color: rgb(0.99, 0.99, 1),
+    color: panel,
   });
+
   page.drawImage(qrImg, { x: qrX, y: qrY, width: qrSize, height: qrSize });
 
+  const qrLabel = winAnsiSafe("Internal Registry Ref");
+  const qlw = font.widthOfTextAtSize(qrLabel, 7.5);
+  page.drawText(qrLabel, {
+    x: qrX + (qrSize - qlw) / 2,
+    y: qrY - 6,
+    size: 7.5,
+    font,
+    color: faint,
+  });
+
+  // Footer
   const foot =
     "Registry artifact generated by Oasis Billing. Authority and lifecycle status are conferred by the internal registry.";
   page.drawText(winAnsiSafe(foot), {
@@ -589,7 +745,7 @@ async function buildOasisBillingPdf(args: {
     size: 7.5,
     font,
     color: rgb(0.6, 0.64, 0.7),
-    maxWidth: W - margin * 2 - 110,
+    maxWidth: W - margin * 2 - 120,
   });
 
   return new Uint8Array(await pdf.save({ useObjectStreams: false }));
@@ -605,7 +761,8 @@ serve(async (req: Request) => {
   try {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
     const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? Deno.env.get("SUPABASE_ANON_KEY_PUBLIC");
-    const SERVICE_ROLE_KEY = Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    const SERVICE_ROLE_KEY =
+      Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
     if (!SUPABASE_URL || !ANON_KEY || !SERVICE_ROLE_KEY) {
       return json(500, { ok: false, error: "MISSING_ENV" }, req);
@@ -655,10 +812,8 @@ serve(async (req: Request) => {
     }
 
     const currency = (safeText(body.currency) ?? "USD").toUpperCase().slice(0, 8);
-
     const issued_at = safeIso(body.issued_at) ?? new Date().toISOString();
     const due_at = safeIso(body.due_at);
-
     const period_start = safeIso(body.period_start);
     const period_end = safeIso(body.period_end);
 
@@ -673,13 +828,14 @@ serve(async (req: Request) => {
     const notes = safeText(body.notes);
 
     const status = safeText(body.status) ?? "issued";
+    const trigger = safeText(body.trigger);
 
     const line_items =
       Array.isArray(body.line_items) && body.line_items.length
         ? body.line_items
         : [{ description: "Service", quantity: 1, unit_price: 0 }];
 
-    // totals (no tax enforcement here; tax=0 unless you add later)
+    // Totals (no tax enforcement here; tax=0 unless you add later)
     const { items: norm_items, subtotal, subtotal_cents } = sumLineItems(line_items);
     const tax_cents = 0;
     const total_cents = subtotal_cents + tax_cents;
@@ -692,16 +848,27 @@ serve(async (req: Request) => {
     const nowIso = new Date().toISOString();
 
     // Service client: registry writes
-    const svc = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch }, auth: { persistSession: false } });
+    const svc = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+      global: { fetch },
+      auth: { persistSession: false },
+    });
 
     // Provider label lookup (safe)
-    const { data: ent, error: entErr } = await svc.from("entities").select("id, slug, name").eq("id", provider_entity_id).maybeSingle();
+    const { data: ent, error: entErr } = await svc
+      .from("entities")
+      .select("id, slug, name")
+      .eq("id", provider_entity_id)
+      .maybeSingle();
+
     if (entErr) return json(500, { ok: false, error: "PROVIDER_LOOKUP_FAILED", details: entErr.message }, req);
 
     const providerLabel = safeText((ent as any)?.name) ?? safeText((ent as any)?.slug) ?? provider_entity_id;
 
-    // Build PDF
-    const internalRef = `billing:${document_type}:${provider_entity_id}:${issued_at}:${invoice_number ?? ""}`;
+    // Build PDF (internalRef is internal only; not a public verification claim)
+    const internalRef = winAnsiSafe(
+      `billing:${document_type}:${provider_entity_id}:${issued_at}:${invoice_number ?? ""}:${document_number ?? ""}`,
+    );
+
     const pdfBytes = await buildOasisBillingPdf({
       docType: document_type,
       providerLabel,
@@ -721,7 +888,7 @@ serve(async (req: Request) => {
       internalRef,
     });
 
-    // Hash
+    // Hash (must pass hex64 check)
     const file_hash = await sha256Hex(pdfBytes);
 
     // Storage target (lane-aware buckets)
@@ -730,31 +897,27 @@ serve(async (req: Request) => {
     const yyyy = issued_at.slice(0, 4);
     const mm = issued_at.slice(5, 7);
 
-    const storage_path = `${providerSlug}/billing/${yyyy}/${mm}/${document_type}-${file_hash.slice(0, 16)}.pdf`;
+    // Idempotent-ish path:
+    // - If invoice_number exists, stable path by invoice_number (better for "update same invoice")
+    // - Else hash-based path
+    const keyPart = invoice_number ? `inv-${slugSafe(invoice_number)}` : `${document_type}-${file_hash.slice(0, 16)}`;
+    const storage_path = `${providerSlug}/billing/${yyyy}/${mm}/${keyPart}.pdf`;
 
-    // Upload (idempotent-ish)
+    // Upload with upsert:true to avoid 409 on repeated clicks
     const up = await svc.storage
       .from(BILLING_BUCKET)
       .upload(storage_path, new Blob([pdfBytes], { type: "application/pdf" }), {
-        upsert: false,
+        upsert: true,
         contentType: "application/pdf",
       });
 
     if (up.error) {
-      const msg = String((up.error as any)?.message ?? "");
-      const statusCode = (up.error as any)?.statusCode ?? (up.error as any)?.status ?? null;
-      const alreadyExists =
-        statusCode === 409 ||
-        msg.toLowerCase().includes("already exists") ||
-        msg.toLowerCase().includes("duplicate") ||
-        msg.toLowerCase().includes("409");
-
-      if (!alreadyExists) return json(500, { ok: false, error: "UPLOAD_FAILED", details: up.error }, req);
+      return json(500, { ok: false, error: "UPLOAD_FAILED", details: up.error }, req);
     }
 
     // ✅ Insert ONLY existing columns (per your table)
     // entity_id is canonical issuer scope
-    const insertRow: any = {
+    const row: any = {
       entity_id: provider_entity_id,
       provider_entity_id: provider_entity_id, // passes CHECK (provider_entity_id = entity_id)
       is_test: body.is_test,
@@ -765,8 +928,8 @@ serve(async (req: Request) => {
       recipient_name: recipient_name ?? null,
       recipient_email: recipient_email ?? null,
 
-      document_type: document_type, // enum label must match your enum
-      status: status, // enum label must match your billing_document_status
+      document_type: document_type,
+      status: status,
 
       document_number: document_number ?? null,
       invoice_number: invoice_number ?? null,
@@ -777,7 +940,7 @@ serve(async (req: Request) => {
       issued_at: issued_at,
       due_at: due_at ?? null,
 
-      currency: currency, // enum label must match your billing_currency
+      currency: currency,
 
       subtotal_amount: subtotal_amount,
       tax_amount: tax_amount,
@@ -799,36 +962,38 @@ serve(async (req: Request) => {
       metadata: {
         notes: notes ?? null,
         generated_by: "billing-generate-document",
-        trigger: body.trigger ?? null,
+        trigger: trigger ?? null,
         reason,
+        internal_ref: internalRef,
+        // helpful trace without schema drift
+        issuer_entity_slug: safeText((ent as any)?.slug) ?? null,
       },
 
       created_by: actor_id,
-      // created_at/updated_at default now()
+      updated_at: nowIso,
     };
 
+    // -----------------------------------------------------------------
+    // ✅ Enterprise idempotent upsert strategy
+    // -----------------------------------------------------------------
     let document_id: string | null = null;
 
-    // Insert; if unique conflict, fetch the existing row
-    const { data: ins, error: insErr } = await svc.from("billing_documents").insert(insertRow).select("id").maybeSingle();
-
-    if (!insErr && ins?.id) {
-      document_id = String(ins.id);
-    } else {
-      // fallback resolution priority:
-      // 1) file_hash unique
-      // 2) invoice_number unique (if provided)
-      // 3) document_number unique (if provided)
-      const byHash = await svc
+    const upsertSelect = async (onConflict: string) => {
+      const { data, error } = await svc
         .from("billing_documents")
+        .upsert(row, { onConflict })
         .select("id")
-        .eq("file_hash", file_hash)
-        .limit(1)
         .maybeSingle();
 
-      if (byHash.data?.id) {
-        document_id = String(byHash.data.id);
-      } else if (invoice_number) {
+      if (error) return { ok: false as const, error };
+      return { ok: true as const, id: data?.id ? String(data.id) : null };
+    };
+
+    // 1) invoice_number unique (partial) if provided
+    if (invoice_number) {
+      const r = await upsertSelect("entity_id,is_test,invoice_number");
+      if (!r.ok) {
+        // fallback to explicit lookup by unique constraint
         const byInv = await svc
           .from("billing_documents")
           .select("id")
@@ -838,8 +1003,19 @@ serve(async (req: Request) => {
           .order("created_at", { ascending: false })
           .limit(1)
           .maybeSingle();
-        if (byInv.data?.id) document_id = String(byInv.data.id);
-      } else if (document_number) {
+
+        if (byInv.error || !byInv.data?.id) {
+          return json(500, { ok: false, error: "DOCUMENT_UPSERT_FAILED", details: r.error }, req);
+        }
+        document_id = String(byInv.data.id);
+      } else {
+        document_id = r.id;
+      }
+    }
+    // 2) document_number unique (partial) if provided and no invoice_number
+    else if (document_number) {
+      const r = await upsertSelect("entity_id,is_test,document_number");
+      if (!r.ok) {
         const byDoc = await svc
           .from("billing_documents")
           .select("id")
@@ -849,23 +1025,40 @@ serve(async (req: Request) => {
           .order("created_at", { ascending: false })
           .limit(1)
           .maybeSingle();
-        if (byDoc.data?.id) document_id = String(byDoc.data.id);
-      }
 
-      if (!document_id) {
-        return json(
-          500,
-          {
-            ok: false,
-            error: "DOCUMENT_INSERT_FAILED",
-            details: insErr?.message ?? "Insert failed and no existing record could be resolved.",
-          },
-          req,
-        );
+        if (byDoc.error || !byDoc.data?.id) {
+          return json(500, { ok: false, error: "DOCUMENT_UPSERT_FAILED", details: r.error }, req);
+        }
+        document_id = String(byDoc.data.id);
+      } else {
+        document_id = r.id;
+      }
+    }
+    // 3) fallback: file_hash unique
+    else {
+      const r = await upsertSelect("file_hash");
+      if (!r.ok) {
+        const byHash = await svc
+          .from("billing_documents")
+          .select("id")
+          .eq("file_hash", file_hash)
+          .limit(1)
+          .maybeSingle();
+
+        if (byHash.error || !byHash.data?.id) {
+          return json(500, { ok: false, error: "DOCUMENT_UPSERT_FAILED", details: r.error }, req);
+        }
+        document_id = String(byHash.data.id);
+      } else {
+        document_id = r.id;
       }
     }
 
-    // Best-effort audit
+    if (!document_id) {
+      return json(500, { ok: false, error: "DOCUMENT_ID_MISSING" }, req);
+    }
+
+    // Best-effort audit (never blocks)
     try {
       await svc.from("actions_log").insert({
         actor_uid: actor_id,
@@ -886,7 +1079,7 @@ serve(async (req: Request) => {
           storage_path,
           total_cents,
           reason,
-          trigger: body.trigger ?? null,
+          trigger: trigger ?? null,
         },
       } as any);
     } catch {
