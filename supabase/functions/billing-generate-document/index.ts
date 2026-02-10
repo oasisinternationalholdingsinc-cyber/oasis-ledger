@@ -36,6 +36,14 @@ import { PNG } from "npm:pngjs@7.0.0";
  * ✅ Writes ONLY columns that EXIST on billing_documents (per locked schema)
  * ✅ Uses entity_id as canonical issuer scope
  * ✅ provider_entity_id is set equal to entity_id (passes CHECK constraint)
+ *
+ * -----------------------------------------------------------------------------
+ * ✅ LAYOUT ENHANCEMENT ONLY (NO WIRING/SCHEMA CHANGES)
+ * - Removes the huge center "ODP" watermark (looked like a demo stamp)
+ * - Rebalances whitespace: table + totals move up, footer panels anchor neatly
+ * - Adds a subtle corner mark (tiny, non-dominant) instead of center watermark
+ * - QR panel reads as an intentional registry affordance (not bolted-on)
+ * -----------------------------------------------------------------------------
  */
 
 type LineItem = {
@@ -312,7 +320,7 @@ function wrapText(
 }
 
 // -----------------------------------------------------------------------------
-// PDF builder (enterprise style — improved)
+// PDF builder (enterprise style — enhanced, NO regressions)
 // -----------------------------------------------------------------------------
 async function buildOasisBillingPdf(args: {
   docType: string;
@@ -375,22 +383,23 @@ async function buildOasisBillingPdf(args: {
 
   page.drawRectangle({ x: 0, y: 0, width: W, height: H, color: paper });
 
-  // Subtle watermark (OS-style, not decorative)
+  // ✅ Subtle corner mark (replaces giant mid-page watermark)
+  // Small, barely-there, bottom-left.
   page.drawText(winAnsiSafe("ODP"), {
-    x: margin + 10,
-    y: 250,
-    size: 120,
+    x: margin,
+    y: 30,
+    size: 10,
     font: bold,
-    color: rgb(0.94, 0.95, 0.97),
+    color: rgb(0.9, 0.92, 0.95),
   });
 
   // Header band
-  const bandH = 96;
+  const bandH = 92;
   page.drawRectangle({ x: 0, y: H - bandH, width: W, height: bandH, color: band });
 
   page.drawText(winAnsiSafe("Oasis Digital Parliament"), {
     x: margin,
-    y: H - 42,
+    y: H - 40,
     size: 14,
     font: bold,
     color: teal,
@@ -398,7 +407,7 @@ async function buildOasisBillingPdf(args: {
 
   page.drawText(winAnsiSafe("Billing Registry"), {
     x: margin,
-    y: H - 64,
+    y: H - 62,
     size: 10,
     font,
     color: rgb(0.86, 0.88, 0.9),
@@ -408,14 +417,14 @@ async function buildOasisBillingPdf(args: {
   const rightW = font.widthOfTextAtSize(rightTop, 9);
   page.drawText(rightTop, {
     x: W - margin - rightW,
-    y: H - 60,
+    y: H - 58,
     size: 9,
     font,
     color: rgb(0.78, 0.82, 0.86),
   });
 
-  // Title block (stronger identity)
-  const topY = H - bandH - 44;
+  // Title block
+  const topY = H - bandH - 34;
   const title =
     docType === "invoice"
       ? "Invoice"
@@ -432,7 +441,7 @@ async function buildOasisBillingPdf(args: {
   page.drawText(winAnsiSafe(title), {
     x: margin,
     y: topY,
-    size: 17,
+    size: 18,
     font: bold,
     color: ink,
   });
@@ -446,8 +455,8 @@ async function buildOasisBillingPdf(args: {
   });
 
   // Two cards: Bill To + Meta
-  const cardY = topY - 78;
-  const cardH = 86;
+  const cardY = topY - 72;
+  const cardH = 84;
 
   const billX = margin;
   const billW = 318;
@@ -522,7 +531,7 @@ async function buildOasisBillingPdf(args: {
   metaRow("Invoice #:", invoiceNumber ?? "—", cardY + cardH - 72);
 
   // Secondary meta line (doc # / period)
-  let subMetaY = cardY - 18;
+  let subMetaY = cardY - 16;
   if (documentNumber) {
     page.drawText(winAnsiSafe(`Doc #: ${documentNumber}`.slice(0, 90)), {
       x: margin,
@@ -551,7 +560,7 @@ async function buildOasisBillingPdf(args: {
   }
 
   // Divider
-  const lineY = subMetaY - 10;
+  const lineY = subMetaY - 8;
   page.drawLine({
     start: { x: margin, y: lineY },
     end: { x: W - margin, y: lineY },
@@ -562,7 +571,7 @@ async function buildOasisBillingPdf(args: {
   // Table header
   const { items } = sumLineItems(lineItems);
 
-  let y = lineY - 28;
+  let y = lineY - 26;
 
   const colDesc = margin;
   const colQty = W - margin - 170;
@@ -577,12 +586,12 @@ async function buildOasisBillingPdf(args: {
   const amtLabelW = bold.widthOfTextAtSize(amtLabel, 9);
   page.drawText(amtLabel, { x: colAmt - amtLabelW, y, size: 9, font: bold, color: muted });
 
-  y -= 14;
+  y -= 12;
   page.drawLine({ start: { x: margin, y }, end: { x: W - margin, y }, thickness: 0.8, color: hair });
-  y -= 16;
+  y -= 14;
 
-  // Table rows
-  const maxRows = 12;
+  // Table rows (tighter rhythm, less dead space)
+  const maxRows = 14; // slightly more capacity without second page
   const rowPad = 10;
   const rowLine = 12;
 
@@ -592,6 +601,7 @@ async function buildOasisBillingPdf(args: {
 
     const rowTop = y;
 
+    // subtle row rule
     page.drawLine({
       start: { x: margin, y: rowTop - 6 },
       end: { x: W - margin, y: rowTop - 6 },
@@ -599,6 +609,7 @@ async function buildOasisBillingPdf(args: {
       color: rgb(0.92, 0.93, 0.95),
     });
 
+    // description
     page.drawText(descLines[0], { x: colDesc, y: rowTop, size: 9, font, color: ink });
     if (descLines[1]) {
       page.drawText(descLines[1], { x: colDesc, y: rowTop - rowLine, size: 9, font, color: ink });
@@ -617,11 +628,25 @@ async function buildOasisBillingPdf(args: {
     y -= rowPad + (descLines[1] ? rowLine : 0);
   }
 
-  // Summary panel
-  const tx = W - margin - 252;
-  const ty = 116;
+  // ✅ Bottom zone anchored relative to remaining space (prevents huge dead middle)
+  // Reserve a clean footer band area.
+  const footerMinY = 54;
+  const footerH = 160;
+  const footerY = Math.max(footerMinY, y - 22 - footerH);
+
+  // Divider before footer band
+  page.drawLine({
+    start: { x: margin, y: footerY + footerH + 14 },
+    end: { x: W - margin, y: footerY + footerH + 14 },
+    thickness: 0.8,
+    color: hair,
+  });
+
+  // Summary panel (right, within footer band)
   const tw = 252;
-  const th = 104;
+  const th = 96;
+  const tx = W - margin - tw;
+  const ty = footerY + footerH - th;
 
   page.drawRectangle({
     x: tx,
@@ -635,7 +660,7 @@ async function buildOasisBillingPdf(args: {
 
   page.drawText(winAnsiSafe("Summary"), {
     x: tx + 14,
-    y: ty + th - 24,
+    y: ty + th - 22,
     size: 9,
     font: bold,
     color: muted,
@@ -659,23 +684,23 @@ async function buildOasisBillingPdf(args: {
     });
   };
 
-  row("Subtotal:", money(currency, totalsMajor.subtotal), ty + 56);
-  row("Tax:", money(currency, totalsMajor.tax), ty + 40);
+  row("Subtotal:", money(currency, totalsMajor.subtotal), ty + 50);
+  row("Tax:", money(currency, totalsMajor.tax), ty + 34);
 
   page.drawLine({
-    start: { x: tx + 14, y: ty + 30 },
-    end: { x: tx + tw - 14, y: ty + 30 },
+    start: { x: tx + 14, y: ty + 24 },
+    end: { x: tx + tw - 14, y: ty + 24 },
     thickness: 0.8,
     color: hair,
   });
 
-  row("Total:", money(currency, totalsMajor.total), ty + 12, true);
+  row("Total:", money(currency, totalsMajor.total), ty + 8, true);
 
-  // Notes panel
+  // Notes panel (left, within footer band)
   const notesX = margin;
-  const notesY = 116;
   const notesW = (tx - margin) - 16;
-  const notesH = 104;
+  const notesH = 96;
+  const notesY = footerY + footerH - notesH;
 
   page.drawRectangle({
     x: notesX,
@@ -689,7 +714,7 @@ async function buildOasisBillingPdf(args: {
 
   page.drawText(winAnsiSafe("Notes"), {
     x: notesX + 14,
-    y: notesY + notesH - 24,
+    y: notesY + notesH - 22,
     size: 9,
     font: bold,
     color: muted,
@@ -699,53 +724,58 @@ async function buildOasisBillingPdf(args: {
     safeText(notes) ??
     "Registry artifact generated to validate billing document generation, storage, hashing, and registry workflows. No commercial charge applied.";
 
-  const notesLines = wrapText(notesBody, font, 8.5, notesW - 28, 5);
-  let ny = notesY + notesH - 44;
+  const notesLines = wrapText(notesBody, font, 8.5, notesW - 28, 4);
+  let ny = notesY + notesH - 40;
   for (const ln of notesLines) {
     page.drawText(ln, { x: notesX + 14, y: ny, size: 8.5, font, color: faint });
     ny -= 11;
   }
 
-  // Internal QR (NOT a public certification claim)
+  // QR panel (bottom-right, integrated)
   const qr = qrPngBytes(internalRef, { size: 256, margin: 2, ecc: "M" });
   const qrImg = await pdf.embedPng(qr);
 
-  const qrSize = 94;
-  const qrX = W - margin - qrSize;
-  const qrY = 34;
+  const qrSize = 84;
+  const qrBoxW = 120;
+  const qrBoxH = 114;
+  const qrBoxX = W - margin - qrBoxW;
+  const qrBoxY = footerY + 12;
 
   page.drawRectangle({
-    x: qrX - 10,
-    y: qrY - 10,
-    width: qrSize + 20,
-    height: qrSize + 26,
+    x: qrBoxX,
+    y: qrBoxY,
+    width: qrBoxW,
+    height: qrBoxH,
     borderColor: hair,
     borderWidth: 1,
     color: panel,
   });
 
-  page.drawImage(qrImg, { x: qrX, y: qrY, width: qrSize, height: qrSize });
-
-  const qrLabel = winAnsiSafe("Internal Registry Ref");
-  const qlw = font.widthOfTextAtSize(qrLabel, 7.5);
-  page.drawText(qrLabel, {
-    x: qrX + (qrSize - qlw) / 2,
-    y: qrY - 6,
-    size: 7.5,
-    font,
-    color: faint,
+  page.drawText(winAnsiSafe("Registry Ref"), {
+    x: qrBoxX + 12,
+    y: qrBoxY + qrBoxH - 18,
+    size: 8.5,
+    font: bold,
+    color: muted,
   });
 
-  // Footer
+  page.drawImage(qrImg, {
+    x: qrBoxX + (qrBoxW - qrSize) / 2,
+    y: qrBoxY + 18,
+    width: qrSize,
+    height: qrSize,
+  });
+
+  // Footer copy (small, calm)
   const foot =
     "Registry artifact generated by Oasis Billing. Authority and lifecycle status are conferred by the internal registry.";
   page.drawText(winAnsiSafe(foot), {
     x: margin,
-    y: 44,
+    y: 26,
     size: 7.5,
     font,
     color: rgb(0.6, 0.64, 0.7),
-    maxWidth: W - margin * 2 - 120,
+    maxWidth: W - margin * 2 - 140,
   });
 
   return new Uint8Array(await pdf.save({ useObjectStreams: false }));
