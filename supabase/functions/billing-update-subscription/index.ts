@@ -3,192 +3,253 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 /**
- * billing-update-subscription
+ * billing-update-subscription (PRODUCTION — LOCKED)
  *
- * OPERATOR-ONLY
- * REGISTRY-GRADE
- * NO DELETES
- * NO PAYMENTS
- * NO AUTO-ENFORCEMENT
- *
- * Updates an existing subscription plan.
- * - Immediate change OR scheduled (effective_at)
- * - Preserves history via metadata
- * - Lane-safe
+ * ✅ OPERATOR-ONLY (valid user session required)
+ * ✅ REGISTRY-GRADE (no deletes, no payments, no enforcement)
+ * ✅ Schema-aligned:
+ *    - billing_subscriptions.status CHECK: trialing|active|past_due|paused|cancelled (NO "ended")
+ *    - Resolve plan via billing_plans.code -> plan_id
+ *    - Update plan_id + plan_key (code) when immediate
+ * ✅ Supports scheduled change (writes metadata only; no automation)
  */
 
 type ReqBody = {
   subscription_id: string;        // REQUIRED
-  next_plan: string;              // REQUIRED (enum-backed)
+  next_plan: string;              // REQUIRED (billing_plans.code)
   effective_at?: string | null;   // optional ISO (defaults to now)
   reason: string;                 // REQUIRED
+  trigger?: string;               // tolerated
 };
 
-const cors = {
+const cors: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers":
-    "authorization, apikey, content-type, x-client-info",
+    "authorization, Authorization, apikey, content-type, x-client-info",
+  "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
-serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: cors });
-  }
+function json(status: number, body: unknown) {
+  return new Response(JSON.stringify(body, null, 2), {
+    status,
+    headers: { ...cors, "content-type": "application/json; charset=utf-8" },
+  });
+}
+
+function pickBearer(req: Request) {
+  const h =
+    req.headers.get("authorization") ||
+    req.headers.get("Authorization") ||
+    "";
+  return h.startsWith("Bearer ") ? h : "";
+}
+
+function safeIso(input?: string | null) {
+  if (!input?.trim()) return null;
+  const d = new Date(input);
+  if (isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
+serve(async (req: Request) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+  const request_id = req.headers.get("x-sb-request-id") || null;
 
   if (req.method !== "POST") {
-    return new Response(
-      JSON.stringify({ ok: false, error: "METHOD_NOT_ALLOWED" }),
-      { status: 405, headers: cors }
-    );
+    return json(405, { ok: false, error: "METHOD_NOT_ALLOWED", request_id });
   }
 
   try {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+    const ANON_KEY =
+      Deno.env.get("SUPABASE_ANON_KEY") ??
+      Deno.env.get("SUPABASE_ANON_KEY_PUBLIC");
     const SERVICE_ROLE_KEY =
       Deno.env.get("SERVICE_ROLE_KEY") ??
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-    if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
-      throw new Error("Missing Supabase env vars");
+    if (!SUPABASE_URL || !ANON_KEY || !SERVICE_ROLE_KEY) {
+      return json(500, { ok: false, error: "MISSING_ENV", request_id });
     }
 
-    // ---------- auth (operator required) ----------
-    const authHeader = req.headers.get("authorization");
-    if (!authHeader) {
-      return new Response(
-        JSON.stringify({ ok: false, error: "UNAUTHORIZED" }),
-        { status: 401, headers: cors }
-      );
-    }
+    // -----------------------------
+    // Auth: operator required (validate with ANON)
+    // -----------------------------
+    const bearer = pickBearer(req);
+    if (!bearer) return json(401, { ok: false, error: "UNAUTHORIZED", request_id });
 
-    const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-      global: { headers: { authorization: authHeader } },
+    const userClient = createClient(SUPABASE_URL, ANON_KEY, {
+      global: { headers: { Authorization: bearer } },
+      auth: { persistSession: false },
     });
 
-    const {
-      data: { user },
-      error: userErr,
-    } = await supabase.auth.getUser();
+    const { data: userRes, error: userErr } = await userClient.auth.getUser();
+    if (userErr || !userRes?.user?.id) {
+      return json(401, { ok: false, error: "INVALID_SESSION", request_id });
+    }
+    const actor_id = userRes.user.id;
+    const actor_email = userRes.user.email ?? null;
 
-    if (userErr || !user) {
-      return new Response(
-        JSON.stringify({ ok: false, error: "INVALID_SESSION" }),
-        { status: 401, headers: cors }
-      );
+    // -----------------------------
+    // Parse + validate
+    // -----------------------------
+    const body = (await req.json().catch(() => ({}))) as ReqBody;
+    const subscription_id = String(body.subscription_id || "").trim();
+    const next_plan_code = String(body.next_plan || "").trim();
+    const reason = String(body.reason || "").trim();
+
+    if (!subscription_id || !next_plan_code || !reason) {
+      return json(400, {
+        ok: false,
+        error: "MISSING_REQUIRED_FIELDS",
+        required: ["subscription_id", "next_plan", "reason"],
+        request_id,
+      });
     }
 
-    // ---------- parse + validate ----------
-    const body = (await req.json()) as ReqBody;
-    const { subscription_id, next_plan, effective_at, reason } = body;
+    const nowIso = new Date().toISOString();
+    const effectiveAt = safeIso(body.effective_at) ?? nowIso;
+    const isImmediate = effectiveAt <= nowIso;
 
-    if (!subscription_id || !next_plan || !reason?.trim()) {
-      return new Response(
-        JSON.stringify({
-          ok: false,
-          error: "MISSING_REQUIRED_FIELDS",
-          required: ["subscription_id", "next_plan", "reason"],
-        }),
-        { status: 400, headers: cors }
-      );
-    }
+    // -----------------------------
+    // Service client: registry reads/writes
+    // -----------------------------
+    const svc = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+      global: { fetch },
+      auth: { persistSession: false },
+    });
 
-    // ---------- load subscription ----------
-    const { data: sub, error: subErr } = await supabase
+    // Load subscription
+    const { data: sub, error: subErr } = await svc
       .from("billing_subscriptions")
-      .select("id, status, plan_key, entity_id, is_test, metadata")
+      .select("id, status, entity_id, is_test, plan_id, plan_key, metadata")
       .eq("id", subscription_id)
       .maybeSingle();
 
-    if (subErr) throw subErr;
-
+    if (subErr) {
+      return json(500, { ok: false, error: "FAILED", details: subErr.message, request_id });
+    }
     if (!sub) {
-      return new Response(
-        JSON.stringify({ ok: false, error: "SUBSCRIPTION_NOT_FOUND" }),
-        { status: 404, headers: cors }
-      );
+      return json(404, { ok: false, error: "SUBSCRIPTION_NOT_FOUND", request_id });
     }
 
-    if (String(sub.status).toLowerCase() === "ended") {
-      return new Response(
-        JSON.stringify({
-          ok: false,
-          error: "SUBSCRIPTION_ALREADY_ENDED",
-        }),
-        { status: 409, headers: cors }
-      );
+    // Terminal guard: cancelled subscriptions are ended in your model
+    if (String(sub.status || "").toLowerCase() === "cancelled") {
+      return json(409, { ok: false, error: "SUBSCRIPTION_CANCELLED", request_id });
     }
 
-    // No-op guard
-    if (String(sub.plan_key) === String(next_plan)) {
-      return new Response(
-        JSON.stringify({
-          ok: true,
-          subscription_id: sub.id,
-          status: sub.status,
-          note: "Plan unchanged (no update performed).",
-        }),
-        { status: 200, headers: cors }
-      );
+    // Resolve plan by billing_plans.code
+    const { data: planRow, error: planErr } = await svc
+      .from("billing_plans")
+      .select("id, code, name, is_active")
+      .eq("code", next_plan_code)
+      .maybeSingle();
+
+    if (planErr) {
+      return json(500, { ok: false, error: "FAILED", details: planErr.message, request_id });
+    }
+    if (!planRow) {
+      return json(400, {
+        ok: false,
+        error: "PLAN_NOT_FOUND",
+        message: `No billing_plans row found for code='${next_plan_code}'`,
+        request_id,
+      });
+    }
+    if (planRow.is_active === false) {
+      return json(400, {
+        ok: false,
+        error: "PLAN_INACTIVE",
+        message: `Plan '${next_plan_code}' is not active`,
+        request_id,
+      });
     }
 
-    const now = new Date().toISOString();
-    const effectiveAt =
-      effective_at && effective_at.trim()
-        ? new Date(effective_at).toISOString()
-        : now;
+    // No-op guard (compare by code / plan_key, fallback to plan_id)
+    const currentKey = String(sub.plan_key || "");
+    if (currentKey === planRow.code) {
+      return json(200, {
+        ok: true,
+        subscription_id: sub.id,
+        status: sub.status,
+        note: "Plan unchanged (no update performed).",
+        request_id,
+      });
+    }
 
-    const isImmediate = effectiveAt <= now;
+    // -----------------------------
+    // Build metadata (preserve history)
+    // -----------------------------
+    const prevMeta =
+      sub.metadata && typeof sub.metadata === "object" ? sub.metadata : {};
 
-    // ---------- build metadata (history preserved) ----------
-    const prevMeta = (sub.metadata && typeof sub.metadata === "object")
-      ? sub.metadata
-      : {};
-
-    const nextMeta = {
-      ...prevMeta,
-      plan_change: {
-        from: sub.plan_key,
-        to: next_plan,
-        effective_at: effectiveAt,
-        changed_at: now,
-        changed_by: user.id,
-        changed_by_email: user.email ?? null,
-        reason,
-      },
+    const changeRecord = {
+      from: sub.plan_key ?? null,
+      to: planRow.code,
+      to_plan_id: planRow.id,
+      effective_at: effectiveAt,
+      changed_at: nowIso,
+      changed_by: actor_id,
+      changed_by_email: actor_email,
+      reason,
+      trigger: body.trigger ?? null,
+      immediate: isImmediate,
     };
 
-    // ---------- apply update ----------
-    const updatePayload: any = {
+    // keep an append-only history array
+    const history = Array.isArray((prevMeta as any).plan_change_history)
+      ? (prevMeta as any).plan_change_history
+      : [];
+
+    const nextMeta: Record<string, any> = {
+      ...prevMeta,
+      plan_change_history: [...history, changeRecord],
+      last_plan_change: changeRecord,
+    };
+
+    // -----------------------------
+    // Apply update (immediate or scheduled)
+    // -----------------------------
+    const updatePayload: Record<string, any> = {
       metadata: nextMeta,
-      updated_at: now,
+      updated_at: nowIso,
     };
 
     if (isImmediate) {
-      updatePayload.plan_key = next_plan;
+      updatePayload.plan_id = planRow.id;
+      updatePayload.plan_key = planRow.code;
+      // if there was a previously scheduled plan, clear it
+      if ((updatePayload.metadata as any).scheduled_plan) {
+        (updatePayload.metadata as any).scheduled_plan = null;
+      }
     } else {
-      // scheduled change (no automation yet)
-      updatePayload.metadata = {
-        ...nextMeta,
-        scheduled_plan: {
-          next_plan,
-          effective_at: effectiveAt,
-        },
+      (updatePayload.metadata as any).scheduled_plan = {
+        next_plan: planRow.code,
+        next_plan_id: planRow.id,
+        effective_at: effectiveAt,
+        scheduled_at: nowIso,
+        scheduled_by: actor_id,
+        scheduled_by_email: actor_email,
+        reason,
+        trigger: body.trigger ?? null,
       };
     }
 
-    const { error: updErr } = await supabase
+    const { error: updErr } = await svc
       .from("billing_subscriptions")
       .update(updatePayload)
       .eq("id", subscription_id);
 
-    if (updErr) throw updErr;
+    if (updErr) {
+      return json(500, { ok: false, error: "FAILED", details: updErr.message, request_id });
+    }
 
-    // ---------- audit log (best-effort) ----------
-    await supabase
+    // Best-effort audit
+    await svc
       .from("actions_log")
       .insert({
-        actor_uid: user.id,
+        actor_uid: actor_id,
         action: "BILLING_UPDATE_SUBSCRIPTION",
         target_table: "billing_subscriptions",
         target_id: subscription_id,
@@ -196,38 +257,32 @@ serve(async (req) => {
           entity_id: sub.entity_id,
           is_test: sub.is_test,
           from_plan: sub.plan_key,
-          to_plan: next_plan,
+          to_plan: planRow.code,
+          to_plan_id: planRow.id,
           effective_at: effectiveAt,
           immediate: isImmediate,
           reason,
+          trigger: body.trigger ?? null,
         },
       })
-      .throwOnError()
-      .catch(() => {
-        /* audit is best-effort */
-      });
+      .catch(() => {});
 
-    // ---------- response ----------
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        subscription_id,
-        previous_plan: sub.plan_key,
-        next_plan,
-        effective_at: effectiveAt,
-        immediate: isImmediate,
-      }),
-      { status: 200, headers: cors }
-    );
+    return json(200, {
+      ok: true,
+      subscription_id,
+      previous_plan: sub.plan_key,
+      next_plan: planRow.code,
+      next_plan_id: planRow.id,
+      effective_at: effectiveAt,
+      immediate: isImmediate,
+      request_id,
+    });
   } catch (e: any) {
     console.error("billing-update-subscription failed:", e);
-    return new Response(
-      JSON.stringify({
-        ok: false,
-        error: "INTERNAL_ERROR",
-        message: e?.message ?? String(e),
-      }),
-      { status: 500, headers: cors }
-    );
+    return json(500, {
+      ok: false,
+      error: "INTERNAL_ERROR",
+      message: e?.message ?? String(e),
+    });
   }
 });

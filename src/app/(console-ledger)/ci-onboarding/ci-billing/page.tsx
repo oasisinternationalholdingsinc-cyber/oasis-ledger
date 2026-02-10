@@ -18,6 +18,13 @@ export const dynamic = "force-dynamic";
  * ✅ AXIOM advisory snapshot (axiom-billing-snapshot)
  *
  * 🚫 NO REGRESSION ALLOWED
+ *
+ * PATCH (UI-ONLY IMPROVEMENT — NO WIRING REGRESSION):
+ * ✅ Update Subscription modal now shows:
+ *    - Current plan (read-only)
+ *    - Dropdown of available backend plans (billing_plans)
+ *    - Selecting a plan fills the payload
+ * ✅ Update invoke sends tolerant keys: next_plan + plan_key + code (+plan aliases)
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -58,7 +65,9 @@ function safeStr(v: any) {
 
 function isUuid(v: any) {
   const s = (v ?? "").toString().trim();
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    s,
+  );
 }
 
 async function fileToBase64(file: File): Promise<string> {
@@ -221,7 +230,9 @@ function OsModal({
       <div className="absolute inset-0 bg-black/60" onClick={!busy ? onClose : undefined} />
       <div className="absolute left-1/2 top-1/2 w-[94vw] max-w-[640px] -translate-x-1/2 -translate-y-1/2">
         <div className="rounded-3xl border border-white/12 bg-[#070A12]/90 shadow-[0_30px_80px_rgba(0,0,0,.55)]">
-          <div className="border-b border-white/10 p-4 text-lg font-semibold text-white/90">{title}</div>
+          <div className="border-b border-white/10 p-4 text-lg font-semibold text-white/90">
+            {title}
+          </div>
           <div className="p-4 space-y-3">{children}</div>
           <div className="flex justify-end gap-2 border-t border-white/10 p-4">
             <button
@@ -372,12 +383,42 @@ export default function CiBillingPage() {
       certified,
       delivery: deliveryForCustomer.length,
     };
-  }, [filteredCustomers.length, subsForCustomer.length, docsForCustomer.length, deliveryForCustomer.length, docsForCustomer]);
+  }, [
+    filteredCustomers.length,
+    subsForCustomer.length,
+    docsForCustomer.length,
+    deliveryForCustomer.length,
+    docsForCustomer,
+  ]);
 
   const activeSub = useMemo(() => {
     const list = subsForCustomer;
     return list.find((s) => (s.status || "").toLowerCase() === "active") || null;
   }, [subsForCustomer]);
+
+  const selectedPlan = useMemo(() => {
+    const key = (planKey || "").trim();
+    if (!key) return null;
+    return plans.find((p) => p.code === key) || null;
+  }, [planKey, plans]);
+
+  const selectedSubPlan = useMemo(() => {
+    const subKey = (selectedSub?.plan_key || "").trim();
+    if (subKey) return plans.find((p) => p.code === subKey) || null;
+    return plans.find((p) => p.id === selectedSub?.plan_id) || null;
+  }, [selectedSub, plans]);
+
+  const selectablePlans = useMemo(() => {
+    // Keep catalog visible; prefer active first.
+    const list = [...plans];
+    list.sort((a, b) => {
+      const ai = a.is_active ? 0 : 1;
+      const bi = b.is_active ? 0 : 1;
+      if (ai !== bi) return ai - bi;
+      return (a.code || "").localeCompare(b.code || "");
+    });
+    return list;
+  }, [plans]);
 
   /* ===================== core: Edge invoke helper ===================== */
 
@@ -409,7 +450,11 @@ export default function CiBillingPage() {
         setProviderEntityId(direct);
         return;
       }
-      const { data, error } = await supabase.from("entities").select("id").eq("slug", entitySlug).maybeSingle();
+      const { data, error } = await supabase
+        .from("entities")
+        .select("id")
+        .eq("slug", entitySlug)
+        .maybeSingle();
       if (error) {
         setProviderEntityId(null);
         return;
@@ -445,7 +490,10 @@ export default function CiBillingPage() {
   useEffect(() => {
     // Plans are not lane-scoped in your schema (global catalog)
     (async () => {
-      const { data: p } = await supabase.from("billing_plans").select("*").order("created_at", { ascending: false });
+      const { data: p } = await supabase
+        .from("billing_plans")
+        .select("*")
+        .order("created_at", { ascending: false });
       setPlans((p || []) as PlanRow[]);
     })();
   }, [refreshKey]);
@@ -614,6 +662,10 @@ export default function CiBillingPage() {
     await invoke("billing-create-subscription", {
       entity_id: providerEntityId,
       plan_key: planKey.trim(),
+      // tolerance aliases (no regression even if function uses code/plan/planKey)
+      code: planKey.trim(),
+      plan: planKey.trim(),
+      planKey: planKey.trim(),
       is_test: isTest,
       reason: reason.trim(),
       customer_id: selectedCustomerId, // optional; tolerated
@@ -632,7 +684,14 @@ export default function CiBillingPage() {
 
     await invoke("billing-update-subscription", {
       subscription_id: selectedSub.id,
+
+      // ✅ tolerant payload keys (prevents drift between UI wording & function contract)
+      next_plan: planKey.trim(),
       plan_key: planKey.trim(),
+      code: planKey.trim(),
+      plan: planKey.trim(),
+      planKey: planKey.trim(),
+
       reason: reason.trim(),
       trigger: "ci_billing_update_subscription",
     });
@@ -738,16 +797,21 @@ export default function CiBillingPage() {
               </span>
             )}
 
-            <span className={cx(
-              "rounded-full border px-3 py-1 text-[10px] font-semibold",
-              isTest ? "border-amber-300/20 bg-amber-400/12 text-amber-100" : "border-sky-300/20 bg-sky-400/12 text-sky-100",
-            )}>
+            <span
+              className={cx(
+                "rounded-full border px-3 py-1 text-[10px] font-semibold",
+                isTest
+                  ? "border-amber-300/20 bg-amber-400/12 text-amber-100"
+                  : "border-sky-300/20 bg-sky-400/12 text-sky-100",
+              )}
+            >
               Lane: {envLabel}
             </span>
           </div>
 
           <div className="mt-2 text-xs text-white/45">
-            Provider (OS Entity): {entityLabel} • provider_entity_id: {shortUUID(providerEntityId)} • Selected customer:{" "}
+            Provider (OS Entity): {entityLabel} • provider_entity_id: {shortUUID(providerEntityId)} • Selected
+            customer:{" "}
             {selectedCustomer ? `${selectedCustomer.legal_name} (${selectedCustomer.billing_email})` : "—"}
           </div>
         </div>
@@ -806,11 +870,15 @@ export default function CiBillingPage() {
                       }}
                       className={cx(
                         "w-full px-3 py-2 text-left text-xs border-b border-white/5 last:border-b-0",
-                        selectedCustomerId === c.id ? "bg-amber-400/10 text-white/90" : "hover:bg-white/5 text-white/70",
+                        selectedCustomerId === c.id
+                          ? "bg-amber-400/10 text-white/90"
+                          : "hover:bg-white/5 text-white/70",
                       )}
                     >
                       <div className="font-semibold">{c.legal_name}</div>
-                      <div className="text-white/45">{c.billing_email} • {shortUUID(c.id)}</div>
+                      <div className="text-white/45">
+                        {c.billing_email} • {shortUUID(c.id)}
+                      </div>
                     </button>
                   ))
                 )}
@@ -834,7 +902,9 @@ export default function CiBillingPage() {
                 <div className="mt-1 text-sm font-semibold text-white/90">
                   {activeSub ? (activeSub.plan_key || safeStr(activeSub.plan_id)) : "—"}
                 </div>
-                <div className="mt-1 text-xs text-white/45">{activeSub ? safeStr(activeSub.status) : "No active sub"}</div>
+                <div className="mt-1 text-xs text-white/45">
+                  {activeSub ? safeStr(activeSub.status) : "No active sub"}
+                </div>
               </div>
               <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                 <div className="text-[10px] uppercase tracking-[0.25em] text-white/40">Docs</div>
@@ -865,21 +935,32 @@ export default function CiBillingPage() {
             <div className="rounded-2xl border border-white/10 bg-black/20 p-3 space-y-2">
               <button
                 disabled={!providerEntityId || busy}
-                onClick={() => setCreateSubOpen(true)}
+                onClick={() => {
+                  setPlanKey("");
+                  setReason("");
+                  setCreateSubOpen(true);
+                }}
                 className="w-full rounded-xl border border-emerald-300/20 bg-emerald-400/12 px-3 py-2 text-xs text-emerald-100 hover:bg-emerald-400/18 disabled:opacity-60"
               >
                 Create Subscription
               </button>
               <button
                 disabled={!selectedSub || busy}
-                onClick={() => setUpdateSubOpen(true)}
+                onClick={() => {
+                  setPlanKey((selectedSub?.plan_key || "").trim());
+                  setReason("");
+                  setUpdateSubOpen(true);
+                }}
                 className="w-full rounded-xl border border-amber-300/20 bg-amber-400/12 px-3 py-2 text-xs text-amber-100 hover:bg-amber-400/18 disabled:opacity-60"
               >
                 Update Subscription
               </button>
               <button
                 disabled={!selectedSub || busy}
-                onClick={() => setEndSubOpen(true)}
+                onClick={() => {
+                  setReason("");
+                  setEndSubOpen(true);
+                }}
                 className="w-full rounded-xl border border-rose-300/20 bg-rose-500/12 px-3 py-2 text-xs text-rose-100 hover:bg-rose-500/18 disabled:opacity-60"
               >
                 End Subscription
@@ -908,28 +989,28 @@ export default function CiBillingPage() {
                   tab === "CUSTOMERS"
                     ? r.legal_name
                     : tab === "SUBSCRIPTIONS"
-                    ? r.plan_key || safeStr(r.plan_id)
-                    : tab === "DOCUMENTS"
-                    ? `${r.document_type} • ${r.status}`
-                    : `${r.channel} • ${r.status}`;
+                      ? r.plan_key || safeStr(r.plan_id)
+                      : tab === "DOCUMENTS"
+                        ? `${r.document_type} • ${r.status}`
+                        : `${r.channel} • ${r.status}`;
 
                 const subline =
                   tab === "CUSTOMERS"
                     ? r.billing_email
                     : tab === "SUBSCRIPTIONS"
-                    ? `status: ${safeStr(r.status)} • ${fmtISO(r.created_at)}`
-                    : tab === "DOCUMENTS"
-                    ? `hash: ${r.file_hash?.slice(0, 10)}… • ${fmtISO(r.created_at)}`
-                    : `recipient: ${safeStr(r.recipient)} • ${fmtISO(r.created_at)}`;
+                      ? `status: ${safeStr(r.status)} • ${fmtISO(r.created_at)}`
+                      : tab === "DOCUMENTS"
+                        ? `hash: ${r.file_hash?.slice(0, 10)}… • ${fmtISO(r.created_at)}`
+                        : `recipient: ${safeStr(r.recipient)} • ${fmtISO(r.created_at)}`;
 
                 const laneBadge =
                   tab === "CUSTOMERS"
                     ? r.is_test
                     : tab === "SUBSCRIPTIONS"
-                    ? r.is_test
-                    : tab === "DOCUMENTS"
-                    ? r.is_test
-                    : r.is_test;
+                      ? r.is_test
+                      : tab === "DOCUMENTS"
+                        ? r.is_test
+                        : r.is_test;
 
                 return (
                   <button
@@ -945,7 +1026,9 @@ export default function CiBillingPage() {
                       <span
                         className={cx(
                           "rounded-full border px-2 py-[2px] text-[10px] font-semibold",
-                          laneBadge ? "border-amber-300/20 bg-amber-400/12 text-amber-100" : "border-sky-300/20 bg-sky-400/12 text-sky-100",
+                          laneBadge
+                            ? "border-amber-300/20 bg-amber-400/12 text-amber-100"
+                            : "border-sky-300/20 bg-sky-400/12 text-sky-100",
                         )}
                       >
                         {laneBadge ? "SANDBOX" : "RoT"}
@@ -1021,7 +1104,9 @@ export default function CiBillingPage() {
                   <span
                     className={cx(
                       "rounded-full border px-2 py-[2px] text-[10px] font-semibold",
-                      selectedSub.is_test ? "border-amber-300/20 bg-amber-400/12 text-amber-100" : "border-sky-300/20 bg-sky-400/12 text-sky-100",
+                      selectedSub.is_test
+                        ? "border-amber-300/20 bg-amber-400/12 text-amber-100"
+                        : "border-sky-300/20 bg-sky-400/12 text-sky-100",
                     )}
                   >
                     {selectedSub.is_test ? "SANDBOX" : "RoT"}
@@ -1048,7 +1133,8 @@ export default function CiBillingPage() {
                   <div className="rounded-xl border border-white/10 bg-black/10 p-3 col-span-2">
                     <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Provider IDs</div>
                     <div className="mt-1">
-                      customer: {safeStr(selectedSub.provider_customer_id)} • sub: {safeStr(selectedSub.provider_subscription_id)}
+                      customer: {safeStr(selectedSub.provider_customer_id)} • sub:{" "}
+                      {safeStr(selectedSub.provider_subscription_id)}
                     </div>
                   </div>
                 </div>
@@ -1056,14 +1142,21 @@ export default function CiBillingPage() {
                 <div className="mt-3 flex flex-wrap gap-2">
                   <button
                     disabled={busy}
-                    onClick={() => setUpdateSubOpen(true)}
+                    onClick={() => {
+                      setPlanKey((selectedSub?.plan_key || "").trim());
+                      setReason("");
+                      setUpdateSubOpen(true);
+                    }}
                     className="rounded-full border border-amber-300/20 bg-amber-400/12 px-3 py-1 text-xs font-semibold text-amber-100 hover:bg-amber-400/18 disabled:opacity-60"
                   >
-                    Update
+                    Change Plan
                   </button>
                   <button
                     disabled={busy}
-                    onClick={() => setEndSubOpen(true)}
+                    onClick={() => {
+                      setReason("");
+                      setEndSubOpen(true);
+                    }}
                     className="rounded-full border border-rose-300/20 bg-rose-500/12 px-3 py-1 text-xs font-semibold text-rose-100 hover:bg-rose-500/18 disabled:opacity-60"
                   >
                     End
@@ -1097,7 +1190,9 @@ export default function CiBillingPage() {
                     <span
                       className={cx(
                         "rounded-full border px-2 py-[2px] text-[10px] font-semibold",
-                        selectedDoc.is_test ? "border-amber-300/20 bg-amber-400/12 text-amber-100" : "border-sky-300/20 bg-sky-400/12 text-sky-100",
+                        selectedDoc.is_test
+                          ? "border-amber-300/20 bg-amber-400/12 text-amber-100"
+                          : "border-sky-300/20 bg-sky-400/12 text-sky-100",
                       )}
                     >
                       {selectedDoc.is_test ? "SANDBOX" : "RoT"}
@@ -1107,7 +1202,9 @@ export default function CiBillingPage() {
                   <div className="mt-3 space-y-2 text-xs text-white/70">
                     <div className="rounded-xl border border-white/10 bg-black/10 p-3">
                       <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Hash (source)</div>
-                      <div className="mt-1 break-all font-mono text-[11px] text-white/80">{selectedDoc.file_hash}</div>
+                      <div className="mt-1 break-all font-mono text-[11px] text-white/80">
+                        {selectedDoc.file_hash}
+                      </div>
                       <div className="mt-2 flex flex-wrap gap-2">
                         <button
                           disabled={busy}
@@ -1150,7 +1247,9 @@ export default function CiBillingPage() {
                         {selectedDoc.certified_at ? (
                           <span className="text-emerald-200">
                             Certified at {fmtISO(selectedDoc.certified_at)} • hash:{" "}
-                            <span className="font-mono">{selectedDoc.certified_file_hash?.slice(0, 12)}…</span>
+                            <span className="font-mono">
+                              {selectedDoc.certified_file_hash?.slice(0, 12)}…
+                            </span>
                           </span>
                         ) : (
                           <span className="text-white/55">Not certified</span>
@@ -1167,7 +1266,11 @@ export default function CiBillingPage() {
                         </button>
 
                         <button
-                          disabled={busy || !selectedDoc.certified_storage_bucket || !selectedDoc.certified_storage_path}
+                          disabled={
+                            busy ||
+                            !selectedDoc.certified_storage_bucket ||
+                            !selectedDoc.certified_storage_path
+                          }
                           onClick={() => openCertifiedPdfClient(selectedDoc)}
                           className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/80 hover:bg-white/10 disabled:opacity-60"
                         >
@@ -1195,7 +1298,8 @@ export default function CiBillingPage() {
                   {selectedDelivery.channel} • {selectedDelivery.status}
                 </div>
                 <div className="mt-1 text-xs text-white/55">
-                  delivery_id: {shortUUID(selectedDelivery.id)} • doc_id: {shortUUID(selectedDelivery.document_id)}
+                  delivery_id: {shortUUID(selectedDelivery.id)} • doc_id:{" "}
+                  {shortUUID(selectedDelivery.document_id)}
                 </div>
 
                 <div className="mt-3 space-y-2 text-xs text-white/70">
@@ -1206,7 +1310,8 @@ export default function CiBillingPage() {
                   <div className="rounded-xl border border-white/10 bg-black/10 p-3">
                     <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Provider</div>
                     <div className="mt-1">
-                      {safeStr(selectedDelivery.provider)} • msg: {safeStr(selectedDelivery.provider_message_id)}
+                      {safeStr(selectedDelivery.provider)} • msg:{" "}
+                      {safeStr(selectedDelivery.provider_message_id)}
                     </div>
                   </div>
                   <div className="rounded-xl border border-white/10 bg-black/10 p-3">
@@ -1313,7 +1418,8 @@ export default function CiBillingPage() {
                   >
                     <div className="font-semibold text-white/90">{p.code}</div>
                     <div className="text-white/45">
-                      {p.name} • {p.currency} {p.price_minor} / {p.billing_period} • {p.is_active ? "active" : "inactive"}
+                      {p.name} • {p.currency} {p.price_minor} / {p.billing_period} •{" "}
+                      {p.is_active ? "active" : "inactive"}
                     </div>
                   </button>
                 ))
@@ -1329,27 +1435,71 @@ export default function CiBillingPage() {
             className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
           />
           <div className="text-xs text-white/45">
-            Customer: {selectedCustomer ? `${selectedCustomer.legal_name} (${selectedCustomer.billing_email})` : "—"} • Lane: {envLabel}
+            Customer:{" "}
+            {selectedCustomer ? `${selectedCustomer.legal_name} (${selectedCustomer.billing_email})` : "—"} • Lane:{" "}
+            {envLabel}
           </div>
         </div>
       </OsModal>
 
+      {/* ✅ UPDATED: operator-independent dropdown + current plan context */}
       <OsModal
         open={updateSubOpen}
-        title="Update subscription"
-        confirmText="Update"
+        title="Change subscription plan"
+        confirmText="Apply Change"
         busy={busy}
         onClose={() => setUpdateSubOpen(false)}
         onConfirm={updateSubscription}
       >
         <div className="space-y-3">
-          <div className="text-xs text-white/55">New plan key *</div>
-          <input
-            placeholder="new plan_key"
-            value={planKey}
-            onChange={(e) => setPlanKey(e.target.value)}
-            className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
-          />
+          <div className="rounded-xl border border-white/10 bg-black/10 p-3">
+            <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Current</div>
+            <div className="mt-1 text-sm font-semibold text-white/90">
+              {safeStr(selectedSub?.plan_key || selectedSubPlan?.code || selectedSub?.plan_id)}
+            </div>
+            <div className="mt-1 text-xs text-white/55">
+              {selectedSubPlan ? `${safeStr(selectedSubPlan.name)} • ${selectedSubPlan.currency} ${selectedSubPlan.price_minor} / ${selectedSubPlan.billing_period}` : "Plan details not resolved (catalog may be empty)."}
+            </div>
+            <div className="mt-2 text-xs text-white/45">
+              subscription_id: <span className="font-mono">{shortUUID(selectedSub?.id)}</span>
+            </div>
+          </div>
+
+          <div>
+            <div className="text-xs text-white/55">Select new plan (backend catalog) *</div>
+            <select
+              value={planKey}
+              onChange={(e) => setPlanKey(e.target.value)}
+              className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
+            >
+              <option value="" disabled>
+                Choose a plan…
+              </option>
+              {selectablePlans.map((p) => (
+                <option key={p.id} value={p.code}>
+                  {p.code} — {p.name} ({p.is_active ? "active" : "inactive"})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {selectedPlan && (
+            <div className="rounded-xl border border-white/10 bg-black/10 p-3">
+              <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Selected</div>
+              <div className="mt-1 text-sm font-semibold text-white/90">{selectedPlan.code}</div>
+              <div className="mt-1 text-xs text-white/55">
+                {safeStr(selectedPlan.name)} • {selectedPlan.currency} {selectedPlan.price_minor} /{" "}
+                {selectedPlan.billing_period}
+              </div>
+              {selectedPlan.description ? (
+                <div className="mt-2 text-xs text-white/45">{selectedPlan.description}</div>
+              ) : null}
+              <div className="mt-2 text-xs text-white/45">
+                plan_id: <span className="font-mono">{shortUUID(selectedPlan.id)}</span>
+              </div>
+            </div>
+          )}
+
           <div className="text-xs text-white/55">Reason *</div>
           <input
             placeholder="reason (required, audited)"
@@ -1357,8 +1507,10 @@ export default function CiBillingPage() {
             onChange={(e) => setReason(e.target.value)}
             className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
           />
+
           <div className="text-xs text-white/45">
-            subscription_id: <span className="font-mono">{shortUUID(selectedSub?.id)}</span>
+            Lane: {envLabel} • This is registry-only (no enforcement). If backend has scheduled-change support,
+            it will record it in metadata.
           </div>
         </div>
       </OsModal>
@@ -1457,7 +1609,8 @@ export default function CiBillingPage() {
               className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/80 outline-none"
             />
             <div className="mt-1 text-xs text-white/45">
-              Selected: {attachFile ? `${attachFile.name} (${Math.round(attachFile.size / 1024)} KB)` : "—"}
+              Selected:{" "}
+              {attachFile ? `${attachFile.name} (${Math.round(attachFile.size / 1024)} KB)` : "—"}
             </div>
           </div>
 
