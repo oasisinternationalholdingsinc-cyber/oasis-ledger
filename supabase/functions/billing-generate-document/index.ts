@@ -16,10 +16,13 @@ import { PNG } from "npm:pngjs@7.0.0";
  * ✅ NO PAYMENTS / NO ENFORCEMENT
  * ✅ Lane-safe via is_test (must be provided; never inferred)
  * ✅ Edge-safe PDF + hash (NO canvas / NO wasm)
+ * ✅ Lane-aware storage buckets:
+ *    - is_test=true  -> bucket: billing_sandbox
+ *    - is_test=false -> bucket: billing_truth
  *
  * Purpose:
  * - Generate invoice/contract/statement PDFs in Oasis enterprise style
- * - Upload to Storage (lane-safe path)
+ * - Upload to Storage (lane-safe bucket + path)
  * - Register pointers + file_hash in billing_documents
  *
  * IMPORTANT:
@@ -92,7 +95,6 @@ const cors: Record<string, string> = {
 };
 
 function getRequestId(req: Request) {
-  // Supabase often returns sb-request-id on response headers; requests may carry x-sb-request-id
   return (
     req.headers.get("x-sb-request-id") ||
     req.headers.get("x-sb-requestid") ||
@@ -739,15 +741,20 @@ serve(async (req: Request) => {
     const { subtotal } = sumLineItems(line_items, currency);
     const amount_cents = Math.round(subtotal * 100);
 
-    // Storage target (lane-safe)
-    const BILLING_BUCKET = Deno.env.get("BILLING_BUCKET") ?? "billing_documents";
+    // -----------------------------------------------------------------
+    // ✅ Storage target (lane-aware buckets — aligned with SQL buckets)
+    // -----------------------------------------------------------------
+    const BILLING_BUCKET = body.is_test ? "billing_sandbox" : "billing_truth";
 
     const providerSlug = safeText((ent as any)?.slug) ?? "provider";
-    const prefix = body.is_test ? "sandbox" : "truth";
     const yyyy = issued_at.slice(0, 4);
     const mm = issued_at.slice(5, 7);
 
-    const storage_path = `${prefix}/${providerSlug}/billing/${yyyy}/${mm}/${document_type}-${file_hash.slice(0, 16)}.pdf`;
+    // No "truth/sandbox" prefix needed because the bucket is lane-specific.
+    const storage_path = `${providerSlug}/billing/${yyyy}/${mm}/${document_type}-${file_hash.slice(
+      0,
+      16,
+    )}.pdf`;
 
     // Upload (idempotent-ish): same hash -> same path; if exists -> continue
     const up = await svc.storage
