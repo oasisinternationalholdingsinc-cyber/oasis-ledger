@@ -22,26 +22,15 @@ import { PNG } from "npm:pngjs@7.0.0";
  * - Upload to Storage (lane-safe path)
  * - Register pointers + file_hash in billing_documents
  *
- * Compatibility (NO REGRESSION):
- * - Writes tolerant alias fields when present in schema:
- *   - entity_id (alias for provider_entity_id)
- *   - document_kind/kind (alias for document_type)
- *   - amount_cents/total_cents (computed from line_items subtotal)
- *
- * Idempotence:
- * - Storage upload is content-addressed-ish (hash in path). If upload exists -> continue.
- * - billing_documents insert:
- *   - If insert fails (likely unique constraint), we fetch existing by file_hash and return it.
- *
  * IMPORTANT:
  * - This function does NOT certify billing docs publicly; it is a registry artifact generator.
- * - Public verification/certification is a separate authority action (later: billing-certify-document).
+ * - Public verification/certification is a separate authority action (billing-certify-document).
  */
 
 type LineItem = {
   description: string;
   quantity?: number;
-  unit_price?: number; // in "major units" (e.g., 49.00)
+  unit_price?: number; // major units (e.g., 49.00)
   amount?: number; // optional override (major units)
 };
 
@@ -66,7 +55,7 @@ type ReqBody = {
   title?: string | null;
 
   // Invoice fields
-  invoice_number?: string | null; // optional (if you have your own numbering)
+  invoice_number?: string | null;
   currency?: string | null; // e.g. "USD" / "CAD"
   issued_at?: string | null; // ISO
   due_at?: string | null; // ISO
@@ -91,6 +80,7 @@ type Resp = {
   error?: string;
   details?: unknown;
   request_id?: string | null;
+  message?: string;
 };
 
 const cors: Record<string, string> = {
@@ -101,26 +91,26 @@ const cors: Record<string, string> = {
   "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
-function json(status: number, body: unknown, req: Request) {
-  const request_id =
+function getRequestId(req: Request) {
+  // Supabase often returns sb-request-id on response headers; requests may carry x-sb-request-id
+  return (
     req.headers.get("x-sb-request-id") ||
     req.headers.get("x-sb-requestid") ||
-    null;
-
-  return new Response(
-    JSON.stringify({ ...(body as any), request_id } satisfies Resp, null, 2),
-    {
-      status,
-      headers: { ...cors, "content-type": "application/json; charset=utf-8" },
-    },
+    req.headers.get("sb-request-id") ||
+    null
   );
 }
 
+function json(status: number, body: unknown, req: Request) {
+  const request_id = getRequestId(req);
+  return new Response(JSON.stringify({ ...(body as any), request_id } satisfies Resp, null, 2), {
+    status,
+    headers: { ...cors, "content-type": "application/json; charset=utf-8" },
+  });
+}
+
 function pickBearer(req: Request) {
-  const h =
-    req.headers.get("authorization") ||
-    req.headers.get("Authorization") ||
-    "";
+  const h = req.headers.get("authorization") || req.headers.get("Authorization") || "";
   return h.startsWith("Bearer ") ? h : "";
 }
 
@@ -288,7 +278,7 @@ async function buildOasisBillingPdf(args: {
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
 
-  // palette (aligned with certify style)
+  // palette (aligned with enterprise style)
   const ink = rgb(0.12, 0.14, 0.18);
   const muted = rgb(0.45, 0.48, 0.55);
   const hair = rgb(0.86, 0.88, 0.91);
@@ -507,7 +497,13 @@ async function buildOasisBillingPdf(args: {
   page.drawText("Subtotal:", { x: tx + 12, y: ty + 34, size: 9, font: bold, color: muted });
 
   const subW = font.widthOfTextAtSize(subtotalText, 9);
-  page.drawText(subtotalText, { x: tx + tw - 12 - subW, y: ty + 34, size: 9, font, color: ink });
+  page.drawText(subtotalText, {
+    x: tx + tw - 12 - subW,
+    y: ty + 34,
+    size: 9,
+    font,
+    color: ink,
+  });
 
   page.drawLine({
     start: { x: tx + 12, y: ty + 24 },
@@ -519,7 +515,13 @@ async function buildOasisBillingPdf(args: {
   page.drawText("Total:", { x: tx + 12, y: ty + 10, size: 10, font: bold, color: ink });
   const totalText = money(subtotal, currency);
   const totalW = bold.widthOfTextAtSize(totalText, 10);
-  page.drawText(totalText, { x: tx + tw - 12 - totalW, y: ty + 10, size: 10, font: bold, color: ink });
+  page.drawText(totalText, {
+    x: tx + tw - 12 - totalW,
+    y: ty + 10,
+    size: 10,
+    font: bold,
+    color: ink,
+  });
 
   // Notes block (optional)
   if (notes?.trim()) {
@@ -588,15 +590,12 @@ async function buildOasisBillingPdf(args: {
 // -----------------------------------------------------------------------------
 serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-  if (req.method !== "POST") {
-    return json(405, { ok: false, error: "METHOD_NOT_ALLOWED" }, req);
-  }
+  if (req.method !== "POST") return json(405, { ok: false, error: "METHOD_NOT_ALLOWED" }, req);
 
   try {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
     const ANON_KEY =
-      Deno.env.get("SUPABASE_ANON_KEY") ??
-      Deno.env.get("SUPABASE_ANON_KEY_PUBLIC");
+      Deno.env.get("SUPABASE_ANON_KEY") ?? Deno.env.get("SUPABASE_ANON_KEY_PUBLIC");
     const SERVICE_ROLE_KEY =
       Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
@@ -650,11 +649,7 @@ serve(async (req: Request) => {
 
     const allowed = new Set(["invoice", "contract", "statement", "receipt", "credit_note", "other"]);
     if (!allowed.has(document_type)) {
-      return json(
-        400,
-        { ok: false, error: "INVALID_DOCUMENT_TYPE", allowed: Array.from(allowed) },
-        req,
-      );
+      return json(400, { ok: false, error: "INVALID_DOCUMENT_TYPE", allowed: Array.from(allowed) }, req);
     }
 
     const currency = (safeText(body.currency) ?? "USD").toUpperCase().slice(0, 8);
@@ -701,10 +696,10 @@ serve(async (req: Request) => {
       auth: { persistSession: false },
     });
 
-    // Provider label (best-effort)
+    // ✅ Provider label lookup (NO legal_name — avoids 500)
     const { data: ent, error: entErr } = await svc
       .from("entities")
-      .select("id, slug, legal_name, name")
+      .select("id, slug, name")
       .eq("id", provider_entity_id)
       .maybeSingle();
 
@@ -713,7 +708,6 @@ serve(async (req: Request) => {
     }
 
     const providerLabel =
-      safeText((ent as any)?.legal_name) ??
       safeText((ent as any)?.name) ??
       safeText((ent as any)?.slug) ??
       provider_entity_id;
@@ -741,7 +735,7 @@ serve(async (req: Request) => {
     // Hash
     const file_hash = await sha256Hex(pdfBytes);
 
-    // ✅ amount_cents (subtotal only; taxes/discounts later)
+    // amount_cents (subtotal only)
     const { subtotal } = sumLineItems(line_items, currency);
     const amount_cents = Math.round(subtotal * 100);
 
@@ -753,10 +747,9 @@ serve(async (req: Request) => {
     const yyyy = issued_at.slice(0, 4);
     const mm = issued_at.slice(5, 7);
 
-    // content-addressed-ish, stable and collision-resistant
     const storage_path = `${prefix}/${providerSlug}/billing/${yyyy}/${mm}/${document_type}-${file_hash.slice(0, 16)}.pdf`;
 
-    // Upload (no upsert; idempotence via same path hash)
+    // Upload (idempotent-ish): same hash -> same path; if exists -> continue
     const up = await svc.storage
       .from(BILLING_BUCKET)
       .upload(storage_path, new Blob([pdfBytes], { type: "application/pdf" }), {
@@ -766,7 +759,9 @@ serve(async (req: Request) => {
 
     if (up.error) {
       const msg = String((up.error as any)?.message ?? "");
+      const status = (up.error as any)?.statusCode ?? (up.error as any)?.status ?? null;
       const alreadyExists =
+        status === 409 ||
         msg.toLowerCase().includes("already exists") ||
         msg.toLowerCase().includes("duplicate") ||
         msg.toLowerCase().includes("409");
@@ -774,22 +769,21 @@ serve(async (req: Request) => {
       if (!alreadyExists) {
         return json(500, { ok: false, error: "UPLOAD_FAILED", details: up.error }, req);
       }
-      // else safe: same hash/path already present
+      // else safe: same object already present
     }
 
     // Register billing_documents row (tolerant insert)
-    // IMPORTANT: Keep provider_entity_id canonical. Add compatibility aliases.
     const docRow: any = {
-      // ✅ canonical scope
+      // canonical
       provider_entity_id,
       is_test: body.is_test,
 
-      // ✅ compatibility aliases (helps resolver/UI)
-      entity_id: provider_entity_id, // if schema has it
-      document_kind: document_type, // if schema has it
-      kind: document_type, // extra tolerance
-      amount_cents, // if schema has it
-      total_cents: amount_cents, // extra tolerance
+      // compatibility aliases (tolerant; harmless if columns exist)
+      entity_id: provider_entity_id,
+      document_kind: document_type,
+      kind: document_type,
+      amount_cents,
+      total_cents: amount_cents,
 
       customer_id: customer_id ?? null,
       recipient_name: recipient_name ?? null,
@@ -823,7 +817,6 @@ serve(async (req: Request) => {
       updated_at: now,
     };
 
-    // ✅ Idempotent insert: if insert fails (unique constraint), fetch existing by file_hash
     let document_id: string | null = null;
 
     const { data: ins, error: insErr } = await svc
@@ -854,14 +847,12 @@ serve(async (req: Request) => {
           req,
         );
       }
-
       document_id = String(existing.id);
     }
 
     // Best-effort audit (never blocks)
-    await svc
-      .from("actions_log")
-      .insert({
+    try {
+      await svc.from("actions_log").insert({
         actor_uid: actor_id,
         action: "BILLING_GENERATE_DOCUMENT",
         target_table: "billing_documents",
@@ -878,9 +869,10 @@ serve(async (req: Request) => {
           reason,
           trigger: body.trigger ?? null,
         },
-      } as any)
-      .throwOnError()
-      .catch(() => {});
+      } as any);
+    } catch {
+      // intentionally swallow
+    }
 
     return json(
       200,
@@ -896,10 +888,6 @@ serve(async (req: Request) => {
     );
   } catch (e: any) {
     console.error("billing-generate-document fatal:", e);
-    return json(
-      500,
-      { ok: false, error: "INTERNAL_ERROR", message: e?.message ?? String(e) },
-      req,
-    );
+    return json(500, { ok: false, error: "INTERNAL_ERROR", message: e?.message ?? String(e) }, req);
   }
 });
