@@ -37,13 +37,14 @@ import { PNG } from "npm:pngjs@7.0.0";
  * ✅ Uses entity_id as canonical issuer scope
  * ✅ provider_entity_id is set equal to entity_id (passes CHECK constraint)
  *
- * -----------------------------------------------------------------------------
- * ✅ LAYOUT ENHANCEMENT ONLY (NO WIRING/SCHEMA CHANGES)
- * - Removes the huge center "ODP" watermark (looked like a demo stamp)
- * - Rebalances whitespace: table + totals move up, footer panels anchor neatly
- * - Adds a subtle corner mark (tiny, non-dominant) instead of center watermark
- * - QR panel reads as an intentional registry affordance (not bolted-on)
- * -----------------------------------------------------------------------------
+ * ---------------------------------------------------------------------------
+ * ✅ Oasis PDF alignment (LAYOUT ONLY — NO WIRING/SCHEMA CHANGES)
+ * - Keeps the same fields + storage + hash behavior (zero regressions)
+ * - Restores "Oasis rhythm": Authority → Identity → Facts → Evidence → Provenance
+ * - Prevents card/title overlap via fixed baselines and dividers
+ * - QR is bottom-right, framed as a registry affordance (not floating)
+ * - Footer is single calm provenance line (no defensive paragraph)
+ * ---------------------------------------------------------------------------
  */
 
 type LineItem = {
@@ -320,11 +321,12 @@ function wrapText(
 }
 
 // -----------------------------------------------------------------------------
-// PDF builder (enterprise style — enhanced, NO regressions)
+// PDF builder (Oasis-aligned, enterprise; layout-only change)
 // -----------------------------------------------------------------------------
 async function buildOasisBillingPdf(args: {
   docType: string;
   providerLabel: string;
+  providerSlug: string;
   laneLabel: string;
   invoiceNumber: string | null;
   documentNumber: string | null;
@@ -338,11 +340,12 @@ async function buildOasisBillingPdf(args: {
   lineItems: LineItem[];
   notes: string | null;
   totalsMajor: { subtotal: number; tax: number; total: number };
-  internalRef: string;
+  registryRefText: string; // internal QR target (NOT a public verification claim)
 }): Promise<Uint8Array> {
   const {
     docType,
     providerLabel,
+    providerSlug,
     laneLabel,
     invoiceNumber,
     documentNumber,
@@ -356,7 +359,7 @@ async function buildOasisBillingPdf(args: {
     lineItems,
     notes,
     totalsMajor,
-    internalRef,
+    registryRefText,
   } = args;
 
   const pdf = await PDFDocument.create();
@@ -366,40 +369,31 @@ async function buildOasisBillingPdf(args: {
   const page = pdf.addPage([612, 792]); // Letter
   const W = page.getWidth();
   const H = page.getHeight();
+
   const margin = 56;
 
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
 
-  // Palette (quiet authority)
+  // Palette (quiet authority; close to certify-minute-book-entry)
   const ink = rgb(0.12, 0.14, 0.18);
-  const muted = rgb(0.42, 0.46, 0.54);
+  const muted = rgb(0.45, 0.48, 0.55);
   const faint = rgb(0.62, 0.66, 0.72);
   const hair = rgb(0.86, 0.88, 0.91);
   const band = rgb(0.06, 0.09, 0.12);
-  const teal = rgb(0.1, 0.78, 0.72);
+  const teal = rgb(0.10, 0.78, 0.72);
   const paper = rgb(1, 1, 1);
   const panel = rgb(0.99, 0.99, 1);
 
   page.drawRectangle({ x: 0, y: 0, width: W, height: H, color: paper });
 
-  // ✅ Subtle corner mark (replaces giant mid-page watermark)
-  // Small, barely-there, bottom-left.
-  page.drawText(winAnsiSafe("ODP"), {
-    x: margin,
-    y: 30,
-    size: 10,
-    font: bold,
-    color: rgb(0.9, 0.92, 0.95),
-  });
-
-  // Header band
+  // Header band (Authority)
   const bandH = 92;
   page.drawRectangle({ x: 0, y: H - bandH, width: W, height: bandH, color: band });
 
   page.drawText(winAnsiSafe("Oasis Digital Parliament"), {
     x: margin,
-    y: H - 40,
+    y: H - 42,
     size: 14,
     font: bold,
     color: teal,
@@ -407,24 +401,24 @@ async function buildOasisBillingPdf(args: {
 
   page.drawText(winAnsiSafe("Billing Registry"), {
     x: margin,
-    y: H - 62,
+    y: H - 64,
     size: 10,
     font,
-    color: rgb(0.86, 0.88, 0.9),
+    color: rgb(0.86, 0.88, 0.90),
   });
 
   const rightTop = winAnsiSafe(`${docType.toUpperCase()}  •  ${laneLabel}`);
   const rightW = font.widthOfTextAtSize(rightTop, 9);
   page.drawText(rightTop, {
     x: W - margin - rightW,
-    y: H - 58,
+    y: H - 60,
     size: 9,
     font,
     color: rgb(0.78, 0.82, 0.86),
   });
 
-  // Title block
-  const topY = H - bandH - 34;
+  // Identity / Title zone (never overlapped by cards)
+  const titleY = H - bandH - 48;
   const title =
     docType === "invoice"
       ? "Invoice"
@@ -440,30 +434,61 @@ async function buildOasisBillingPdf(args: {
 
   page.drawText(winAnsiSafe(title), {
     x: margin,
-    y: topY,
+    y: titleY,
     size: 18,
     font: bold,
     color: ink,
   });
 
-  page.drawText(winAnsiSafe(`Issuer: ${providerLabel}`.slice(0, 150)), {
+  const issuerLine = winAnsiSafe(`Issuer: ${providerLabel}`.slice(0, 160));
+  page.drawText(issuerLine, {
     x: margin,
-    y: topY - 18,
+    y: titleY - 18,
     size: 9.5,
     font,
     color: muted,
   });
 
-  // Two cards: Bill To + Meta
-  const cardY = topY - 72;
+  // Compact context line (doc#, period) — stays under title, above cards
+  let ctxY = titleY - 36;
+  if (documentNumber) {
+    page.drawText(winAnsiSafe(`Doc #: ${documentNumber}`.slice(0, 96)), {
+      x: margin,
+      y: ctxY,
+      size: 8.5,
+      font,
+      color: muted,
+    });
+    ctxY -= 12;
+  }
+
+  const period =
+    periodStart || periodEnd
+      ? `${(periodStart ?? "—").slice(0, 10)} -> ${(periodEnd ?? "—").slice(0, 10)}`
+      : null;
+
+  if (period) {
+    page.drawText(winAnsiSafe(`Period: ${period}`.slice(0, 120)), {
+      x: margin,
+      y: ctxY,
+      size: 8.5,
+      font,
+      color: muted,
+    });
+    ctxY -= 12;
+  }
+
+  // Cards baseline: fixed distance from title/context, prevents overlap
+  const cardTop = ctxY - 18;
   const cardH = 84;
 
+  // Bill To card (left)
   const billX = margin;
   const billW = 318;
 
   page.drawRectangle({
     x: billX,
-    y: cardY,
+    y: cardTop - cardH,
     width: billW,
     height: cardH,
     borderColor: hair,
@@ -473,7 +498,7 @@ async function buildOasisBillingPdf(args: {
 
   page.drawText(winAnsiSafe("Bill To"), {
     x: billX + 14,
-    y: cardY + cardH - 24,
+    y: cardTop - 22,
     size: 9,
     font: bold,
     color: muted,
@@ -481,26 +506,27 @@ async function buildOasisBillingPdf(args: {
 
   page.drawText(winAnsiSafe((recipientName ?? "—").slice(0, 64)), {
     x: billX + 14,
-    y: cardY + 42,
+    y: cardTop - 44,
     size: 10.5,
     font: bold,
     color: ink,
   });
 
-  page.drawText(winAnsiSafe((recipientEmail ?? "—").slice(0, 72)), {
+  page.drawText(winAnsiSafe((recipientEmail ?? "—").slice(0, 80)), {
     x: billX + 14,
-    y: cardY + 24,
+    y: cardTop - 62,
     size: 9,
     font,
     color: muted,
   });
 
-  const metaX = margin + billW + 16;
+  // Meta card (right)
+  const metaX = billX + billW + 16;
   const metaW = W - margin - metaX;
 
   page.drawRectangle({
     x: metaX,
-    y: cardY,
+    y: cardTop - cardH,
     width: metaW,
     height: cardH,
     borderColor: hair,
@@ -516,7 +542,7 @@ async function buildOasisBillingPdf(args: {
       font: bold,
       color: muted,
     });
-    page.drawText(winAnsiSafe(value.slice(0, 42)), {
+    page.drawText(winAnsiSafe(value.slice(0, 46)), {
       x: metaX + 120,
       y,
       size: 8.5,
@@ -525,45 +551,16 @@ async function buildOasisBillingPdf(args: {
     });
   };
 
-  metaRow("Issued:", issuedAtIso.slice(0, 10), cardY + cardH - 24);
-  metaRow("Due:", dueAtIso ? dueAtIso.slice(0, 10) : "—", cardY + cardH - 40);
-  metaRow("Currency:", currency, cardY + cardH - 56);
-  metaRow("Invoice #:", invoiceNumber ?? "—", cardY + cardH - 72);
+  metaRow("Issued:", issuedAtIso.slice(0, 10), cardTop - 24);
+  metaRow("Due:", dueAtIso ? dueAtIso.slice(0, 10) : "—", cardTop - 40);
+  metaRow("Currency:", currency, cardTop - 56);
+  metaRow("Invoice #:", invoiceNumber ?? "—", cardTop - 72);
 
-  // Secondary meta line (doc # / period)
-  let subMetaY = cardY - 16;
-  if (documentNumber) {
-    page.drawText(winAnsiSafe(`Doc #: ${documentNumber}`.slice(0, 90)), {
-      x: margin,
-      y: subMetaY,
-      size: 8.5,
-      font,
-      color: muted,
-    });
-    subMetaY -= 12;
-  }
-
-  const period =
-    periodStart || periodEnd
-      ? `${(periodStart ?? "—").slice(0, 10)} -> ${(periodEnd ?? "—").slice(0, 10)}`
-      : null;
-
-  if (period) {
-    page.drawText(winAnsiSafe(`Period: ${period}`.slice(0, 96)), {
-      x: margin,
-      y: subMetaY,
-      size: 8.5,
-      font,
-      color: muted,
-    });
-    subMetaY -= 12;
-  }
-
-  // Divider
-  const lineY = subMetaY - 8;
+  // Divider below cards
+  const dividerY = (cardTop - cardH) - 22;
   page.drawLine({
-    start: { x: margin, y: lineY },
-    end: { x: W - margin, y: lineY },
+    start: { x: margin, y: dividerY },
+    end: { x: W - margin, y: dividerY },
     thickness: 0.8,
     color: hair,
   });
@@ -571,7 +568,7 @@ async function buildOasisBillingPdf(args: {
   // Table header
   const { items } = sumLineItems(lineItems);
 
-  let y = lineY - 26;
+  let y = dividerY - 28;
 
   const colDesc = margin;
   const colQty = W - margin - 170;
@@ -588,20 +585,19 @@ async function buildOasisBillingPdf(args: {
 
   y -= 12;
   page.drawLine({ start: { x: margin, y }, end: { x: W - margin, y }, thickness: 0.8, color: hair });
-  y -= 14;
+  y -= 16;
 
-  // Table rows (tighter rhythm, less dead space)
-  const maxRows = 14; // slightly more capacity without second page
-  const rowPad = 10;
-  const rowLine = 12;
+  // Rows (stable, compact; no mid-page void)
+  const maxRows = 14;
+  const rowBase = 12;
 
   for (let i = 0; i < Math.min(items.length, maxRows); i++) {
     const it = items[i];
-    const descLines = wrapText(it.description, font, 9, colQty - colDesc - 12, 2);
 
+    const descLines = wrapText(it.description, font, 9, colQty - colDesc - 12, 2);
     const rowTop = y;
 
-    // subtle row rule
+    // very light rule
     page.drawLine({
       start: { x: margin, y: rowTop - 6 },
       end: { x: W - margin, y: rowTop - 6 },
@@ -609,10 +605,9 @@ async function buildOasisBillingPdf(args: {
       color: rgb(0.92, 0.93, 0.95),
     });
 
-    // description
     page.drawText(descLines[0], { x: colDesc, y: rowTop, size: 9, font, color: ink });
     if (descLines[1]) {
-      page.drawText(descLines[1], { x: colDesc, y: rowTop - rowLine, size: 9, font, color: ink });
+      page.drawText(descLines[1], { x: colDesc, y: rowTop - rowBase, size: 9, font, color: ink });
     }
 
     const qtyText = winAnsiSafe(String(it.quantity));
@@ -625,16 +620,15 @@ async function buildOasisBillingPdf(args: {
     const amtW = font.widthOfTextAtSize(amtText, 9);
     page.drawText(amtText, { x: colAmt - amtW, y: rowTop, size: 9, font, color: ink });
 
-    y -= rowPad + (descLines[1] ? rowLine : 0);
+    y -= 12 + (descLines[1] ? rowBase : 0);
   }
 
-  // ✅ Bottom zone anchored relative to remaining space (prevents huge dead middle)
-  // Reserve a clean footer band area.
+  // Footer band anchor (prevents weird spacing)
   const footerMinY = 54;
   const footerH = 160;
-  const footerY = Math.max(footerMinY, y - 22 - footerH);
+  const footerY = Math.max(footerMinY, y - 20 - footerH);
 
-  // Divider before footer band
+  // Divider above footer band
   page.drawLine({
     start: { x: margin, y: footerY + footerH + 14 },
     end: { x: W - margin, y: footerY + footerH + 14 },
@@ -642,63 +636,9 @@ async function buildOasisBillingPdf(args: {
     color: hair,
   });
 
-  // Summary panel (right, within footer band)
-  const tw = 252;
-  const th = 96;
-  const tx = W - margin - tw;
-  const ty = footerY + footerH - th;
-
-  page.drawRectangle({
-    x: tx,
-    y: ty,
-    width: tw,
-    height: th,
-    borderColor: hair,
-    borderWidth: 1,
-    color: panel,
-  });
-
-  page.drawText(winAnsiSafe("Summary"), {
-    x: tx + 14,
-    y: ty + th - 22,
-    size: 9,
-    font: bold,
-    color: muted,
-  });
-
-  const row = (label: string, value: string, y2: number, strong?: boolean) => {
-    page.drawText(winAnsiSafe(label), {
-      x: tx + 14,
-      y: y2,
-      size: strong ? 10 : 9,
-      font: strong ? bold : font,
-      color: strong ? ink : muted,
-    });
-    const vw = (strong ? bold : font).widthOfTextAtSize(value, strong ? 10 : 9);
-    page.drawText(winAnsiSafe(value), {
-      x: tx + tw - 14 - vw,
-      y: y2,
-      size: strong ? 10 : 9,
-      font: strong ? bold : font,
-      color: ink,
-    });
-  };
-
-  row("Subtotal:", money(currency, totalsMajor.subtotal), ty + 50);
-  row("Tax:", money(currency, totalsMajor.tax), ty + 34);
-
-  page.drawLine({
-    start: { x: tx + 14, y: ty + 24 },
-    end: { x: tx + tw - 14, y: ty + 24 },
-    thickness: 0.8,
-    color: hair,
-  });
-
-  row("Total:", money(currency, totalsMajor.total), ty + 8, true);
-
-  // Notes panel (left, within footer band)
+  // Notes panel (left)
   const notesX = margin;
-  const notesW = (tx - margin) - 16;
+  const notesW = 320;
   const notesH = 96;
   const notesY = footerY + footerH - notesH;
 
@@ -722,7 +662,7 @@ async function buildOasisBillingPdf(args: {
 
   const notesBody =
     safeText(notes) ??
-    "Registry artifact generated to validate billing document generation, storage, hashing, and registry workflows. No commercial charge applied.";
+    "Internal sandbox document generated for audit validation of billing PDF generation, hashing, storage, and registry workflows. No commercial charge applied.";
 
   const notesLines = wrapText(notesBody, font, 8.5, notesW - 28, 4);
   let ny = notesY + notesH - 40;
@@ -731,15 +671,69 @@ async function buildOasisBillingPdf(args: {
     ny -= 11;
   }
 
-  // QR panel (bottom-right, integrated)
-  const qr = qrPngBytes(internalRef, { size: 256, margin: 2, ecc: "M" });
+  // Summary panel (right) — separate from QR (no overlap)
+  const sumW = 252;
+  const sumH = 96;
+  const sumX = W - margin - sumW;
+  const sumY = footerY + footerH - sumH;
+
+  page.drawRectangle({
+    x: sumX,
+    y: sumY,
+    width: sumW,
+    height: sumH,
+    borderColor: hair,
+    borderWidth: 1,
+    color: panel,
+  });
+
+  page.drawText(winAnsiSafe("Summary"), {
+    x: sumX + 14,
+    y: sumY + sumH - 22,
+    size: 9,
+    font: bold,
+    color: muted,
+  });
+
+  const srow = (label: string, value: string, y2: number, strong?: boolean) => {
+    page.drawText(winAnsiSafe(label), {
+      x: sumX + 14,
+      y: y2,
+      size: strong ? 10 : 9,
+      font: strong ? bold : font,
+      color: strong ? ink : muted,
+    });
+    const vw = (strong ? bold : font).widthOfTextAtSize(value, strong ? 10 : 9);
+    page.drawText(winAnsiSafe(value), {
+      x: sumX + sumW - 14 - vw,
+      y: y2,
+      size: strong ? 10 : 9,
+      font: strong ? bold : font,
+      color: ink,
+    });
+  };
+
+  srow("Subtotal:", money(currency, totalsMajor.subtotal), sumY + 50);
+  srow("Tax:", money(currency, totalsMajor.tax), sumY + 34);
+
+  page.drawLine({
+    start: { x: sumX + 14, y: sumY + 24 },
+    end: { x: sumX + sumW - 14, y: sumY + 24 },
+    thickness: 0.8,
+    color: hair,
+  });
+
+  srow("Total:", money(currency, totalsMajor.total), sumY + 8, true);
+
+  // QR panel (bottom-right, true Oasis placement)
+  const qr = qrPngBytes(registryRefText, { size: 256, margin: 2, ecc: "M" });
   const qrImg = await pdf.embedPng(qr);
 
-  const qrSize = 84;
-  const qrBoxW = 120;
-  const qrBoxH = 114;
+  const qrSize = 92;
+  const qrBoxW = 132;
+  const qrBoxH = 126;
   const qrBoxX = W - margin - qrBoxW;
-  const qrBoxY = footerY + 12;
+  const qrBoxY = footerY + 10;
 
   page.drawRectangle({
     x: qrBoxX,
@@ -766,16 +760,26 @@ async function buildOasisBillingPdf(args: {
     height: qrSize,
   });
 
-  // Footer copy (small, calm)
+  // Tiny, non-dominant corner mark (replaces demo watermark)
+  const corner = winAnsiSafe(providerSlug.toUpperCase().slice(0, 10) || "ODP");
+  page.drawText(corner, {
+    x: margin,
+    y: 28,
+    size: 9,
+    font: bold,
+    color: rgb(0.90, 0.92, 0.95),
+  });
+
+  // Footer provenance (single calm line)
   const foot =
     "Registry artifact generated by Oasis Billing. Authority and lifecycle status are conferred by the internal registry.";
   page.drawText(winAnsiSafe(foot), {
     x: margin,
-    y: 26,
+    y: 16,
     size: 7.5,
     font,
     color: rgb(0.6, 0.64, 0.7),
-    maxWidth: W - margin * 2 - 140,
+    maxWidth: W - margin * 2 - 150,
   });
 
   return new Uint8Array(await pdf.save({ useObjectStreams: false }));
@@ -790,7 +794,8 @@ serve(async (req: Request) => {
 
   try {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-    const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? Deno.env.get("SUPABASE_ANON_KEY_PUBLIC");
+    const ANON_KEY =
+      Deno.env.get("SUPABASE_ANON_KEY") ?? Deno.env.get("SUPABASE_ANON_KEY_PUBLIC");
     const SERVICE_ROLE_KEY =
       Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
@@ -890,18 +895,25 @@ serve(async (req: Request) => {
       .eq("id", provider_entity_id)
       .maybeSingle();
 
-    if (entErr) return json(500, { ok: false, error: "PROVIDER_LOOKUP_FAILED", details: entErr.message }, req);
+    if (entErr) {
+      return json(500, { ok: false, error: "PROVIDER_LOOKUP_FAILED", details: entErr.message }, req);
+    }
 
-    const providerLabel = safeText((ent as any)?.name) ?? safeText((ent as any)?.slug) ?? provider_entity_id;
+    const providerSlug = safeText((ent as any)?.slug) ?? "provider";
+    const providerLabel =
+      safeText((ent as any)?.name) ?? safeText((ent as any)?.slug) ?? provider_entity_id;
 
-    // Build PDF (internalRef is internal only; not a public verification claim)
-    const internalRef = winAnsiSafe(
-      `billing:${document_type}:${provider_entity_id}:${issued_at}:${invoice_number ?? ""}:${document_number ?? ""}`,
+    // Internal registry ref for QR (NOT a public verification claim)
+    // Keep stable + short; includes hash later in DB as file_hash.
+    const registryRefText = winAnsiSafe(
+      `billing:${document_type}:${provider_entity_id}:${issued_at.slice(0, 10)}:${invoice_number ?? ""}:${document_number ?? ""}`,
     );
 
+    // Build PDF
     const pdfBytes = await buildOasisBillingPdf({
       docType: document_type,
       providerLabel,
+      providerSlug,
       laneLabel,
       invoiceNumber: invoice_number,
       documentNumber: document_number,
@@ -915,7 +927,7 @@ serve(async (req: Request) => {
       lineItems: norm_items,
       notes,
       totalsMajor: { subtotal: subtotal_amount, tax: tax_amount, total: total_amount },
-      internalRef,
+      registryRefText,
     });
 
     // Hash (must pass hex64 check)
@@ -923,12 +935,13 @@ serve(async (req: Request) => {
 
     // Storage target (lane-aware buckets)
     const BILLING_BUCKET = body.is_test ? "billing_sandbox" : "billing_truth";
-    const providerSlug = safeText((ent as any)?.slug) ?? "provider";
     const yyyy = issued_at.slice(0, 4);
     const mm = issued_at.slice(5, 7);
 
     // Stable path if invoice_number exists; else hash-based
-    const keyPart = invoice_number ? `inv-${slugSafe(invoice_number)}` : `${document_type}-${file_hash.slice(0, 16)}`;
+    const keyPart = invoice_number
+      ? `inv-${slugSafe(invoice_number)}`
+      : `${document_type}-${file_hash.slice(0, 16)}`;
     const storage_path = `${providerSlug}/billing/${yyyy}/${mm}/${keyPart}.pdf`;
 
     // Upload with upsert:true to avoid 409 on repeated clicks
@@ -992,8 +1005,9 @@ serve(async (req: Request) => {
         generated_by: "billing-generate-document",
         trigger: trigger ?? null,
         reason,
-        internal_ref: internalRef,
-        issuer_entity_slug: safeText((ent as any)?.slug) ?? null,
+        registry_ref: registryRefText,
+        issuer_entity_slug: providerSlug,
+        external_reference: external_reference ?? null,
       },
 
       created_by: actor_id,
@@ -1001,8 +1015,8 @@ serve(async (req: Request) => {
     };
 
     // -----------------------------------------------------------------
-    // ✅ Enterprise idempotent strategy (NO regression, fixes your 42P10)
-    // - invoice_number & document_number are PARTIAL UNIQUE indexes => cannot use ON CONFLICT column list
+    // ✅ Enterprise idempotent strategy (NO regression, fixes 42P10)
+    // - invoice_number & document_number are PARTIAL UNIQUE indexes => cannot use ON CONFLICT(column list)
     // - do explicit SELECT then UPDATE/INSERT
     // - file_hash is FULL UNIQUE => can UPSERT safely
     // -----------------------------------------------------------------
@@ -1040,7 +1054,9 @@ serve(async (req: Request) => {
         if (!upd.ok) return json(500, { ok: false, error: "DOCUMENT_UPDATE_FAILED", details: upd.error }, req);
       } else {
         const ins = await insertNew();
-        if (!ins.ok || !ins.id) return json(500, { ok: false, error: "DOCUMENT_INSERT_FAILED", details: ins.error }, req);
+        if (!ins.ok || !ins.id) {
+          return json(500, { ok: false, error: "DOCUMENT_INSERT_FAILED", details: ins.error }, req);
+        }
         document_id = ins.id;
       }
     }
@@ -1065,7 +1081,9 @@ serve(async (req: Request) => {
         if (!upd.ok) return json(500, { ok: false, error: "DOCUMENT_UPDATE_FAILED", details: upd.error }, req);
       } else {
         const ins = await insertNew();
-        if (!ins.ok || !ins.id) return json(500, { ok: false, error: "DOCUMENT_INSERT_FAILED", details: ins.error }, req);
+        if (!ins.ok || !ins.id) {
+          return json(500, { ok: false, error: "DOCUMENT_INSERT_FAILED", details: ins.error }, req);
+        }
         document_id = ins.id;
       }
     }
