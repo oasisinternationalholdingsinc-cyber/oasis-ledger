@@ -5,13 +5,15 @@ export const dynamic = "force-dynamic";
  * CI • Billing — OPERATOR CONSOLE (PRODUCTION — LOCKED)
  *
  * ✅ Registry-grade billing console (NO enforcement, NO payments)
- * ✅ ALL authority via Supabase Edge Functions (already deployed)
+ * ✅ Authority via Supabase Edge Functions (preferred)
  * ✅ NO Next.js API routes
  * ✅ Lane-safe (SANDBOX / RoT) — MUST NOT CONTAMINATE
  * ✅ Provider = active OS entity (issuer)
  * ✅ Customers are first-class (provider_entity_id + is_test scoped)
  * ✅ Subscription lifecycle (create / update / end)
- * ✅ Document registry (attach external PDF)
+ * ✅ Document registry:
+ *    - Generate PDF (billing-generate-document) ✅ NEW
+ *    - Attach external PDF (billing-attach-external-document)
  * ✅ Certification (billing-certify-document)
  * ✅ Resolver-backed Open PDF (resolve-billing-document)
  * ✅ Discovery export ZIP (export-billing-discovery-package)
@@ -20,11 +22,10 @@ export const dynamic = "force-dynamic";
  * 🚫 NO REGRESSION ALLOWED
  *
  * PATCH (UI-ONLY IMPROVEMENT — NO WIRING REGRESSION):
- * ✅ Update Subscription modal now shows:
- *    - Current plan (read-only)
- *    - Dropdown of available backend plans (billing_plans)
- *    - Selecting a plan fills the payload
- * ✅ Update invoke sends tolerant keys: next_plan + plan_key + code (+plan aliases)
+ * ✅ Add “Generate Document” flow (billing-generate-document)
+ * ✅ Load billing_documents robustly across schema variants:
+ *    - some schemas use entity_id, others use provider_entity_id
+ * ✅ Customer create prefers Edge Function if present; safe fallback to direct insert (non-breaking)
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -79,6 +80,29 @@ async function fileToBase64(file: File): Promise<string> {
     bin += String.fromCharCode(...bytes.slice(i, i + chunkSize));
   }
   return btoa(bin);
+}
+
+function isMissingColumnErr(e: any, col: string) {
+  const msg = (e?.message || e?.toString?.() || "").toLowerCase();
+  return msg.includes("column") && msg.includes(col.toLowerCase()) && msg.includes("does not exist");
+}
+
+function toMoneyMinor(nMajor: number) {
+  const n = Number.isFinite(nMajor) ? nMajor : 0;
+  return Math.round(n * 100);
+}
+
+function fromMoneyMinor(nMinor: number | null | undefined) {
+  const n = Number.isFinite(Number(nMinor)) ? Number(nMinor) : 0;
+  return (n / 100).toFixed(2);
+}
+
+function isoNowLocalDate() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
 }
 
 /* ===================== types ===================== */
@@ -138,34 +162,45 @@ type SubRow = {
 
 type DocRow = {
   id: string;
-  entity_id: string;
+
+  // schema variants:
+  entity_id?: string; // some schemas
+  provider_entity_id?: string; // newer billing direction
+
   is_test: boolean;
 
   subscription_id?: string | null;
   document_type: string; // enum
-  status: string; // enum
+  status?: string; // enum (some schemas)
   document_number?: string | null;
+  invoice_number?: string | null;
 
   external_reference?: string | null;
 
   period_start?: string | null;
   period_end?: string | null;
-  issued_at: string;
+  issued_at?: string | null;
+  due_at?: string | null;
   voided_at?: string | null;
 
-  currency: string; // enum
+  currency?: string | null;
+
+  // schema variants:
+  amount_cents?: number | null;
+  total_cents?: number | null;
   subtotal_amount?: number | null;
   tax_amount?: number | null;
   total_amount?: number | null;
 
-  storage_bucket: string;
-  storage_path: string;
+  storage_bucket?: string | null;
+  storage_path?: string | null;
   file_hash: string;
-  content_type: string;
+  content_type?: string | null;
+  mime_type?: string | null;
 
   file_size_bytes?: number | null;
 
-  line_items: any;
+  line_items?: any;
   metadata: any;
 
   created_by?: string | null;
@@ -181,6 +216,9 @@ type DocRow = {
   customer_id?: string | null;
   recipient_name?: string | null;
   recipient_email?: string | null;
+
+  title?: string | null;
+  document_kind?: string | null;
 };
 
 type DeliveryRow = {
@@ -228,7 +266,7 @@ function OsModal({
   return (
     <div className="fixed inset-0 z-[100]">
       <div className="absolute inset-0 bg-black/60" onClick={!busy ? onClose : undefined} />
-      <div className="absolute left-1/2 top-1/2 w-[94vw] max-w-[640px] -translate-x-1/2 -translate-y-1/2">
+      <div className="absolute left-1/2 top-1/2 w-[94vw] max-w-[720px] -translate-x-1/2 -translate-y-1/2">
         <div className="rounded-3xl border border-white/12 bg-[#070A12]/90 shadow-[0_30px_80px_rgba(0,0,0,.55)]">
           <div className="border-b border-white/10 p-4 text-lg font-semibold text-white/90">
             {title}
@@ -313,6 +351,7 @@ export default function CiBillingPage() {
   const [updateSubOpen, setUpdateSubOpen] = useState(false);
   const [endSubOpen, setEndSubOpen] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
+  const [generateOpen, setGenerateOpen] = useState(false); // ✅ NEW
   const [certifyOpen, setCertifyOpen] = useState(false);
 
   // New customer form
@@ -333,6 +372,28 @@ export default function CiBillingPage() {
   const [attachReason, setAttachReason] = useState("");
   const [attachFile, setAttachFile] = useState<File | null>(null);
   const attachInputRef = useRef<HTMLInputElement | null>(null);
+
+  // ✅ Generate document form (billing-generate-document)
+  const [genDocType, setGenDocType] = useState<
+    "invoice" | "contract" | "statement" | "receipt" | "credit_note" | "other"
+  >("invoice");
+  const [genTitle, setGenTitle] = useState("");
+  const [genInvoiceNumber, setGenInvoiceNumber] = useState("");
+  const [genCurrency, setGenCurrency] = useState("USD");
+  const [genIssuedAt, setGenIssuedAt] = useState(isoNowLocalDate()); // yyyy-mm-dd
+  const [genDueAt, setGenDueAt] = useState("");
+  const [genPeriodStart, setGenPeriodStart] = useState("");
+  const [genPeriodEnd, setGenPeriodEnd] = useState("");
+  const [genNotes, setGenNotes] = useState("");
+  const [genReason, setGenReason] = useState("");
+  const [genRecipientName, setGenRecipientName] = useState("");
+  const [genRecipientEmail, setGenRecipientEmail] = useState("");
+  const [genLI1Desc, setGenLI1Desc] = useState("Service");
+  const [genLI1Qty, setGenLI1Qty] = useState("1");
+  const [genLI1Unit, setGenLI1Unit] = useState("0.00");
+  const [genLI2Desc, setGenLI2Desc] = useState("");
+  const [genLI2Qty, setGenLI2Qty] = useState("1");
+  const [genLI2Unit, setGenLI2Unit] = useState("0.00");
 
   // Certify form
   const [certifyForce, setCertifyForce] = useState(false);
@@ -369,7 +430,7 @@ export default function CiBillingPage() {
   }, [delivery, selectedCustomerId]);
 
   const commercialIntent = useMemo(() => {
-    // A “Commercial Intent” badge is visible when there is any active non-internal subscription in the lane.
+    // “Commercial Intent” badge is visible when there is any active non-internal subscription in the lane.
     return subs.some((s) => (s.status || "").toLowerCase() === "active" && !s.is_internal);
   }, [subs]);
 
@@ -409,7 +470,6 @@ export default function CiBillingPage() {
   }, [selectedSub, plans]);
 
   const selectablePlans = useMemo(() => {
-    // Keep catalog visible; prefer active first.
     const list = [...plans];
     list.sort((a, b) => {
       const ai = a.is_active ? 0 : 1;
@@ -469,7 +529,6 @@ export default function CiBillingPage() {
   useEffect(() => {
     if (!providerEntityId) return;
     (async () => {
-      // Customers: provider scoped
       const { data: c } = await supabase
         .from("billing_customers")
         .select("*")
@@ -480,7 +539,6 @@ export default function CiBillingPage() {
       const rows = (c || []) as CustomerRow[];
       setCustomers(rows);
 
-      // auto-select first if none selected
       if (!selectedCustomerId && rows[0]?.id) {
         setSelectedCustomerId(rows[0].id);
       }
@@ -488,12 +546,10 @@ export default function CiBillingPage() {
   }, [providerEntityId, isTest, refreshKey]); // keep selectedCustomerId out to avoid loops
 
   useEffect(() => {
-    // Plans are not lane-scoped in your schema (global catalog)
     (async () => {
-      const { data: p } = await supabase
-        .from("billing_plans")
-        .select("*")
-        .order("created_at", { ascending: false });
+      const { data: p } = await supabase.from("billing_plans").select("*").order("created_at", {
+        ascending: false,
+      });
       setPlans((p || []) as PlanRow[]);
     })();
   }, [refreshKey]);
@@ -501,7 +557,6 @@ export default function CiBillingPage() {
   useEffect(() => {
     if (!providerEntityId) return;
     (async () => {
-      // Subscriptions: entity_id is provider
       const { data: s } = await supabase
         .from("billing_subscriptions")
         .select("*")
@@ -518,24 +573,48 @@ export default function CiBillingPage() {
   useEffect(() => {
     if (!providerEntityId) return;
     (async () => {
-      // Documents: entity_id is provider
-      const { data: d } = await supabase
-        .from("billing_documents")
-        .select("*")
-        .eq("entity_id", providerEntityId)
-        .eq("is_test", isTest)
-        .order("created_at", { ascending: false });
+      // ✅ Robust: try entity_id first, fallback to provider_entity_id if schema differs
+      try {
+        const { data: d, error } = await supabase
+          .from("billing_documents")
+          .select("*")
+          .eq("entity_id", providerEntityId)
+          .eq("is_test", isTest)
+          .order("created_at", { ascending: false });
 
-      const rows = (d || []) as DocRow[];
-      setDocs(rows);
-      setSelectedDoc(rows[0] ?? null);
+        if (error) throw error;
+
+        const rows = (d || []) as DocRow[];
+        setDocs(rows);
+        setSelectedDoc(rows[0] ?? null);
+      } catch (e: any) {
+        if (isMissingColumnErr(e, "entity_id")) {
+          const { data: d2, error: e2 } = await supabase
+            .from("billing_documents")
+            .select("*")
+            .eq("provider_entity_id", providerEntityId)
+            .eq("is_test", isTest)
+            .order("created_at", { ascending: false });
+
+          if (e2) {
+            setDocs([]);
+            setSelectedDoc(null);
+            return;
+          }
+
+          const rows2 = (d2 || []) as DocRow[];
+          setDocs(rows2);
+          setSelectedDoc(rows2[0] ?? null);
+        } else {
+          setDocs([]);
+          setSelectedDoc(null);
+        }
+      }
     })();
   }, [providerEntityId, isTest, refreshKey]);
 
   useEffect(() => {
     (async () => {
-      // Delivery events: may have nullable entity_id/is_test; we filter best-effort by provider + lane.
-      // If some rows are null, they’ll still show once selected by customer filter.
       const { data: e } = await supabase
         .from("billing_delivery_events")
         .select("*")
@@ -546,7 +625,8 @@ export default function CiBillingPage() {
 
       const filtered = rows.filter((r) => {
         const sameLane = (r.is_test ?? null) === null ? true : Boolean(r.is_test) === isTest;
-        const sameEntity = (r.entity_id ?? null) === null ? true : r.entity_id === providerEntityId;
+        const sameEntity =
+          (r.entity_id ?? null) === null ? true : r.entity_id === providerEntityId;
         return sameLane && sameEntity;
       });
 
@@ -563,7 +643,6 @@ export default function CiBillingPage() {
   }
 
   async function openPdfViaResolver(doc: DocRow) {
-    // Resolver is hash-first; we pass both hash + id (tolerated)
     const data = await invoke("resolve-billing-document", {
       hash: doc.file_hash,
       document_id: doc.id,
@@ -575,8 +654,6 @@ export default function CiBillingPage() {
   }
 
   async function openCertifiedPdfClient(doc: DocRow) {
-    // Resolver resolves by billing_documents.file_hash; certified uses dedicated pointers.
-    // We open certified PDF via Storage signed url directly (NO backend changes).
     const b = (doc.certified_storage_bucket ?? "").toString().trim();
     const p = (doc.certified_storage_path ?? "").toString().trim();
     if (!b || !p) return alert("No certified storage pointer on this document.");
@@ -596,16 +673,12 @@ export default function CiBillingPage() {
   }
 
   async function certifyDocument(doc: DocRow) {
-    // billing-certify-document expects billing_document_id/document_id; operator JWT is required by your code.
     const data = await invoke("billing-certify-document", {
       billing_document_id: doc.id,
       force: certifyForce,
-      // verify_base_url optional; default is sign.oasisintlholdings.com
       trigger: "ci_billing_certify",
     });
-    if (data?.verify_url) {
-      setNote(`Certified. Verify URL ready.`);
-    }
+    if (data?.verify_url) setNote("Certified. Verify URL ready.");
   }
 
   /* ===================== mutations (Edge) ===================== */
@@ -615,11 +688,41 @@ export default function CiBillingPage() {
     if (!custLegalName.trim()) return alert("legal_name required");
     if (!custBillingEmail.trim()) return alert("billing_email required");
 
-    // We insert directly (operator console, RLS should allow provider operators).
-    // If you later want an RPC, this can be swapped with NO UI regression.
     setBusy(true);
     setNote(null);
     try {
+      // ✅ Prefer Edge Function if deployed (no regression if it isn't)
+      try {
+        const data = await invoke("billing-create-customer", {
+          provider_entity_id: providerEntityId,
+          is_test: isTest,
+          legal_name: custLegalName.trim(),
+          billing_email: custBillingEmail.trim(),
+          contact_name: custContactName.trim() || null,
+          phone: custPhone.trim() || null,
+          status: custStatus.trim() || "active",
+          reason: "create customer (ci-billing)",
+          trigger: "ci_billing_create_customer",
+        });
+
+        const newId = data?.customer_id || data?.id || null;
+        if (newId) setSelectedCustomerId(String(newId));
+        setNewCustomerOpen(false);
+
+        setCustLegalName("");
+        setCustBillingEmail("");
+        setCustContactName("");
+        setCustPhone("");
+        setCustStatus("active");
+
+        setNote("Customer created.");
+        setRefreshKey((n) => n + 1);
+        return;
+      } catch {
+        // fallback below
+      }
+
+      // Fallback (non-breaking): direct insert, still provider+lane safe
       const { data: row, error } = await supabase
         .from("billing_customers")
         .insert({
@@ -637,6 +740,7 @@ export default function CiBillingPage() {
         .single();
 
       if (error) throw error;
+
       setNote("Customer created.");
       setRefreshKey((n) => n + 1);
       setSelectedCustomerId(row?.id ?? null);
@@ -662,13 +766,12 @@ export default function CiBillingPage() {
     await invoke("billing-create-subscription", {
       entity_id: providerEntityId,
       plan_key: planKey.trim(),
-      // tolerance aliases (no regression even if function uses code/plan/planKey)
       code: planKey.trim(),
       plan: planKey.trim(),
       planKey: planKey.trim(),
       is_test: isTest,
       reason: reason.trim(),
-      customer_id: selectedCustomerId, // optional; tolerated
+      customer_id: selectedCustomerId,
       trigger: "ci_billing_create_subscription",
     });
 
@@ -684,14 +787,11 @@ export default function CiBillingPage() {
 
     await invoke("billing-update-subscription", {
       subscription_id: selectedSub.id,
-
-      // ✅ tolerant payload keys (prevents drift between UI wording & function contract)
       next_plan: planKey.trim(),
       plan_key: planKey.trim(),
       code: planKey.trim(),
       plan: planKey.trim(),
       planKey: planKey.trim(),
-
       reason: reason.trim(),
       trigger: "ci_billing_update_subscription",
     });
@@ -732,7 +832,7 @@ export default function CiBillingPage() {
       base64_file: b64,
       is_test: isTest,
       reason: attachReason.trim(),
-      customer_id: selectedCustomerId, // optional; tolerated if backend ignores
+      customer_id: selectedCustomerId,
       trigger: "ci_billing_attach_external_document",
     });
 
@@ -743,6 +843,129 @@ export default function CiBillingPage() {
     setAttachDocumentType("invoice");
     setAttachFile(null);
     if (attachInputRef.current) attachInputRef.current.value = "";
+  }
+
+  // ✅ NEW: Generate billing document
+  async function generateBillingDocument() {
+    if (!providerEntityId) return alert("Missing provider entity_id");
+    if (!genReason.trim()) return alert("reason required");
+
+    const qty1 = Math.max(0, Number(genLI1Qty || "1") || 1);
+    const unit1 = Math.max(0, Number(genLI1Unit || "0") || 0);
+
+    const li: any[] = [
+      {
+        description: (genLI1Desc || "Service").trim(),
+        quantity: qty1,
+        unit_price: unit1,
+      },
+    ];
+
+    const desc2 = genLI2Desc.trim();
+    if (desc2) {
+      const qty2 = Math.max(0, Number(genLI2Qty || "1") || 1);
+      const unit2 = Math.max(0, Number(genLI2Unit || "0") || 0);
+      li.push({ description: desc2, quantity: qty2, unit_price: unit2 });
+    }
+
+    const title =
+      genTitle.trim() ||
+      (genDocType === "invoice"
+        ? "Invoice"
+        : genDocType === "contract"
+          ? "Contract"
+          : genDocType === "statement"
+            ? "Statement"
+            : genDocType === "receipt"
+              ? "Receipt"
+              : genDocType === "credit_note"
+                ? "Credit Note"
+                : "Billing Document");
+
+    // Edge expects ISO strings; tolerate yyyy-mm-dd by appending time.
+    const issuedIso = genIssuedAt.trim()
+      ? new Date(`${genIssuedAt.trim()}T00:00:00.000Z`).toISOString()
+      : new Date().toISOString();
+
+    const dueIso = genDueAt.trim()
+      ? new Date(`${genDueAt.trim()}T00:00:00.000Z`).toISOString()
+      : null;
+
+    const psIso = genPeriodStart.trim()
+      ? new Date(`${genPeriodStart.trim()}T00:00:00.000Z`).toISOString()
+      : null;
+
+    const peIso = genPeriodEnd.trim()
+      ? new Date(`${genPeriodEnd.trim()}T00:00:00.000Z`).toISOString()
+      : null;
+
+    const payload: any = {
+      provider_entity_id: providerEntityId,
+      is_test: isTest,
+
+      customer_id: selectedCustomerId ?? null,
+      recipient_name: genRecipientName.trim() || selectedCustomer?.legal_name || null,
+      recipient_email: genRecipientEmail.trim() || selectedCustomer?.billing_email || null,
+
+      document_type: genDocType,
+      title,
+
+      invoice_number: genInvoiceNumber.trim() || null,
+      currency: (genCurrency || "USD").trim().toUpperCase(),
+      issued_at: issuedIso,
+      due_at: dueIso,
+
+      period_start: psIso,
+      period_end: peIso,
+
+      notes: genNotes.trim() || null,
+      line_items: li,
+
+      reason: genReason.trim(),
+      trigger: "ci_billing_generate_document",
+    };
+
+    const data = await invoke("billing-generate-document", payload);
+
+    // Optional: open the PDF immediately (resolver) if we got id/hash back.
+    const newId = data?.document_id || null;
+    const newHash = data?.file_hash || null;
+
+    setGenerateOpen(false);
+
+    // reset (keep currency)
+    setGenTitle("");
+    setGenInvoiceNumber("");
+    setGenIssuedAt(isoNowLocalDate());
+    setGenDueAt("");
+    setGenPeriodStart("");
+    setGenPeriodEnd("");
+    setGenNotes("");
+    setGenReason("");
+    setGenRecipientName("");
+    setGenRecipientEmail("");
+    setGenLI1Desc("Service");
+    setGenLI1Qty("1");
+    setGenLI1Unit("0.00");
+    setGenLI2Desc("");
+    setGenLI2Qty("1");
+    setGenLI2Unit("0.00");
+
+    // auto-open if possible
+    if (newHash || newId) {
+      try {
+        const resolved = await invoke("resolve-billing-document", {
+          hash: newHash,
+          document_id: newId,
+          is_test: isTest,
+          entity_id: providerEntityId,
+          trigger: "ci_billing_generate_document_open",
+        });
+        if (resolved?.urls?.pdf) window.open(resolved.urls.pdf, "_blank", "noopener,noreferrer");
+      } catch {
+        // non-blocking
+      }
+    }
   }
 
   /* ===================== UI helpers ===================== */
@@ -764,7 +987,6 @@ export default function CiBillingPage() {
   function selectRow(r: any) {
     if (tab === "CUSTOMERS") {
       setSelectedCustomerId(r.id);
-      // keep other selections but re-point to first relevant
       const s = subs.filter((x) => (x.customer_id ?? null) === r.id)[0] || subs[0] || null;
       const d = docs.filter((x) => (x.customer_id ?? null) === r.id)[0] || docs[0] || null;
       setSelectedSub(s);
@@ -775,6 +997,38 @@ export default function CiBillingPage() {
     if (tab === "DOCUMENTS") setSelectedDoc(r);
     if (tab === "DELIVERY") setSelectedDelivery(r);
   }
+
+  const selectedDocStatus = useMemo(() => {
+    const s = (selectedDoc as any)?.status;
+    if (s) return String(s);
+    // fallback for generated docs which may not have status in schema
+    return "registered";
+  }, [selectedDoc]);
+
+  const selectedDocAmountText = useMemo(() => {
+    if (!selectedDoc) return "—";
+    const currency = (selectedDoc.currency ?? "—").toString();
+    const cents =
+      (selectedDoc as any).amount_cents ??
+      (selectedDoc as any).total_cents ??
+      null;
+
+    if (Number.isFinite(Number(cents))) {
+      return `${currency} ${fromMoneyMinor(Number(cents))}`;
+    }
+
+    // older schema uses total_amount (major units)
+    const totalMajor =
+      (selectedDoc as any).total_amount ??
+      (selectedDoc as any).subtotal_amount ??
+      null;
+
+    if (Number.isFinite(Number(totalMajor))) {
+      return `${currency} ${Number(totalMajor).toFixed(2)}`;
+    }
+
+    return currency;
+  }, [selectedDoc]);
 
   /* ===================== render ===================== */
 
@@ -965,7 +1219,23 @@ export default function CiBillingPage() {
               >
                 End Subscription
               </button>
+
               <div className="h-px bg-white/10" />
+
+              <button
+                disabled={!providerEntityId || busy}
+                onClick={() => {
+                  // seed recipient from selected customer (safe)
+                  setGenRecipientName(selectedCustomer?.legal_name || "");
+                  setGenRecipientEmail(selectedCustomer?.billing_email || "");
+                  setGenReason("");
+                  setGenerateOpen(true);
+                }}
+                className="w-full rounded-xl border border-amber-300/20 bg-amber-400/12 px-3 py-2 text-xs font-semibold text-amber-100 hover:bg-amber-400/18 disabled:opacity-60"
+              >
+                Generate Document (PDF)
+              </button>
+
               <button
                 disabled={!providerEntityId || busy}
                 onClick={() => setAttachOpen(true)}
@@ -985,13 +1255,14 @@ export default function CiBillingPage() {
             ) : (
               listRows.map((r: any) => {
                 const isSelected = selectedId === r.id;
+
                 const headline =
                   tab === "CUSTOMERS"
                     ? r.legal_name
                     : tab === "SUBSCRIPTIONS"
                       ? r.plan_key || safeStr(r.plan_id)
                       : tab === "DOCUMENTS"
-                        ? `${r.document_type} • ${r.status}`
+                        ? `${safeStr(r.document_type || r.document_kind)} • ${safeStr(r.status || "registered")}`
                         : `${r.channel} • ${r.status}`;
 
                 const subline =
@@ -1018,7 +1289,9 @@ export default function CiBillingPage() {
                     onClick={() => selectRow(r)}
                     className={cx(
                       "w-full rounded-2xl border p-3 text-left transition",
-                      isSelected ? "border-amber-300/25 bg-black/40" : "border-white/10 bg-black/20 hover:bg-black/30",
+                      isSelected
+                        ? "border-amber-300/25 bg-black/40"
+                        : "border-white/10 bg-black/20 hover:bg-black/30",
                     )}
                   >
                     <div className="flex items-center justify-between gap-2">
@@ -1181,10 +1454,12 @@ export default function CiBillingPage() {
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <div className="text-sm font-semibold text-white/90">
-                        {selectedDoc.document_type} • {selectedDoc.status}
+                        {safeStr((selectedDoc as any).document_type || (selectedDoc as any).document_kind)} •{" "}
+                        {safeStr(selectedDocStatus)}
                       </div>
                       <div className="mt-1 text-xs text-white/55">
-                        doc_id: {shortUUID(selectedDoc.id)} • issued: {fmtISO(selectedDoc.issued_at)}
+                        doc_id: {shortUUID(selectedDoc.id)} • issued:{" "}
+                        {fmtISO((selectedDoc as any).issued_at || null)}
                       </div>
                     </div>
                     <span
@@ -1229,16 +1504,13 @@ export default function CiBillingPage() {
                     <div className="rounded-xl border border-white/10 bg-black/10 p-3">
                       <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Recipient</div>
                       <div className="mt-1">
-                        {safeStr(selectedDoc.recipient_name)} • {safeStr(selectedDoc.recipient_email)}
+                        {safeStr((selectedDoc as any).recipient_name)} • {safeStr((selectedDoc as any).recipient_email)}
                       </div>
                     </div>
 
                     <div className="rounded-xl border border-white/10 bg-black/10 p-3">
-                      <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Totals</div>
-                      <div className="mt-1">
-                        {selectedDoc.currency} • subtotal: {safeStr(selectedDoc.subtotal_amount)} • tax:{" "}
-                        {safeStr(selectedDoc.tax_amount)} • total: {safeStr(selectedDoc.total_amount)}
-                      </div>
+                      <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Amount</div>
+                      <div className="mt-1">{selectedDocAmountText}</div>
                     </div>
 
                     <div className="rounded-xl border border-white/10 bg-black/10 p-3">
@@ -1458,7 +1730,9 @@ export default function CiBillingPage() {
               {safeStr(selectedSub?.plan_key || selectedSubPlan?.code || selectedSub?.plan_id)}
             </div>
             <div className="mt-1 text-xs text-white/55">
-              {selectedSubPlan ? `${safeStr(selectedSubPlan.name)} • ${selectedSubPlan.currency} ${selectedSubPlan.price_minor} / ${selectedSubPlan.billing_period}` : "Plan details not resolved (catalog may be empty)."}
+              {selectedSubPlan
+                ? `${safeStr(selectedSubPlan.name)} • ${selectedSubPlan.currency} ${selectedSubPlan.price_minor} / ${selectedSubPlan.billing_period}`
+                : "Plan details not resolved (catalog may be empty)."}
             </div>
             <div className="mt-2 text-xs text-white/45">
               subscription_id: <span className="font-mono">{shortUUID(selectedSub?.id)}</span>
@@ -1509,8 +1783,7 @@ export default function CiBillingPage() {
           />
 
           <div className="text-xs text-white/45">
-            Lane: {envLabel} • This is registry-only (no enforcement). If backend has scheduled-change support,
-            it will record it in metadata.
+            Lane: {envLabel} • Registry-only (no enforcement). Backend records the change in metadata/audit.
           </div>
         </div>
       </OsModal>
@@ -1534,6 +1807,212 @@ export default function CiBillingPage() {
           />
           <div className="text-xs text-white/45">
             subscription_id: <span className="font-mono">{shortUUID(selectedSub?.id)}</span>
+          </div>
+        </div>
+      </OsModal>
+
+      {/* ✅ NEW: Generate Document */}
+      <OsModal
+        open={generateOpen}
+        title="Generate billing document (PDF)"
+        confirmText="Generate"
+        busy={busy}
+        onClose={() => setGenerateOpen(false)}
+        onConfirm={generateBillingDocument}
+      >
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <div className="text-xs text-white/55">Document type *</div>
+              <select
+                value={genDocType}
+                onChange={(e) => setGenDocType(e.target.value as any)}
+                className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
+              >
+                <option value="invoice">invoice</option>
+                <option value="receipt">receipt</option>
+                <option value="credit_note">credit_note</option>
+                <option value="statement">statement</option>
+                <option value="contract">contract</option>
+                <option value="other">other</option>
+              </select>
+            </div>
+
+            <div>
+              <div className="text-xs text-white/55">Currency</div>
+              <input
+                value={genCurrency}
+                onChange={(e) => setGenCurrency(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
+                placeholder="USD"
+              />
+            </div>
+
+            <div className="col-span-2">
+              <div className="text-xs text-white/55">Title (optional)</div>
+              <input
+                value={genTitle}
+                onChange={(e) => setGenTitle(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
+                placeholder="Leave blank for default"
+              />
+            </div>
+
+            <div>
+              <div className="text-xs text-white/55">Issued date</div>
+              <input
+                type="date"
+                value={genIssuedAt}
+                onChange={(e) => setGenIssuedAt(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
+              />
+            </div>
+
+            <div>
+              <div className="text-xs text-white/55">Due date (optional)</div>
+              <input
+                type="date"
+                value={genDueAt}
+                onChange={(e) => setGenDueAt(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
+              />
+            </div>
+
+            <div>
+              <div className="text-xs text-white/55">Period start (optional)</div>
+              <input
+                type="date"
+                value={genPeriodStart}
+                onChange={(e) => setGenPeriodStart(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
+              />
+            </div>
+
+            <div>
+              <div className="text-xs text-white/55">Period end (optional)</div>
+              <input
+                type="date"
+                value={genPeriodEnd}
+                onChange={(e) => setGenPeriodEnd(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
+              />
+            </div>
+
+            <div className="col-span-2">
+              <div className="text-xs text-white/55">Invoice # (optional)</div>
+              <input
+                value={genInvoiceNumber}
+                onChange={(e) => setGenInvoiceNumber(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
+                placeholder="Optional"
+              />
+            </div>
+
+            <div>
+              <div className="text-xs text-white/55">Recipient name</div>
+              <input
+                value={genRecipientName}
+                onChange={(e) => setGenRecipientName(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
+                placeholder={selectedCustomer?.legal_name || "Optional"}
+              />
+            </div>
+
+            <div>
+              <div className="text-xs text-white/55">Recipient email</div>
+              <input
+                value={genRecipientEmail}
+                onChange={(e) => setGenRecipientEmail(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
+                placeholder={selectedCustomer?.billing_email || "Optional"}
+              />
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
+            <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Line items</div>
+
+            <div className="mt-2 grid grid-cols-12 gap-2">
+              <div className="col-span-7">
+                <div className="text-[11px] text-white/55">Description</div>
+                <input
+                  value={genLI1Desc}
+                  onChange={(e) => setGenLI1Desc(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
+                />
+              </div>
+              <div className="col-span-2">
+                <div className="text-[11px] text-white/55">Qty</div>
+                <input
+                  value={genLI1Qty}
+                  onChange={(e) => setGenLI1Qty(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
+                />
+              </div>
+              <div className="col-span-3">
+                <div className="text-[11px] text-white/55">Unit price</div>
+                <input
+                  value={genLI1Unit}
+                  onChange={(e) => setGenLI1Unit(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
+                  placeholder="0.00"
+                />
+              </div>
+
+              <div className="col-span-7">
+                <input
+                  value={genLI2Desc}
+                  onChange={(e) => setGenLI2Desc(e.target.value)}
+                  className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/70 outline-none"
+                  placeholder="(optional) second line item description"
+                />
+              </div>
+              <div className="col-span-2">
+                <input
+                  value={genLI2Qty}
+                  onChange={(e) => setGenLI2Qty(e.target.value)}
+                  className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/70 outline-none"
+                />
+              </div>
+              <div className="col-span-3">
+                <input
+                  value={genLI2Unit}
+                  onChange={(e) => setGenLI2Unit(e.target.value)}
+                  className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/70 outline-none"
+                  placeholder="0.00"
+                />
+              </div>
+            </div>
+
+            <div className="mt-2 text-xs text-white/45">
+              Total is calculated by the Edge function from line items (registry-grade, audited).
+            </div>
+          </div>
+
+          <div>
+            <div className="text-xs text-white/55">Notes (optional)</div>
+            <textarea
+              value={genNotes}
+              onChange={(e) => setGenNotes(e.target.value)}
+              className="mt-1 w-full rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/80 outline-none"
+              rows={3}
+              placeholder="Optional notes rendered into the PDF."
+            />
+          </div>
+
+          <div>
+            <div className="text-xs text-white/55">Reason *</div>
+            <input
+              value={genReason}
+              onChange={(e) => setGenReason(e.target.value)}
+              className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
+              placeholder="required (audited)"
+            />
+          </div>
+
+          <div className="text-xs text-white/45">
+            Provider: <span className="font-mono">{shortUUID(providerEntityId)}</span> • Customer:{" "}
+            {selectedCustomer ? selectedCustomer.legal_name : "—"} • Lane: {envLabel}
           </div>
         </div>
       </OsModal>
