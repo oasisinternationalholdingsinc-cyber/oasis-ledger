@@ -23,15 +23,19 @@ import { PNG } from "npm:pngjs@7.0.0";
  *    is_test=false -> billing_truth
  *
  * Idempotency (enterprise, no regression):
- * - If invoice_number provided: UPSERT by (entity_id,is_test,invoice_number) and overwrite pointers/hash.
- * - Else if document_number provided: UPSERT by (entity_id,is_test,document_number).
- * - Else: UPSERT by file_hash (unique).
- * - Storage upload uses upsert:true to avoid 409 on repeated clicks.
+ * - IMPORTANT: Supabase/PostgREST UPSERT only works against NON-PARTIAL unique constraints.
+ *   Your billing_documents has PARTIAL UNIQUE indexes for (entity_id,is_test,invoice_number) and
+ *   (entity_id,is_test,document_number), so ON CONFLICT(columnlist) will FAIL with:
+ *     "no unique or exclusion constraint matching the ON CONFLICT specification"
  *
- * IMPORTANT:
- * - Writes ONLY columns that EXIST on billing_documents (per your screenshots).
- * - Uses entity_id as canonical issuer scope.
- * - provider_entity_id is set equal to entity_id (passes CHECK constraint).
+ * ✅ Therefore:
+ * - If invoice_number provided: SELECT existing by (entity_id,is_test,invoice_number) → UPDATE else INSERT
+ * - Else if document_number provided: SELECT existing by (entity_id,is_test,document_number) → UPDATE else INSERT
+ * - Else: UPSERT by file_hash (FULL UNIQUE) is allowed and used
+ *
+ * ✅ Writes ONLY columns that EXIST on billing_documents (per locked schema)
+ * ✅ Uses entity_id as canonical issuer scope
+ * ✅ provider_entity_id is set equal to entity_id (passes CHECK constraint)
  */
 
 type LineItem = {
@@ -577,7 +581,7 @@ async function buildOasisBillingPdf(args: {
   page.drawLine({ start: { x: margin, y }, end: { x: W - margin, y }, thickness: 0.8, color: hair });
   y -= 16;
 
-  // Table rows (wrap + calmer rhythm)
+  // Table rows
   const maxRows = 12;
   const rowPad = 10;
   const rowLine = 12;
@@ -586,10 +590,8 @@ async function buildOasisBillingPdf(args: {
     const it = items[i];
     const descLines = wrapText(it.description, font, 9, colQty - colDesc - 12, 2);
 
-    // row baseline
     const rowTop = y;
 
-    // zebra hairline
     page.drawLine({
       start: { x: margin, y: rowTop - 6 },
       end: { x: W - margin, y: rowTop - 6 },
@@ -597,7 +599,6 @@ async function buildOasisBillingPdf(args: {
       color: rgb(0.92, 0.93, 0.95),
     });
 
-    // description (2 lines max)
     page.drawText(descLines[0], { x: colDesc, y: rowTop, size: 9, font, color: ink });
     if (descLines[1]) {
       page.drawText(descLines[1], { x: colDesc, y: rowTop - rowLine, size: 9, font, color: ink });
@@ -613,11 +614,10 @@ async function buildOasisBillingPdf(args: {
     const amtW = font.widthOfTextAtSize(amtText, 9);
     page.drawText(amtText, { x: colAmt - amtW, y: rowTop, size: 9, font, color: ink });
 
-    // advance Y by row height (2-line rows)
     y -= rowPad + (descLines[1] ? rowLine : 0);
   }
 
-  // Summary panel (bottom-right)
+  // Summary panel
   const tx = W - margin - 252;
   const ty = 116;
   const tw = 252;
@@ -671,7 +671,7 @@ async function buildOasisBillingPdf(args: {
 
   row("Total:", money(currency, totalsMajor.total), ty + 12, true);
 
-  // Notes panel (bottom-left)
+  // Notes panel
   const notesX = margin;
   const notesY = 116;
   const notesW = (tx - margin) - 16;
@@ -897,9 +897,7 @@ serve(async (req: Request) => {
     const yyyy = issued_at.slice(0, 4);
     const mm = issued_at.slice(5, 7);
 
-    // Idempotent-ish path:
-    // - If invoice_number exists, stable path by invoice_number (better for "update same invoice")
-    // - Else hash-based path
+    // Stable path if invoice_number exists; else hash-based
     const keyPart = invoice_number ? `inv-${slugSafe(invoice_number)}` : `${document_type}-${file_hash.slice(0, 16)}`;
     const storage_path = `${providerSlug}/billing/${yyyy}/${mm}/${keyPart}.pdf`;
 
@@ -915,7 +913,7 @@ serve(async (req: Request) => {
       return json(500, { ok: false, error: "UPLOAD_FAILED", details: up.error }, req);
     }
 
-    // ✅ Insert ONLY existing columns (per your table)
+    // ✅ Insert ONLY existing columns (per locked schema)
     // entity_id is canonical issuer scope
     const row: any = {
       entity_id: provider_entity_id,
@@ -965,7 +963,6 @@ serve(async (req: Request) => {
         trigger: trigger ?? null,
         reason,
         internal_ref: internalRef,
-        // helpful trace without schema drift
         issuer_entity_slug: safeText((ent as any)?.slug) ?? null,
       },
 
@@ -974,84 +971,86 @@ serve(async (req: Request) => {
     };
 
     // -----------------------------------------------------------------
-    // ✅ Enterprise idempotent upsert strategy
+    // ✅ Enterprise idempotent strategy (NO regression, fixes your 42P10)
+    // - invoice_number & document_number are PARTIAL UNIQUE indexes => cannot use ON CONFLICT column list
+    // - do explicit SELECT then UPDATE/INSERT
+    // - file_hash is FULL UNIQUE => can UPSERT safely
     // -----------------------------------------------------------------
     let document_id: string | null = null;
 
-    const upsertSelect = async (onConflict: string) => {
-      const { data, error } = await svc
-        .from("billing_documents")
-        .upsert(row, { onConflict })
-        .select("id")
-        .maybeSingle();
+    const updateById = async (id: string) => {
+      const { error } = await svc.from("billing_documents").update(row).eq("id", id);
+      return { ok: !error, error };
+    };
 
+    const insertNew = async () => {
+      const { data, error } = await svc.from("billing_documents").insert(row).select("id").maybeSingle();
       if (error) return { ok: false as const, error };
       return { ok: true as const, id: data?.id ? String(data.id) : null };
     };
 
-    // 1) invoice_number unique (partial) if provided
+    // 1) invoice_number path (manual idempotency)
     if (invoice_number) {
-      const r = await upsertSelect("entity_id,is_test,invoice_number");
-      if (!r.ok) {
-        // fallback to explicit lookup by unique constraint
-        const byInv = await svc
-          .from("billing_documents")
-          .select("id")
-          .eq("entity_id", provider_entity_id)
-          .eq("is_test", body.is_test)
-          .eq("invoice_number", invoice_number)
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
+      const existing = await svc
+        .from("billing_documents")
+        .select("id")
+        .eq("entity_id", provider_entity_id)
+        .eq("is_test", body.is_test)
+        .eq("invoice_number", invoice_number)
+        .limit(1)
+        .maybeSingle();
 
-        if (byInv.error || !byInv.data?.id) {
-          return json(500, { ok: false, error: "DOCUMENT_UPSERT_FAILED", details: r.error }, req);
-        }
-        document_id = String(byInv.data.id);
+      if (existing.error) {
+        return json(500, { ok: false, error: "DOCUMENT_LOOKUP_FAILED", details: existing.error }, req);
+      }
+
+      if (existing.data?.id) {
+        document_id = String(existing.data.id);
+        const upd = await updateById(document_id);
+        if (!upd.ok) return json(500, { ok: false, error: "DOCUMENT_UPDATE_FAILED", details: upd.error }, req);
       } else {
-        document_id = r.id;
+        const ins = await insertNew();
+        if (!ins.ok || !ins.id) return json(500, { ok: false, error: "DOCUMENT_INSERT_FAILED", details: ins.error }, req);
+        document_id = ins.id;
       }
     }
-    // 2) document_number unique (partial) if provided and no invoice_number
+    // 2) document_number path (manual idempotency)
     else if (document_number) {
-      const r = await upsertSelect("entity_id,is_test,document_number");
-      if (!r.ok) {
-        const byDoc = await svc
-          .from("billing_documents")
-          .select("id")
-          .eq("entity_id", provider_entity_id)
-          .eq("is_test", body.is_test)
-          .eq("document_number", document_number)
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
+      const existing = await svc
+        .from("billing_documents")
+        .select("id")
+        .eq("entity_id", provider_entity_id)
+        .eq("is_test", body.is_test)
+        .eq("document_number", document_number)
+        .limit(1)
+        .maybeSingle();
 
-        if (byDoc.error || !byDoc.data?.id) {
-          return json(500, { ok: false, error: "DOCUMENT_UPSERT_FAILED", details: r.error }, req);
-        }
-        document_id = String(byDoc.data.id);
+      if (existing.error) {
+        return json(500, { ok: false, error: "DOCUMENT_LOOKUP_FAILED", details: existing.error }, req);
+      }
+
+      if (existing.data?.id) {
+        document_id = String(existing.data.id);
+        const upd = await updateById(document_id);
+        if (!upd.ok) return json(500, { ok: false, error: "DOCUMENT_UPDATE_FAILED", details: upd.error }, req);
       } else {
-        document_id = r.id;
+        const ins = await insertNew();
+        if (!ins.ok || !ins.id) return json(500, { ok: false, error: "DOCUMENT_INSERT_FAILED", details: ins.error }, req);
+        document_id = ins.id;
       }
     }
-    // 3) fallback: file_hash unique
+    // 3) fallback: file_hash unique (FULL UNIQUE) — safe upsert
     else {
-      const r = await upsertSelect("file_hash");
-      if (!r.ok) {
-        const byHash = await svc
-          .from("billing_documents")
-          .select("id")
-          .eq("file_hash", file_hash)
-          .limit(1)
-          .maybeSingle();
+      const { data, error } = await svc
+        .from("billing_documents")
+        .upsert(row, { onConflict: "file_hash" })
+        .select("id")
+        .maybeSingle();
 
-        if (byHash.error || !byHash.data?.id) {
-          return json(500, { ok: false, error: "DOCUMENT_UPSERT_FAILED", details: r.error }, req);
-        }
-        document_id = String(byHash.data.id);
-      } else {
-        document_id = r.id;
+      if (error) {
+        return json(500, { ok: false, error: "DOCUMENT_UPSERT_FAILED", details: error }, req);
       }
+      document_id = data?.id ? String(data.id) : null;
     }
 
     if (!document_id) {
