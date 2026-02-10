@@ -55,7 +55,8 @@ function pickBearer(req: Request) {
     req.headers.get("authorization") ||
     req.headers.get("Authorization") ||
     "";
-  return h.startsWith("Bearer ") ? h : "";
+  // Allow any casing of "Bearer"
+  return /^bearer\s+/i.test(h) ? `Bearer ${h.split(/\s+/).slice(1).join(" ")}` : "";
 }
 
 function safeIso(input?: string | null) {
@@ -216,10 +217,11 @@ serve(async (req: Request) => {
       );
     }
 
-    // Best-effort audit
-    await svc
-      .from("actions_log")
-      .insert({
+    // -----------------------------
+    // Best-effort audit (v2-safe; NEVER break the main action)
+    // -----------------------------
+    try {
+      const { error: logErr } = await svc.from("actions_log").insert({
         actor_uid: actor_id,
         action: "BILLING_END_SUBSCRIPTION",
         target_table: "billing_subscriptions",
@@ -233,9 +235,11 @@ serve(async (req: Request) => {
           reason,
           trigger: body.trigger ?? null,
         },
-      })
-      .throwOnError()
-      .catch(() => {});
+      });
+      if (logErr) console.warn("audit insert failed:", logErr.message);
+    } catch (e) {
+      console.warn("audit insert threw:", e);
+    }
 
     return json(
       200,
