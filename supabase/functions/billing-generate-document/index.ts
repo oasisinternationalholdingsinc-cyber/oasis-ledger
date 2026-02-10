@@ -105,14 +105,18 @@ function getRequestId(req: Request) {
 
 function json(status: number, body: unknown, req: Request) {
   const request_id = getRequestId(req);
-  return new Response(JSON.stringify({ ...(body as any), request_id } satisfies Resp, null, 2), {
-    status,
-    headers: { ...cors, "content-type": "application/json; charset=utf-8" },
-  });
+  return new Response(
+    JSON.stringify({ ...(body as any), request_id } satisfies Resp, null, 2),
+    {
+      status,
+      headers: { ...cors, "content-type": "application/json; charset=utf-8" },
+    },
+  );
 }
 
 function pickBearer(req: Request) {
-  const h = req.headers.get("authorization") || req.headers.get("Authorization") || "";
+  const h =
+    req.headers.get("authorization") || req.headers.get("Authorization") || "";
   return h.startsWith("Bearer ") ? h : "";
 }
 
@@ -141,6 +145,33 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   let hex = "";
   for (const b of arr) hex += b.toString(16).padStart(2, "0");
   return hex;
+}
+
+/**
+ * ✅ PRODUCTION FIX (NO REGRESSION):
+ * pdf-lib StandardFonts (WinAnsi) cannot encode some Unicode chars like:
+ *  - "→" (U+2192), "•" (U+2022), "—" (U+2014), smart quotes, etc.
+ * This sanitizer makes ALL drawn text WinAnsi-safe while preserving meaning.
+ */
+function winAnsiSafe(input: unknown): string {
+  const s = String(input ?? "");
+
+  // Replace common “pretty” unicode with ascii-safe equivalents
+  let out = s
+    .replaceAll("→", "->")
+    .replaceAll("•", "-")
+    .replaceAll("—", "-")
+    .replaceAll("–", "-")
+    .replaceAll("“", '"')
+    .replaceAll("”", '"')
+    .replaceAll("‘", "'")
+    .replaceAll("’", "'")
+    .replaceAll("\u00A0", " "); // nbsp
+
+  // Last resort: strip remaining non-basic characters that can crash WinAnsi
+  out = out.replace(/[^\x09\x0A\x0D\x20-\x7E]/g, "");
+
+  return out;
 }
 
 // -----------------------------------------------------------------------------
@@ -213,8 +244,12 @@ function sumLineItems(items: LineItem[], currency: string) {
   const norm = items.map((it) => {
     const desc = String(it.description ?? "").trim() || "Line item";
     const qty = Number.isFinite(Number(it.quantity)) ? Number(it.quantity) : 1;
-    const unit = Number.isFinite(Number(it.unit_price)) ? Number(it.unit_price) : 0;
-    const amt = Number.isFinite(Number(it.amount)) ? Number(it.amount) : qty * unit;
+    const unit = Number.isFinite(Number(it.unit_price))
+      ? Number(it.unit_price)
+      : 0;
+    const amt = Number.isFinite(Number(it.amount))
+      ? Number(it.amount)
+      : qty * unit;
 
     subtotal += amt;
 
@@ -285,7 +320,7 @@ async function buildOasisBillingPdf(args: {
   const muted = rgb(0.45, 0.48, 0.55);
   const hair = rgb(0.86, 0.88, 0.91);
   const band = rgb(0.06, 0.09, 0.12);
-  const teal = rgb(0.10, 0.78, 0.72);
+  const teal = rgb(0.1, 0.78, 0.72);
   const paper = rgb(1, 1, 1);
 
   // background
@@ -295,7 +330,7 @@ async function buildOasisBillingPdf(args: {
   const bandH = 92;
   page.drawRectangle({ x: 0, y: H - bandH, width: W, height: bandH, color: band });
 
-  page.drawText("Oasis Digital Parliament", {
+  page.drawText(winAnsiSafe("Oasis Digital Parliament"), {
     x: margin,
     y: H - 42,
     size: 14,
@@ -303,7 +338,7 @@ async function buildOasisBillingPdf(args: {
     color: teal,
   });
 
-  page.drawText("Billing Registry", {
+  page.drawText(winAnsiSafe("Billing Registry"), {
     x: margin,
     y: H - 64,
     size: 10,
@@ -311,7 +346,8 @@ async function buildOasisBillingPdf(args: {
     color: rgb(0.86, 0.88, 0.9),
   });
 
-  const rightTop = `${docType.toUpperCase()} • ${laneLabel}`;
+  // ✅ Avoid bullet "•" (can crash WinAnsi in some builds) → use " - "
+  const rightTop = winAnsiSafe(`${docType.toUpperCase()} - ${laneLabel}`);
   const rightW = font.widthOfTextAtSize(rightTop, 9);
   page.drawText(rightTop, {
     x: W - margin - rightW,
@@ -323,7 +359,7 @@ async function buildOasisBillingPdf(args: {
 
   // Title block
   const topY = H - bandH - 48;
-  page.drawText(title.slice(0, 96), {
+  page.drawText(winAnsiSafe(title.slice(0, 96)), {
     x: margin,
     y: topY,
     size: 16,
@@ -331,13 +367,16 @@ async function buildOasisBillingPdf(args: {
     color: ink,
   });
 
-  page.drawText(`Issuer: ${providerLabel}`.slice(0, 120), {
-    x: margin,
-    y: topY - 18,
-    size: 9.5,
-    font,
-    color: muted,
-  });
+  page.drawText(
+    winAnsiSafe(`Issuer: ${providerLabel}`.slice(0, 120)),
+    {
+      x: margin,
+      y: topY - 18,
+      size: 9.5,
+      font,
+      color: muted,
+    },
+  );
 
   // Recipient block
   const rx = margin;
@@ -354,7 +393,7 @@ async function buildOasisBillingPdf(args: {
     color: rgb(0.99, 0.99, 1),
   });
 
-  page.drawText("Bill To", {
+  page.drawText(winAnsiSafe("Bill To"), {
     x: rx + 12,
     y: ry + rh - 22,
     size: 9,
@@ -362,7 +401,7 @@ async function buildOasisBillingPdf(args: {
     color: muted,
   });
 
-  page.drawText((recipientName ?? "—").slice(0, 64), {
+  page.drawText(winAnsiSafe((recipientName ?? "—").slice(0, 64)), {
     x: rx + 12,
     y: ry + 36,
     size: 10,
@@ -370,7 +409,7 @@ async function buildOasisBillingPdf(args: {
     color: ink,
   });
 
-  page.drawText((recipientEmail ?? "—").slice(0, 64), {
+  page.drawText(winAnsiSafe((recipientEmail ?? "—").slice(0, 64)), {
     x: rx + 12,
     y: ry + 20,
     size: 9,
@@ -394,8 +433,20 @@ async function buildOasisBillingPdf(args: {
   });
 
   const metaRow = (label: string, value: string, y: number) => {
-    page.drawText(label, { x: mx + 12, y, size: 8.5, font: bold, color: muted });
-    page.drawText(value.slice(0, 40), { x: mx + 110, y, size: 8.5, font, color: ink });
+    page.drawText(winAnsiSafe(label), {
+      x: mx + 12,
+      y,
+      size: 8.5,
+      font: bold,
+      color: muted,
+    });
+    page.drawText(winAnsiSafe(value.slice(0, 40)), {
+      x: mx + 110,
+      y,
+      size: 8.5,
+      font,
+      color: ink,
+    });
   };
 
   const issued = issuedAtIso.slice(0, 10);
@@ -406,13 +457,14 @@ async function buildOasisBillingPdf(args: {
   metaRow("Invoice #:", invoiceNumber ?? "—", my + mh - 70);
 
   // Period (optional)
+  // ✅ Avoid Unicode arrow "→" → use "->" (WinAnsi-safe)
   const period =
     periodStart || periodEnd
-      ? `${(periodStart ?? "—").slice(0, 10)} → ${(periodEnd ?? "—").slice(0, 10)}`
+      ? `${(periodStart ?? "—").slice(0, 10)} -> ${(periodEnd ?? "—").slice(0, 10)}`
       : null;
 
   if (period) {
-    page.drawText(`Period: ${period}`.slice(0, 64), {
+    page.drawText(winAnsiSafe(`Period: ${period}`.slice(0, 64)), {
       x: margin,
       y: ry - 18,
       size: 8.5,
@@ -440,10 +492,34 @@ async function buildOasisBillingPdf(args: {
   const colUnit = W - margin - 110;
   const colAmt = W - margin;
 
-  page.drawText("Description", { x: colDesc, y, size: 9, font: bold, color: muted });
-  page.drawText("Qty", { x: colQty, y, size: 9, font: bold, color: muted });
-  page.drawText("Unit", { x: colUnit, y, size: 9, font: bold, color: muted });
-  page.drawText("Amount", { x: colAmt - 44, y, size: 9, font: bold, color: muted });
+  page.drawText(winAnsiSafe("Description"), {
+    x: colDesc,
+    y,
+    size: 9,
+    font: bold,
+    color: muted,
+  });
+  page.drawText(winAnsiSafe("Qty"), {
+    x: colQty,
+    y,
+    size: 9,
+    font: bold,
+    color: muted,
+  });
+  page.drawText(winAnsiSafe("Unit"), {
+    x: colUnit,
+    y,
+    size: 9,
+    font: bold,
+    color: muted,
+  });
+  page.drawText(winAnsiSafe("Amount"), {
+    x: colAmt - 44,
+    y,
+    size: 9,
+    font: bold,
+    color: muted,
+  });
 
   y -= 14;
 
@@ -462,11 +538,17 @@ async function buildOasisBillingPdf(args: {
   for (let i = 0; i < Math.min(items.length, maxRows); i++) {
     const it = items[i];
 
-    page.drawText(it.description, { x: colDesc, y, size: 9, font, color: ink });
+    page.drawText(winAnsiSafe(it.description), {
+      x: colDesc,
+      y,
+      size: 9,
+      font,
+      color: ink,
+    });
 
-    const qtyText = String(it.quantity);
-    const unitText = money(it.unit_price, currency);
-    const amtText = money(it.amount, currency);
+    const qtyText = winAnsiSafe(String(it.quantity));
+    const unitText = winAnsiSafe(money(it.unit_price, currency));
+    const amtText = winAnsiSafe(money(it.amount, currency));
 
     page.drawText(qtyText, { x: colQty, y, size: 9, font, color: muted });
     page.drawText(unitText, { x: colUnit, y, size: 9, font, color: muted });
@@ -493,10 +575,22 @@ async function buildOasisBillingPdf(args: {
     color: rgb(0.99, 0.99, 1),
   });
 
-  page.drawText("Summary", { x: tx + 12, y: ty + th - 22, size: 9, font: bold, color: muted });
+  page.drawText(winAnsiSafe("Summary"), {
+    x: tx + 12,
+    y: ty + th - 22,
+    size: 9,
+    font: bold,
+    color: muted,
+  });
 
-  const subtotalText = money(subtotal, currency);
-  page.drawText("Subtotal:", { x: tx + 12, y: ty + 34, size: 9, font: bold, color: muted });
+  const subtotalText = winAnsiSafe(money(subtotal, currency));
+  page.drawText(winAnsiSafe("Subtotal:"), {
+    x: tx + 12,
+    y: ty + 34,
+    size: 9,
+    font: bold,
+    color: muted,
+  });
 
   const subW = font.widthOfTextAtSize(subtotalText, 9);
   page.drawText(subtotalText, {
@@ -514,8 +608,15 @@ async function buildOasisBillingPdf(args: {
     color: hair,
   });
 
-  page.drawText("Total:", { x: tx + 12, y: ty + 10, size: 10, font: bold, color: ink });
-  const totalText = money(subtotal, currency);
+  page.drawText(winAnsiSafe("Total:"), {
+    x: tx + 12,
+    y: ty + 10,
+    size: 10,
+    font: bold,
+    color: ink,
+  });
+
+  const totalText = winAnsiSafe(money(subtotal, currency));
   const totalW = bold.widthOfTextAtSize(totalText, 10);
   page.drawText(totalText, {
     x: tx + tw - 12 - totalW,
@@ -542,8 +643,15 @@ async function buildOasisBillingPdf(args: {
       color: rgb(0.99, 0.99, 1),
     });
 
-    page.drawText("Notes", { x: nx + 12, y: ny + nh - 22, size: 9, font: bold, color: muted });
-    page.drawText(notes.trim().slice(0, 220), {
+    page.drawText(winAnsiSafe("Notes"), {
+      x: nx + 12,
+      y: ny + nh - 22,
+      size: 9,
+      font: bold,
+      color: muted,
+    });
+
+    page.drawText(winAnsiSafe(notes.trim().slice(0, 220)), {
       x: nx + 12,
       y: ny + 42,
       size: 8.5,
@@ -575,7 +683,7 @@ async function buildOasisBillingPdf(args: {
   // Footer
   const foot =
     "Registry artifact generated by Oasis Billing. Authority and lifecycle status are conferred by the internal registry.";
-  page.drawText(foot, {
+  page.drawText(winAnsiSafe(foot), {
     x: margin,
     y: 44,
     size: 7.5,
@@ -592,7 +700,8 @@ async function buildOasisBillingPdf(args: {
 // -----------------------------------------------------------------------------
 serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-  if (req.method !== "POST") return json(405, { ok: false, error: "METHOD_NOT_ALLOWED" }, req);
+  if (req.method !== "POST")
+    return json(405, { ok: false, error: "METHOD_NOT_ALLOWED" }, req);
 
   try {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
@@ -646,12 +755,27 @@ serve(async (req: Request) => {
     }
 
     if (typeof body.is_test !== "boolean") {
-      return json(400, { ok: false, error: "LANE_REQUIRED", details: "is_test must be boolean" }, req);
+      return json(
+        400,
+        { ok: false, error: "LANE_REQUIRED", details: "is_test must be boolean" },
+        req,
+      );
     }
 
-    const allowed = new Set(["invoice", "contract", "statement", "receipt", "credit_note", "other"]);
+    const allowed = new Set([
+      "invoice",
+      "contract",
+      "statement",
+      "receipt",
+      "credit_note",
+      "other",
+    ]);
     if (!allowed.has(document_type)) {
-      return json(400, { ok: false, error: "INVALID_DOCUMENT_TYPE", allowed: Array.from(allowed) }, req);
+      return json(
+        400,
+        { ok: false, error: "INVALID_DOCUMENT_TYPE", allowed: Array.from(allowed) },
+        req,
+      );
     }
 
     const currency = (safeText(body.currency) ?? "USD").toUpperCase().slice(0, 8);
@@ -706,13 +830,15 @@ serve(async (req: Request) => {
       .maybeSingle();
 
     if (entErr) {
-      return json(500, { ok: false, error: "PROVIDER_LOOKUP_FAILED", details: entErr.message }, req);
+      return json(
+        500,
+        { ok: false, error: "PROVIDER_LOOKUP_FAILED", details: entErr.message },
+        req,
+      );
     }
 
     const providerLabel =
-      safeText((ent as any)?.name) ??
-      safeText((ent as any)?.slug) ??
-      provider_entity_id;
+      safeText((ent as any)?.name) ?? safeText((ent as any)?.slug) ?? provider_entity_id;
 
     // Generate PDF
     const internalRef = `billing:${document_type}:${provider_entity_id}:${now}`;
@@ -895,6 +1021,10 @@ serve(async (req: Request) => {
     );
   } catch (e: any) {
     console.error("billing-generate-document fatal:", e);
-    return json(500, { ok: false, error: "INTERNAL_ERROR", message: e?.message ?? String(e) }, req);
+    return json(
+      500,
+      { ok: false, error: "INTERNAL_ERROR", message: e?.message ?? String(e) },
+      req,
+    );
   }
 });
