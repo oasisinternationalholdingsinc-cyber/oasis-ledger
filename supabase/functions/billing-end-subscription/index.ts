@@ -6,16 +6,18 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 /**
  * billing-end-subscription (PRODUCTION — LOCKED)
  *
- * ✅ OPERATOR-ONLY (requires valid user session)
+ * ✅ OPERATOR-ONLY (valid user session required)
  * ✅ REGISTRY-GRADE
  * ✅ NO DELETES
  * ✅ NO PAYMENTS
  * ✅ NO AUTO-REPLACEMENT
- * ✅ Idempotent (if already cancelled / ended_at present, returns ok)
+ * ✅ Lane-safe via is_test (read-only; we do not mutate lane here)
+ * ✅ Idempotent: if already cancelled, returns ok (no-op)
  *
- * Canonical terminal state:
- *   - status = 'cancelled' (per billing_subscriptions_status_check)
- *   - ended_at set (terminal timestamp)
+ * IMPORTANT (NO REGRESSION):
+ * billing_subscriptions.status is CHECK constrained to:
+ * ['trialing','active','past_due','paused','cancelled'] — NOT 'ended'.
+ * So "End Subscription" => status='cancelled' + ended_at (+ cancel_at).
  */
 
 type ReqBody = {
@@ -33,11 +35,19 @@ const cors: Record<string, string> = {
   "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
-function json(status: number, body: unknown) {
-  return new Response(JSON.stringify(body, null, 2), {
-    status,
-    headers: { ...cors, "content-type": "application/json; charset=utf-8" },
-  });
+function json(status: number, body: unknown, req: Request) {
+  const request_id =
+    req.headers.get("x-sb-request-id") ||
+    req.headers.get("x-sb-requestid") ||
+    null;
+
+  return new Response(
+    JSON.stringify({ ...(body as any), request_id }, null, 2),
+    {
+      status,
+      headers: { ...cors, "content-type": "application/json; charset=utf-8" },
+    },
+  );
 }
 
 function pickBearer(req: Request) {
@@ -57,45 +67,39 @@ function safeIso(input?: string | null) {
 
 serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-
-  const request_id =
-    req.headers.get("x-sb-request-id") ?? req.headers.get("x-request-id") ?? null;
-
   if (req.method !== "POST") {
-    return json(405, { ok: false, error: "METHOD_NOT_ALLOWED", request_id });
+    return json(405, { ok: false, error: "METHOD_NOT_ALLOWED" }, req);
   }
 
   try {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-
     const ANON_KEY =
       Deno.env.get("SUPABASE_ANON_KEY") ??
       Deno.env.get("SUPABASE_ANON_KEY_PUBLIC");
-
     const SERVICE_ROLE_KEY =
       Deno.env.get("SERVICE_ROLE_KEY") ??
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
     if (!SUPABASE_URL || !ANON_KEY || !SERVICE_ROLE_KEY) {
-      return json(500, { ok: false, error: "MISSING_ENV", request_id });
+      return json(500, { ok: false, error: "MISSING_ENV" }, req);
     }
 
     // -----------------------------
-    // Auth: operator required (validate session using ANON)
+    // Auth: operator required (ANON validate session)
     // -----------------------------
     const bearer = pickBearer(req);
     if (!bearer) {
-      return json(401, { ok: false, error: "UNAUTHORIZED", request_id });
+      return json(401, { ok: false, error: "UNAUTHORIZED" }, req);
     }
 
     const userClient = createClient(SUPABASE_URL, ANON_KEY, {
-      global: { headers: { Authorization: bearer } },
+      global: { headers: { Authorization: bearer } }, // proper casing
       auth: { persistSession: false },
     });
 
     const { data: userRes, error: userErr } = await userClient.auth.getUser();
     if (userErr || !userRes?.user?.id) {
-      return json(401, { ok: false, error: "INVALID_SESSION", request_id });
+      return json(401, { ok: false, error: "INVALID_SESSION" }, req);
     }
 
     const actor_id = userRes.user.id;
@@ -109,15 +113,18 @@ serve(async (req: Request) => {
     const reason = String(body.reason ?? "").trim();
 
     if (!subscription_id || !reason) {
-      return json(400, {
-        ok: false,
-        error: "MISSING_REQUIRED_FIELDS",
-        required: ["subscription_id", "reason"],
-        request_id,
-      });
+      return json(
+        400,
+        {
+          ok: false,
+          error: "MISSING_REQUIRED_FIELDS",
+          required: ["subscription_id", "reason"],
+        },
+        req,
+      );
     }
 
-    const endedAt = safeIso(body.ended_at ?? null) ?? new Date().toISOString();
+    const endedAt = safeIso(body.ended_at) ?? new Date().toISOString();
     const now = new Date().toISOString();
 
     // -----------------------------
@@ -131,79 +138,85 @@ serve(async (req: Request) => {
     // Load subscription (include metadata so we merge, not overwrite)
     const { data: sub, error: subErr } = await svc
       .from("billing_subscriptions")
-      .select("id, status, entity_id, is_test, ended_at, metadata")
+      .select("id, status, entity_id, is_test, metadata")
       .eq("id", subscription_id)
       .maybeSingle();
 
     if (subErr) {
-      return json(500, {
-        ok: false,
-        error: "FAILED",
-        details: subErr.message,
-        request_id,
-      });
+      return json(
+        500,
+        { ok: false, error: "FAILED", details: subErr.message },
+        req,
+      );
     }
 
     if (!sub) {
-      return json(404, {
-        ok: false,
-        error: "SUBSCRIPTION_NOT_FOUND",
-        request_id,
-      });
+      return json(404, { ok: false, error: "SUBSCRIPTION_NOT_FOUND" }, req);
     }
 
-    const curStatus = String(sub.status ?? "").toLowerCase();
-    const alreadyEnded = curStatus === "cancelled" || !!sub.ended_at;
+    const statusLower = String(sub.status ?? "").toLowerCase();
 
-    // -----------------------------
-    // Idempotent: already ended
-    // -----------------------------
-    if (alreadyEnded) {
-      return json(200, {
-        ok: true,
-        subscription_id: sub.id,
-        status: "cancelled",
-        ended_at: sub.ended_at ?? endedAt,
-        note: "Subscription already ended/cancelled (no action taken).",
-        request_id,
-      });
+    // Idempotent: already cancelled
+    if (statusLower === "cancelled") {
+      return json(
+        200,
+        {
+          ok: true,
+          subscription_id: sub.id,
+          status: "cancelled",
+          note: "Subscription already cancelled (no action taken).",
+        },
+        req,
+      );
     }
 
-    // Preserve existing metadata
+    // Guard: only allow cancelling from allowed states (registry-grade)
+    const allowedFrom = new Set(["trialing", "active", "past_due", "paused"]);
+    if (!allowedFrom.has(statusLower)) {
+      return json(
+        409,
+        {
+          ok: false,
+          error: "INVALID_STATE",
+          message: `Cannot cancel from status '${sub.status}'.`,
+          allowed_from: Array.from(allowedFrom),
+        },
+        req,
+      );
+    }
+
+    // Merge metadata (preserve history)
     const mergedMeta = {
       ...(sub.metadata ?? {}),
-      ended_reason: reason,
-      ended_at: endedAt,
-      ended_by: actor_id,
-      ended_by_email: actor_email,
+      cancel_reason: reason,
+      cancelled_at: endedAt,
+      cancelled_by: actor_id,
+      cancelled_by_email: actor_email,
       trigger: body.trigger ?? null,
     };
 
-    // -----------------------------
-    // Update subscription
-    // -----------------------------
+    // Update subscription (NO 'ended' status — must be 'cancelled')
     const { error: updErr } = await svc
       .from("billing_subscriptions")
       .update({
-        status: "cancelled", // ✅ CONSTRAINT-SAFE TERMINAL STATUS
+        status: "cancelled",
+        // keep both columns (schema has both ended_at + cancel_at)
         ended_at: endedAt,
+        cancel_at: endedAt,
         updated_at: now,
         metadata: mergedMeta,
       })
       .eq("id", subscription_id);
 
     if (updErr) {
-      return json(500, {
-        ok: false,
-        error: "FAILED",
-        details: updErr.message,
-        request_id,
-      });
+      return json(
+        500,
+        { ok: false, error: "FAILED", details: updErr.message },
+        req,
+      );
     }
 
-    // -----------------------------
     // Best-effort audit
-    // -----------------------------
     await svc
       .from("actions_log")
       .insert({
@@ -214,29 +227,31 @@ serve(async (req: Request) => {
         details_json: {
           entity_id: sub.entity_id,
           is_test: sub.is_test,
+          status_from: sub.status,
+          status_to: "cancelled",
           ended_at: endedAt,
           reason,
           trigger: body.trigger ?? null,
-          previous_status: sub.status ?? null,
-          new_status: "cancelled",
         },
       })
       .throwOnError()
       .catch(() => {});
 
-    return json(200, {
-      ok: true,
-      subscription_id,
-      status: "cancelled",
-      ended_at: endedAt,
-      request_id,
-    });
+    return json(
+      200,
+      {
+        ok: true,
+        subscription_id,
+        status: "cancelled",
+        ended_at: endedAt,
+      },
+      req,
+    );
   } catch (e: any) {
-    return json(500, {
-      ok: false,
-      error: "INTERNAL_ERROR",
-      message: e?.message ?? String(e),
-      request_id: null,
-    });
+    return json(
+      500,
+      { ok: false, error: "INTERNAL_ERROR", message: e?.message ?? String(e) },
+      req,
+    );
   }
 });
