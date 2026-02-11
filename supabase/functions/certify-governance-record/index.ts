@@ -10,17 +10,22 @@ import QRCode from "https://esm.sh/qrcode-svg@1.1.0";
 import { initialize, svg2png } from "https://esm.sh/svg2png-wasm@1.4.1";
 
 /**
- * CERTIFY (Governance)
- * - ✅ NO governance_ledger.entity_slug (does not exist in prod)
- * - ✅ Lane-safe archive pointers: governance_sandbox vs governance_archive
- * - ✅ Hash is computed from FINAL bytes (the file you upload)
- * - ✅ verified_documents: always writes file_hash when verification_level='certified'
- * - ✅ Upsert uses UNIQUE(source_table, source_record_id)
+ * CERTIFY (Governance) — PRODUCTION (NO REGRESSION)
+ *
+ * ✅ NO governance_ledger.entity_slug (does not exist in prod)
+ * ✅ Lane-safe archive pointers: governance_sandbox vs governance_archive
+ * ✅ Hash is computed from FINAL bytes (the file you upload)
+ * ✅ verified_documents: writes file_hash (and uses mime_type per schema)
+ * ✅ Upsert uses UNIQUE(source_table, source_record_id)
  *
  * IMPORTANT NOTE (hash circularity):
  * - A QR that encodes the *final* file hash is circular (hash depends on QR).
  * - To stay correct + stable, QR encodes ledger_id (resolver-friendly), while
  *   verify_url returned is hash-first for sharing/copy.
+ *
+ * HARD RULES:
+ * - Do NOT write generated columns (source_storage_*).
+ * - Do NOT invent columns that don't exist (content_type/certified_by/certified_at).
  */
 
 type ReqBody = {
@@ -52,7 +57,7 @@ type Resp = {
   request_id?: string | null;
 };
 
-const cors = {
+const cors: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers":
@@ -75,9 +80,8 @@ if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
 }
 
 const isUuid = (s: string) =>
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    s,
-  );
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    .test(s);
 
 const safeText = (v: unknown) => {
   if (v == null) return null;
@@ -112,6 +116,38 @@ async function resolveActorIdBestEffort(
 
   const id = data?.user?.id ?? null;
   return id && isUuid(id) ? id : null;
+}
+
+/**
+ * svg2png-wasm init is expensive; do it once per runtime.
+ * Also: if init or png conversion fails, we DO NOT fail certification — we just omit the QR image.
+ */
+let _svg2pngInit: Promise<void> | null = null;
+const ensureSvg2PngReady = async () => {
+  if (!_svg2pngInit) _svg2pngInit = initialize();
+  await _svg2pngInit;
+};
+
+async function makeQrPngBestEffort(url: string): Promise<Uint8Array | null> {
+  try {
+    await ensureSvg2PngReady();
+
+    const svg = new QRCode({
+      content: url,
+      padding: 0,
+      width: 256,
+      height: 256,
+      color: "#0b0f18",
+      background: "#ffffff",
+      ecl: "M",
+    }).svg();
+
+    const png = await svg2png(svg, { width: 256, height: 256 });
+    return new Uint8Array(png);
+  } catch (e) {
+    console.error("certify-governance-record QR generation failed (non-fatal):", e);
+    return null;
+  }
 }
 
 serve(async (req) => {
@@ -156,7 +192,12 @@ serve(async (req) => {
     if (ledErr) {
       console.error("certify-governance-record ledger load error:", ledErr);
       return json(
-        { ok: false, error: "LEDGER_LOAD_FAILED", details: ledErr, request_id: reqId },
+        {
+          ok: false,
+          error: "LEDGER_LOAD_FAILED",
+          details: ledErr,
+          request_id: reqId,
+        },
         500,
       );
     }
@@ -168,7 +209,9 @@ serve(async (req) => {
 
     // ✅ Lane-safe destination pointers (your current convention)
     const bucket = is_test ? "governance_sandbox" : "governance_archive";
-    const path = is_test ? `sandbox/archive/${ledgerId}.pdf` : `archive/${ledgerId}.pdf`;
+    const path = is_test
+      ? `sandbox/archive/${ledgerId}.pdf`
+      : `archive/${ledgerId}.pdf`;
 
     // ✅ Idempotency: if already certified + hash exists + pointers match, reuse unless force
     const existing = await supabaseAdmin
@@ -236,30 +279,11 @@ serve(async (req) => {
       "https://sign.oasisintlholdings.com/verify.html";
 
     // ✅ QR content uses ledger_id to avoid hash circularity
-    // (Your resolver/verify terminal should support ledger_id lookups.)
     const qrUrl = (() => {
       const u = new URL(base);
       u.searchParams.set("ledger_id", ledgerId);
       return u.toString();
     })();
-
-    // Init svg2png wasm once per runtime
-    await initialize();
-
-    const makeQrPng = async (url: string) => {
-      const svg = new QRCode({
-        content: url,
-        padding: 0,
-        width: 256,
-        height: 256,
-        color: "#0b0f18",
-        background: "#ffffff",
-        ecl: "M",
-      }).svg();
-
-      const png = await svg2png(svg, { width: 256, height: 256 });
-      return new Uint8Array(png);
-    };
 
     // Load PDF and append certification page (stable, no fancy glyphs)
     const pdf = await PDFDocument.load(sourceBytes, { ignoreEncryption: true });
@@ -274,6 +298,7 @@ serve(async (req) => {
       y: height - 72,
       size: 18,
       font: fontBold,
+      color: rgb(0.95, 0.95, 0.96),
     });
 
     page.drawText("This document is digitally certified.", {
@@ -281,6 +306,7 @@ serve(async (req) => {
       y: height - 110,
       size: 11,
       font,
+      color: rgb(0.92, 0.92, 0.94),
     });
 
     page.drawText("Scan the QR to open the verification terminal.", {
@@ -288,34 +314,55 @@ serve(async (req) => {
       y: height - 140,
       size: 11,
       font,
+      color: rgb(0.92, 0.92, 0.94),
     });
 
     const qrSize = 120;
     const qrX = width - 48 - qrSize;
     const qrY = 72;
 
-    const qrPng = await makeQrPng(qrUrl);
-    const qrImg = await pdf.embedPng(qrPng);
-
-    page.drawImage(qrImg, {
-      x: qrX,
-      y: qrY,
-      width: qrSize,
-      height: qrSize,
-    });
+    const qrPng = await makeQrPngBestEffort(qrUrl);
+    if (qrPng) {
+      const qrImg = await pdf.embedPng(qrPng);
+      page.drawImage(qrImg, {
+        x: qrX,
+        y: qrY,
+        width: qrSize,
+        height: qrSize,
+      });
+    } else {
+      // Non-fatal fallback marker (still certifies + hashes correctly)
+      page.drawText("[QR unavailable]", {
+        x: qrX,
+        y: qrY + qrSize / 2,
+        size: 9,
+        font,
+        color: rgb(0.75, 0.75, 0.78),
+      });
+    }
 
     page.drawText("Verification Terminal:", {
       x: 48,
       y: qrY + 48,
       size: 10,
       font: fontBold,
+      color: rgb(0.92, 0.92, 0.94),
     });
+
     page.drawText(base, {
       x: 48,
       y: qrY + 32,
       size: 9,
       font,
-      color: rgb(0.85, 0.85, 0.88),
+      color: rgb(0.78, 0.78, 0.82),
+    });
+
+    page.drawText(`Ledger ID: ${ledgerId}`, {
+      x: 48,
+      y: qrY + 16,
+      size: 9,
+      font,
+      color: rgb(0.78, 0.78, 0.82),
     });
 
     // Save final bytes and compute authoritative hash
@@ -352,25 +399,27 @@ serve(async (req) => {
     }
     const entity_slug = safeText((ent.data as any)?.slug) ?? "holdings";
 
-    // Upsert verified_documents
-    // ✅ DO NOT write generated columns
-    // ✅ MUST include file_hash when verification_level='certified'
+    // Upsert verified_documents (SCHEMA-SAFE)
+    // ✅ DO NOT write generated columns (source_storage_*).
+    // ✅ Use mime_type (not content_type).
+    // ✅ Do NOT invent certified_by/certified_at (do not exist in schema).
+    const nowIso = new Date().toISOString();
+
     const vdPayload: Record<string, unknown> = {
       entity_id,
-      entity_slug, // if your table has it; harmless if present in your prod schema
+      entity_slug,
       title: safeText((ledger as any).title) ?? "Certified Document",
       document_class: "resolution",
       source_table: "governance_ledger",
       source_record_id: ledgerId,
       storage_bucket: bucket,
       storage_path: path,
-      file_hash, // ✅ REQUIRED by CHECK when certified
-      content_type: "application/pdf",
+      file_hash,
+      mime_type: "application/pdf",
       verification_level: "certified",
       is_archived: true,
-      certified_by: actorId, // can be null if service-call without user JWT
-      certified_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      updated_by: actorId,
+      updated_at: nowIso,
     };
 
     const vd = await supabaseAdmin
