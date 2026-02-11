@@ -38,7 +38,9 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
 const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-if (!SUPABASE_URL || !SERVICE_ROLE_KEY) throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
+if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
+  throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
+}
 
 const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
   global: { fetch },
@@ -75,13 +77,6 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return hex;
 }
 
-function buildVerifyUrl(base: string, verifiedId: string, ledgerId: string) {
-  const u = new URL(base);
-  u.searchParams.set("verified_id", verifiedId);
-  u.searchParams.set("ledger_id", ledgerId);
-  return u.toString();
-}
-
 async function resolveActorIdFromJwt(req: Request): Promise<string | null> {
   const authHeader = req.headers.get("authorization") ?? req.headers.get("Authorization");
   const jwt = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
@@ -95,9 +90,9 @@ async function resolveActorIdFromJwt(req: Request): Promise<string | null> {
 }
 
 /**
- * ✅ Resolve minute_book PDF WITHOUT storage.objects (PostgREST blocks it)
+ * ✅ Resolve minute_book source PDF WITHOUT storage.objects.
  * 1) signature_envelopes paths
- * 2) supporting_documents primary pointer
+ * 2) supporting_documents minute_book primary pointer
  */
 async function resolveMinuteBookSourcePdf(ledgerId: string): Promise<string | null> {
   const env = await supabaseAdmin
@@ -200,12 +195,21 @@ function qrPngBytes(
   return PNG.sync.write(png);
 }
 
+function buildVerifyUrl(base: string, ledgerId: string) {
+  // ✅ Avoid hash circularity: resolver supports ledger_id
+  const u = new URL(base);
+  u.searchParams.set("ledger_id", ledgerId);
+  return u.toString();
+}
+
 serve(async (req) => {
   const reqId = req.headers.get("x-sb-request-id") ?? null;
 
   try {
     if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-    if (req.method !== "POST") return json({ ok: false, error: "POST only", request_id: reqId }, 405);
+    if (req.method !== "POST") {
+      return json({ ok: false, error: "POST only", request_id: reqId }, 405);
+    }
 
     const body = (await req.json().catch(() => ({}))) as ReqBody;
 
@@ -223,30 +227,39 @@ serve(async (req) => {
 
     const force = !!body.force;
 
-    // 1) Load ledger
+    // 1) Load ledger (✅ NO entity_slug — it doesn't exist in prod)
     const gl = await supabaseAdmin
       .from("governance_ledger")
       .select("id, entity_id, title, is_test")
       .eq("id", ledgerId)
       .maybeSingle();
 
-    if (gl.error) return json({ ok: false, error: gl.error.message, request_id: reqId }, 400);
+    if (gl.error) {
+      console.error("certify-governance-record ledger load error:", gl.error);
+      return json({ ok: false, error: "LEDGER_LOAD_FAILED", details: gl.error, request_id: reqId }, 500);
+    }
     if (!gl.data?.id) return json({ ok: false, error: "LEDGER_NOT_FOUND", request_id: reqId }, 404);
 
     const is_test = !!(gl.data as any).is_test;
     const entity_id = String((gl.data as any).entity_id);
     const title = String((gl.data as any).title ?? "Untitled Resolution");
 
-    // 2) entity slug
-    const ent = await supabaseAdmin.from("entities").select("id, slug").eq("id", entity_id).maybeSingle();
-    if (ent.error) return json({ ok: false, error: ent.error.message, request_id: reqId }, 400);
+    // 2) entity slug (canonical source of truth)
+    const ent = await supabaseAdmin
+      .from("entities")
+      .select("id, slug")
+      .eq("id", entity_id)
+      .maybeSingle();
+
+    if (ent.error) return json({ ok: false, error: "ENTITY_LOAD_FAILED", details: ent.error, request_id: reqId }, 500);
     if (!ent.data?.id) return json({ ok: false, error: "ENTITY_NOT_FOUND", request_id: reqId }, 404);
+
     const entity_slug = String((ent.data as any).slug);
 
     // 3) Existing verified doc (idempotency)
     const existingVd = await supabaseAdmin
       .from("verified_documents")
-      .select("id, storage_bucket, storage_path, file_hash, verification_level")
+      .select("id, storage_bucket, storage_path, file_hash, verification_level, created_at")
       .eq("source_table", "governance_ledger")
       .eq("source_record_id", ledgerId)
       .order("created_at", { ascending: false })
@@ -257,8 +270,9 @@ serve(async (req) => {
     const existingHash = safeText((existingVd.data as any)?.file_hash);
     const existingLevel = safeText((existingVd.data as any)?.verification_level);
 
-    const certified_bucket = is_test ? "governance_sandbox" : "governance_truth";
-    const certified_path = is_test ? `sandbox/archive/${ledgerId}.pdf` : `truth/archive/${ledgerId}.pdf`;
+    // ✅ Lane-safe destination pointers (match your production convention)
+    const certified_bucket = is_test ? "governance_sandbox" : "governance_archive";
+    const certified_path = is_test ? `sandbox/archive/${ledgerId}.pdf` : `archive/${ledgerId}.pdf`;
 
     if (!force && existingId && existingHash && (existingLevel ?? "").toLowerCase() === "certified") {
       const sb = safeText((existingVd.data as any)?.storage_bucket);
@@ -286,67 +300,36 @@ serve(async (req) => {
         {
           ok: false,
           error: "SOURCE_PDF_NOT_FOUND",
-          details:
-            "No minute_book PDF pointer found. If this was a signing flow, the envelope likely completed without ensure_pdf=true. Re-run start-signature-envelope with ensure_pdf=true to generate the base PDF.",
+          details: "No minute_book PDF pointer found for this ledger_id.",
           request_id: reqId,
-        },
+        } satisfies Resp,
         404,
       );
     }
 
-    // 5) Ensure verified_documents row exists (need id for QR)
-    let verified_id = existingId;
-
-    if (!verified_id) {
-      const ins = await supabaseAdmin
-        .from("verified_documents")
-        .insert({
-          entity_id,
-          entity_slug,
-          document_class: "resolution",
-          title,
-          source_table: "governance_ledger",
-          source_record_id: ledgerId,
-          storage_bucket: certified_bucket,
-          storage_path: certified_path,
-          file_hash: null,
-          mime_type: "application/pdf",
-          verification_level: "certified",
-          is_archived: true,
-          created_by: actorId,
-          updated_by: actorId,
-        } as any)
-        .select("id")
-        .single();
-
-      if (ins.error) {
-        return json(
-          { ok: false, error: "VERIFIED_DOC_INSERT_FAILED", details: ins.error, request_id: reqId } satisfies Resp,
-          500,
-        );
-      }
-      verified_id = String(ins.data.id);
-    }
-
-    // 6) Download source PDF
+    // 5) Download source PDF
     const dl = await supabaseAdmin.storage.from(source_bucket).download(source_path);
     if (dl.error || !dl.data) {
-      return json({ ok: false, error: "SOURCE_PDF_DOWNLOAD_FAILED", details: dl.error, request_id: reqId }, 500);
+      return json(
+        { ok: false, error: "SOURCE_PDF_DOWNLOAD_FAILED", details: dl.error, request_id: reqId } satisfies Resp,
+        500,
+      );
     }
+
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // 7) QR URL
+    // 6) Build verification URL (ledger_id-based to avoid hash circularity)
     const verifyBase =
       safeText(body.verify_base_url) ??
-      Deno.env.get("VERIFY_BASE_URL") ??
-      "https://portal.oasisintlholdings.com/verify";
+      safeText(Deno.env.get("VERIFY_BASE_URL")) ??
+      "https://sign.oasisintlholdings.com/verify.html";
 
-    const verifyUrl = buildVerifyUrl(verifyBase, verified_id!, ledgerId);
+    const verifyUrl = buildVerifyUrl(verifyBase, ledgerId);
 
-    // ✅ Generate PNG bytes (Edge-safe)
+    // ✅ Generate QR PNG bytes (Edge-safe)
     const qrPng = qrPngBytes(verifyUrl, { size: 256, margin: 2, ecc: "M" });
 
-    // 8) Stamp QR bottom-right on last page (wet signature preserved)
+    // 7) Stamp QR bottom-right on last page (wet signature preserved)
     const pdfDoc = await PDFDocument.load(sourceBytes);
     const pages = pdfDoc.getPages();
     const last = pages[pages.length - 1];
@@ -372,42 +355,64 @@ serve(async (req) => {
     const certifiedBytes = new Uint8Array(await pdfDoc.save());
     const hashHex = await sha256Hex(certifiedBytes);
 
-    // 9) Upload certified PDF
+    // 8) Upload certified PDF
     const up = await supabaseAdmin.storage
       .from(certified_bucket)
-      .upload(certified_path, new Blob([certifiedBytes], { type: "application/pdf" }), {
-        upsert: true,
-        contentType: "application/pdf",
-      });
+      .upload(
+        certified_path,
+        new Blob([certifiedBytes], { type: "application/pdf" }),
+        { upsert: true, contentType: "application/pdf" },
+      );
 
-    if (up.error) return json({ ok: false, error: "CERTIFIED_PDF_UPLOAD_FAILED", details: up.error, request_id: reqId }, 500);
+    if (up.error) {
+      return json(
+        { ok: false, error: "CERTIFIED_PDF_UPLOAD_FAILED", details: up.error, request_id: reqId } satisfies Resp,
+        500,
+      );
+    }
 
-    // 10) Update verified_documents canonical pointer + hash
-    const upd = await supabaseAdmin
+    // 9) ✅ UPSERT verified_documents (NO NULL hash ever)
+    // Uses your UNIQUE(source_table, source_record_id)
+    const vd = await supabaseAdmin
       .from("verified_documents")
-      .update({
-        entity_id,
-        entity_slug,
-        title,
-        storage_bucket: certified_bucket,
-        storage_path: certified_path,
-        file_hash: hashHex,
-        mime_type: "application/pdf",
-        verification_level: "certified",
-        is_archived: true,
-        updated_at: new Date().toISOString(),
-        updated_by: actorId,
-      } as any)
-      .eq("id", verified_id);
+      .upsert(
+        {
+          entity_id,
+          entity_slug,
+          document_class: "resolution",
+          title,
+          source_table: "governance_ledger",
+          source_record_id: ledgerId,
+          storage_bucket: certified_bucket,
+          storage_path: certified_path,
+          file_hash: hashHex, // ✅ required by CHECK when certified
+          content_type: "application/pdf",
+          verification_level: "certified",
+          is_archived: true,
+          certified_at: new Date().toISOString(),
+          certified_by: actorId,
+          updated_at: new Date().toISOString(),
+        } as any,
+        { onConflict: "source_table,source_record_id" },
+      )
+      .select("id")
+      .single();
 
-    if (upd.error) return json({ ok: false, error: "VERIFIED_DOC_UPDATE_FAILED", details: upd.error, request_id: reqId }, 500);
+    if (vd.error) {
+      return json(
+        { ok: false, error: "VERIFIED_DOC_UPSERT_FAILED", details: vd.error, request_id: reqId } satisfies Resp,
+        500,
+      );
+    }
+
+    const verified_id = String((vd.data as any).id);
 
     return json<Resp>({
       ok: true,
       ledger_id: ledgerId,
       actor_id: actorId,
       is_test,
-      verified_document_id: verified_id!,
+      verified_document_id: verified_id,
       source: { bucket: source_bucket, path: source_path },
       certified: {
         bucket: certified_bucket,
