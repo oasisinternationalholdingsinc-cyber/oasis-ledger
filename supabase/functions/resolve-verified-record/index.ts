@@ -1,4 +1,3 @@
-// supabase/functions/resolve-verified-record/index.ts
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -92,13 +91,17 @@ async function signUrl(
   return { url: data?.signedUrl ?? null, error: null as string | null };
 }
 
+/**
+ * ONLY as fallback if DB source cannot be resolved.
+ * Truth is derived from governance_ledger.is_test or minute_book_entries.is_test.
+ */
 function isTestFromBucketFallback(bucket: string) {
   const b = bucket.toLowerCase();
   return b === "governance_sandbox" || b.includes("sandbox");
 }
 
 /* ============================
-   NEW: lane + minute_book resolver (DB truth, not bucket)
+   lane + minute_book resolver (DB truth, not verified_documents)
 ============================ */
 async function resolveLaneAndMinuteBookFromSource(args: {
   supabaseAdmin: ReturnType<typeof createClient>;
@@ -118,10 +121,7 @@ async function resolveLaneAndMinuteBookFromSource(args: {
   let ledger_id: string | null = null;
   let minute_book: { storage_bucket: string; storage_path: string } | null = null;
 
-  // If your verified_documents has an is_test column, prefer it (safe, no break)
-  if (vd && typeof vd.is_test === "boolean") {
-    is_test = vd.is_test;
-  }
+  // ✅ IMPORTANT: verified_documents has NO is_test — never read it.
 
   if (source_table === "governance_ledger" && source_record_id && isUuid(source_record_id)) {
     ledger_id = source_record_id;
@@ -172,7 +172,7 @@ async function resolveLaneAndMinuteBookFromSource(args: {
 }
 
 /* ============================
-   Build payload from a verified_documents row
+   Build payload from verified_documents row
 ============================ */
 async function buildFromVerifiedRow(args: {
   supabaseAdmin: ReturnType<typeof createClient>;
@@ -206,7 +206,7 @@ async function buildFromVerifiedRow(args: {
     );
   }
 
-  // entity hydration (best-effort)
+  // entity hydration (best-effort, NO contamination)
   const entId = safeText(vd.entity_id);
   const entSlug = safeText(vd.entity_slug);
 
@@ -237,15 +237,14 @@ async function buildFromVerifiedRow(args: {
     hash: vd.file_hash,
     verified_document_id: vd.id,
 
-    // ✅ for UI sanity
     ledger_id: derived.ledger_id ?? null,
-    envelope_id: null,
+    envelope_id: vd.envelope_id ?? null,
 
     entity:
       ent ?? {
         id: entId ?? null,
-        name: ent?.name ?? "—",
-        slug: ent?.slug ?? entSlug ?? "—",
+        name: "—",
+        slug: entSlug ?? "—",
       },
 
     ledger: {
@@ -269,15 +268,16 @@ async function buildFromVerifiedRow(args: {
       created_at: vd.created_at ?? null,
       source_table: vd.source_table ?? null,
       source_record_id: vd.source_record_id ?? null,
+      envelope_id: vd.envelope_id ?? null,
     },
 
+    // UI toggles
     best_pdf: {
       kind: "verified_archive",
       storage_bucket: bucket,
       storage_path: path,
     },
 
-    // ✅ expose minute book pointer to the UI
     public_pdf: derived.minute_book
       ? {
           kind: "minute_book",
@@ -310,7 +310,7 @@ async function buildHashFirstPayload(args: {
   const { data: vd, error: vdErr } = await supabaseAdmin
     .from("verified_documents")
     .select(
-      "id, entity_id, entity_slug, title, document_class, verification_level, storage_bucket, storage_path, file_hash, created_at, updated_at, source_table, source_record_id, is_test",
+      "id, entity_id, entity_slug, title, document_class, verification_level, storage_bucket, storage_path, file_hash, created_at, updated_at, source_table, source_record_id, envelope_id",
     )
     .eq("file_hash", hash)
     .order("created_at", { ascending: false })
@@ -340,7 +340,7 @@ async function buildEntryFirstPayload(args: {
   const { data: vd, error: vdErr } = await supabaseAdmin
     .from("verified_documents")
     .select(
-      "id, entity_id, entity_slug, title, document_class, verification_level, storage_bucket, storage_path, file_hash, created_at, updated_at, source_table, source_record_id, is_test",
+      "id, entity_id, entity_slug, title, document_class, verification_level, storage_bucket, storage_path, file_hash, created_at, updated_at, source_table, source_record_id, envelope_id",
     )
     .eq("source_table", "minute_book_entries")
     .eq("source_record_id", entry_id)
@@ -413,6 +413,7 @@ serve(async (req) => {
     const fb = await buildHashFirstPayload({ supabaseAdmin, hash, expires_in });
     if ((fb as any).ok === true) return json({ ...(fb as any), request_id: reqId }, 200);
 
+    // If ONLY hash provided, return that failure cleanly
     if (!entry_id && !envelope_id && !ledger_id) {
       return json({ ...(fb as any), request_id: reqId }, 200);
     }
