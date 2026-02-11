@@ -6,25 +6,20 @@ import { PDFDocument, StandardFonts, rgb } from "https://esm.sh/pdf-lib@1.17.1";
 
 // ✅ Server-safe QR → SVG (NO canvas)
 import QRCode from "https://esm.sh/qrcode-svg@1.1.0";
-// ✅ SVG → PNG in Deno (NO canvas)
+// ✅ SVG → PNG (NO canvas)
 import { initialize, svg2png } from "https://esm.sh/svg2png-wasm@1.4.1";
 
 /**
- * CERTIFY (Governance) — PRODUCTION (NO REGRESSION)
+ * CERTIFY (Governance) — PRODUCTION — NO REGRESSION
  *
- * ✅ Reads source PDF from minute_book storage pointer (bucket/path)
- * ✅ Lane-safe (only uses governance_ledger.is_test for metadata; does NOT guess archive buckets)
- * ✅ Computes SHA-256 from FINAL bytes (the actual uploaded certified file)
- * ✅ Appends a NEW final certification page (not stamping last)
- * ✅ Writes Verified Registry:
- *    - public.verified_documents (schema-safe: mime_type, file_hash REQUIRED for certified)
- *    - upsert on (source_table, source_record_id)
- * ✅ NO governance_ledger.entity_slug (does not exist)
- * ✅ DOES NOT write generated columns (source_storage_*)
- *
- * QR / hash circularity:
- * - QR encodes ledger_id (resolver-friendly) to avoid hash circularity.
- * - Response includes verify_url hash-first for copy/share.
+ * ✅ DOES NOT query storage.objects (not exposed to PostgREST)
+ * ✅ Resolves the REAL minute_book PDF pointer via public.minute_book_entries (canonical)
+ * ✅ Fallback to signature_envelopes.storage_path/supporting_document_path
+ * ✅ Bucket is ALWAYS minute_book (this is your archive-grade canonical store)
+ * ✅ Hash is computed from FINAL certified bytes (the bytes you upload)
+ * ✅ Upserts public.verified_documents with file_hash populated (passes constraint)
+ * ✅ Uses mime_type (not content_type)
+ * ✅ On conflict: (source_table, source_record_id)
  */
 
 type ReqBody = {
@@ -32,20 +27,24 @@ type ReqBody = {
   record_id?: string; // alias
   actor_id?: string;
 
+  // optional
   force?: boolean;
   verify_base_url?: string;
+
+  // tolerated (Forge sends these sometimes)
+  envelope_id?: string;
+  is_test?: boolean;
+  entity_slug?: string;
+  trigger?: string;
 };
 
 type Resp = {
   ok: boolean;
   ledger_id?: string;
   actor_id?: string | null;
-  is_test?: boolean;
 
-  source?: {
-    bucket: string;
-    path: string;
-  };
+  storage_bucket?: string;
+  storage_path?: string;
 
   file_hash?: string;
   verify_url?: string;
@@ -97,6 +96,34 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
     .join("");
 }
 
+/** svg2png init once per runtime */
+let _svg2pngInit: Promise<void> | null = null;
+const ensureSvg2PngReady = async () => {
+  if (!_svg2pngInit) _svg2pngInit = initialize();
+  await _svg2pngInit;
+};
+
+async function makeQrPngBestEffort(url: string): Promise<Uint8Array | null> {
+  try {
+    await ensureSvg2PngReady();
+    const svg = new QRCode({
+      content: url,
+      padding: 0,
+      width: 256,
+      height: 256,
+      color: "#0b0f18",
+      background: "#ffffff",
+      ecl: "M",
+    }).svg();
+
+    const png = await svg2png(svg, { width: 256, height: 256 });
+    return new Uint8Array(png);
+  } catch (e) {
+    console.error("QR generation failed (non-fatal):", e);
+    return null;
+  }
+}
+
 async function resolveActorIdBestEffort(
   supabaseAdmin: ReturnType<typeof createClient>,
   req: Request,
@@ -120,84 +147,44 @@ async function resolveActorIdBestEffort(
 }
 
 /**
- * svg2png-wasm init is expensive; do it once per runtime.
- * If QR conversion fails, certification still proceeds (QR omitted).
+ * ✅ Resolve canonical minute_book pointer WITHOUT querying storage.objects.
+ * Priority:
+ *  1) minute_book_entries.storage_path for this ledger_id
+ *  2) signature_envelopes.storage_path / supporting_document_path (latest)
  */
-let _svg2pngInit: Promise<void> | null = null;
-const ensureSvg2PngReady = async () => {
-  if (!_svg2pngInit) _svg2pngInit = initialize();
-  await _svg2pngInit;
-};
-
-async function makeQrPngBestEffort(url: string): Promise<Uint8Array | null> {
-  try {
-    await ensureSvg2PngReady();
-
-    const svg = new QRCode({
-      content: url,
-      padding: 0,
-      width: 256,
-      height: 256,
-      color: "#0b0f18",
-      background: "#ffffff",
-      ecl: "M",
-    }).svg();
-
-    const png = await svg2png(svg, { width: 256, height: 256 });
-    return new Uint8Array(png);
-  } catch (e) {
-    console.error("certify-governance-record QR generation failed (non-fatal):", e);
-    return null;
-  }
-}
-
-/**
- * ✅ Enterprise pointer resolver:
- * - Reads the source PDF from minute_book bucket by searching storage.objects
- * - Prefers "*-signed.pdf" then latest updated
- * - Refuses archive-looking paths
- *
- * We do NOT assume "holdings/resolutions/<id>-signed.pdf" because case drift exists.
- */
-async function resolveMinuteBookPointer(
+async function resolveMinuteBookPath(
   supabaseAdmin: ReturnType<typeof createClient>,
   ledgerId: string,
-): Promise<{ bucket: string; path: string }> {
-  const bucket = "minute_book";
+): Promise<{ path: string | null; source: string }> {
+  // 1) minute_book_entries
+  const mbe = await supabaseAdmin
+    .from("minute_book_entries")
+    .select("id, storage_path, created_at")
+    .eq("source_record_id", ledgerId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
-  // Query storage.objects through PostgREST (works; table is in "storage" schema)
-  const q = await supabaseAdmin
-    .schema("storage")
-    .from("objects")
-    .select("name, updated_at")
-    .eq("bucket_id", bucket)
-    .ilike("name", `%${ledgerId}%`)
-    .ilike("name", "%.pdf")
-    .order("updated_at", { ascending: false })
-    .limit(25);
+  const mbePath = safeText((mbe.data as any)?.storage_path);
+  if (mbePath) return { path: mbePath, source: "minute_book_entries.storage_path" };
 
-  if (q.error) {
-    throw new Error(`STORAGE_OBJECTS_QUERY_FAILED: ${q.error.message}`);
-  }
+  // 2) signature_envelopes fallbacks
+  const env = await supabaseAdmin
+    .from("signature_envelopes")
+    .select("id, storage_path, supporting_document_path, certificate_path, created_at")
+    .eq("record_id", ledgerId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
-  const rows = (q.data ?? []) as Array<{ name: string; updated_at: string }>;
+  const envPath =
+    safeText((env.data as any)?.storage_path) ??
+    safeText((env.data as any)?.supporting_document_path) ??
+    safeText((env.data as any)?.certificate_path);
 
-  if (!rows.length) {
-    throw new Error(`MINUTE_BOOK_PDF_NOT_FOUND: ${ledgerId}`);
-  }
+  if (envPath) return { path: envPath, source: "signature_envelopes.*_path" };
 
-  // Prefer *-signed.pdf (case-insensitive)
-  const signed =
-    rows.find((r) => r.name.toLowerCase().includes("-signed.pdf")) ?? rows[0];
-
-  const path = signed.name;
-
-  const p = path.toLowerCase();
-  if (p.startsWith("sandbox/archive/") || p.includes("/archive/")) {
-    throw new Error(`FORBIDDEN_ARCHIVE_PATH_RESOLVED: ${path}`);
-  }
-
-  return { bucket, path };
+  return { path: null, source: "none" };
 }
 
 serve(async (req) => {
@@ -213,8 +200,8 @@ serve(async (req) => {
     const ledgerId = safeText(body.ledger_id ?? body.record_id);
 
     if (!ledgerId || !isUuid(ledgerId)) {
-      return json(
-        { ok: false, error: "ledger_id must be uuid", request_id: reqId } satisfies Resp,
+      return json<Resp>(
+        { ok: false, error: "ledger_id must be uuid", request_id: reqId },
         400,
       );
     }
@@ -232,117 +219,128 @@ serve(async (req) => {
 
     const force = !!body.force;
 
-    // ✅ Load ledger (NO entity_slug)
-    const { data: ledger, error: ledErr } = await supabaseAdmin
+    // ✅ Load ledger (NO entity_slug column)
+    const gl = await supabaseAdmin
       .from("governance_ledger")
-      .select("id,title,entity_id,is_test,archived")
+      .select("id, title, entity_id, is_test")
       .eq("id", ledgerId)
       .maybeSingle();
 
-    if (ledErr) {
-      console.error("certify-governance-record ledger load error:", ledErr);
-      return json(
-        { ok: false, error: "LEDGER_LOAD_FAILED", details: ledErr, request_id: reqId } satisfies Resp,
+    if (gl.error) {
+      return json<Resp>(
+        { ok: false, error: "LEDGER_LOAD_FAILED", details: gl.error, request_id: reqId },
         500,
       );
     }
-    if (!ledger?.id) {
-      return json({ ok: false, error: "LEDGER_NOT_FOUND", request_id: reqId } satisfies Resp, 404);
+    if (!gl.data?.id) {
+      return json<Resp>({ ok: false, error: "LEDGER_NOT_FOUND", request_id: reqId }, 404);
     }
 
-    const is_test = !!(ledger as any).is_test;
-
-    // ✅ Resolve entity_slug from entities (canonical)
-    const entity_id = String((ledger as any).entity_id);
+    // ✅ Resolve entity_slug from entities table
     const ent = await supabaseAdmin
       .from("entities")
       .select("id, slug")
-      .eq("id", entity_id)
+      .eq("id", String((gl.data as any).entity_id))
       .maybeSingle();
 
     if (ent.error) {
-      return json(
-        { ok: false, error: "ENTITY_LOAD_FAILED", details: ent.error, request_id: reqId } satisfies Resp,
+      return json<Resp>(
+        { ok: false, error: "ENTITY_LOAD_FAILED", details: ent.error, request_id: reqId },
         500,
       );
     }
     const entity_slug = safeText((ent.data as any)?.slug) ?? "holdings";
 
-    // ✅ Resolve minute_book pointer (bucket/path)
-    const src = await resolveMinuteBookPointer(supabaseAdmin, ledgerId);
-
-    // ✅ Idempotency: if verified already matches same pointer + has hash, reuse unless force
+    // ✅ Idempotency reuse (only if already certified and pointers exist)
     const existing = await supabaseAdmin
       .from("verified_documents")
-      .select("id,file_hash,verification_level,storage_bucket,storage_path,created_at")
+      .select("id, file_hash, verification_level, storage_bucket, storage_path, created_at")
       .eq("source_table", "governance_ledger")
       .eq("source_record_id", ledgerId)
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
 
-    if (!force && existing.data?.id) {
-      const existingHash = safeText((existing.data as any)?.file_hash);
-      const existingLevel = safeText((existing.data as any)?.verification_level);
-      const existingBucket = safeText((existing.data as any)?.storage_bucket);
-      const existingPath = safeText((existing.data as any)?.storage_path);
+    const existingHash = safeText((existing.data as any)?.file_hash);
+    const existingLevel = safeText((existing.data as any)?.verification_level);
+    const existingBucket = safeText((existing.data as any)?.storage_bucket);
+    const existingPath = safeText((existing.data as any)?.storage_path);
 
-      if (
-        existingHash &&
-        (existingLevel ?? "").toLowerCase() === "certified" &&
-        existingBucket === src.bucket &&
-        existingPath === src.path
-      ) {
-        const base =
-          safeText(body.verify_base_url) ??
-          "https://sign.oasisintlholdings.com/verify.html";
+    const base =
+      safeText(body.verify_base_url) ??
+      "https://sign.oasisintlholdings.com/verify.html";
 
-        return json<Resp>({
-          ok: true,
-          reused: true,
-          ledger_id: ledgerId,
-          actor_id: actorId,
-          is_test,
-          source: { bucket: src.bucket, path: src.path },
-          file_hash: existingHash,
-          verify_url: `${base}?hash=${existingHash}`,
-          verified_document_id: String((existing.data as any).id),
-          request_id: reqId,
-        });
-      }
+    if (
+      !force &&
+      existing.data?.id &&
+      existingHash &&
+      (existingLevel ?? "").toLowerCase() === "certified" &&
+      existingBucket &&
+      existingPath
+    ) {
+      return json<Resp>({
+        ok: true,
+        reused: true,
+        ledger_id: ledgerId,
+        actor_id: actorId,
+        storage_bucket: existingBucket,
+        storage_path: existingPath,
+        file_hash: existingHash,
+        verify_url: `${base}?hash=${existingHash}`,
+        verified_document_id: String((existing.data as any).id),
+        request_id: reqId,
+      });
     }
 
-    // ✅ Download existing PDF from minute_book pointer
-    const dl = await supabaseAdmin.storage.from(src.bucket).download(src.path);
+    // ✅ Resolve minute_book pointer (NO storage.objects)
+    const bucket = "minute_book";
+    const resolved = await resolveMinuteBookPath(supabaseAdmin, ledgerId);
+
+    if (!resolved.path) {
+      return json<Resp>(
+        {
+          ok: false,
+          error: "SOURCE_POINTER_MISSING",
+          details: {
+            message:
+              "No minute_book_entries.storage_path and no signature_envelopes path found. Archive/seal must run first to establish a minute_book pointer.",
+            ledger_id: ledgerId,
+            resolver_source: resolved.source,
+          },
+          request_id: reqId,
+        },
+        409,
+      );
+    }
+
+    const path = resolved.path;
+
+    // ✅ Download the existing minute_book PDF
+    const dl = await supabaseAdmin.storage.from(bucket).download(path);
     if (dl.error || !dl.data) {
-      console.error("certify-governance-record download error:", dl.error);
-      return json(
+      return json<Resp>(
         {
           ok: false,
           error: "SOURCE_PDF_NOT_FOUND",
           details: dl.error,
+          storage_bucket: bucket,
+          storage_path: path,
           request_id: reqId,
-          source: { bucket: src.bucket, path: src.path },
-        } satisfies Resp,
+        },
         404,
       );
     }
 
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // Verify terminal base (hash-first sharing)
-    const base =
-      safeText(body.verify_base_url) ??
-      "https://sign.oasisintlholdings.com/verify.html";
-
-    // ✅ QR content uses ledger_id (resolver-friendly) to avoid hash circularity
+    // ✅ QR content uses ledger_id (avoids hash circularity)
     const qrUrl = (() => {
       const u = new URL(base);
       u.searchParams.set("ledger_id", ledgerId);
       return u.toString();
     })();
 
-    // Append certification page (stable, no risky glyphs)
+    // Append certification page
     const pdf = await PDFDocument.load(sourceBytes, { ignoreEncryption: true });
     const page = pdf.addPage();
     const { width, height } = page.getSize();
@@ -355,7 +353,7 @@ serve(async (req) => {
       y: height - 72,
       size: 18,
       font: fontBold,
-      color: rgb(0.95, 0.95, 0.96),
+      color: rgb(0.10, 0.12, 0.16),
     });
 
     page.drawText("This document is digitally certified.", {
@@ -363,7 +361,7 @@ serve(async (req) => {
       y: height - 110,
       size: 11,
       font,
-      color: rgb(0.92, 0.92, 0.94),
+      color: rgb(0.18, 0.20, 0.24),
     });
 
     page.drawText("Scan the QR to open the verification terminal.", {
@@ -371,7 +369,7 @@ serve(async (req) => {
       y: height - 140,
       size: 11,
       font,
-      color: rgb(0.92, 0.92, 0.94),
+      color: rgb(0.18, 0.20, 0.24),
     });
 
     const qrSize = 120;
@@ -381,19 +379,14 @@ serve(async (req) => {
     const qrPng = await makeQrPngBestEffort(qrUrl);
     if (qrPng) {
       const qrImg = await pdf.embedPng(qrPng);
-      page.drawImage(qrImg, {
-        x: qrX,
-        y: qrY,
-        width: qrSize,
-        height: qrSize,
-      });
+      page.drawImage(qrImg, { x: qrX, y: qrY, width: qrSize, height: qrSize });
     } else {
       page.drawText("[QR unavailable]", {
         x: qrX,
         y: qrY + qrSize / 2,
         size: 9,
         font,
-        color: rgb(0.75, 0.75, 0.78),
+        color: rgb(0.45, 0.45, 0.48),
       });
     }
 
@@ -402,7 +395,7 @@ serve(async (req) => {
       y: qrY + 48,
       size: 10,
       font: fontBold,
-      color: rgb(0.92, 0.92, 0.94),
+      color: rgb(0.18, 0.20, 0.24),
     });
 
     page.drawText(base, {
@@ -410,7 +403,7 @@ serve(async (req) => {
       y: qrY + 32,
       size: 9,
       font,
-      color: rgb(0.78, 0.78, 0.82),
+      color: rgb(0.35, 0.35, 0.40),
     });
 
     page.drawText(`Ledger ID: ${ledgerId}`, {
@@ -418,43 +411,39 @@ serve(async (req) => {
       y: qrY + 16,
       size: 9,
       font,
-      color: rgb(0.78, 0.78, 0.82),
+      color: rgb(0.35, 0.35, 0.40),
     });
 
-    // Save final bytes + authoritative hash
+    // ✅ Save final bytes + compute authoritative hash
     const finalBytes = new Uint8Array(await pdf.save());
     const file_hash = await sha256Hex(finalBytes);
 
-    // Upload certified PDF back to SAME minute_book pointer (no drift)
-    const up = await supabaseAdmin.storage.from(src.bucket).upload(src.path, finalBytes, {
+    // ✅ Upload certified PDF back to same minute_book pointer (no drift)
+    const up = await supabaseAdmin.storage.from(bucket).upload(path, finalBytes, {
       contentType: "application/pdf",
       upsert: true,
     });
 
     if (up.error) {
-      console.error("certify-governance-record upload error:", up.error);
-      return json(
-        { ok: false, error: "UPLOAD_FAILED", details: up.error, request_id: reqId } satisfies Resp,
+      return json<Resp>(
+        { ok: false, error: "UPLOAD_FAILED", details: up.error, request_id: reqId },
         500,
       );
     }
 
-    // ✅ Upsert Verified Registry (schema-safe)
-    // - mime_type (not content_type)
-    // - file_hash REQUIRED for certified
-    // - upsert by (source_table,source_record_id)
+    // ✅ Upsert verified_documents with required fields
     const nowIso = new Date().toISOString();
 
     const vdPayload: Record<string, unknown> = {
-      entity_id,
+      entity_id: String((gl.data as any).entity_id),
       entity_slug,
-      title: safeText((ledger as any).title) ?? "Certified Document",
       document_class: "resolution",
+      title: safeText((gl.data as any).title) ?? "Untitled Resolution",
       source_table: "governance_ledger",
       source_record_id: ledgerId,
-      storage_bucket: src.bucket,
-      storage_path: src.path,
-      file_hash,
+      storage_bucket: bucket,
+      storage_path: path,
+      file_hash, // ✅ REQUIRED for certified
       mime_type: "application/pdf",
       verification_level: "certified",
       is_archived: true,
@@ -469,9 +458,8 @@ serve(async (req) => {
       .maybeSingle();
 
     if (vd.error) {
-      console.error("verified_documents upsert error:", vd.error);
-      return json(
-        { ok: false, error: "VERIFIED_DOC_UPSERT_FAILED", details: vd.error, request_id: reqId } satisfies Resp,
+      return json<Resp>(
+        { ok: false, error: "VERIFIED_DOC_UPSERT_FAILED", details: vd.error, request_id: reqId },
         500,
       );
     }
@@ -480,8 +468,8 @@ serve(async (req) => {
       ok: true,
       ledger_id: ledgerId,
       actor_id: actorId,
-      is_test,
-      source: { bucket: src.bucket, path: src.path },
+      storage_bucket: bucket,
+      storage_path: path,
       file_hash,
       verify_url: `${base}?hash=${file_hash}`,
       verified_document_id: vd.data?.id ? String((vd.data as any).id) : undefined,
@@ -489,13 +477,13 @@ serve(async (req) => {
     });
   } catch (e) {
     console.error("certify-governance-record fatal:", e);
-    return json(
+    return json<Resp>(
       {
         ok: false,
         error: "CERTIFY_FATAL",
         details: String((e as any)?.message ?? e),
         request_id: req.headers.get("x-sb-request-id") ?? null,
-      } satisfies Resp,
+      },
       500,
     );
   }

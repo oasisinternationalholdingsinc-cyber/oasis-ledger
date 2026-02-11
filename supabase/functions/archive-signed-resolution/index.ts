@@ -3,21 +3,18 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
-/* ============================
-   Types
-============================ */
 type ReqBody = {
-  envelope_id: string;
+  envelope_id?: string;
+
+  // tolerated from Forge / callers
+  ledger_id?: string;
+  record_id?: string; // alias
   actor_id?: string;
 
-  // tolerated (no regressions if client sends extra fields)
   trigger?: string;
   is_test?: boolean;
 };
 
-/* ============================
-   CORS / helpers
-============================ */
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -41,15 +38,17 @@ if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
 }
 
 const isUuid = (s: string) =>
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    s,
-  );
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    .test(s);
+
+const safeText = (v: unknown) => {
+  if (v == null) return null;
+  const t = String(v).trim();
+  return t.length ? t : null;
+};
 
 const edgeBase = SUPABASE_URL.replace(/\/rest\/v1\/?$/, "");
 
-/* ============================
-   MAIN
-============================ */
 serve(async (req) => {
   const reqId = req.headers.get("x-sb-request-id") ?? null;
 
@@ -70,101 +69,83 @@ serve(async (req) => {
       );
     }
 
-    const body = (await req.json().catch(() => ({}))) as Partial<ReqBody>;
-    const envelopeId = body.envelope_id?.trim();
-
-    if (!envelopeId || !isUuid(envelopeId)) {
-      return json(
-        { ok: false, error: "envelope_id must be a uuid", request_id: reqId },
-        400,
-      );
-    }
+    const body = (await req.json().catch(() => ({}))) as ReqBody;
 
     const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
       global: { fetch },
       auth: { persistSession: false },
     });
 
-    /* -------- resolve actor -------- */
-    let actorId = body.actor_id?.trim() ?? null;
-
+    // Resolve actor
+    let actorId = safeText(body.actor_id);
     if (actorId && !isUuid(actorId)) {
-      return json(
-        { ok: false, error: "actor_id must be a uuid", request_id: reqId },
-        400,
-      );
+      return json({ ok: false, error: "actor_id must be uuid", request_id: reqId }, 400);
     }
-
     if (!actorId) {
       const { data, error } = await supabaseAdmin.auth.getUser(jwt);
-      if (error) {
-        console.error("archive-signed-resolution getUser error:", error);
+      if (error || !data?.user?.id) {
+        return json({ ok: false, error: "Unable to resolve actor", request_id: reqId }, 401);
+      }
+      actorId = data.user.id;
+    }
+
+    // Resolve ledgerId (prefer body, fallback envelope.record_id)
+    let ledgerId = safeText(body.ledger_id ?? body.record_id);
+    const envelopeId = safeText(body.envelope_id);
+
+    if (!ledgerId) {
+      if (!envelopeId || !isUuid(envelopeId)) {
         return json(
-          { ok: false, error: "Unable to resolve actor", request_id: reqId },
-          401,
+          { ok: false, error: "ledger_id or envelope_id required", request_id: reqId },
+          400,
         );
       }
-      actorId = data?.user?.id ?? null;
-      if (!actorId) {
-        return json(
-          { ok: false, error: "Unable to resolve actor", request_id: reqId },
-          401,
-        );
+
+      const env = await supabaseAdmin
+        .from("signature_envelopes")
+        .select("id, status, record_id")
+        .eq("id", envelopeId)
+        .maybeSingle();
+
+      if (env.error) {
+        return json({ ok: false, error: "Envelope lookup failed", details: env.error, request_id: reqId }, 500);
       }
+      if (!env.data?.id) {
+        return json({ ok: false, error: "Envelope not found", request_id: reqId }, 404);
+      }
+      if (String((env.data as any).status).toLowerCase() !== "completed") {
+        return json({ ok: false, error: "Envelope not completed", status: (env.data as any).status, request_id: reqId }, 400);
+      }
+
+      ledgerId = String((env.data as any).record_id ?? "");
     }
 
-    /* -------- load envelope -------- */
-    const { data: env, error: envErr } = await supabaseAdmin
-      .from("signature_envelopes")
-      .select("id,status,record_id")
-      .eq("id", envelopeId)
-      .maybeSingle();
-
-    if (envErr) {
-      console.error("archive-signed-resolution envelope load error:", envErr);
-      return json(
-        { ok: false, error: "Envelope lookup failed", request_id: reqId },
-        500,
-      );
-    }
-
-    if (!env) {
-      return json(
-        { ok: false, error: "Envelope not found", request_id: reqId },
-        404,
-      );
-    }
-
-    if (env.status !== "completed") {
-      return json(
-        {
-          ok: false,
-          error: "Envelope not completed",
-          status: env.status,
-          request_id: reqId,
-        },
-        400,
-      );
-    }
-
-    const ledgerId = env.record_id?.toString?.() ?? null;
     if (!ledgerId || !isUuid(ledgerId)) {
+      return json({ ok: false, error: "ledger_id invalid", ledger_id: ledgerId, request_id: reqId }, 400);
+    }
+
+    // ✅ STEP 1: Seal first (creates minute_book_entries pointer, marks archived, links intent)
+    const seal = await supabaseAdmin.rpc("seal_governance_record_for_archive", {
+      p_actor_id: actorId,
+      p_ledger_id: ledgerId,
+    });
+
+    if (seal.error) {
       return json(
         {
           ok: false,
-          error: "Envelope record_id invalid",
-          record_id: ledgerId,
+          error: "SEAL_FAILED",
+          details: seal.error,
+          ledger_id: ledgerId,
+          envelope_id: envelopeId ?? null,
+          actor_id: actorId,
           request_id: reqId,
         },
         500,
       );
     }
 
-    /* ============================================================
-       ✅ OPTION A (ENTERPRISE): CERTIFY FIRST (QR + REAL PDF HASH)
-       - No regressions: sealer call unchanged
-       - Certification is explicit authority and updates verified_documents
-    ============================================================ */
+    // ✅ STEP 2: Certify using the minute_book pointer created by seal
     const certRes = await fetch(`${edgeBase}/functions/v1/certify-governance-record`, {
       method: "POST",
       headers: {
@@ -181,15 +162,14 @@ serve(async (req) => {
 
     if (!certRes.ok) {
       const t = await certRes.text().catch(() => "");
-      console.error("certify-governance-record failed:", certRes.status, t);
       return json(
         {
           ok: false,
           error: "CERTIFY_FAILED",
           status: certRes.status,
           details: t,
-          envelope_id: envelopeId,
           ledger_id: ledgerId,
+          envelope_id: envelopeId ?? null,
           actor_id: actorId,
           request_id: reqId,
         },
@@ -197,40 +177,15 @@ serve(async (req) => {
       );
     }
 
-    /* -------- canonical sealer call (LOCKED) --------
-       - No extra args. No p_file_hash. No minute_book assumptions.
-       - Sealer remains source of truth for linking + minute_book pointers + status.
-    */
-    const rpcArgs = {
-      p_actor_id: actorId,
-      p_ledger_id: ledgerId,
-    };
-
-    const r = await supabaseAdmin.rpc("seal_governance_record_for_archive", rpcArgs);
-
-    if (r.error) {
-      console.error("seal_governance_record_for_archive error:", r.error);
-      return json(
-        {
-          ok: false,
-          error: r.error.message ?? String(r.error),
-          envelope_id: envelopeId,
-          ledger_id: ledgerId,
-          actor_id: actorId,
-          request_id: reqId,
-        },
-        500,
-      );
-    }
-
-    const row = Array.isArray(r.data) ? r.data[0] : r.data;
+    const certJson = await certRes.json().catch(() => null);
 
     return json({
       ok: true,
-      envelope_id: envelopeId,
       ledger_id: ledgerId,
+      envelope_id: envelopeId ?? null,
       actor_id: actorId,
-      result: row ?? null,
+      sealed: seal.data ?? null,
+      certified: certJson ?? null,
       request_id: reqId,
     });
   } catch (e) {
@@ -239,8 +194,8 @@ serve(async (req) => {
       {
         ok: false,
         error: "ARCHIVE_SIGNED_FATAL",
-        message: String((e as any)?.message ?? e),
-        request_id: reqId,
+        details: String((e as any)?.message ?? e),
+        request_id: req.headers.get("x-sb-request-id") ?? null,
       },
       500,
     );
