@@ -293,6 +293,9 @@ export default function ForgeClient() {
   const [isResealing, setIsResealing] = useState(false);
   const [isOpeningArchive, setIsOpeningArchive] = useState(false);
 
+  // ✅ MISSING UI FIX: archive-signed-resolution (direct) state
+  const [isArchivingSigned, setIsArchivingSigned] = useState(false);
+
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
@@ -338,6 +341,9 @@ export default function ForgeClient() {
   const [inviteModalOpen, setInviteModalOpen] = useState(false);
   const [archiveModalOpen, setArchiveModalOpen] = useState(false);
   const [resealModalOpen, setResealModalOpen] = useState(false);
+
+  // ✅ MISSING UI FIX: modal for archive-signed-resolution
+  const [archiveSignedModalOpen, setArchiveSignedModalOpen] = useState(false);
 
   // ✅ FRONTEND-ONLY: keep recently archived/sealed record visible even if view stops returning it immediately
   const [pinned, setPinned] = useState<ForgeQueueItem | null>(null);
@@ -923,6 +929,68 @@ export default function ForgeClient() {
     }
   }
 
+  // ✅ MISSING UI FIX: direct archive-signed-resolution handler (NO wiring regression to existing buttons)
+  async function onArchiveSignedDirect() {
+    setError(null);
+    setInfo(null);
+
+    if (!selected?.ledger_id) return;
+
+    if (selected.envelope_status !== "completed") {
+      flashError("Archive Signed requires a completed envelope.");
+      return;
+    }
+
+    if (!selected.envelope_id) {
+      flashError("Archive Signed requires an envelope_id.");
+      return;
+    }
+
+    setIsArchivingSigned(true);
+    try {
+      setPinned(selected);
+
+      // Be tolerant: send both record_id and ledger_id aliases + envelope_id
+      const { data, error } = await supabase.functions.invoke("archive-signed-resolution", {
+        body: {
+          record_id: selected.ledger_id,
+          ledger_id: selected.ledger_id,
+          envelope_id: selected.envelope_id,
+          entity_slug: activeEntity,
+          is_test: isTest,
+          trigger: "forge-archive-signed-direct",
+        },
+      });
+
+      if (error) {
+        const msg = await extractFnError(error);
+        throw new Error(msg);
+      }
+
+      const res = data as ArchiveSignedResolutionResponse;
+
+      if (!res?.ok) {
+        flashError(res?.error ?? "Archive Signed failed.");
+        return;
+      }
+
+      if (res.already_archived) {
+        flashInfo("Signed artifact already archived — no action required.");
+      } else {
+        flashInfo("Archived Signed artifact (direct).");
+      }
+
+      // Evidence + queue refresh (same as other flows)
+      await loadArchiveEvidence(selected.ledger_id);
+      await refreshQueuesKeepSelection(selected.ledger_id);
+    } catch (e: any) {
+      console.error("onArchiveSignedDirect error", e);
+      flashError(e?.message || "Archive Signed failed.");
+    } finally {
+      setIsArchivingSigned(false);
+    }
+  }
+
   // ============================
   // Intent loaders + actions
   // ============================
@@ -1369,8 +1437,7 @@ export default function ForgeClient() {
       return <span className={cx(base, "border-amber-500/40 bg-amber-500/10 text-amber-200")}>In Progress</span>;
     if (s === "cancelled" || s === "expired")
       return <span className={cx(base, "border-slate-600 bg-slate-900/40 text-slate-300")}>{s}</span>;
-    return <span className={
-cx(base, "border-slate-600 bg-slate-900/40 text-slate-300")}>{s || "unknown"}</span>;
+    return <span className={cx(base, "border-slate-600 bg-slate-900/40 text-slate-300")}>{s || "unknown"}</span>;
   };
 
   const ledgerStatusPill = (item: ForgeQueueItem) => {
@@ -1522,10 +1589,12 @@ cx(base, "border-slate-600 bg-slate-900/40 text-slate-300")}>{s || "unknown"}</s
 
           <div className="hidden sm:flex items-center gap-2">
             <div className="rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-300">
-              <span className="text-slate-500">Entity:</span> <span className="font-semibold text-slate-100">{activeEntity}</span>
+              <span className="text-slate-500">Entity:</span>{" "}
+              <span className="font-semibold text-slate-100">{activeEntity}</span>
             </div>
             <div className="rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-300">
-              <span className="text-slate-500">Lane:</span> <span className="font-semibold text-slate-100">{isTest ? "SANDBOX" : "RoT"}</span>
+              <span className="text-slate-500">Lane:</span>{" "}
+              <span className="font-semibold text-slate-100">{isTest ? "SANDBOX" : "RoT"}</span>
             </div>
           </div>
         </div>
@@ -1775,10 +1844,31 @@ cx(base, "border-slate-600 bg-slate-900/40 text-slate-300")}>{s || "unknown"}</s
                             <div className="mt-2 text-[11px] text-slate-500">
                               Archive writes Minute Book primary pointer + Verified registry (certified source).
                             </div>
+
+                            {/* ✅ MISSING UI FIX: explicit Archive Signed (Direct) button */}
+                            <div className="mt-3">
+                              <ActionButton
+                                label={archiveLocked ? "Archive Signed (Already)" : "Archive Signed (Direct)"}
+                                tone="amber"
+                                disabled={
+                                  isArchivingSigned ||
+                                  selected.envelope_status !== "completed" ||
+                                  !selected.envelope_id ||
+                                  archiveLocked
+                                }
+                                onClick={() => setArchiveSignedModalOpen(true)}
+                              />
+                              <div className="mt-2 text-[11px] text-slate-500">
+                                Calls <span className="font-mono">archive-signed-resolution</span> directly (legacy path). This does{" "}
+                                <span className="font-semibold">not</span> replace Archive Now; it’s an explicit operator action.
+                              </div>
+                            </div>
+
                             {archiveMissing ? (
                               <div className="mt-3 rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-100">
                                 Completed envelope detected, but archive pointers are missing. Use{" "}
-                                <span className="font-semibold">Re-seal / Repair</span>.
+                                <span className="font-semibold">Re-seal / Repair</span>. If you specifically need the legacy
+                                signed-only archiver, use <span className="font-semibold">Archive Signed (Direct)</span>.
                               </div>
                             ) : null}
                           </div>
@@ -1833,12 +1923,8 @@ cx(base, "border-slate-600 bg-slate-900/40 text-slate-300")}>{s || "unknown"}</s
 
                         <div className="col-span-12 md:col-span-6 rounded-2xl border border-white/10 bg-black/25 p-4">
                           <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">AXIOM</div>
-                          {axiomError ? (
-                            <div className="mt-2 text-[12px] text-rose-200">{axiomError}</div>
-                          ) : null}
-                          {axiomInfo ? (
-                            <div className="mt-2 text-[12px] text-emerald-200">{axiomInfo}</div>
-                          ) : null}
+                          {axiomError ? <div className="mt-2 text-[12px] text-rose-200">{axiomError}</div> : null}
+                          {axiomInfo ? <div className="mt-2 text-[12px] text-emerald-200">{axiomInfo}</div> : null}
 
                           <div className="mt-3 flex gap-2 flex-wrap">
                             <button
@@ -2027,7 +2113,12 @@ cx(base, "border-slate-600 bg-slate-900/40 text-slate-300")}>{s || "unknown"}</s
                             </div>
                           </div>
 
-                          <ActionButton label="Open Archive PDF" tone="slate" disabled={isOpeningArchive} onClick={() => onViewArchivePdf()} />
+                          <ActionButton
+                            label="Open Archive PDF"
+                            tone="slate"
+                            disabled={isOpeningArchive}
+                            onClick={() => onViewArchivePdf()}
+                          />
                         </>
                       )}
                     </div>
@@ -2213,10 +2304,7 @@ cx(base, "border-slate-600 bg-slate-900/40 text-slate-300")}>{s || "unknown"}</s
                   {/* Notes */}
                   {rightTab === "notes" ? (
                     <div className="space-y-3">
-                      <EmptyState
-                        title="Notes (optional)"
-                        detail="Reserved for operator notes. Keep Forge execution clean."
-                      />
+                      <EmptyState title="Notes (optional)" detail="Reserved for operator notes. Keep Forge execution clean." />
                     </div>
                   ) : null}
                 </div>
@@ -2268,6 +2356,36 @@ cx(base, "border-slate-600 bg-slate-900/40 text-slate-300")}>{s || "unknown"}</s
         }}
         onClose={() => setArchiveModalOpen(false)}
       />
+
+      {/* ✅ MISSING UI FIX: archive-signed-resolution modal */}
+      <Modal
+        open={archiveSignedModalOpen}
+        title="Archive Signed (Direct)"
+        description="Invokes archive-signed-resolution explicitly. This does not replace Archive Now; it is an operator-triggered legacy path."
+        confirmLabel={isArchivingSigned ? "Archiving…" : "Archive Signed"}
+        confirmTone="amber"
+        confirmDisabled={isArchivingSigned}
+        onConfirm={async () => {
+          setArchiveSignedModalOpen(false);
+          await onArchiveSignedDirect();
+        }}
+        onClose={() => setArchiveSignedModalOpen(false)}
+      >
+        <div className="rounded-2xl border border-white/10 bg-black/25 p-4 text-[12px] text-slate-300">
+          <div className="text-slate-100 font-semibold">What this does</div>
+          <div className="mt-2">
+            • Calls <span className="font-mono">archive-signed-resolution</span> using the current{" "}
+            <span className="font-mono">ledger_id</span> + <span className="font-mono">envelope_id</span>.
+          </div>
+          <div className="mt-2">
+            • Intended when you specifically want the signed-artifact archiver path, separate from the canonical seal wrapper.
+          </div>
+          <div className="mt-3 text-slate-400">
+            Preferred canonical flow remains <span className="font-semibold">Archive Now</span> or{" "}
+            <span className="font-semibold">Re-seal / Repair</span>.
+          </div>
+        </div>
+      </Modal>
 
       <Modal
         open={resealModalOpen}
