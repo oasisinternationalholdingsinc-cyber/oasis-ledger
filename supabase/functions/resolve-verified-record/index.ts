@@ -92,9 +92,83 @@ async function signUrl(
   return { url: data?.signedUrl ?? null, error: null as string | null };
 }
 
-function isTestFromBucket(bucket: string) {
+function isTestFromBucketFallback(bucket: string) {
   const b = bucket.toLowerCase();
   return b === "governance_sandbox" || b.includes("sandbox");
+}
+
+/* ============================
+   NEW: lane + minute_book resolver (DB truth, not bucket)
+============================ */
+async function resolveLaneAndMinuteBookFromSource(args: {
+  supabaseAdmin: ReturnType<typeof createClient>;
+  vd: any;
+}): Promise<{
+  is_test: boolean;
+  ledger_id: string | null;
+  minute_book: { storage_bucket: string; storage_path: string } | null;
+}> {
+  const { supabaseAdmin, vd } = args;
+
+  const source_table = safeText(vd.source_table);
+  const source_record_id = safeText(vd.source_record_id);
+
+  // default fallback
+  let is_test = isTestFromBucketFallback(String(vd.storage_bucket ?? ""));
+  let ledger_id: string | null = null;
+  let minute_book: { storage_bucket: string; storage_path: string } | null = null;
+
+  // If your verified_documents has an is_test column, prefer it (safe, no break)
+  if (vd && typeof vd.is_test === "boolean") {
+    is_test = vd.is_test;
+  }
+
+  if (source_table === "governance_ledger" && source_record_id && isUuid(source_record_id)) {
+    ledger_id = source_record_id;
+
+    // authoritative lane from ledger
+    const gl = await supabaseAdmin
+      .from("governance_ledger")
+      .select("id,is_test")
+      .eq("id", ledger_id)
+      .maybeSingle();
+
+    if (!gl.error && gl.data && typeof (gl.data as any).is_test === "boolean") {
+      is_test = !!(gl.data as any).is_test;
+    }
+
+    // minute book pointer from minute_book_entries
+    const mbe = await supabaseAdmin
+      .from("minute_book_entries")
+      .select("storage_path, created_at")
+      .eq("source_record_id", ledger_id)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const p = safeText((mbe.data as any)?.storage_path);
+    if (p) {
+      minute_book = { storage_bucket: "minute_book", storage_path: p };
+    }
+  }
+
+  if (source_table === "minute_book_entries" && source_record_id && isUuid(source_record_id)) {
+    // source is already a minute_book_entries record
+    const mbe = await supabaseAdmin
+      .from("minute_book_entries")
+      .select("id,is_test,storage_path")
+      .eq("id", source_record_id)
+      .maybeSingle();
+
+    const p = safeText((mbe.data as any)?.storage_path);
+    if (p) minute_book = { storage_bucket: "minute_book", storage_path: p };
+
+    if (!mbe.error && mbe.data && typeof (mbe.data as any).is_test === "boolean") {
+      is_test = !!(mbe.data as any).is_test;
+    }
+  }
+
+  return { is_test, ledger_id, minute_book };
 }
 
 /* ============================
@@ -112,7 +186,25 @@ async function buildFromVerifiedRow(args: {
   const path = String(vd.storage_path);
 
   const signed = await signUrl(supabaseAdmin, bucket, path, expires_in);
-  const is_test = isTestFromBucket(bucket);
+
+  // ✅ FIX: lane + minute_book pointer from DB truth
+  const derived = await resolveLaneAndMinuteBookFromSource({ supabaseAdmin, vd });
+  const is_test = derived.is_test;
+
+  // minute book signed url (best-effort)
+  let minuteBookSigned: { url: string | null; error: string | null } = {
+    url: null,
+    error: null,
+  };
+
+  if (derived.minute_book?.storage_bucket && derived.minute_book?.storage_path) {
+    minuteBookSigned = await signUrl(
+      supabaseAdmin,
+      derived.minute_book.storage_bucket,
+      derived.minute_book.storage_path,
+      expires_in,
+    );
+  }
 
   // entity hydration (best-effort)
   const entId = safeText(vd.entity_id);
@@ -137,13 +229,16 @@ async function buildFromVerifiedRow(args: {
 
   const notes: Record<string, unknown> = { ...(noteExtras ?? {}) };
   if (signed.error) notes.archive_sign_error = signed.error;
+  if (minuteBookSigned.error) notes.minute_book_sign_error = minuteBookSigned.error;
+  if (!derived.minute_book) notes.minute_book_pointer_missing = true;
 
   return {
     ok: true,
     hash: vd.file_hash,
     verified_document_id: vd.id,
 
-    ledger_id: null,
+    // ✅ for UI sanity
+    ledger_id: derived.ledger_id ?? null,
     envelope_id: null,
 
     entity:
@@ -154,7 +249,7 @@ async function buildFromVerifiedRow(args: {
       },
 
     ledger: {
-      id: null,
+      id: derived.ledger_id ?? null,
       title: vd.title ?? "Verified Document",
       status: "ARCHIVED",
       is_test,
@@ -182,12 +277,19 @@ async function buildFromVerifiedRow(args: {
       storage_path: path,
     },
 
-    public_pdf: null,
+    // ✅ expose minute book pointer to the UI
+    public_pdf: derived.minute_book
+      ? {
+          kind: "minute_book",
+          storage_bucket: derived.minute_book.storage_bucket,
+          storage_path: derived.minute_book.storage_path,
+        }
+      : null,
 
     expires_in,
     urls: {
       best_pdf: signed.url,
-      minute_book_pdf: null,
+      minute_book_pdf: minuteBookSigned.url,
       certified_archive_pdf: signed.url,
     },
 
@@ -208,7 +310,7 @@ async function buildHashFirstPayload(args: {
   const { data: vd, error: vdErr } = await supabaseAdmin
     .from("verified_documents")
     .select(
-      "id, entity_id, entity_slug, title, document_class, verification_level, storage_bucket, storage_path, file_hash, created_at, updated_at, source_table, source_record_id",
+      "id, entity_id, entity_slug, title, document_class, verification_level, storage_bucket, storage_path, file_hash, created_at, updated_at, source_table, source_record_id, is_test",
     )
     .eq("file_hash", hash)
     .order("created_at", { ascending: false })
@@ -233,13 +335,12 @@ async function buildEntryFirstPayload(args: {
 }) {
   const { supabaseAdmin, entry_id, expires_in } = args;
 
-  // strict UUID guard (prevents accidental junk + keeps enterprise clean)
   if (!isUuid(entry_id)) return { ok: false, error: "BAD_ENTRY_ID" };
 
   const { data: vd, error: vdErr } = await supabaseAdmin
     .from("verified_documents")
     .select(
-      "id, entity_id, entity_slug, title, document_class, verification_level, storage_bucket, storage_path, file_hash, created_at, updated_at, source_table, source_record_id",
+      "id, entity_id, entity_slug, title, document_class, verification_level, storage_bucket, storage_path, file_hash, created_at, updated_at, source_table, source_record_id, is_test",
     )
     .eq("source_table", "minute_book_entries")
     .eq("source_record_id", entry_id)
@@ -289,7 +390,6 @@ serve(async (req) => {
     return json({ ok: false, error: "INVALID_JSON", request_id: reqId }, 400);
   }
 
-  // ENTERPRISE INPUT NORMALIZATION
   const hash = safeText(body.hash ?? body.p_hash)?.toLowerCase() ?? null;
   const entry_id = safeText(body.entry_id ?? body.p_entry_id) ?? null;
   const envelope_id = safeText(body.envelope_id ?? body.p_envelope_id) ?? null;
@@ -313,11 +413,9 @@ serve(async (req) => {
     const fb = await buildHashFirstPayload({ supabaseAdmin, hash, expires_in });
     if ((fb as any).ok === true) return json({ ...(fb as any), request_id: reqId }, 200);
 
-    // If only hash was provided, stop here.
     if (!entry_id && !envelope_id && !ledger_id) {
       return json({ ...(fb as any), request_id: reqId }, 200);
     }
-    // else fall through to other identifiers
   }
 
   // ✅ 2) ENTRY-FIRST (minute book QR)
@@ -325,13 +423,12 @@ serve(async (req) => {
     const eb = await buildEntryFirstPayload({ supabaseAdmin, entry_id, expires_in });
     if ((eb as any).ok === true) return json({ ...(eb as any), request_id: reqId }, 200);
 
-    // If only entry_id was provided, stop here.
     if (!envelope_id && !ledger_id) {
       return json({ ...(eb as any), request_id: reqId }, 200);
     }
   }
 
-  // ✅ 3) Canonical SQL RPC (envelope_id / ledger_id / (hash handled above))
+  // ✅ 3) Canonical SQL RPC (envelope_id / ledger_id)
   const { data: resolved, error: rpcErr } = await supabaseAdmin.rpc(RESOLVE_RPC, {
     p_hash: null, // IMPORTANT: hash handled above (registry-first)
     p_envelope_id: envelope_id,
