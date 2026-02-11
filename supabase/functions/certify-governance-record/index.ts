@@ -2,24 +2,32 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { PDFDocument, StandardFonts, rgb } from "https://esm.sh/pdf-lib@1.17.1";
-
-// ✅ Server-safe QR → SVG (NO canvas)
-import QRCode from "https://esm.sh/qrcode-svg@1.1.0";
-// ✅ SVG → PNG (NO canvas)
-import { initialize, svg2png } from "https://esm.sh/svg2png-wasm@1.4.1";
 
 /**
  * CERTIFY (Governance) — PRODUCTION — NO REGRESSION
  *
+ * GOAL (your ask):
+ * ✅ DO NOT append an extra certification page (NO PDF mutation beyond optional QR overlay)
+ * ✅ NO wiring changes (Forge/Archive can keep sending same payload)
  * ✅ DOES NOT query storage.objects (not exposed to PostgREST)
- * ✅ Resolves the REAL minute_book PDF pointer via public.minute_book_entries (canonical)
- * ✅ Fallback to signature_envelopes.storage_path/supporting_document_path
- * ✅ Bucket is ALWAYS minute_book (this is your archive-grade canonical store)
- * ✅ Hash is computed from FINAL certified bytes (the bytes you upload)
+ * ✅ Resolves the REAL minute_book PDF pointer via:
+ *    1) public.minute_book_entries.storage_path (canonical)
+ *    2) signature_envelopes.storage_path/supporting_document_path/certificate_path (fallback)
+ * ✅ Bucket always minute_book (canonical archive-grade store)
+ * ✅ Computes SHA-256 from FINAL BYTES (the exact bytes uploaded)
  * ✅ Upserts public.verified_documents with file_hash populated (passes constraint)
  * ✅ Uses mime_type (not content_type)
  * ✅ On conflict: (source_table, source_record_id)
+ *
+ * IMPORTANT:
+ * - We DO NOT add pages. We DO NOT re-layout. We only:
+ *   - download the existing PDF
+ *   - (optionally) overlay a tiny QR in a reserved corner ONLY IF requested later
+ *   - upload back to the SAME storage pointer
+ *   - compute + store file_hash in verified_documents
+ *
+ * If you want ZERO PDF changes at all (hash-only), this already does that:
+ * - It re-uploads identical bytes only if you want; we still upsert verified_documents either way.
  */
 
 type ReqBody = {
@@ -80,8 +88,9 @@ if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
 }
 
 const isUuid = (s: string) =>
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-    .test(s);
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    s,
+  );
 
 const safeText = (v: unknown) => {
   if (v == null) return null;
@@ -94,34 +103,6 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return Array.from(new Uint8Array(hash))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
-}
-
-/** svg2png init once per runtime */
-let _svg2pngInit: Promise<void> | null = null;
-const ensureSvg2PngReady = async () => {
-  if (!_svg2pngInit) _svg2pngInit = initialize();
-  await _svg2pngInit;
-};
-
-async function makeQrPngBestEffort(url: string): Promise<Uint8Array | null> {
-  try {
-    await ensureSvg2PngReady();
-    const svg = new QRCode({
-      content: url,
-      padding: 0,
-      width: 256,
-      height: 256,
-      color: "#0b0f18",
-      background: "#ffffff",
-      ecl: "M",
-    }).svg();
-
-    const png = await svg2png(svg, { width: 256, height: 256 });
-    return new Uint8Array(png);
-  } catch (e) {
-    console.error("QR generation failed (non-fatal):", e);
-    return null;
-  }
 }
 
 async function resolveActorIdBestEffort(
@@ -150,7 +131,7 @@ async function resolveActorIdBestEffort(
  * ✅ Resolve canonical minute_book pointer WITHOUT querying storage.objects.
  * Priority:
  *  1) minute_book_entries.storage_path for this ledger_id
- *  2) signature_envelopes.storage_path / supporting_document_path (latest)
+ *  2) signature_envelopes.storage_path / supporting_document_path / certificate_path (latest)
  */
 async function resolveMinuteBookPath(
   supabaseAdmin: ReturnType<typeof createClient>,
@@ -236,7 +217,7 @@ serve(async (req) => {
       return json<Resp>({ ok: false, error: "LEDGER_NOT_FOUND", request_id: reqId }, 404);
     }
 
-    // ✅ Resolve entity_slug from entities table
+    // ✅ Resolve entity_slug from entities table (canonical)
     const ent = await supabaseAdmin
       .from("entities")
       .select("id, slug")
@@ -251,7 +232,11 @@ serve(async (req) => {
     }
     const entity_slug = safeText((ent.data as any)?.slug) ?? "holdings";
 
-    // ✅ Idempotency reuse (only if already certified and pointers exist)
+    const base =
+      safeText(body.verify_base_url) ??
+      "https://sign.oasisintlholdings.com/verify.html";
+
+    // ✅ Reuse if already certified + has pointers + hash (idempotent)
     const existing = await supabaseAdmin
       .from("verified_documents")
       .select("id, file_hash, verification_level, storage_bucket, storage_path, created_at")
@@ -265,10 +250,6 @@ serve(async (req) => {
     const existingLevel = safeText((existing.data as any)?.verification_level);
     const existingBucket = safeText((existing.data as any)?.storage_bucket);
     const existingPath = safeText((existing.data as any)?.storage_path);
-
-    const base =
-      safeText(body.verify_base_url) ??
-      "https://sign.oasisintlholdings.com/verify.html";
 
     if (
       !force &&
@@ -333,92 +314,21 @@ serve(async (req) => {
 
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // ✅ QR content uses ledger_id (avoids hash circularity)
-    const qrUrl = (() => {
-      const u = new URL(base);
-      u.searchParams.set("ledger_id", ledgerId);
-      return u.toString();
-    })();
-
-    // Append certification page
-    const pdf = await PDFDocument.load(sourceBytes, { ignoreEncryption: true });
-    const page = pdf.addPage();
-    const { width, height } = page.getSize();
-
-    const font = await pdf.embedFont(StandardFonts.Helvetica);
-    const fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
-
-    page.drawText("Oasis Digital Parliament — Certification", {
-      x: 48,
-      y: height - 72,
-      size: 18,
-      font: fontBold,
-      color: rgb(0.10, 0.12, 0.16),
-    });
-
-    page.drawText("This document is digitally certified.", {
-      x: 48,
-      y: height - 110,
-      size: 11,
-      font,
-      color: rgb(0.18, 0.20, 0.24),
-    });
-
-    page.drawText("Scan the QR to open the verification terminal.", {
-      x: 48,
-      y: height - 140,
-      size: 11,
-      font,
-      color: rgb(0.18, 0.20, 0.24),
-    });
-
-    const qrSize = 120;
-    const qrX = width - 48 - qrSize;
-    const qrY = 72;
-
-    const qrPng = await makeQrPngBestEffort(qrUrl);
-    if (qrPng) {
-      const qrImg = await pdf.embedPng(qrPng);
-      page.drawImage(qrImg, { x: qrX, y: qrY, width: qrSize, height: qrSize });
-    } else {
-      page.drawText("[QR unavailable]", {
-        x: qrX,
-        y: qrY + qrSize / 2,
-        size: 9,
-        font,
-        color: rgb(0.45, 0.45, 0.48),
-      });
-    }
-
-    page.drawText("Verification Terminal:", {
-      x: 48,
-      y: qrY + 48,
-      size: 10,
-      font: fontBold,
-      color: rgb(0.18, 0.20, 0.24),
-    });
-
-    page.drawText(base, {
-      x: 48,
-      y: qrY + 32,
-      size: 9,
-      font,
-      color: rgb(0.35, 0.35, 0.40),
-    });
-
-    page.drawText(`Ledger ID: ${ledgerId}`, {
-      x: 48,
-      y: qrY + 16,
-      size: 9,
-      font,
-      color: rgb(0.35, 0.35, 0.40),
-    });
-
-    // ✅ Save final bytes + compute authoritative hash
-    const finalBytes = new Uint8Array(await pdf.save());
+    /**
+     * ✅ NO EXTRA PAGE:
+     * We do NOT modify the PDF bytes at all.
+     * We certify by:
+     *   - hashing the existing bytes
+     *   - writing verified_documents pointers + file_hash
+     *
+     * (If you later want a tiny QR overlay *without adding a page*,
+     * we can do last-page stamping, but you explicitly said take out last page.)
+     */
+    const finalBytes = sourceBytes;
     const file_hash = await sha256Hex(finalBytes);
 
-    // ✅ Upload certified PDF back to same minute_book pointer (no drift)
+    // OPTIONAL: If you want to ensure metadata consistency (same bytes) you can skip re-upload.
+    // But keeping "upload upsert" is safe and keeps behavior consistent (no wiring changes).
     const up = await supabaseAdmin.storage.from(bucket).upload(path, finalBytes, {
       contentType: "application/pdf",
       upsert: true,
@@ -471,7 +381,7 @@ serve(async (req) => {
       storage_bucket: bucket,
       storage_path: path,
       file_hash,
-      verify_url: `${base}?hash=${file_hash}`,
+      verify_url: `${base}?hash=${file_hash}`, // hash-first for copy/share
       verified_document_id: vd.data?.id ? String((vd.data as any).id) : undefined,
       request_id: reqId,
     });
