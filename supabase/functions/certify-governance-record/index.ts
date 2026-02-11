@@ -2,7 +2,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { PDFDocument, StandardFonts, rgb } from "https://esm.sh/pdf-lib@1.17.1";
+import { PDFDocument, StandardFonts } from "https://esm.sh/pdf-lib@1.17.1";
 
 // ✅ Server-safe QR → SVG (NO canvas)
 import QRCode from "https://esm.sh/qrcode-svg@1.1.0";
@@ -14,18 +14,17 @@ import { initialize, svg2png } from "https://esm.sh/svg2png-wasm@1.4.1";
  *
  * ✅ NO governance_ledger.entity_slug (does not exist in prod)
  * ✅ Lane-safe archive pointers: governance_sandbox vs governance_archive
- * ✅ Hash is computed from FINAL bytes (the file you upload)
- * ✅ verified_documents: writes file_hash (and uses mime_type per schema)
+ * ✅ Hash computed from FINAL bytes (the file uploaded)
+ * ✅ verified_documents: writes REQUIRED file_hash + mime_type
  * ✅ Upsert uses UNIQUE(source_table, source_record_id)
  *
- * IMPORTANT NOTE (hash circularity):
- * - A QR that encodes the *final* file hash is circular (hash depends on QR).
- * - To stay correct + stable, QR encodes ledger_id (resolver-friendly), while
- *   verify_url returned is hash-first for sharing/copy.
+ * NOTE (hash circularity):
+ * - QR encodes ledger_id (resolver-friendly, non-circular).
+ * - verify_url returned is hash-first for copy/share.
  *
  * HARD RULES:
  * - Do NOT write generated columns (source_storage_*).
- * - Do NOT invent columns that don't exist (content_type/certified_by/certified_at).
+ * - Do NOT invent columns that don't exist.
  */
 
 type ReqBody = {
@@ -108,7 +107,6 @@ async function resolveActorIdBestEffort(
     req.headers.get("authorization") ?? req.headers.get("Authorization");
   const jwt = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
 
-  // If called internally with service_role, there may be no user JWT.
   if (!jwt || jwt === SERVICE_ROLE_KEY) return null;
 
   const { data, error } = await supabaseAdmin.auth.getUser(jwt);
@@ -120,7 +118,7 @@ async function resolveActorIdBestEffort(
 
 /**
  * svg2png-wasm init is expensive; do it once per runtime.
- * Also: if init or png conversion fails, we DO NOT fail certification — we just omit the QR image.
+ * If conversion fails, we DO NOT fail certification — we just omit QR image.
  */
 let _svg2pngInit: Promise<void> | null = null;
 const ensureSvg2PngReady = async () => {
@@ -145,7 +143,10 @@ async function makeQrPngBestEffort(url: string): Promise<Uint8Array | null> {
     const png = await svg2png(svg, { width: 256, height: 256 });
     return new Uint8Array(png);
   } catch (e) {
-    console.error("certify-governance-record QR generation failed (non-fatal):", e);
+    console.error(
+      "certify-governance-record QR generation failed (non-fatal):",
+      e,
+    );
     return null;
   }
 }
@@ -185,7 +186,7 @@ serve(async (req) => {
     // ✅ Load ledger (NO entity_slug)
     const { data: ledger, error: ledErr } = await supabaseAdmin
       .from("governance_ledger")
-      .select("id,title,entity_id,is_test,archived")
+      .select("id,title,entity_id,is_test")
       .eq("id", ledgerId)
       .maybeSingle();
 
@@ -197,23 +198,26 @@ serve(async (req) => {
           error: "LEDGER_LOAD_FAILED",
           details: ledErr,
           request_id: reqId,
-        },
+        } satisfies Resp,
         500,
       );
     }
     if (!ledger?.id) {
-      return json({ ok: false, error: "LEDGER_NOT_FOUND", request_id: reqId }, 404);
+      return json(
+        { ok: false, error: "LEDGER_NOT_FOUND", request_id: reqId } satisfies Resp,
+        404,
+      );
     }
 
     const is_test = !!(ledger as any).is_test;
 
-    // ✅ Lane-safe destination pointers (your current convention)
+    // ✅ Lane-safe destination pointers (your convention)
     const bucket = is_test ? "governance_sandbox" : "governance_archive";
     const path = is_test
       ? `sandbox/archive/${ledgerId}.pdf`
       : `archive/${ledgerId}.pdf`;
 
-    // ✅ Idempotency: if already certified + hash exists + pointers match, reuse unless force
+    // ✅ Idempotency: reuse existing certified row unless force
     const existing = await supabaseAdmin
       .from("verified_documents")
       .select("id,file_hash,verification_level,storage_bucket,storage_path,created_at")
@@ -254,7 +258,7 @@ serve(async (req) => {
       }
     }
 
-    // Download existing archived PDF (must exist before cert)
+    // ✅ Download archived PDF (must exist)
     const dl = await supabaseAdmin.storage.from(bucket).download(path);
     if (dl.error || !dl.data) {
       console.error("certify-governance-record download error:", dl.error);
@@ -273,19 +277,18 @@ serve(async (req) => {
 
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // Verify terminal base (hash-first sharing)
     const base =
       safeText(body.verify_base_url) ??
       "https://sign.oasisintlholdings.com/verify.html";
 
-    // ✅ QR content uses ledger_id to avoid hash circularity
+    // ✅ QR encodes ledger_id (non-circular)
     const qrUrl = (() => {
       const u = new URL(base);
       u.searchParams.set("ledger_id", ledgerId);
       return u.toString();
     })();
 
-    // Load PDF and append certification page (stable, no fancy glyphs)
+    // Append certification page
     const pdf = await PDFDocument.load(sourceBytes, { ignoreEncryption: true });
     const page = pdf.addPage();
     const { width, height } = page.getSize();
@@ -298,7 +301,6 @@ serve(async (req) => {
       y: height - 72,
       size: 18,
       font: fontBold,
-      color: rgb(0.95, 0.95, 0.96),
     });
 
     page.drawText("This document is digitally certified.", {
@@ -306,7 +308,6 @@ serve(async (req) => {
       y: height - 110,
       size: 11,
       font,
-      color: rgb(0.92, 0.92, 0.94),
     });
 
     page.drawText("Scan the QR to open the verification terminal.", {
@@ -314,7 +315,6 @@ serve(async (req) => {
       y: height - 140,
       size: 11,
       font,
-      color: rgb(0.92, 0.92, 0.94),
     });
 
     const qrSize = 120;
@@ -331,13 +331,11 @@ serve(async (req) => {
         height: qrSize,
       });
     } else {
-      // Non-fatal fallback marker (still certifies + hashes correctly)
       page.drawText("[QR unavailable]", {
         x: qrX,
         y: qrY + qrSize / 2,
         size: 9,
         font,
-        color: rgb(0.75, 0.75, 0.78),
       });
     }
 
@@ -346,7 +344,6 @@ serve(async (req) => {
       y: qrY + 48,
       size: 10,
       font: fontBold,
-      color: rgb(0.92, 0.92, 0.94),
     });
 
     page.drawText(base, {
@@ -354,7 +351,6 @@ serve(async (req) => {
       y: qrY + 32,
       size: 9,
       font,
-      color: rgb(0.78, 0.78, 0.82),
     });
 
     page.drawText(`Ledger ID: ${ledgerId}`, {
@@ -362,14 +358,13 @@ serve(async (req) => {
       y: qrY + 16,
       size: 9,
       font,
-      color: rgb(0.78, 0.78, 0.82),
     });
 
-    // Save final bytes and compute authoritative hash
+    // Final bytes + hash
     const finalBytes = new Uint8Array(await pdf.save());
     const file_hash = await sha256Hex(finalBytes);
 
-    // Upload final PDF back to same pointer (no drift)
+    // Upload certified PDF back to same pointer
     const up = await supabaseAdmin.storage.from(bucket).upload(path, finalBytes, {
       contentType: "application/pdf",
       upsert: true,
@@ -378,48 +373,29 @@ serve(async (req) => {
     if (up.error) {
       console.error("certify-governance-record upload error:", up.error);
       return json(
-        { ok: false, error: "UPLOAD_FAILED", details: up.error, request_id: reqId } satisfies Resp,
+        {
+          ok: false,
+          error: "UPLOAD_FAILED",
+          details: up.error,
+          request_id: reqId,
+        } satisfies Resp,
         500,
       );
     }
 
-    // Resolve entity_slug from entities (canonical)
-    const entity_id = String((ledger as any).entity_id);
-    const ent = await supabaseAdmin
-      .from("entities")
-      .select("id, slug")
-      .eq("id", entity_id)
-      .maybeSingle();
-
-    if (ent.error) {
-      return json(
-        { ok: false, error: "ENTITY_LOAD_FAILED", details: ent.error, request_id: reqId } satisfies Resp,
-        500,
-      );
-    }
-    const entity_slug = safeText((ent.data as any)?.slug) ?? "holdings";
-
-    // Upsert verified_documents (SCHEMA-SAFE)
-    // ✅ DO NOT write generated columns (source_storage_*).
-    // ✅ Use mime_type (not content_type).
-    // ✅ Do NOT invent certified_by/certified_at (do not exist in schema).
-    const nowIso = new Date().toISOString();
-
+    // ✅ Upsert verified_documents — ONLY KNOWN COLUMNS
     const vdPayload: Record<string, unknown> = {
-      entity_id,
-      entity_slug,
+      entity_id: String((ledger as any).entity_id),
       title: safeText((ledger as any).title) ?? "Certified Document",
       document_class: "resolution",
       source_table: "governance_ledger",
       source_record_id: ledgerId,
       storage_bucket: bucket,
       storage_path: path,
-      file_hash,
+      file_hash, // ✅ REQUIRED by constraint for certified
       mime_type: "application/pdf",
       verification_level: "certified",
       is_archived: true,
-      updated_by: actorId,
-      updated_at: nowIso,
     };
 
     const vd = await supabaseAdmin
@@ -431,7 +407,12 @@ serve(async (req) => {
     if (vd.error) {
       console.error("verified_documents upsert error:", vd.error);
       return json(
-        { ok: false, error: "VERIFIED_DOC_UPSERT_FAILED", details: vd.error, request_id: reqId } satisfies Resp,
+        {
+          ok: false,
+          error: "VERIFIED_DOC_UPSERT_FAILED",
+          details: vd.error,
+          request_id: reqId,
+        } satisfies Resp,
         500,
       );
     }
