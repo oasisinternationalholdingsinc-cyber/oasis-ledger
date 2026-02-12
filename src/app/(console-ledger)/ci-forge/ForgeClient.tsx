@@ -22,7 +22,7 @@ import { ArrowLeft, ExternalLink, Copy, RefreshCw } from "lucide-react";
  * 2) "Copy" actions for IDs + Verified hash (quick operator flow).
  * 3) "Open Best PDF" preference remains: Verified registry first → Minute Book primary → entry.
  * 4) Defensive evidence + intent loaders: never destabilize Forge if sidecars fail.
- * 5) Better disabled-state messaging + inline micro-status pills.
+ * 5) Better disabled-state styling (NOT blacked out) — UI-only, logic unchanged.
  */
 
 type ForgeQueueItem = {
@@ -1415,7 +1415,12 @@ export default function ForgeClient() {
       const cRow = Array.isArray(cd) ? cd[0] : cd;
 
       const intentId =
-        cRow?.intent_id ?? cRow?.id ?? cRow?.intent?.id ?? cd?.intent_id ?? cd?.id ?? (typeof cd === "string" ? cd : null);
+        cRow?.intent_id ??
+        cRow?.id ??
+        cRow?.intent?.id ??
+        cd?.intent_id ??
+        cd?.id ??
+        (typeof cd === "string" ? cd : null);
 
       if (!intentId) throw new Error("Intent created but id could not be resolved.");
 
@@ -1576,6 +1581,7 @@ export default function ForgeClient() {
     </div>
   );
 
+  // ✅ ENHANCED (UI ONLY): disabled state no longer looks "blacked out"
   const ActionButton = ({
     label,
     tone = "amber",
@@ -1604,7 +1610,7 @@ export default function ForgeClient() {
         className={cx(
           "w-full rounded-2xl px-4 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase transition",
           tone === "emerald" || tone === "slate" ? cls : cx("border", cls),
-          disabled ? "opacity-60 cursor-not-allowed" : ""
+          disabled ? "opacity-70 cursor-not-allowed border-white/10 bg-white/[0.04] text-slate-400" : ""
         )}
       >
         {label}
