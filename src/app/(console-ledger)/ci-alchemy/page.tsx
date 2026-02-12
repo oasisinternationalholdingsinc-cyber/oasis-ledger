@@ -115,6 +115,15 @@ export default function CIAlchemyPage() {
   const [dirty, setDirty] = useState(false);
   const lastLoadedRef = useRef<{ id: string | null; title: string; body: string } | null>(null);
 
+  // -------------------------
+  // AXIOM (ai_notes)
+  // -------------------------
+  const [axiomNotes, setAxiomNotes] = useState<AxiomNote[]>([]);
+  const [axiomLoading, setAxiomLoading] = useState(false);
+  const [axiomErr, setAxiomErr] = useState<string | null>(null);
+  const [axiomLastRefresh, setAxiomLastRefresh] = useState<string | null>(null);
+  const [selectedAxiomId, setSelectedAxiomId] = useState<string | null>(null);
+
   const selectedDraft = useMemo(
     () => drafts.find((d) => d.id === selectedId) ?? null,
     [drafts, selectedId]
@@ -152,6 +161,17 @@ export default function CIAlchemyPage() {
     if (!dirty) return true;
     return window.confirm("You have unsaved edits. Continue and lose changes?");
   }
+
+  // ✅ Browser-level guard (refresh/close/back) – no wiring changes
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
+      if (!dirty) return;
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [dirty]);
 
   function pickDefaultSelection(rows: DraftRecord[]) {
     const preferred =
@@ -266,6 +286,8 @@ export default function CIAlchemyPage() {
       setStatusTab("draft");
       setQuery("");
       setWorkspaceTab("editor");
+      setSelectedAxiomId(null);
+      setAxiomNotes([]);
       await reloadDrafts(false);
     })();
     return () => {
@@ -281,6 +303,13 @@ export default function CIAlchemyPage() {
     setBody(draft.draft_text ?? "");
     setInfo(null);
     setError(null);
+
+    // reset AXIOM selection for new draft
+    setSelectedAxiomId(null);
+    setAxiomNotes([]);
+    setAxiomErr(null);
+    setAxiomLastRefresh(null);
+
     markLoadedSnapshot(draft.id, draft.title ?? "", draft.draft_text ?? "");
   }
 
@@ -292,6 +321,13 @@ export default function CIAlchemyPage() {
     setInfo(null);
     setError(null);
     setWorkspaceTab("editor");
+
+    // reset AXIOM selection for new draft
+    setSelectedAxiomId(null);
+    setAxiomNotes([]);
+    setAxiomErr(null);
+    setAxiomLastRefresh(null);
+
     markLoadedSnapshot(null, "", "");
   }
 
@@ -309,20 +345,16 @@ export default function CIAlchemyPage() {
     return list;
   }, [drafts, statusTab, query]);
 
-  // -------------------------
-  // AXIOM (ai_notes)
-  // -------------------------
-  const [axiomNotes, setAxiomNotes] = useState<AxiomNote[]>([]);
-  const [axiomLoading, setAxiomLoading] = useState(false);
-  const [axiomErr, setAxiomErr] = useState<string | null>(null);
-  const [axiomLastRefresh, setAxiomLastRefresh] = useState<string | null>(null);
-
-  const selectedAxiomSummary = useMemo(() => {
+  const selectedAxiomNote = useMemo(() => {
+    if (selectedAxiomId) {
+      const found = axiomNotes.find((n) => n.id === selectedAxiomId);
+      if (found) return found;
+    }
     const summaries = axiomNotes.filter((n) => (n.note_type ?? "").toLowerCase() === "summary");
     return summaries[0] ?? axiomNotes[0] ?? null;
-  }, [axiomNotes]);
+  }, [axiomNotes, selectedAxiomId]);
 
-  async function loadAxiomNotes() {
+  async function loadAxiomNotes(opts?: { keepSelection?: boolean }) {
     if (!selectedId) return;
     setAxiomLoading(true);
     setAxiomErr(null);
@@ -350,10 +382,22 @@ export default function CIAlchemyPage() {
         .limit(25);
 
       if (error) throw error;
-      setAxiomNotes((data ?? []) as AxiomNote[]);
+      const rows = (data ?? []) as AxiomNote[];
+      setAxiomNotes(rows);
       setAxiomLastRefresh(new Date().toISOString());
+
+      // ✅ enhancement: stable selection (no UI regression)
+      if (opts?.keepSelection && selectedAxiomId) {
+        const stillThere = rows.find((n) => n.id === selectedAxiomId);
+        if (stillThere) return;
+      }
+
+      const summaries = rows.filter((n) => (n.note_type ?? "").toLowerCase() === "summary");
+      const defaultPick = summaries[0] ?? rows[0] ?? null;
+      setSelectedAxiomId(defaultPick?.id ?? null);
     } catch (e: any) {
       setAxiomNotes([]);
+      setSelectedAxiomId(null);
       setAxiomErr(e?.message ?? "Failed to load AXIOM notes.");
     } finally {
       setAxiomLoading(false);
@@ -363,7 +407,7 @@ export default function CIAlchemyPage() {
   useEffect(() => {
     if (workspaceTab !== "axiom") return;
     if (!selectedId) return;
-    void loadAxiomNotes();
+    void loadAxiomNotes({ keepSelection: false });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceTab, selectedId]);
 
@@ -460,10 +504,8 @@ export default function CIAlchemyPage() {
         return created.id;
       };
 
-      // ✅ FIX: define targetDraftId BEFORE building payload
       const targetDraftId = await ensureDraftRow();
 
-      // ✅ FIX: Turbopack-safe instructions (no template literals)
       const hasBody = body.trim().length > 0;
       const defaultTopic = title.trim() || "a governance matter";
       const instructions = hasBody
@@ -511,7 +553,6 @@ export default function CIAlchemyPage() {
 
       const producedTitle = (data.title || title.trim() || "(untitled)") as string;
 
-      // ✅ Persist Alchemy output into governance_drafts BEFORE reloadDrafts
       const updatePayload: any = {
         title: producedTitle,
         draft_text: draftText,
@@ -635,7 +676,8 @@ export default function CIAlchemyPage() {
       flashInfo(noteId ? `AXIOM Review saved (note_id=${noteId}).` : "AXIOM Review saved.");
 
       setWorkspaceTab("axiom");
-      await loadAxiomNotes();
+      await loadAxiomNotes({ keepSelection: false });
+      if (noteId) setSelectedAxiomId(String(noteId));
     } catch (err: any) {
       console.error("axiom review invoke exception", err);
       flashError(err?.message ?? "Network error calling AXIOM Review.");
@@ -1003,9 +1045,7 @@ export default function CIAlchemyPage() {
       const nextRows =
         deleteMode === "hard"
           ? (drafts.filter((d) => d.id !== selectedId) as DraftRecord[])
-          : (drafts.map((d) =>
-              d.id === selectedId ? { ...d, status: "discarded" as DraftStatus } : d
-            ) as DraftRecord[]);
+          : (drafts.map((d) => (d.id === selectedId ? { ...d, status: "discarded" as DraftStatus } : d)) as DraftRecord[]);
 
       const next = pickDefaultSelection(nextRows);
       if (next) {
@@ -1013,12 +1053,20 @@ export default function CIAlchemyPage() {
         setTitle(next.title ?? "");
         setBody(next.draft_text ?? "");
         setWorkspaceTab("editor");
+        setSelectedAxiomId(null);
+        setAxiomNotes([]);
+        setAxiomErr(null);
+        setAxiomLastRefresh(null);
         markLoadedSnapshot(next.id, next.title ?? "", next.draft_text ?? "");
       } else {
         setSelectedId(null);
         setTitle("");
         setBody("");
         setWorkspaceTab("editor");
+        setSelectedAxiomId(null);
+        setAxiomNotes([]);
+        setAxiomErr(null);
+        setAxiomLastRefresh(null);
         markLoadedSnapshot(null, "", "");
       }
     } catch (err: any) {
@@ -1038,9 +1086,7 @@ export default function CIAlchemyPage() {
   }
 
   const editorCard =
-    editorTheme === "light"
-      ? "bg-white text-slate-900 border-slate-200"
-      : "bg-slate-950/70 text-slate-100 border-slate-800";
+    editorTheme === "light" ? "bg-white text-slate-900 border-slate-200" : "bg-slate-950/70 text-slate-100 border-slate-800";
 
   const inputBase =
     editorTheme === "light"
@@ -1054,18 +1100,16 @@ export default function CIAlchemyPage() {
 
   const readerMode = workspaceTab === "axiom" ? "axiom" : "draft";
   const readerTitle =
-    readerMode === "axiom"
-      ? selectedAxiomSummary?.title || "AXIOM Snapshot"
-      : selectedDraft?.title || title || "(untitled)";
+    readerMode === "axiom" ? selectedAxiomNote?.title || "AXIOM Snapshot" : selectedDraft?.title || title || "(untitled)";
   const readerMetaLine =
     readerMode === "axiom"
-      ? `${fmtShort(selectedAxiomSummary?.created_at ?? null)} • model: ${selectedAxiomSummary?.model || "—"} • tokens: ${
-          selectedAxiomSummary?.tokens_used ?? "—"
+      ? `${fmtShort(selectedAxiomNote?.created_at ?? null)} • model: ${selectedAxiomNote?.model || "—"} • tokens: ${
+          selectedAxiomNote?.tokens_used ?? "—"
         }`
       : `${selectedDraft ? `${selectedDraft.status.toUpperCase()} • ${fmtShort(selectedDraft.created_at)}` : "—"}`;
   const readerBody =
     readerMode === "axiom"
-      ? selectedAxiomSummary?.content || "No AXIOM summary yet. Run AXIOM to generate one."
+      ? selectedAxiomNote?.content || "No AXIOM summary yet. Run AXIOM to generate one."
       : selectedDraft
       ? selectedDraft.draft_text ?? ""
       : body ?? "";
@@ -1074,15 +1118,11 @@ export default function CIAlchemyPage() {
   const cardShell =
     "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden flex flex-col";
   const cardHeader = "shrink-0 border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent";
-  // ⬇️ IMPORTANT: let the section decide scroll; avoid trapping the whole page
   const cardBody = "flex-1 min-h-0 overflow-hidden";
 
   return (
-    // ✅ Page should NOT be height-locked; OS shell handles its own layout.
     <div className="w-full">
-      {/* Page container (Provisioning-style, no inner “window frame”) */}
       <div className="mx-auto w-full max-w-[1400px] px-4 pb-8 pt-4 sm:pt-6">
-        {/* Header under OS bar */}
         <div className="mb-4">
           <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">CI • Alchemy</div>
           <h1 className="mt-1 text-lg sm:text-xl font-semibold text-slate-50">Drafting Console · AI Scribe</h1>
@@ -1115,22 +1155,13 @@ export default function CIAlchemyPage() {
           </div>
         </div>
 
-        {/* Top controls */}
         <div className={cx(cardShell, "mb-4")}>
           <div className={cx(cardHeader, "px-4 sm:px-6 pt-4 sm:pt-5 pb-3")}>
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
               <div className="inline-flex w-full lg:w-auto rounded-full bg-slate-950/70 border border-slate-800 p-1 overflow-x-auto no-scrollbar">
                 <StatusTabButton label="Drafts" active={statusTab === "draft"} onClick={() => setStatusTab("draft")} />
-                <StatusTabButton
-                  label="Reviewed"
-                  active={statusTab === "reviewed"}
-                  onClick={() => setStatusTab("reviewed")}
-                />
-                <StatusTabButton
-                  label="Finalized"
-                  active={statusTab === "finalized"}
-                  onClick={() => setStatusTab("finalized")}
-                />
+                <StatusTabButton label="Reviewed" active={statusTab === "reviewed"} onClick={() => setStatusTab("reviewed")} />
+                <StatusTabButton label="Finalized" active={statusTab === "finalized"} onClick={() => setStatusTab("finalized")} />
                 <StatusTabButton
                   label="Discarded"
                   active={statusTab === "discarded"}
@@ -1188,9 +1219,7 @@ export default function CIAlchemyPage() {
           </div>
         </div>
 
-        {/* Workspace grid */}
         <div className="grid grid-cols-12 gap-4">
-          {/* LEFT: Drafts */}
           {drawerOpen ? (
             <aside className={cx(cardShell, "col-span-12 lg:col-span-4")}>
               <div className={cx(cardHeader, "p-4")}>
@@ -1228,23 +1257,15 @@ export default function CIAlchemyPage() {
                         <li
                           key={d.id}
                           onClick={() => handleSelectDraft(d)}
-                          className={cx(
-                            "cursor-pointer px-4 py-3 transition",
-                            "hover:bg-white/5",
-                            d.id === selectedId && "bg-white/7"
-                          )}
+                          className={cx("cursor-pointer px-4 py-3 transition", "hover:bg-white/5", d.id === selectedId && "bg-white/7")}
                         >
                           <div className="flex items-start justify-between gap-2">
                             <div className="min-w-0 flex-1">
-                              <div className="truncate text-[13px] font-semibold text-slate-100">
-                                {d.title || "(untitled)"}
-                              </div>
+                              <div className="truncate text-[13px] font-semibold text-slate-100">{d.title || "(untitled)"}</div>
                               <div className="mt-1 text-[11px] text-slate-500">
                                 {fmtShort(d.created_at)} · {d.record_type || "resolution"}
                               </div>
-                              <div className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-slate-400">
-                                {d.draft_text}
-                              </div>
+                              <div className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-slate-400">{d.draft_text}</div>
                             </div>
                             <span
                               className={cx(
@@ -1286,7 +1307,6 @@ export default function CIAlchemyPage() {
             </aside>
           ) : null}
 
-          {/* MAIN */}
           <main className={cx(cardShell, drawerOpen ? "col-span-12 lg:col-span-8" : "col-span-12")}>
             <div className={cx(cardHeader, "p-4 sm:p-5")}>
               <div className="flex flex-col gap-3">
@@ -1314,9 +1334,7 @@ export default function CIAlchemyPage() {
                         onClick={() => setWorkspaceTab("editor")}
                         className={cx(
                           "rounded-full px-3 py-1.5 transition",
-                          workspaceTab === "editor"
-                            ? "bg-white/10 text-slate-100 border border-white/10"
-                            : "text-slate-400 hover:bg-slate-900/60"
+                          workspaceTab === "editor" ? "bg-white/10 text-slate-100 border border-white/10" : "text-slate-400 hover:bg-slate-900/60"
                         )}
                       >
                         Draft
@@ -1401,17 +1419,14 @@ export default function CIAlchemyPage() {
                 ) : null}
               </div>
             </div>
+
             <div className={cx(cardBody, "flex flex-col")}>
-              {/* Content area */}
               <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar p-4 sm:p-6">
                 {workspaceTab === "editor" ? (
                   <div className="space-y-4">
-                    {/* Editor card */}
                     <div className={cx("rounded-3xl border shadow-sm overflow-hidden", editorCard)}>
                       <div className="border-b border-black/10 px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-                        <div className="text-[10px] uppercase tracking-[0.25em] font-semibold text-slate-500">
-                          Draft Editor
-                        </div>
+                        <div className="text-[10px] uppercase tracking-[0.25em] font-semibold text-slate-500">Draft Editor</div>
 
                         <div className="flex flex-wrap items-center gap-2">
                           <button
@@ -1462,14 +1477,9 @@ export default function CIAlchemyPage() {
 
                       <div className="p-4 sm:p-5 space-y-4">
                         <div>
-                          <label className="block text-[10px] uppercase tracking-[0.25em] font-semibold text-slate-500">
-                            Title
-                          </label>
+                          <label className="block text-[10px] uppercase tracking-[0.25em] font-semibold text-slate-500">Title</label>
                           <input
-                            className={cx(
-                              "mt-2 w-full rounded-2xl border px-4 py-3 text-[14px] outline-none",
-                              inputBase
-                            )}
+                            className={cx("mt-2 w-full rounded-2xl border px-4 py-3 text-[14px] outline-none", inputBase)}
                             placeholder="Resolution title…"
                             value={title}
                             onChange={(e) => onTitleChange(e.target.value)}
@@ -1478,9 +1488,7 @@ export default function CIAlchemyPage() {
                         </div>
 
                         <div>
-                          <label className="block text-[10px] uppercase tracking-[0.25em] font-semibold text-slate-500">
-                            Draft Body
-                          </label>
+                          <label className="block text-[10px] uppercase tracking-[0.25em] font-semibold text-slate-500">Draft Body</label>
                           <textarea
                             className={cx(
                               "mt-2 w-full rounded-2xl border px-4 py-3 text-[13px] leading-relaxed outline-none min-h-[360px] sm:min-h-[520px]",
@@ -1492,15 +1500,9 @@ export default function CIAlchemyPage() {
                             disabled={!canMutateSelected}
                           />
                           <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
+                            <span>{selectedDraft ? `Draft: ${selectedDraft.id.slice(0, 8)}…` : "New draft (not saved)"}</span>
                             <span>
-                              {selectedDraft ? `Draft: ${selectedDraft.id.slice(0, 8)}…` : "New draft (not saved)"}
-                            </span>
-                            <span>
-                              {dirty ? (
-                                <span className="text-amber-600 font-semibold">Unsaved</span>
-                              ) : (
-                                <span className="text-emerald-600 font-semibold">Saved</span>
-                              )}
+                              {dirty ? <span className="text-amber-600 font-semibold">Unsaved</span> : <span className="text-emerald-600 font-semibold">Saved</span>}
                             </span>
                           </div>
                         </div>
@@ -1514,20 +1516,17 @@ export default function CIAlchemyPage() {
                     </div>
                   </div>
                 ) : (
-                  // AXIOM tab
                   <div className="space-y-4">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                         AXIOM Notes
                         {axiomLastRefresh ? (
-                          <span className="ml-2 text-slate-600 normal-case tracking-normal font-medium">
-                            refreshed {fmtShort(axiomLastRefresh)}
-                          </span>
+                          <span className="ml-2 text-slate-600 normal-case tracking-normal font-medium">refreshed {fmtShort(axiomLastRefresh)}</span>
                         ) : null}
                       </div>
 
                       <button
-                        onClick={loadAxiomNotes}
+                        onClick={() => loadAxiomNotes({ keepSelection: true })}
                         disabled={axiomLoading || !selectedId}
                         className={cx(
                           "rounded-full border px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase",
@@ -1550,9 +1549,7 @@ export default function CIAlchemyPage() {
                       <div className="col-span-12 lg:col-span-5">
                         <div className={cx(cardShell)}>
                           <div className={cx(cardHeader, "px-4 py-3")}>
-                            <div className="text-[10px] uppercase tracking-[0.25em] font-semibold text-slate-400">
-                              History
-                            </div>
+                            <div className="text-[10px] uppercase tracking-[0.25em] font-semibold text-slate-400">History</div>
                           </div>
                           <div className={cx(cardBody, "flex flex-col")}>
                             <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
@@ -1561,31 +1558,27 @@ export default function CIAlchemyPage() {
                               ) : axiomLoading ? (
                                 <div className="p-4 text-[13px] text-slate-400">Loading…</div>
                               ) : axiomNotes.length === 0 ? (
-                                <div className="p-4 text-[13px] text-slate-500">
-                                  No AXIOM notes yet. Run AXIOM to generate a summary.
-                                </div>
+                                <div className="p-4 text-[13px] text-slate-500">No AXIOM notes yet. Run AXIOM to generate a summary.</div>
                               ) : (
                                 <ul className="divide-y divide-white/10">
                                   {axiomNotes.map((n) => {
-                                    const active = selectedAxiomSummary?.id === n.id;
+                                    const active = selectedAxiomNote?.id === n.id;
                                     return (
                                       <li
                                         key={n.id}
-                                        className={cx("px-4 py-3", active ? "bg-white/7" : "hover:bg-white/5")}
+                                        onClick={() => setSelectedAxiomId(n.id)}
+                                        className={cx("px-4 py-3 cursor-pointer", active ? "bg-white/7" : "hover:bg-white/5")}
+                                        title="Select note"
                                       >
                                         <div className="flex items-start justify-between gap-2">
                                           <div className="min-w-0 flex-1">
-                                            <div className="truncate text-[13px] font-semibold text-slate-100">
-                                              {n.title || "AXIOM Note"}
-                                            </div>
+                                            <div className="truncate text-[13px] font-semibold text-slate-100">{n.title || "AXIOM Note"}</div>
                                             <div className="mt-1 text-[11px] text-slate-500">
                                               {fmtShort(n.created_at)}
                                               <span className="mx-2 text-slate-700">•</span>
                                               {n.note_type || "note"}
                                             </div>
-                                            <div className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-slate-400">
-                                              {n.content || ""}
-                                            </div>
+                                            <div className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-slate-400">{n.content || ""}</div>
                                           </div>
                                           <span className="shrink-0 rounded-full px-2 py-1 text-[9px] uppercase tracking-[0.18em] bg-emerald-500/15 text-emerald-200">
                                             {n.note_type || "note"}
@@ -1610,17 +1603,15 @@ export default function CIAlchemyPage() {
                           <div className={cx(cardHeader, "px-4 py-3")}>
                             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                               <div className="min-w-0">
-                                <div className="truncate text-[13px] font-semibold text-slate-100">
-                                  {selectedAxiomSummary?.title || "AXIOM Snapshot"}
-                                </div>
+                                <div className="truncate text-[13px] font-semibold text-slate-100">{selectedAxiomNote?.title || "AXIOM Snapshot"}</div>
                                 <div className="mt-1 text-[11px] text-slate-500">
-                                  {selectedAxiomSummary ? (
+                                  {selectedAxiomNote ? (
                                     <>
-                                      {fmtShort(selectedAxiomSummary.created_at)}
+                                      {fmtShort(selectedAxiomNote.created_at)}
                                       <span className="mx-2 text-slate-700">•</span>
-                                      model: {selectedAxiomSummary.model || "—"}
+                                      model: {selectedAxiomNote.model || "—"}
                                       <span className="mx-2 text-slate-700">•</span>
-                                      tokens: {selectedAxiomSummary.tokens_used ?? "—"}
+                                      tokens: {selectedAxiomNote.tokens_used ?? "—"}
                                     </>
                                   ) : (
                                     "—"
@@ -1647,13 +1638,11 @@ export default function CIAlchemyPage() {
                             <div className="rounded-3xl border border-white/10 bg-black/20 p-4 sm:p-5 shadow-inner">
                               <div className="prose prose-invert max-w-none prose-p:leading-relaxed prose-pre:bg-black/30">
                                 <pre className="whitespace-pre-wrap break-words text-[12px] sm:text-[13px] leading-relaxed">
-{selectedAxiomSummary?.content || "No AXIOM summary yet. Run AXIOM to generate one."}
+{selectedAxiomNote?.content || "No AXIOM summary yet. Run AXIOM to generate one."}
                                 </pre>
                               </div>
                             </div>
-                            <div className="mt-3 text-[11px] text-slate-500">
-                              AXIOM is advisory (sidecar). It never alters drafts or resolution templates.
-                            </div>
+                            <div className="mt-3 text-[11px] text-slate-500">AXIOM is advisory (sidecar). It never alters drafts or resolution templates.</div>
                           </div>
                         </div>
                       </div>
@@ -1662,7 +1651,6 @@ export default function CIAlchemyPage() {
                 )}
               </div>
 
-              {/* Footer note */}
               <div className="shrink-0 border-t border-white/10 px-4 py-3 text-[10px] text-slate-500 flex flex-wrap items-center justify-between gap-2">
                 <span>
                   Mutations are RPC/Edge only · Finalize → <span className="text-emerald-300">Council</span>
@@ -1679,10 +1667,7 @@ export default function CIAlchemyPage() {
       {/* Reader Modal */}
       {readerOpen ? (
         <div className="fixed inset-0 z-[80]">
-          <div
-            className="absolute inset-0 bg-black/70 backdrop-blur-sm"
-            onClick={() => setReaderOpen(false)}
-          />
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setReaderOpen(false)} />
           <div className="absolute inset-x-0 bottom-0 top-10 sm:top-14 mx-auto max-w-5xl px-3 pb-3">
             <div className="h-full rounded-3xl border border-white/10 bg-black/40 shadow-[0_30px_140px_rgba(0,0,0,0.75)] overflow-hidden flex flex-col">
               <div className="shrink-0 border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent px-4 sm:px-6 py-4">
@@ -1691,9 +1676,7 @@ export default function CIAlchemyPage() {
                     <div className="text-[10px] uppercase tracking-[0.25em] font-semibold text-slate-400">
                       Reader • {readerMode === "axiom" ? "AXIOM" : "Draft"}
                     </div>
-                    <div className="mt-1 truncate text-[14px] sm:text-[16px] font-semibold text-slate-50">
-                      {readerTitle}
-                    </div>
+                    <div className="mt-1 truncate text-[14px] sm:text-[16px] font-semibold text-slate-50">{readerTitle}</div>
                     <div className="mt-1 text-[11px] text-slate-500">{readerMetaLine}</div>
                   </div>
 
@@ -1703,9 +1686,7 @@ export default function CIAlchemyPage() {
                         onClick={() => setWorkspaceTab("editor")}
                         className={cx(
                           "rounded-full px-3 py-1.5 transition",
-                          workspaceTab === "editor"
-                            ? "bg-white/10 text-slate-100 border border-white/10"
-                            : "text-slate-400 hover:bg-slate-900/60"
+                          workspaceTab === "editor" ? "bg-white/10 text-slate-100 border border-white/10" : "text-slate-400 hover:bg-slate-900/60"
                         )}
                       >
                         Draft
@@ -1743,9 +1724,7 @@ export default function CIAlchemyPage() {
                 <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
                   <span>
                     Lane:{" "}
-                    <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>
-                      {env}
-                    </span>
+                    <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
                   </span>
                   <span>Reader is non-mutating.</span>
                 </div>
@@ -1764,12 +1743,8 @@ export default function CIAlchemyPage() {
               <div className="shrink-0 border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent px-4 sm:px-6 py-4">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="text-[10px] uppercase tracking-[0.25em] font-semibold text-slate-400">
-                      Delete Draft
-                    </div>
-                    <div className="mt-1 truncate text-[14px] sm:text-[16px] font-semibold text-slate-50">
-                      {selectedDraft?.title || "(untitled)"}
-                    </div>
+                    <div className="text-[10px] uppercase tracking-[0.25em] font-semibold text-slate-400">Delete Draft</div>
+                    <div className="mt-1 truncate text-[14px] sm:text-[16px] font-semibold text-slate-50">{selectedDraft?.title || "(untitled)"}</div>
                     <div className="mt-1 text-[11px] text-slate-500">
                       Soft delete = status “discarded”. Hard delete = RPC owner_delete_governance_draft.
                     </div>
@@ -1790,9 +1765,7 @@ export default function CIAlchemyPage() {
                     onClick={() => setDeleteMode("soft")}
                     className={cx(
                       "flex-1 rounded-xl px-3 py-2 transition",
-                      deleteMode === "soft"
-                        ? "bg-white/10 text-slate-100 border border-white/10"
-                        : "text-slate-400 hover:bg-slate-900/60"
+                      deleteMode === "soft" ? "bg-white/10 text-slate-100 border border-white/10" : "text-slate-400 hover:bg-slate-900/60"
                     )}
                   >
                     Soft (Discard)
@@ -1811,9 +1784,7 @@ export default function CIAlchemyPage() {
                 </div>
 
                 <div>
-                  <label className="block text-[10px] uppercase tracking-[0.25em] font-semibold text-slate-400">
-                    Reason (optional)
-                  </label>
+                  <label className="block text-[10px] uppercase tracking-[0.25em] font-semibold text-slate-400">Reason (optional)</label>
                   <textarea
                     className="mt-2 w-full rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-[13px] text-slate-100 outline-none focus:border-emerald-400 min-h-[120px]"
                     placeholder="Why are you removing this draft?"
@@ -1848,9 +1819,7 @@ export default function CIAlchemyPage() {
                     disabled={deleteBusy}
                     className={cx(
                       "rounded-full border px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase",
-                      deleteBusy
-                        ? "border-white/10 bg-white/5 text-slate-500 cursor-not-allowed"
-                        : "border-white/10 bg-black/20 text-slate-200 hover:bg-black/30"
+                      deleteBusy ? "border-white/10 bg-white/5 text-slate-500 cursor-not-allowed" : "border-white/10 bg-black/20 text-slate-200 hover:bg-black/30"
                     )}
                   >
                     Cancel
@@ -1886,15 +1855,7 @@ export default function CIAlchemyPage() {
 
 /* ---------------- small UI atoms ---------------- */
 
-function StatusTabButton({
-  label,
-  active,
-  onClick,
-}: {
-  label: string;
-  active: boolean;
-  onClick: () => void;
-}) {
+function StatusTabButton({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
   return (
     <button
       onClick={onClick}
