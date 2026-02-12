@@ -192,9 +192,15 @@ function ConfirmModal({
     <div className="fixed inset-0 z-[100] bg-black/70 px-4 sm:px-6 py-6 flex items-center justify-center">
       <div className="w-full max-w-[560px] rounded-3xl border border-white/12 bg-[#070A12]/90 shadow-[0_40px_160px_rgba(0,0,0,0.70)] overflow-hidden">
         <div className="px-6 py-5 border-b border-white/10">
-          <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Authority Confirmation</div>
-          <div className="mt-2 text-[15px] font-semibold text-slate-100">{state.title}</div>
-          {state.subtitle && <div className="mt-2 text-[12px] text-slate-400">{state.subtitle}</div>}
+          <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">
+            Authority Confirmation
+          </div>
+          <div className="mt-2 text-[15px] font-semibold text-slate-100">
+            {state.title}
+          </div>
+          {state.subtitle && (
+            <div className="mt-2 text-[12px] text-slate-400">{state.subtitle}</div>
+          )}
         </div>
 
         <div className="px-6 py-5">
@@ -322,7 +328,10 @@ export default function CICouncilPage() {
     setTimeout(() => setInfo(null), 3500);
   }
 
-  const selected = useMemo(() => records.find((r) => r.id === selectedId) ?? null, [records, selectedId]);
+  const selected = useMemo(
+    () => records.find((r) => r.id === selectedId) ?? null,
+    [records, selectedId]
+  );
 
   // env filtering (extra safety if table/view ever returns mixed lanes)
   const envFiltered = useMemo(() => {
@@ -359,7 +368,11 @@ export default function CICouncilPage() {
 
     if (!slug) throw new Error("OS Context missing entity slug.");
 
-    const { data, error } = await supabase.from("entities").select("id, slug").eq("slug", slug).single();
+    const { data, error } = await supabase
+      .from("entities")
+      .select("id, slug")
+      .eq("slug", slug)
+      .single();
 
     if (error || !data?.id) throw error ?? new Error("Entity lookup failed.");
     setEntityId(data.id);
@@ -493,7 +506,10 @@ export default function CICouncilPage() {
     }
 
     // 2) fallback update
-    const { error: upErr } = await supabase.from("governance_ledger").update({ status: next }).eq("id", recordId);
+    const { error: upErr } = await supabase
+      .from("governance_ledger")
+      .update({ status: next })
+      .eq("id", recordId);
 
     if (upErr) throw upErr;
   }
@@ -875,9 +891,7 @@ export default function CICouncilPage() {
                   <span className="text-slate-700">•</span>
                   <span>
                     Lane:{" "}
-                    <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>
-                      {env}
-                    </span>
+                    <span className={cx("font-semibold", isSandbox ? "text-amber-300" : "text-sky-300")}>{env}</span>
                   </span>
                   <span className="text-slate-700">•</span>
                   <span>
@@ -901,19 +915,8 @@ export default function CICouncilPage() {
               </div>
 
               <div className="shrink-0 flex items-center gap-2">
-                <Link
-                  href="/ci-council"
-                  className="hidden"
-                  aria-hidden="true"
-                  tabIndex={-1}
-                />
-
-                <Link
-                  href="/"
-                  className="hidden"
-                  aria-hidden="true"
-                  tabIndex={-1}
-                />
+                <Link href="/ci-council" className="hidden" aria-hidden="true" tabIndex={-1} />
+                <Link href="/" className="hidden" aria-hidden="true" tabIndex={-1} />
 
                 <Link
                   href="/ci-archive"
@@ -1134,17 +1137,24 @@ export default function CICouncilPage() {
                           <div className="mt-2 space-y-1">
                             <div className="flex items-center justify-between gap-2">
                               <span className="text-slate-500">Bucket</span>
-                              <span className="font-mono text-slate-200 text-[11px]">{axiomLastMemo.storage_bucket ?? "—"}</span>
+                              <span className="font-mono text-slate-200 text-[11px]">
+                                {axiomLastMemo.storage_bucket ?? "—"}
+                              </span>
                             </div>
                             <div className="flex items-center justify-between gap-2">
                               <span className="text-slate-500">Path</span>
-                              <span className="font-mono text-slate-200 text-[11px] truncate max-w-[520px]" title={axiomLastMemo.storage_path ?? ""}>
+                              <span
+                                className="font-mono text-slate-200 text-[11px] truncate max-w-[520px]"
+                                title={axiomLastMemo.storage_path ?? ""}
+                              >
                                 {axiomLastMemo.storage_path ?? "—"}
                               </span>
                             </div>
                             <div className="flex items-center justify-between gap-2">
                               <span className="text-slate-500">Hash</span>
-                              <span className="font-mono text-slate-200 text-[11px]">{hashShort(axiomLastMemo.file_hash ?? null)}</span>
+                              <span className="font-mono text-slate-200 text-[11px]">
+                                {hashShort(axiomLastMemo.file_hash ?? null)}
+                              </span>
                             </div>
                           </div>
 
@@ -1292,7 +1302,13 @@ export default function CICouncilPage() {
                 </section>
 
                 {/* MIDDLE: Queue */}
-                <section className={cx("col-span-12 rounded-3xl border border-white/10 bg-black/20 p-4", queueOpen ? "lg:col-span-6" : "lg:col-span-6")}>
+                <section
+                  className={cx(
+                    "col-span-12 rounded-3xl border border-white/10 bg-black/20 p-4",
+                    // (keep layout stable; queueOpen only affects visibility inside)
+                    "lg:col-span-6"
+                  )}
+                >
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-sm font-semibold text-slate-200">Queue</div>
@@ -1334,7 +1350,9 @@ export default function CICouncilPage() {
                             >
                               <div className="flex items-start justify-between gap-3">
                                 <div className="min-w-0">
-                                  <div className="text-sm font-medium text-slate-100 truncate">{r.title || "(untitled)"}</div>
+                                  <div className="text-sm font-medium text-slate-100 truncate">
+                                    {r.title || "(untitled)"}
+                                  </div>
                                   <div className="mt-1 text-xs text-slate-400">
                                     {fmtShort(r.created_at)} · {r.record_type || "resolution"}
                                   </div>
@@ -1456,14 +1474,15 @@ export default function CICouncilPage() {
                             </div>
                           </div>
 
-                                                   
                           {detailTab === "AXIOM" ? (
                             <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-4">
                               <div className="flex items-start justify-between gap-3">
                                 <div>
                                   <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">AXIOM Advisory</div>
                                   <div className="mt-1 text-[12px] text-slate-500">
-                                    Writes to <span className="font-mono text-slate-200">ai_notes</span> (scope_type=document, scope_id=ledger_id).
+                                    Writes to{" "}
+                                    <span className="font-mono text-slate-200">ai_notes</span>{" "}
+                                    (scope_type=document, scope_id=ledger_id).
                                   </div>
                                 </div>
 
@@ -1516,7 +1535,9 @@ export default function CICouncilPage() {
                                   <>
                                     <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Latest Advisory</div>
                                     <button
-                                      onClick={() => setAxiomSelectedNoteId(axiomSelected?.id ?? axiomNotes[0]?.id ?? null)}
+                                      onClick={() =>
+                                        setAxiomSelectedNoteId(axiomSelected?.id ?? axiomNotes[0]?.id ?? null)
+                                      }
                                       className="w-full text-left rounded-2xl border border-white/10 bg-black/25 px-4 py-4 hover:bg-white/5 transition"
                                     >
                                       <div className="flex items-start justify-between gap-3">
@@ -1527,7 +1548,9 @@ export default function CICouncilPage() {
                                           <div className="mt-1 text-[10px] text-slate-500">
                                             {fmtShort(axiomSelected?.created_at ?? null)}
                                             {axiomSelected?.model ? ` • ${axiomSelected.model}` : ""}
-                                            {typeof axiomSelected?.tokens_used === "number" ? ` • ${axiomSelected.tokens_used} tok` : ""}
+                                            {typeof axiomSelected?.tokens_used === "number"
+                                              ? ` • ${axiomSelected.tokens_used} tok`
+                                              : ""}
                                           </div>
                                         </div>
 
@@ -1835,9 +1858,12 @@ export default function CICouncilPage() {
                   <div className="px-6 py-5 border-b border-white/10 flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">Reader</div>
-                      <div className="mt-2 text-[15px] font-semibold text-slate-100 truncate">{selected.title || "(untitled)"}</div>
+                      <div className="mt-2 text-[15px] font-semibold text-slate-100 truncate">
+                        {selected.title || "(untitled)"}
+                      </div>
                       <div className="mt-1 text-[12px] text-slate-400">
-                        {fmtShort(selected.created_at)} • {(selected.status ?? "").toUpperCase()} • {selected.record_type || "resolution"}
+                        {fmtShort(selected.created_at)} • {(selected.status ?? "").toUpperCase()} •{" "}
+                        {selected.record_type || "resolution"}
                       </div>
                     </div>
                     <button
@@ -1903,4 +1929,3 @@ function DetailTabButton({
     </button>
   );
 }
-
