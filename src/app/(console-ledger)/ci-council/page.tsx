@@ -9,7 +9,20 @@ import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
 import { ArrowLeft, ShieldCheck, Search } from "lucide-react";
 
-type CouncilStatus = "PENDING" | "APPROVED" | "REJECTED" | "ARCHIVED";
+/**
+ * ✅ CANONICAL STATUS SET (matches your check constraint)
+ * governance_ledger.status valid values:
+ * DRAFT/PENDING/APPROVED/REJECTED/READY_FOR_SIGNATURE/SIGNED/ARCHIVED
+ */
+type CouncilStatus =
+  | "DRAFT"
+  | "PENDING"
+  | "APPROVED"
+  | "REJECTED"
+  | "READY_FOR_SIGNATURE"
+  | "SIGNED"
+  | "ARCHIVED";
+
 type StatusTab = "PENDING" | "APPROVED" | "REJECTED" | "ARCHIVED" | "ALL";
 type DetailTab = "AXIOM" | "ARTIFACTS"; // ✅ no duplicate Record tab
 
@@ -195,16 +208,19 @@ function ConfirmModal({
           <div className="text-[11px] uppercase tracking-[0.22em] text-slate-400">
             Authority Confirmation
           </div>
-          <div className="mt-2 text-[15px] font-semibold text-slate-100">
-            {state.title}
-          </div>
+          <div className="mt-2 text-[15px] font-semibold text-slate-100">{state.title}</div>
           {state.subtitle && (
             <div className="mt-2 text-[12px] text-slate-400">{state.subtitle}</div>
           )}
         </div>
 
         <div className="px-6 py-5">
-          <div className={cx("rounded-2xl border px-4 py-4 text-[12px] text-slate-200", tone)}>
+          <div
+            className={cx(
+              "rounded-2xl border px-4 py-4 text-[12px] text-slate-200",
+              tone
+            )}
+          >
             <div className="text-slate-200">
               This will apply an <b>authority decision</b> to the selected record.
             </div>
@@ -506,11 +522,7 @@ export default function CICouncilPage() {
     }
 
     // 2) fallback update
-    const { error: upErr } = await supabase
-      .from("governance_ledger")
-      .update({ status: next })
-      .eq("id", recordId);
-
+    const { error: upErr } = await supabase.from("governance_ledger").update({ status: next }).eq("id", recordId);
     if (upErr) throw upErr;
   }
 
@@ -545,13 +557,16 @@ export default function CICouncilPage() {
     }
   }
 
-  async function handleArchiveDiscipline() {
-    flashError(
-      "Council does not directly archive by default. Use Forge (signature path) or wire Council to the deterministic seal/archive function for direct-archive mode."
-    );
-  }
-
-  // ✅ Send Back is “best effort” (NO new wiring): tries existing RPC names; always falls back to opening Alchemy.
+  /**
+   * ✅ CANONICAL SEND-BACK (NO REGRESSION)
+   * Calls the RPC you just installed:
+   * public.council_send_back_to_alchemy(p_record_id uuid, p_reason text)
+   * Returns { ok, draft_id, record_id }.
+   *
+   * - No probing other function names (avoids regressions)
+   * - Opens Alchemy with draft_id (best UX)
+   * - Falls back to opening Alchemy with from_ledger param if needed
+   */
   async function sendBackToAlchemy() {
     if (!selected?.id) return flashError("Select a record first.");
     setBusy("sendback");
@@ -563,62 +578,26 @@ export default function CICouncilPage() {
     };
 
     try {
-      const candidates = [
-        "council_send_back_to_alchemy",
-        "council_send_back",
-        "council_return_to_alchemy",
-        "council_sendback",
-      ];
+      const { data, error } = await supabase.rpc("council_send_back_to_alchemy", {
+        p_record_id: selected.id,
+        p_reason: "Council send-back",
+      });
 
-      const paramShapes: Array<Record<string, any>> = [
-        { p_record_id: selected.id },
-        { record_id: selected.id },
-        { p_record_id: selected.id, p_reason: "Council send-back" },
-        { p_record_id: selected.id, p_note: "Council send-back" },
-        { p_record_id: selected.id, p_message: "Council send-back" },
-      ];
+      if (error) throw error;
 
-      let didRpc = false;
-      let lastErr: any = null;
+      const ok = (data as any)?.ok;
+      if (ok === false) throw new Error((data as any)?.error ?? "Send-back failed.");
 
-      for (const fn of candidates) {
-        for (const params of paramShapes) {
-          try {
-            const { data, error } = await supabase.rpc(fn as any, params as any);
-            if (!error) {
-              const ok = (data as any)?.ok;
-              if (ok === false) throw new Error((data as any)?.error ?? "Send-back RPC failed.");
-              didRpc = true;
-              break;
-            }
-            const msg = (error?.message ?? "").toLowerCase();
-            if (msg.includes("function") && msg.includes("does not exist")) {
-              // try next function name
-              break;
-            }
-            lastErr = error;
-          } catch (e: any) {
-            lastErr = e;
-            if (isTruthImmutableErr(e)) throw e;
-          }
-        }
-        if (didRpc) break;
-      }
+      const draftId = (data as any)?.draft_id as string | undefined;
 
-      if (didRpc) {
-        flashInfo("Sent back to Alchemy.");
-        await reload(true);
-        return;
-      }
+      flashInfo("Sent back to Alchemy.");
+      await reload(true);
 
-      if (lastErr) {
-        flashError(`Send-back RPC failed; opening Alchemy fallback. (${String(lastErr?.message ?? lastErr)})`);
+      if (draftId) {
+        window.open(`/ci-alchemy?draft_id=${encodeURIComponent(draftId)}`, "_blank", "noopener,noreferrer");
+      } else {
         openFallback();
-        return;
       }
-
-      openFallback();
-      flashInfo("Opened Alchemy (manual send-back).");
     } catch (err: any) {
       if (isTruthImmutableErr(err)) {
         flashError("Blocked by immutability guardrail (Truth lane).");
@@ -1302,13 +1281,7 @@ export default function CICouncilPage() {
                 </section>
 
                 {/* MIDDLE: Queue */}
-                <section
-                  className={cx(
-                    "col-span-12 rounded-3xl border border-white/10 bg-black/20 p-4",
-                    // (keep layout stable; queueOpen only affects visibility inside)
-                    "lg:col-span-6"
-                  )}
-                >
+                <section className={cx("col-span-12 rounded-3xl border border-white/10 bg-black/20 p-4", "lg:col-span-6")}>
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-sm font-semibold text-slate-200">Queue</div>
@@ -1321,13 +1294,9 @@ export default function CICouncilPage() {
 
                   <div className="mt-3 space-y-2">
                     {!queueOpen ? (
-                      <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-slate-400">
-                        Queue hidden.
-                      </div>
+                      <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-slate-400">Queue hidden.</div>
                     ) : loading ? (
-                      <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-slate-400">
-                        Loading queue…
-                      </div>
+                      <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-slate-400">Loading queue…</div>
                     ) : filtered.length === 0 ? (
                       <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-slate-400">
                         No records match this view.
@@ -1343,16 +1312,12 @@ export default function CICouncilPage() {
                               onClick={() => handleSelect(r)}
                               className={cx(
                                 "w-full text-left rounded-3xl border p-3 transition",
-                                active
-                                  ? "border-emerald-400/40 bg-emerald-500/10"
-                                  : "border-white/10 bg-black/20 hover:bg-black/25"
+                                active ? "border-emerald-400/40 bg-emerald-500/10" : "border-white/10 bg-black/20 hover:bg-black/25"
                               )}
                             >
                               <div className="flex items-start justify-between gap-3">
                                 <div className="min-w-0">
-                                  <div className="text-sm font-medium text-slate-100 truncate">
-                                    {r.title || "(untitled)"}
-                                  </div>
+                                  <div className="text-sm font-medium text-slate-100 truncate">{r.title || "(untitled)"}</div>
                                   <div className="mt-1 text-xs text-slate-400">
                                     {fmtShort(r.created_at)} · {r.record_type || "resolution"}
                                   </div>
@@ -1400,11 +1365,7 @@ export default function CICouncilPage() {
                     {/* Tabs (AXIOM / ARTIFACTS) */}
                     <div className="mt-3 inline-flex rounded-full bg-white/5 border border-white/10 p-1 overflow-hidden">
                       <DetailTabButton label="AXIOM" active={detailTab === "AXIOM"} onClick={() => setDetailTab("AXIOM")} />
-                      <DetailTabButton
-                        label="Artifacts"
-                        active={detailTab === "ARTIFACTS"}
-                        onClick={() => setDetailTab("ARTIFACTS")}
-                      />
+                      <DetailTabButton label="Artifacts" active={detailTab === "ARTIFACTS"} onClick={() => setDetailTab("ARTIFACTS")} />
                     </div>
 
                     <div className="mt-4 space-y-4">
@@ -1414,7 +1375,7 @@ export default function CICouncilPage() {
                         </div>
                       ) : (
                         <>
-                          {/* Authority block (same actions, same modals) */}
+                          {/* Authority block */}
                           <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-4">
                             <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Authority</div>
                             <div className="mt-2 text-[12px] text-slate-400">
@@ -1428,7 +1389,7 @@ export default function CICouncilPage() {
 
                             <div className="mt-3 text-[12px] text-slate-500 leading-relaxed">
                               Council is the authority. AXIOM is advisory-only and never blocks. Use <b>Send Back</b> to return
-                              to Alchemy correction flow (best effort RPC; always falls back to opening Alchemy).
+                              to Alchemy correction flow (canonical RPC + opens new draft).
                             </div>
 
                             <div className="mt-4 space-y-2">
@@ -1452,7 +1413,7 @@ export default function CICouncilPage() {
                                 onClick={() => openConfirm("SENDBACK")}
                                 disabled={!canSendBack || !!busy}
                                 className="w-full rounded-full bg-amber-500 px-5 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-black hover:bg-amber-400 disabled:opacity-50 disabled:cursor-not-allowed"
-                                title="Returns to Alchemy correction flow (RPC if present; otherwise opens Alchemy with record_id)."
+                                title="Creates new draft + returns ledger to DRAFT via SECURITY DEFINER RPC."
                               >
                                 {busy === "sendback" ? "Sending Back…" : "Send Back to Alchemy"}
                               </button>
@@ -1480,9 +1441,7 @@ export default function CICouncilPage() {
                                 <div>
                                   <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">AXIOM Advisory</div>
                                   <div className="mt-1 text-[12px] text-slate-500">
-                                    Writes to{" "}
-                                    <span className="font-mono text-slate-200">ai_notes</span>{" "}
-                                    (scope_type=document, scope_id=ledger_id).
+                                    Writes to <span className="font-mono text-slate-200">ai_notes</span> (scope_type=document, scope_id=ledger_id).
                                   </div>
                                 </div>
 
@@ -1535,9 +1494,7 @@ export default function CICouncilPage() {
                                   <>
                                     <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Latest Advisory</div>
                                     <button
-                                      onClick={() =>
-                                        setAxiomSelectedNoteId(axiomSelected?.id ?? axiomNotes[0]?.id ?? null)
-                                      }
+                                      onClick={() => setAxiomSelectedNoteId(axiomSelected?.id ?? axiomNotes[0]?.id ?? null)}
                                       className="w-full text-left rounded-2xl border border-white/10 bg-black/25 px-4 py-4 hover:bg-white/5 transition"
                                     >
                                       <div className="flex items-start justify-between gap-3">
@@ -1548,9 +1505,7 @@ export default function CICouncilPage() {
                                           <div className="mt-1 text-[10px] text-slate-500">
                                             {fmtShort(axiomSelected?.created_at ?? null)}
                                             {axiomSelected?.model ? ` • ${axiomSelected.model}` : ""}
-                                            {typeof axiomSelected?.tokens_used === "number"
-                                              ? ` • ${axiomSelected.tokens_used} tok`
-                                              : ""}
+                                            {typeof axiomSelected?.tokens_used === "number" ? ` • ${axiomSelected.tokens_used} tok` : ""}
                                           </div>
                                         </div>
 
@@ -1570,180 +1525,41 @@ export default function CICouncilPage() {
                                         {axiomSelected?.content?.trim() ? axiomSelected.content.trim() : "—"}
                                       </div>
                                     </button>
-
-                                    {axiomNotes.length > 1 && (
-                                      <div className="pt-2">
-                                        <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">History</div>
-                                        <div className="mt-2 max-h-[220px] overflow-y-auto pr-1 space-y-2">
-                                          {axiomNotes.slice(0, 10).map((n) => {
-                                            const active = (axiomSelected?.id ?? axiomNotes[0]?.id) === n.id;
-                                            const sev = n.severity ?? inferSeverity(n.title, n.content);
-                                            return (
-                                              <button
-                                                key={n.id}
-                                                onClick={() => setAxiomSelectedNoteId(n.id)}
-                                                className={cx(
-                                                  "w-full text-left rounded-2xl border px-3 py-3 transition",
-                                                  active
-                                                    ? "border-emerald-400/50 bg-emerald-500/10"
-                                                    : "border-white/10 bg-black/20 hover:bg-white/5"
-                                                )}
-                                              >
-                                                <div className="flex items-start justify-between gap-2">
-                                                  <div className="min-w-0 flex-1">
-                                                    <div className="text-[12px] font-semibold text-slate-100 truncate">
-                                                      {n.title || "AXIOM Advisory"}
-                                                    </div>
-                                                    <div className="mt-1 text-[10px] text-slate-500">
-                                                      {fmtShort(n.created_at)}
-                                                      {n.model ? ` • ${n.model}` : ""}
-                                                    </div>
-                                                  </div>
-                                                  {sev && (
-                                                    <span
-                                                      className={cx(
-                                                        "shrink-0 rounded-full border px-2 py-1 text-[9px] uppercase tracking-[0.18em]",
-                                                        severityPill(sev)
-                                                      )}
-                                                    >
-                                                      {sev}
-                                                    </span>
-                                                  )}
-                                                </div>
-                                              </button>
-                                            );
-                                          })}
-                                        </div>
-                                      </div>
-                                    )}
                                   </>
                                 )}
                               </div>
-
-                              {axiomLastMemo && (
-                                <div className="mt-4 rounded-2xl border border-white/10 bg-black/25 px-4 py-4">
-                                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Memo Artifact</div>
-
-                                  <div className="mt-3 space-y-2 text-[12px] text-slate-400">
-                                    <div className="flex items-center justify-between gap-2">
-                                      <span className="text-slate-500">Bucket</span>
-                                      <span className="font-mono text-slate-200 text-[11px]">
-                                        {axiomLastMemo.storage_bucket ?? "—"}
-                                      </span>
-                                    </div>
-                                    <div className="flex items-center justify-between gap-2">
-                                      <span className="text-slate-500">Path</span>
-                                      <span
-                                        className="font-mono text-slate-200 text-[11px] truncate max-w-[220px]"
-                                        title={axiomLastMemo.storage_path ?? ""}
-                                      >
-                                        {axiomLastMemo.storage_path ?? "—"}
-                                      </span>
-                                    </div>
-                                    <div className="flex items-center justify-between gap-2">
-                                      <span className="text-slate-500">Hash</span>
-                                      <span className="font-mono text-slate-200 text-[11px]">
-                                        {hashShort(axiomLastMemo.file_hash ?? null)}
-                                      </span>
-                                    </div>
-                                    <div className="flex items-center justify-between gap-2">
-                                      <span className="text-slate-500">Size</span>
-                                      <span className="font-mono text-slate-200 text-[11px]">
-                                        {bytesPretty(axiomLastMemo.file_size ?? null)}
-                                      </span>
-                                    </div>
-                                  </div>
-
-                                  <div className="mt-3 flex flex-wrap gap-2">
-                                    <button
-                                      onClick={async () => {
-                                        if (!axiomLastMemo?.storage_bucket || !axiomLastMemo?.storage_path) {
-                                          flashError("No memo artifact yet. Generate Memo PDF first.");
-                                          return;
-                                        }
-                                        await ensureSignedUrlForMemo(axiomLastMemo.storage_bucket, axiomLastMemo.storage_path);
-                                        flashInfo("Signed URL prepared.");
-                                      }}
-                                      disabled={axiomBusy !== null}
-                                      className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/8 disabled:opacity-50 disabled:cursor-not-allowed"
-                                    >
-                                      {axiomBusy === "url" ? "Preparing…" : "Prepare Link"}
-                                    </button>
-
-                                    <button
-                                      onClick={() => {
-                                        if (!axiomMemoUrl) return flashError("No signed URL yet. Click Prepare Link.");
-                                        window.open(axiomMemoUrl, "_blank", "noopener,noreferrer");
-                                      }}
-                                      disabled={!axiomMemoUrl}
-                                      className={cx(
-                                        "rounded-full px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase",
-                                        axiomMemoUrl
-                                          ? "border border-emerald-500/40 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/15"
-                                          : "border border-white/10 bg-white/5 text-slate-500 opacity-60 cursor-not-allowed"
-                                      )}
-                                    >
-                                      Open PDF
-                                    </button>
-                                  </div>
-
-                                  {axiomLastMemo?.warning && (
-                                    <div className="mt-3 rounded-2xl border border-amber-500/40 bg-amber-500/10 px-3 py-3 text-[12px] text-amber-200">
-                                      Memo warning: {axiomLastMemo.warning}
-                                    </div>
-                                  )}
-                                </div>
-                              )}
                             </div>
                           ) : (
                             <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-4">
-                              <div className="flex items-start justify-between gap-3">
-                                <div>
-                                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Artifacts</div>
-                                  <div className="mt-1 text-[12px] text-slate-500">
-                                    Lane-scoped sidecars (e.g., AXIOM memo PDF). Council stays non-archiving.
-                                  </div>
-                                </div>
-                                <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] tracking-[0.18em] uppercase text-slate-200">
-                                  artifacts
-                                </span>
+                              <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">Artifacts</div>
+                              <div className="mt-2 text-[12px] text-slate-500">
+                                Lane-scoped sidecars (e.g., AXIOM memo PDF). Council stays non-archiving.
                               </div>
 
                               <div className="mt-4 rounded-2xl border border-white/10 bg-black/25 px-4 py-4">
                                 <div className="text-[11px] uppercase tracking-[0.22em] text-slate-300">AXIOM Memo PDF</div>
                                 <div className="mt-2 text-[12px] text-slate-500">
-                                  {axiomLastMemo?.storage_bucket && axiomLastMemo?.storage_path
-                                    ? "Memo exists for this record."
-                                    : "No memo generated yet."}
+                                  {axiomLastMemo?.storage_bucket && axiomLastMemo?.storage_path ? "Memo exists for this record." : "No memo generated yet."}
                                 </div>
 
                                 <div className="mt-3 space-y-2 text-[12px] text-slate-400">
                                   <div className="flex items-center justify-between gap-2">
                                     <span className="text-slate-500">Bucket</span>
-                                    <span className="font-mono text-slate-200 text-[11px]">
-                                      {axiomLastMemo?.storage_bucket ?? "—"}
-                                    </span>
+                                    <span className="font-mono text-slate-200 text-[11px]">{axiomLastMemo?.storage_bucket ?? "—"}</span>
                                   </div>
                                   <div className="flex items-center justify-between gap-2">
                                     <span className="text-slate-500">Path</span>
-                                    <span
-                                      className="font-mono text-slate-200 text-[11px] truncate max-w-[220px]"
-                                      title={axiomLastMemo?.storage_path ?? ""}
-                                    >
+                                    <span className="font-mono text-slate-200 text-[11px] truncate max-w-[220px]" title={axiomLastMemo?.storage_path ?? ""}>
                                       {axiomLastMemo?.storage_path ?? "—"}
                                     </span>
                                   </div>
                                   <div className="flex items-center justify-between gap-2">
                                     <span className="text-slate-500">Hash</span>
-                                    <span className="font-mono text-slate-200 text-[11px]">
-                                      {hashShort(axiomLastMemo?.file_hash ?? null)}
-                                    </span>
+                                    <span className="font-mono text-slate-200 text-[11px]">{hashShort(axiomLastMemo?.file_hash ?? null)}</span>
                                   </div>
                                   <div className="flex items-center justify-between gap-2">
                                     <span className="text-slate-500">Size</span>
-                                    <span className="font-mono text-slate-200 text-[11px]">
-                                      {bytesPretty(axiomLastMemo?.file_size ?? null)}
-                                    </span>
+                                    <span className="font-mono text-slate-200 text-[11px]">{bytesPretty(axiomLastMemo?.file_size ?? null)}</span>
                                   </div>
                                 </div>
 
