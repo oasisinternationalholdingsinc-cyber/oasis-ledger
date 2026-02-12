@@ -1,39 +1,16 @@
-// supabase/functions/scribe/index.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-// ---------------------------------------------------------------------------
-// ENV
-// ---------------------------------------------------------------------------
-const OPENAI_KEY =
-  Deno.env.get("OPENAI_KEY") ??
-  Deno.env.get("OPENAI_API_KEY") ??
-  ""; // final fallback = empty string so we can debug
+/* -------------------------------------------------------------------------- */
+/* ENV                                                                        */
+/* -------------------------------------------------------------------------- */
 
-const SUPABASE_URL =
-  Deno.env.get("SUPABASE_URL") ??
-  Deno.env.get("SUPABASE_URL_INTERNAL") ??
-  ""; // CLI usually injects SUPABASE_URL
-
+const OPENAI_KEY = Deno.env.get("OPENAI_KEY");
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
 const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ??
-  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ??
-  "";
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-// Central env debug block so we always know what runtime we're in
-const ENV_DEBUG_BASE = {
-  has_OPENAI_KEY: !!Deno.env.get("OPENAI_KEY"),
-  has_OPENAI_API_KEY: !!Deno.env.get("OPENAI_API_KEY"),
-  runtime: {
-    SUPABASE_URL: SUPABASE_URL || null,
-    has_SERVICE_ROLE_KEY: !!SERVICE_ROLE_KEY,
-  },
-};
-
-// Log once to Supabase function logs so you can see it
-console.log("SCRIBE ENV DEBUG (startup):", ENV_DEBUG_BASE);
-
-// Supabase client (service role – backend only, bypasses RLS safely)
 const supabase =
   SUPABASE_URL && SERVICE_ROLE_KEY
     ? createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
@@ -41,25 +18,29 @@ const supabase =
       })
     : null;
 
-// Simple JSON helper with CORS
-function json(data: unknown, status = 200): Response {
+/* -------------------------------------------------------------------------- */
+/* Helpers                                                                    */
+/* -------------------------------------------------------------------------- */
+
+function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
     headers: {
       "Content-Type": "application/json",
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey",
+      "Access-Control-Allow-Headers":
+        "Content-Type, Authorization, apikey",
     },
   });
 }
 
-// ---------------------------------------------------------------------------
-// HTTP HANDLER
-// ---------------------------------------------------------------------------
-serve(async (req: Request): Promise<Response> => {
+/* -------------------------------------------------------------------------- */
+/* Handler                                                                    */
+/* -------------------------------------------------------------------------- */
+
+serve(async (req) => {
   try {
-    // CORS preflight
     if (req.method === "OPTIONS") {
       return new Response("ok", {
         status: 200,
@@ -73,50 +54,28 @@ serve(async (req: Request): Promise<Response> => {
     }
 
     if (req.method !== "POST") {
-      return json(
-        { ok: false, stage: "method_check", error: "Use POST" },
-        200,
-      );
+      return json({ ok: false, stage: "method_check", error: "Use POST" });
     }
 
-    // Env checks (with debug)
     if (!OPENAI_KEY) {
-      return json(
-        {
-          ok: false,
-          stage: "env_openai",
-          error: "Missing OPENAI_KEY / OPENAI_API_KEY in Supabase env",
-          envDebug: ENV_DEBUG_BASE,
-        },
-        200,
-      );
+      return json({ ok: false, stage: "env_openai", error: "Missing OPENAI_KEY" });
     }
 
     if (!supabase) {
-      return json(
-        {
-          ok: false,
-          stage: "env_supabase",
-          error:
-            "Missing SUPABASE_URL or SERVICE_ROLE_KEY / SUPABASE_SERVICE_ROLE_KEY in Supabase env",
-          envDebug: ENV_DEBUG_BASE,
-        },
-        200,
-      );
+      return json({
+        ok: false,
+        stage: "env_supabase",
+        error: "Missing SUPABASE_URL or SERVICE_ROLE_KEY",
+      });
     }
 
-    // Parse body
-    let body: any;
-    try {
-      body = await req.json();
-    } catch {
-      return json(
-        { ok: false, stage: "parse_body", error: "Invalid JSON body" },
-        200,
-      );
+    const body = await req.json().catch(() => null);
+    if (!body) {
+      return json({ ok: false, stage: "parse_body", error: "Invalid JSON body" });
     }
 
     const {
+      draft_id,          // optional (update mode)
       entity_slug,
       entity_name,
       title,
@@ -124,89 +83,124 @@ serve(async (req: Request): Promise<Response> => {
       instructions,
       tone = "formal",
       language = "English",
+      is_test,           // 🔒 lane passed explicitly from UI
     } = body ?? {};
 
     const trimmedTitle = (title ?? "").trim();
     const trimmedInstructions = (instructions ?? "").trim();
 
-    // -----------------------------------------------------------------------
-    // INPUT VALIDATION
-    // -----------------------------------------------------------------------
-    if (!trimmedTitle || trimmedTitle.length < 5) {
-      return json(
-        {
-          ok: false,
-          stage: "validate",
-          error:
-            "Missing or invalid title. Please provide a meaningful title (at least 5 characters).",
-          received: { title },
-        },
-        200,
-      );
-    }
-
-    if (!type) {
-      return json(
-        {
-          ok: false,
-          stage: "validate",
-          error: "Missing required field: type",
-          received: { type },
-        },
-        200,
-      );
-    }
-
-    if (!entity_slug) {
-      return json(
-        {
-          ok: false,
-          stage: "validate",
-          error: "entity_slug is required for drafting",
-        },
-        200,
-      );
-    }
-
     if (!trimmedInstructions || trimmedInstructions.length < 30) {
-      return json(
-        {
-          ok: false,
-          stage: "validate",
-          error:
-            "Please describe what to draft (at least a few sentences of instructions).",
-        },
-        200,
-      );
+      return json({
+        ok: false,
+        stage: "validate",
+        error: "Provide meaningful drafting instructions (min 30 chars).",
+      });
     }
 
-    // -----------------------------------------------------------------------
-    // STEP 1: Draft with OpenAI
-    // -----------------------------------------------------------------------
+    /* ---------------------------------------------------------------------- */
+    /* LOAD EXISTING DRAFT IF draft_id PROVIDED                              */
+    /* ---------------------------------------------------------------------- */
+
+    let existingDraft: any = null;
+
+    if (draft_id) {
+      const { data, error } = await supabase
+        .from("governance_drafts")
+        .select("*")
+        .eq("id", draft_id)
+        .single();
+
+      if (error || !data) {
+        return json({
+          ok: false,
+          stage: "load_draft",
+          error: "Draft not found. Refusing to create duplicate.",
+        });
+      }
+
+      existingDraft = data;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* ENTITY LOOKUP (only needed if creating new draft)                     */
+    /* ---------------------------------------------------------------------- */
+
+    let entityId: string | null = null;
+    let resolvedEntitySlug = entity_slug;
+    let resolvedEntityName = entity_name;
+
+    if (!existingDraft) {
+      if (!entity_slug || !trimmedTitle || !type) {
+        return json({
+          ok: false,
+          stage: "validate",
+          error: "entity_slug, title, and type are required for new drafts.",
+        });
+      }
+
+      const { data: entity, error: entityErr } = await supabase
+        .from("entities")
+        .select("id, slug, name")
+        .eq("slug", entity_slug)
+        .single();
+
+      if (entityErr || !entity) {
+        return json({
+          ok: false,
+          stage: "entity_lookup",
+          error: "Entity not found",
+        });
+      }
+
+      entityId = entity.id;
+      resolvedEntitySlug = entity.slug;
+      resolvedEntityName = entity_name ?? entity.name;
+    } else {
+      entityId = existingDraft.entity_id;
+      resolvedEntitySlug = existingDraft.entity_slug;
+      resolvedEntityName = existingDraft.entity_name;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* RECORD TYPE MAPPING                                                    */
+    /* ---------------------------------------------------------------------- */
+
+    let recordType: string;
+    switch (type) {
+      case "meeting_minutes":
+      case "meeting":
+        recordType = "meeting";
+        break;
+      case "decision":
+      case "decision_memo":
+        recordType = "decision";
+        break;
+      default:
+        recordType = "resolution";
+        break;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* OPENAI GENERATION                                                      */
+    /* ---------------------------------------------------------------------- */
+
     const prompt = `
-You are **Oasis Scribe**, the drafting console of the Oasis Digital Parliament Ledger.
+You are Oasis Scribe, governance drafting AI.
 
-Context:
-- Entity slug: ${entity_slug ?? "n/a"}
-- Entity name: ${entity_name ?? "n/a"}
-- Resolution type: ${type}
-- Resolution title: ${trimmedTitle}
-- Tone: ${tone}
-- Language: ${language}
+Entity: ${resolvedEntityName}
+Slug: ${resolvedEntitySlug}
+Title: ${trimmedTitle ?? existingDraft?.title}
+Type: ${recordType}
+Tone: ${tone}
+Language: ${language}
 
-Task:
-Draft a complete, clean, board-ready resolution text that a human director could sign.
-
-Additional drafting instructions from the user:
+Instructions:
 "${trimmedInstructions}"
 
-Output requirements:
-- Write in ${language}.
-- Use headings and numbered clauses where appropriate.
-- Include "WHEREAS" clauses if suitable.
-- Include a clear "RESOLVED THAT:" section with numbered resolutions.
-- Do **not** include the signature lines; the signing system will attach those.
-- Assume this will be stored in a digital governance ledger and read by lawyers.
+Draft a legally clean, board-ready document.
+Include WHEREAS clauses if suitable.
+Include clear RESOLVED THAT section.
+Do not include signature blocks.
 `.trim();
 
     const oaRes = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -222,146 +216,111 @@ Output requirements:
           {
             role: "system",
             content:
-              "You are Oasis Scribe, an AI governance drafter for a digital corporate minute book. Draft precise, legally clean resolutions.",
+              "You draft precise corporate governance resolutions for digital minute books.",
           },
-          {
-            role: "user",
-            content: prompt,
-          },
+          { role: "user", content: prompt },
         ],
       }),
     });
 
     if (!oaRes.ok) {
       const txt = await oaRes.text().catch(() => null);
-      return json(
-        {
-          ok: false,
-          stage: "openai_http",
-          error: "OpenAI call failed",
-          status: oaRes.status,
-          body: txt,
-        },
-        200,
-      );
+      return json({
+        ok: false,
+        stage: "openai_http",
+        status: oaRes.status,
+        body: txt,
+      });
     }
 
-    const oaData = await oaRes.json().catch(() => null);
+    const oaData = await oaRes.json();
     const draftText =
       oaData?.choices?.[0]?.message?.content?.trim() ??
-      "No draft text returned from OpenAI.";
+      "No draft returned.";
+
     const descriptionPreview =
       draftText.length > 240 ? draftText.slice(0, 240) + "…" : draftText;
 
-    // -----------------------------------------------------------------------
-    // STEP 2: Entity lookup
-    // -----------------------------------------------------------------------
-    const { data: entity, error: entityErr } = await supabase
-      .from("entities")
-      .select("id, slug, name")
-      .eq("slug", entity_slug)
-      .single();
+    /* ---------------------------------------------------------------------- */
+    /* UPDATE OR INSERT (LANE SAFE)                                           */
+    /* ---------------------------------------------------------------------- */
 
-    if (entityErr || !entity) {
-      return json(
-        {
+    let draftRow;
+
+    if (existingDraft) {
+      const { data, error } = await supabase
+        .from("governance_drafts")
+        .update({
+          draft_text: draftText,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", draft_id)
+        .select("id, status, updated_at")
+        .single();
+
+      if (error || !data) {
+        return json({
           ok: false,
-          stage: "entity_lookup",
-          error: "Entity not found for given entity_slug",
-          entity_slug,
-          details: entityErr,
-        },
-        200,
-      );
-    }
+          stage: "update_draft",
+          error: "Failed to update draft",
+        });
+      }
 
-    const entityId = (entity as any).id as string;
-    const entityName = entity_name ?? (entity as any).name ?? "Unknown Entity";
+      draftRow = data;
+    } else {
+      const { data, error } = await supabase
+        .from("governance_drafts")
+        .insert({
+          entity_id: entityId,
+          entity_slug: resolvedEntitySlug,
+          entity_name: resolvedEntityName,
+          title: trimmedTitle,
+          record_type: recordType,
+          draft_text: draftText,
+          status: "draft",
+          is_test: !!is_test, // 🔒 explicit lane stamp
+        })
+        .select("id, status, created_at")
+        .single();
 
-    // -----------------------------------------------------------------------
-    // STEP 3: Map type → record_type
-    // -----------------------------------------------------------------------
-    let recordType: string;
-    switch (type) {
-      case "meeting_minutes":
-      case "meeting":
-        recordType = "meeting";
-        break;
-      case "decision":
-      case "decision_memo":
-        recordType = "decision";
-        break;
-      case "board_resolution":
-      default:
-        recordType = "resolution";
-        break;
-    }
-
-    // -----------------------------------------------------------------------
-    // STEP 4: Insert into governance_drafts
-    // -----------------------------------------------------------------------
-    const { data: draftRow, error: draftErr } = await supabase
-      .from("governance_drafts")
-      .insert({
-        entity_id: entityId,
-        entity_slug: entity.slug,
-        entity_name: entityName,
-        title: trimmedTitle,
-        record_type: recordType,
-        draft_text: draftText,
-        status: "draft",
-      })
-      .select("id, status, created_at")
-      .single();
-
-    if (draftErr || !draftRow) {
-      return json(
-        {
+      if (error || !data) {
+        return json({
           ok: false,
           stage: "insert_draft",
-          error: "Failed to insert into governance_drafts",
-          details: draftErr,
-        },
-        200,
-      );
+          error: "Failed to insert draft",
+        });
+      }
+
+      draftRow = data;
     }
 
-    // -----------------------------------------------------------------------
-    // SUCCESS
-    // -----------------------------------------------------------------------
-    return json(
-      {
-        ok: true,
-        stage: "draft_saved",
-        role: "scribe",
-        engine: "gpt-4.1-mini",
-        entity_slug: entity.slug,
-        entity_id: entityId,
-        entity_name: entityName,
-        draft_id: draftRow.id,
-        draft_status: draftRow.status,
-        draft_created_at: draftRow.created_at,
-        title: trimmedTitle,
-        record_type: recordType,
-        type,
-        tone,
-        language,
-        description_preview: descriptionPreview,
-        draft: draftText,
-      },
-      200,
-    );
+    /* ---------------------------------------------------------------------- */
+    /* SUCCESS                                                                */
+    /* ---------------------------------------------------------------------- */
+
+    return json({
+      ok: true,
+      stage: "draft_saved",
+      role: "scribe",
+      engine: "gpt-4.1-mini",
+      entity_slug: resolvedEntitySlug,
+      entity_id: entityId,
+      entity_name: resolvedEntityName,
+      draft_id: draftRow.id,
+      draft_status: draftRow.status,
+      title: trimmedTitle ?? existingDraft?.title,
+      record_type: recordType,
+      tone,
+      language,
+      description_preview: descriptionPreview,
+      draft: draftText,
+    });
   } catch (e: any) {
-    console.error("Scribe exception:", e);
-    return json(
-      {
-        ok: false,
-        stage: "exception",
-        error: String(e?.message ?? e),
-        stack: e?.stack ?? null,
-        envDebug: ENV_DEBUG_BASE,
-      },
-      200,
-    );
+    return json({
+      ok: false,
+      stage: "exception",
+      error: String(e?.message ?? e),
+      stack: e?.stack ?? null,
+    });
   }
 });
