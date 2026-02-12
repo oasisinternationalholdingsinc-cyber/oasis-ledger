@@ -1,21 +1,16 @@
-// supabase/functions/certify-governance-record/index.ts
+// supabase/functions/archive-save-document/index.ts
+
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { PDFDocument, StandardFonts } from "https://esm.sh/pdf-lib@1.17.1";
-
-// ✅ Server-safe QR → SVG (NO canvas)
-import QRCode from "https://esm.sh/qrcode-svg@1.1.0";
-// ✅ SVG → PNG in Deno (NO canvas)
-import { initialize, svg2png } from "https://esm.sh/svg2png-wasm@1.4.1";
 
 type ReqBody = {
   ledger_id?: string;
   record_id?: string; // alias
   actor_id?: string;
 
-  force?: boolean;
-  verify_base_url?: string;
+  trigger?: string;
+  is_test?: boolean;
 };
 
 const cors = {
@@ -45,12 +40,13 @@ const isUuid = (s: string) =>
     s,
   );
 
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const hash = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(hash))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
+const safeText = (v: unknown) => {
+  if (v == null) return null;
+  const t = String(v).trim();
+  return t.length ? t : null;
+};
+
+const edgeBase = SUPABASE_URL.replace(/\/rest\/v1\/?$/, "");
 
 serve(async (req) => {
   const reqId = req.headers.get("x-sb-request-id") ?? null;
@@ -61,8 +57,47 @@ serve(async (req) => {
       return json({ ok: false, error: "POST only", request_id: reqId }, 405);
     }
 
+    const authHeader =
+      req.headers.get("authorization") ?? req.headers.get("Authorization");
+    const jwt = authHeader?.startsWith("Bearer ")
+      ? authHeader.slice(7)
+      : null;
+
+    if (!jwt) {
+      return json(
+        { ok: false, error: "Auth session missing", request_id: reqId },
+        401,
+      );
+    }
+
     const body = (await req.json().catch(() => ({}))) as ReqBody;
-    const ledgerId = (body.ledger_id ?? body.record_id)?.trim();
+
+    const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+      global: { fetch },
+      auth: { persistSession: false },
+    });
+
+    // Resolve actor
+    let actorId = safeText(body.actor_id);
+    if (actorId && !isUuid(actorId)) {
+      return json(
+        { ok: false, error: "actor_id must be uuid", request_id: reqId },
+        400,
+      );
+    }
+
+    if (!actorId) {
+      const { data, error } = await supabaseAdmin.auth.getUser(jwt);
+      if (error || !data?.user?.id) {
+        return json(
+          { ok: false, error: "Unable to resolve actor", request_id: reqId },
+          401,
+        );
+      }
+      actorId = data.user.id;
+    }
+
+    const ledgerId = safeText(body.ledger_id ?? body.record_id);
 
     if (!ledgerId || !isUuid(ledgerId)) {
       return json(
@@ -71,280 +106,81 @@ serve(async (req) => {
       );
     }
 
-    // This function is invoked from archive-save-document using service role (internal)
-    const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-      global: { fetch },
-      auth: { persistSession: false },
-    });
+    // STEP 1 — Seal (creates archive PDF + minute book + verified pointer)
+    const seal = await supabaseAdmin.rpc(
+      "seal_governance_record_for_archive",
+      {
+        p_actor_id: actorId,
+        p_ledger_id: ledgerId,
+      },
+    );
 
-    // Actor is already resolved by archive-save-document; tolerate direct calls too
-    let actorId = body.actor_id?.trim() ?? null;
-    if (actorId && !isUuid(actorId)) {
-      return json(
-        { ok: false, error: "actor_id must be uuid", request_id: reqId },
-        400,
-      );
-    }
-    if (!actorId) {
-      // best-effort: try auth header JWT (if any) — but do not require UI flow here
-      const authHeader =
-        req.headers.get("authorization") ?? req.headers.get("Authorization");
-      const jwt = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
-      if (jwt && jwt !== SERVICE_ROLE_KEY) {
-        const { data } = await supabaseAdmin.auth.getUser(jwt);
-        actorId = data?.user?.id ?? null;
-      }
-    }
-
-    // Load ledger + entity + lane + archive pointers (no schema changes)
-    const { data: ledger, error: ledErr } = await supabaseAdmin
-      .from("governance_ledger")
-      .select("id,title,entity_id,is_test,entity_slug,archived")
-      .eq("id", ledgerId)
-      .maybeSingle();
-
-    if (ledErr || !ledger) {
-      console.error("certify-governance-record ledger load error:", ledErr);
-      return json(
-        { ok: false, error: "LEDGER_NOT_FOUND", request_id: reqId },
-        404,
-      );
-    }
-
-    // Resolve the current archive artifact pointer.
-    // NOTE: This keeps your existing behavior (the failing row shows governance_sandbox + sandbox/archive/<id>.pdf).
-    const bucket = ledger.is_test ? "governance_sandbox" : "governance_archive";
-    const path = ledger.is_test
-      ? `sandbox/archive/${ledgerId}.pdf`
-      : `archive/${ledgerId}.pdf`;
-
-    // Download existing PDF
-    const dl = await supabaseAdmin.storage.from(bucket).download(path);
-    if (dl.error) {
-      console.error("certify-governance-record download error:", dl.error);
+    if (seal.error) {
       return json(
         {
           ok: false,
-          error: "SOURCE_PDF_NOT_FOUND",
-          details: dl.error,
-          storage_bucket: bucket,
-          storage_path: path,
-          request_id: reqId,
-        },
-        404,
-      );
-    }
-
-    const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
-
-    // Build verify URL (hash-first) — default to your public verify terminal
-    const base =
-      (body.verify_base_url?.trim() ||
-        "https://sign.oasisintlholdings.com/verify.html");
-    // We'll compute hash AFTER we generate the certified PDF; QR points to hash-first URL.
-    // (We update the QR using the final file_hash.)
-    // So we first create a placeholder, then overwrite once hash computed.
-    let verifyUrl = `${base}?hash=`;
-
-    // Init svg2png wasm once per runtime
-    await initialize();
-
-    // Load PDF and append certification page
-    const pdf = await PDFDocument.load(sourceBytes, { ignoreEncryption: true });
-    const page = pdf.addPage();
-    const { width, height } = page.getSize();
-
-    const font = await pdf.embedFont(StandardFonts.Helvetica);
-    const fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
-
-    // Simple, stable certification page layout (no risky glyphs)
-    const title = "Oasis Digital Parliament — Certification";
-    page.drawText(title, {
-      x: 48,
-      y: height - 72,
-      size: 18,
-      font: fontBold,
-    });
-
-    page.drawText("This document is digitally certified.", {
-      x: 48,
-      y: height - 110,
-      size: 11,
-      font,
-    });
-
-    page.drawText("Scan the QR or verify by hash:", {
-      x: 48,
-      y: height - 140,
-      size: 11,
-      font,
-    });
-
-    // We'll place QR bottom-right. We'll embed after we compute final verifyUrl.
-    // For now, reserve area and write placeholders.
-    const qrSize = 120;
-    const qrX = width - 48 - qrSize;
-    const qrY = 72;
-
-    // Save once WITHOUT QR to compute final hash? We need QR to be included in hash.
-    // So we compute hash AFTER embedding QR. That means we need verifyUrl first.
-    // Approach: temporarily compute hash of source? NO. We need hash of final.
-    // Instead: generate QR after we compute hash — but QR needs hash. Circular.
-    //
-    // Solution: generate QR using the FINAL hash, but we can only know final hash after QR is embedded.
-    // To break the cycle, we use a two-pass approach:
-    // Pass 1: embed QR with a temporary token, save, hash.
-    // Pass 2: embed QR with real hash, save, hash again, and use THAT hash as authority.
-    //
-    // This is acceptable and stable, because the Verified Registry hash is for the final bytes.
-    const makeQrPng = async (url: string) => {
-      const svg = new QRCode({
-        content: url,
-        padding: 0,
-        width: 256,
-        height: 256,
-        color: "#0b0f18",
-        background: "#ffffff",
-        ecl: "M",
-      }).svg();
-
-      const png = await svg2png(svg, { width: 256, height: 256 });
-      return new Uint8Array(png);
-    };
-
-    // Pass 1 (temporary)
-    const tempUrl = `${base}?hash=temp`;
-    const tempPng = await makeQrPng(tempUrl);
-    const tempImg = await pdf.embedPng(tempPng);
-
-    page.drawImage(tempImg, {
-      x: qrX,
-      y: qrY,
-      width: qrSize,
-      height: qrSize,
-    });
-
-    page.drawText("Verification Terminal:", {
-      x: 48,
-      y: qrY + 48,
-      size: 10,
-      font: fontBold,
-    });
-    page.drawText(base, {
-      x: 48,
-      y: qrY + 32,
-      size: 9,
-      font,
-    });
-
-    // Save pass 1 bytes and hash
-    const pass1Bytes = new Uint8Array(await pdf.save());
-    const pass1Hash = await sha256Hex(pass1Bytes);
-
-    // Now rewrite QR with real hash by rebuilding the PDF from pass1Bytes
-    const pdf2 = await PDFDocument.load(pass1Bytes, { ignoreEncryption: true });
-    const last = pdf2.getPages()[pdf2.getPageCount() - 1];
-    const { width: w2, height: h2 } = last.getSize();
-
-    // Cover old QR area with white rect (safe, minimal)
-    last.drawRectangle({
-      x: w2 - 48 - qrSize,
-      y: 72,
-      width: qrSize,
-      height: qrSize,
-      color: { r: 1, g: 1, b: 1 },
-    });
-
-    verifyUrl = `${base}?hash=${pass1Hash}`;
-    const realPng = await makeQrPng(verifyUrl);
-    const realImg = await pdf2.embedPng(realPng);
-
-    last.drawImage(realImg, {
-      x: w2 - 48 - qrSize,
-      y: 72,
-      width: qrSize,
-      height: qrSize,
-    });
-
-    // Save final bytes and compute authoritative hash
-    const finalBytes = new Uint8Array(await pdf2.save());
-    const file_hash = await sha256Hex(finalBytes);
-
-    // Upload final PDF back to same pointer (no drift)
-    const up = await supabaseAdmin.storage.from(bucket).upload(path, finalBytes, {
-      contentType: "application/pdf",
-      upsert: true,
-    });
-    if (up.error) {
-      console.error("certify-governance-record upload error:", up.error);
-      return json(
-        {
-          ok: false,
-          error: "UPLOAD_FAILED",
-          details: up.error,
+          error: "SEAL_FAILED",
+          details: seal.error,
+          ledger_id: ledgerId,
+          actor_id: actorId,
           request_id: reqId,
         },
         500,
       );
     }
 
-    // Upsert verified_documents (DO NOT write generated columns)
-    const vdPayload: Record<string, unknown> = {
-      entity_id: ledger.entity_id,
-      entity_slug: ledger.entity_slug ?? "holdings",
-      title: ledger.title ?? "Certified Document",
-      document_class: "resolution",
-      source_table: "governance_ledger",
-      source_record_id: ledgerId,
-      storage_bucket: bucket,
-      storage_path: path,
-      file_hash, // ✅ REQUIRED (fixes your 23514)
-      content_type: "application/pdf",
-      verification_level: "certified",
-      is_archived: true,
-      // If you store actor fields, keep them tolerant:
-      certified_by: actorId,
-      certified_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
+    // STEP 2 — Certify (append QR + hash + verified_documents upsert)
+    const certRes = await fetch(
+      `${edgeBase}/functions/v1/certify-governance-record`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+          "x-client-info": "odp/archive-save-document:certify",
+        },
+        body: JSON.stringify({
+          ledger_id: ledgerId,
+          actor_id: actorId,
+        }),
+      },
+    );
 
-    // Prefer upsert on source_record_id or file_hash unique; your schema has UNIQUE(file_hash),
-    // and typically you want one row per source_record_id. We'll upsert on source_record_id.
-    const { error: vdErr } = await supabaseAdmin
-      .from("verified_documents")
-      .upsert(vdPayload, { onConflict: "source_record_id" });
-
-    if (vdErr) {
-      console.error("verified_documents upsert error:", vdErr);
+    if (!certRes.ok) {
+      const t = await certRes.text().catch(() => "");
       return json(
         {
           ok: false,
-          error: "VERIFIED_DOC_INSERT_FAILED",
-          details: vdErr,
+          error: "CERTIFY_FAILED",
+          status: certRes.status,
+          details: t,
+          ledger_id: ledgerId,
+          actor_id: actorId,
           request_id: reqId,
         },
         500,
       );
     }
+
+    const certJson = await certRes.json().catch(() => null);
 
     return json({
       ok: true,
       ledger_id: ledgerId,
       actor_id: actorId,
-      storage_bucket: bucket,
-      storage_path: path,
-      file_hash,
-      verify_url: `${base}?hash=${file_hash}`,
+      sealed: seal.data ?? null,
+      certified: certJson ?? null,
       request_id: reqId,
     });
   } catch (e) {
-    console.error("certify-governance-record fatal:", e);
+    console.error("archive-save-document fatal:", e);
     return json(
       {
         ok: false,
-        error: "CERTIFY_FATAL",
-        message: String((e as any)?.message ?? e),
-        request_id: reqId,
+        error: "ARCHIVE_SAVE_FATAL",
+        details: String((e as any)?.message ?? e),
+        request_id: req.headers.get("x-sb-request-id") ?? null,
       },
       500,
     );
