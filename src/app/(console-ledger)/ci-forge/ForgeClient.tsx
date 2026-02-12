@@ -7,7 +7,23 @@ import Link from "next/link";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, ExternalLink, Copy, RefreshCw } from "lucide-react";
+
+/**
+ * CI — Forge (Execution Console)
+ * ✅ Entity-scoped via OS Global Bar (activeEntity)
+ * ✅ Lane-safe via is_test (SANDBOX vs RoT)
+ * ✅ SQL-backed queues: v_forge_queue_latest + v_forge_queue_archived
+ * ✅ Canonical archive path remains archive-save-document (seal wrapper)
+ * ✅ Adds operator-only legacy path button: archive-signed-resolution (direct)
+ *
+ * ENHANCEMENTS (NO REGRESSION):
+ * 1) Stabilized selection when switching tabs + refresh (keeps selectedId if still present).
+ * 2) "Copy" actions for IDs + Verified hash (quick operator flow).
+ * 3) "Open Best PDF" preference remains: Verified registry first → Minute Book primary → entry.
+ * 4) Defensive evidence + intent loaders: never destabilize Forge if sidecars fail.
+ * 5) Better disabled-state messaging + inline micro-status pills.
+ */
 
 type ForgeQueueItem = {
   ledger_id: string;
@@ -75,12 +91,11 @@ type AxiomReviewResponse = {
 
 type RiskLevel = "GREEN" | "AMBER" | "RED" | "IDLE";
 
-// ✅ add Archived tab (SQL-backed)
+// ✅ Archived tab (SQL-backed)
 type TabKey = "active" | "completed" | "archived";
-
 type AxiomTab = "advisory" | "summary" | "analysis" | "advice";
 
-// ✅ add Intent sidecar tab (same tier as Evidence / AXIOM / Portal)
+// ✅ Intent sidecar tab (same tier as Evidence / AXIOM / Portal)
 type RightTab = "evidence" | "axiom" | "portal" | "intent" | "notes";
 
 type AxiomLatest = {
@@ -184,6 +199,75 @@ async function getActorId(): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+async function safeCopy(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function MiniPill({
+  label,
+  tone = "slate",
+  title,
+}: {
+  label: string;
+  tone?: "slate" | "amber" | "emerald" | "cyan" | "rose";
+  title?: string;
+}) {
+  const cls =
+    tone === "emerald"
+      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+      : tone === "amber"
+      ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
+      : tone === "cyan"
+      ? "border-cyan-500/30 bg-cyan-500/10 text-cyan-100"
+      : tone === "rose"
+      ? "border-rose-500/30 bg-rose-500/10 text-rose-100"
+      : "border-white/10 bg-black/20 text-slate-300";
+
+  return (
+    <span
+      title={title}
+      className={cx(
+        "inline-flex items-center gap-2 rounded-full border px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase",
+        cls
+      )}
+    >
+      {label}
+    </span>
+  );
+}
+
+function IconButton({
+  title,
+  onClick,
+  disabled,
+  children,
+}: {
+  title: string;
+  onClick: () => void;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      disabled={disabled}
+      className={cx(
+        "inline-flex items-center justify-center rounded-xl border border-white/10 bg-black/20 p-2 text-slate-200 hover:border-white/20 hover:bg-white/5 transition",
+        disabled ? "opacity-60 cursor-not-allowed pointer-events-none" : ""
+      )}
+    >
+      {children}
+    </button>
+  );
 }
 
 function Modal({
@@ -293,7 +377,7 @@ export default function ForgeClient() {
   const [isResealing, setIsResealing] = useState(false);
   const [isOpeningArchive, setIsOpeningArchive] = useState(false);
 
-  // ✅ MISSING UI FIX: archive-signed-resolution (direct) state
+  // ✅ archive-signed-resolution direct state
   const [isArchivingSigned, setIsArchivingSigned] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
@@ -341,12 +425,19 @@ export default function ForgeClient() {
   const [inviteModalOpen, setInviteModalOpen] = useState(false);
   const [archiveModalOpen, setArchiveModalOpen] = useState(false);
   const [resealModalOpen, setResealModalOpen] = useState(false);
-
-  // ✅ MISSING UI FIX: modal for archive-signed-resolution
   const [archiveSignedModalOpen, setArchiveSignedModalOpen] = useState(false);
 
-  // ✅ FRONTEND-ONLY: keep recently archived/sealed record visible even if view stops returning it immediately
+  // ✅ keep recently archived/sealed record visible even if view stops returning it immediately
   const [pinned, setPinned] = useState<ForgeQueueItem | null>(null);
+
+  // ✅ enhancements: local copy flash
+  const [copied, setCopied] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(null), 1800);
+    return () => clearTimeout(t);
+  }, [copied]);
 
   useEffect(() => {
     setPinned(null);
@@ -378,120 +469,50 @@ export default function ForgeClient() {
     "is_test",
   ].join(", ");
 
-  async function fetchQueues() {
-    setLoadingQueue(true);
-    setError(null);
-    setInfo(null);
-
-    try {
-      const latestP = supabase
-        .from("v_forge_queue_latest")
-        .select(selectCols)
-        .eq("entity_slug", activeEntity)
-        .eq("is_test", isTest)
-        .order("created_at", { ascending: false });
-
-      const archivedP = supabase
-        .from("v_forge_queue_archived")
-        .select(selectCols)
-        .eq("entity_slug", activeEntity)
-        .eq("is_test", isTest)
-        .order("created_at", { ascending: false });
-
-      const [latestR, archivedR] = await Promise.all([latestP, archivedP]);
-
-      if (latestR.error) {
-        console.error("CI-Forge latest queue error:", latestR.error);
-        setQueueLatest([]);
-        setSelectedId(null);
-        setError("Unable to load Forge queue for this entity/environment.");
-        return;
-      }
-
-      if (archivedR.error) {
-        console.warn("CI-Forge archived queue error:", archivedR.error);
-        setQueueArchived([]);
-      } else {
-        setQueueArchived((((archivedR.data ?? []) as unknown) as ForgeQueueItem[]) ?? []);
-      }
-
-      const latestRows = ((((latestR.data ?? []) as unknown) as ForgeQueueItem[]) ?? []);
-      setQueueLatest(latestRows);
-      setSelectedId((prev) => prev ?? latestRows[0]?.ledger_id ?? null);
-    } catch (err) {
-      console.error("CI-Forge fetchQueues exception:", err);
-      setQueueLatest([]);
-      setQueueArchived([]);
-      setSelectedId(null);
-      setError("Unable to load Forge queue for this entity/environment.");
-    } finally {
-      setLoadingQueue(false);
-    }
+  function flashError(msg: string) {
+    console.error(msg);
+    setError(msg);
+    setTimeout(() => setError(null), 6500);
   }
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      if (cancelled) return;
-      await fetchQueues();
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeEntity, isTest]);
+  function flashInfo(msg: string) {
+    setInfo(msg);
+    setTimeout(() => setInfo(null), 5200);
+  }
 
-  const activeQueueRaw = useMemo(() => queueLatest.filter((q) => !isCompleted(q)), [queueLatest]);
-  const completedQueueRaw = useMemo(() => queueLatest.filter((q) => isCompleted(q) && !isArchived(q)), [queueLatest]);
-  const archivedQueueSqlRaw = useMemo(() => queueArchived, [queueArchived]);
+  function flashAxiomError(msg: string) {
+    console.error(msg);
+    setAxiomError(msg);
+    setTimeout(() => setAxiomError(null), 6500);
+  }
 
-  const activeQueue = useMemo(() => {
-    if (!hideEnvelopes) return activeQueueRaw;
-    return activeQueueRaw.filter((q) => !q.envelope_id);
-  }, [activeQueueRaw, hideEnvelopes]);
+  function flashAxiomInfo(msg: string) {
+    setAxiomInfo(msg);
+    setTimeout(() => setAxiomInfo(null), 5000);
+  }
 
-  const completedQueue = useMemo(() => {
-    const base = completedQueueRaw;
-    if (!pinned) return base;
-    if (pinned.is_test !== isTest) return base;
-    if (pinned.entity_slug !== activeEntity) return base;
-    if (base.some((x) => x.ledger_id === pinned.ledger_id)) return base;
-    if (isArchived(pinned)) return base;
-    return [pinned, ...base];
-  }, [completedQueueRaw, pinned, isTest, activeEntity]);
+  function flashIntentError(msg: string) {
+    console.error(msg);
+    setIntentError(msg);
+    setTimeout(() => setIntentError(null), 6500);
+  }
 
-  const archivedQueue = useMemo(() => {
-    const base = archivedQueueSqlRaw;
-    if (!pinned) return base;
-    if (pinned.is_test !== isTest) return base;
-    if (pinned.entity_slug !== activeEntity) return base;
-    if (base.some((x) => x.ledger_id === pinned.ledger_id)) return base;
-    if (!isArchived(pinned)) return base;
-    return [pinned, ...base];
-  }, [archivedQueueSqlRaw, pinned, isTest, activeEntity]);
+  function flashIntentInfo(msg: string) {
+    setIntentInfo(msg);
+    setTimeout(() => setIntentInfo(null), 5200);
+  }
 
-  const visibleQueue = tab === "active" ? activeQueue : tab === "archived" ? archivedQueue : completedQueue;
-
-  useEffect(() => {
-    setSelectedId(visibleQueue[0]?.ledger_id ?? null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, activeEntity, isTest, hideEnvelopes]);
-
-  const selected = visibleQueue.find((q) => q.ledger_id === selectedId) ?? visibleQueue[0] ?? null;
-
-  useEffect(() => {
-    setPortal({});
-    setPortalError(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected?.ledger_id]);
-
-  // Reset intent when selection changes
-  useEffect(() => {
-    setIntentHeader(null);
-    setIntentArtifacts([]);
-    setIntentError(null);
-    setIntentInfo(null);
-  }, [selected?.ledger_id]);
+  const envPill = () => (
+    <span
+      className={cx(
+        "rounded-full px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase border",
+        isTest ? "border-amber-500/40 bg-amber-500/10 text-amber-200" : "border-sky-500/30 bg-sky-500/10 text-sky-200"
+      )}
+      title={isTest ? "SANDBOX (is_test=true)" : "RoT (is_test=false)"}
+    >
+      {isTest ? "SANDBOX" : "RoT"}
+    </span>
+  );
 
   const computeRiskLevel = (item: ForgeQueueItem): RiskLevel => {
     const days = item.days_since_last_signature ?? null;
@@ -537,52 +558,11 @@ export default function ForgeClient() {
     return "Idle";
   };
 
-  const envPill = () => (
-    <span
-      className={cx(
-        "rounded-full px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase border",
-        isTest ? "border-amber-500/40 bg-amber-500/10 text-amber-200" : "border-sky-500/30 bg-sky-500/10 text-sky-200"
-      )}
-      title={isTest ? "SANDBOX (is_test=true)" : "RoT (is_test=false)"}
-    >
-      {isTest ? "SANDBOX" : "RoT"}
-    </span>
-  );
+  async function fetchQueues(preferKeepId?: string | null) {
+    setLoadingQueue(true);
+    setError(null);
+    setInfo(null);
 
-  function flashError(msg: string) {
-    console.error(msg);
-    setError(msg);
-    setTimeout(() => setError(null), 6500);
-  }
-
-  function flashInfo(msg: string) {
-    setInfo(msg);
-    setTimeout(() => setInfo(null), 5200);
-  }
-
-  function flashAxiomError(msg: string) {
-    console.error(msg);
-    setAxiomError(msg);
-    setTimeout(() => setAxiomError(null), 6500);
-  }
-
-  function flashAxiomInfo(msg: string) {
-    setAxiomInfo(msg);
-    setTimeout(() => setAxiomInfo(null), 5000);
-  }
-
-  function flashIntentError(msg: string) {
-    console.error(msg);
-    setIntentError(msg);
-    setTimeout(() => setIntentError(null), 6500);
-  }
-
-  function flashIntentInfo(msg: string) {
-    setIntentInfo(msg);
-    setTimeout(() => setIntentInfo(null), 5200);
-  }
-
-  async function refreshQueuesKeepSelection(keepLedgerId?: string | null) {
     try {
       const latestP = supabase
         .from("v_forge_queue_latest")
@@ -600,62 +580,117 @@ export default function ForgeClient() {
 
       const [latestR, archivedR] = await Promise.all([latestP, archivedP]);
 
-      if (!latestR.error) setQueueLatest(((((latestR.data ?? []) as unknown) as ForgeQueueItem[]) ?? []));
-      if (!archivedR.error) setQueueArchived(((((archivedR.data ?? []) as unknown) as ForgeQueueItem[]) ?? []));
-
-      if (keepLedgerId) {
-        const latestRows = (((latestR.data ?? []) as unknown) as ForgeQueueItem[]) ?? [];
-        const archivedRows = (((archivedR.data ?? []) as unknown) as ForgeQueueItem[]) ?? [];
-
-        const inLatest = latestRows.some((x) => x.ledger_id === keepLedgerId);
-        const inArchived = archivedRows.some((x) => x.ledger_id === keepLedgerId);
-
-        if (!inLatest && !inArchived) {
-          const prev =
-            (selected && selected.ledger_id === keepLedgerId ? selected : null) ??
-            (pinned && pinned.ledger_id === keepLedgerId ? pinned : null) ??
-            null;
-
-          if (prev) {
-            setPinned(prev);
-            if (isArchived(prev)) setTab("archived");
-            else if (tab === "active") setTab("completed");
-            setSelectedId(keepLedgerId);
-            return;
-          }
-        }
-
-        if (inArchived) {
-          setTab("archived");
-          setSelectedId(keepLedgerId);
-          return;
-        }
-
-        const row = latestRows.find((x) => x.ledger_id === keepLedgerId) ?? null;
-        if (row) {
-          if (!isCompleted(row)) setTab("active");
-          else setTab("completed");
-          setSelectedId(keepLedgerId);
-          return;
-        }
+      if (latestR.error) {
+        console.error("CI-Forge latest queue error:", latestR.error);
+        setQueueLatest([]);
+        setSelectedId(null);
+        setError("Unable to load Forge queue for this entity/environment.");
+        return;
       }
 
-      const latestRows = (((latestR.data ?? []) as unknown) as ForgeQueueItem[]) ?? [];
+      if (archivedR.error) {
+        console.warn("CI-Forge archived queue error:", archivedR.error);
+        setQueueArchived([]);
+      } else {
+        setQueueArchived((((archivedR.data ?? []) as unknown) as ForgeQueueItem[]) ?? []);
+      }
+
+      const latestRows = ((((latestR.data ?? []) as unknown) as ForgeQueueItem[]) ?? []);
+      setQueueLatest(latestRows);
+
+      // ✅ Enhancement: preserve selection if possible
+      const keepId = preferKeepId ?? selectedId ?? null;
       const archivedRows = (((archivedR.data ?? []) as unknown) as ForgeQueueItem[]) ?? [];
+      const foundInLatest = !!keepId && latestRows.some((r) => r.ledger_id === keepId);
+      const foundInArchived = !!keepId && archivedRows.some((r) => r.ledger_id === keepId);
 
-      const next =
-        tab === "active"
-          ? latestRows.filter((r) => !isCompleted(r))
-          : tab === "completed"
-          ? latestRows.filter((r) => isCompleted(r) && !isArchived(r))
-          : archivedRows;
-
-      const nextFinal = tab === "active" && hideEnvelopes ? next.filter((r) => !r.envelope_id) : next;
-      setSelectedId(nextFinal[0]?.ledger_id ?? null);
-    } catch (e) {
-      console.error("refreshQueuesKeepSelection error", e);
+      if (keepId && (foundInLatest || foundInArchived)) {
+        setSelectedId(keepId);
+      } else {
+        setSelectedId((prev) => prev ?? latestRows[0]?.ledger_id ?? null);
+      }
+    } catch (err) {
+      console.error("CI-Forge fetchQueues exception:", err);
+      setQueueLatest([]);
+      setQueueArchived([]);
+      setSelectedId(null);
+      setError("Unable to load Forge queue for this entity/environment.");
+    } finally {
+      setLoadingQueue(false);
     }
   }
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (cancelled) return;
+      await fetchQueues(null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeEntity, isTest]);
+
+  const activeQueueRaw = useMemo(() => queueLatest.filter((q) => !isCompleted(q)), [queueLatest]);
+  const completedQueueRaw = useMemo(() => queueLatest.filter((q) => isCompleted(q) && !isArchived(q)), [queueLatest]);
+  const archivedQueueSqlRaw = useMemo(() => queueArchived, [queueArchived]);
+
+  const activeQueue = useMemo(() => {
+    if (!hideEnvelopes) return activeQueueRaw;
+    return activeQueueRaw.filter((q) => !q.envelope_id);
+  }, [activeQueueRaw, hideEnvelopes]);
+
+  const completedQueue = useMemo(() => {
+    const base = completedQueueRaw;
+    if (!pinned) return base;
+    if (pinned.is_test !== isTest) return base;
+    if (pinned.entity_slug !== activeEntity) return base;
+    if (base.some((x) => x.ledger_id === pinned.ledger_id)) return base;
+    if (isArchived(pinned)) return base;
+    return [pinned, ...base];
+  }, [completedQueueRaw, pinned, isTest, activeEntity]);
+
+  const archivedQueue = useMemo(() => {
+    const base = archivedQueueSqlRaw;
+    if (!pinned) return base;
+    if (pinned.is_test !== isTest) return base;
+    if (pinned.entity_slug !== activeEntity) return base;
+    if (base.some((x) => x.ledger_id === pinned.ledger_id)) return base;
+    if (!isArchived(pinned)) return base;
+    return [pinned, ...base];
+  }, [archivedQueueSqlRaw, pinned, isTest, activeEntity]);
+
+  const visibleQueue = tab === "active" ? activeQueue : tab === "archived" ? archivedQueue : completedQueue;
+
+  // ✅ Enhancement: preserve selection if it still exists in the new visibleQueue
+  useEffect(() => {
+    if (!visibleQueue.length) {
+      setSelectedId(null);
+      return;
+    }
+    setSelectedId((prev) => {
+      if (prev && visibleQueue.some((x) => x.ledger_id === prev)) return prev;
+      return visibleQueue[0]?.ledger_id ?? null;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, activeEntity, isTest, hideEnvelopes, visibleQueue.length]);
+
+  const selected = visibleQueue.find((q) => q.ledger_id === selectedId) ?? visibleQueue[0] ?? null;
+
+  useEffect(() => {
+    setPortal({});
+    setPortalError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.ledger_id]);
+
+  // Reset intent when selection changes
+  useEffect(() => {
+    setIntentHeader(null);
+    setIntentArtifacts([]);
+    setIntentError(null);
+    setIntentInfo(null);
+  }, [selected?.ledger_id]);
 
   // --------------------------
   // Portal URLs
@@ -854,6 +889,7 @@ export default function ForgeClient() {
     window.open(data.signedUrl, "_blank", "noopener,noreferrer");
   }
 
+  // Best PDF preference: Verified → Minute Book primary → entry storage_path
   async function onViewArchivePdf() {
     setError(null);
     setInfo(null);
@@ -886,6 +922,81 @@ export default function ForgeClient() {
       flashError(e?.message || "Unable to open archive PDF.");
     } finally {
       setIsOpeningArchive(false);
+    }
+  }
+
+  async function refreshQueuesKeepSelection(keepLedgerId?: string | null) {
+    try {
+      const latestP = supabase
+        .from("v_forge_queue_latest")
+        .select(selectCols)
+        .eq("entity_slug", activeEntity)
+        .eq("is_test", isTest)
+        .order("created_at", { ascending: false });
+
+      const archivedP = supabase
+        .from("v_forge_queue_archived")
+        .select(selectCols)
+        .eq("entity_slug", activeEntity)
+        .eq("is_test", isTest)
+        .order("created_at", { ascending: false });
+
+      const [latestR, archivedR] = await Promise.all([latestP, archivedP]);
+
+      if (!latestR.error) setQueueLatest(((((latestR.data ?? []) as unknown) as ForgeQueueItem[]) ?? []));
+      if (!archivedR.error) setQueueArchived(((((archivedR.data ?? []) as unknown) as ForgeQueueItem[]) ?? []));
+
+      if (keepLedgerId) {
+        const latestRows = (((latestR.data ?? []) as unknown) as ForgeQueueItem[]) ?? [];
+        const archivedRows = (((archivedR.data ?? []) as unknown) as ForgeQueueItem[]) ?? [];
+
+        const inLatest = latestRows.some((x) => x.ledger_id === keepLedgerId);
+        const inArchived = archivedRows.some((x) => x.ledger_id === keepLedgerId);
+
+        if (!inLatest && !inArchived) {
+          const prev =
+            (selected && selected.ledger_id === keepLedgerId ? selected : null) ??
+            (pinned && pinned.ledger_id === keepLedgerId ? pinned : null) ??
+            null;
+
+          if (prev) {
+            setPinned(prev);
+            if (isArchived(prev)) setTab("archived");
+            else if (tab === "active") setTab("completed");
+            setSelectedId(keepLedgerId);
+            return;
+          }
+        }
+
+        if (inArchived) {
+          setTab("archived");
+          setSelectedId(keepLedgerId);
+          return;
+        }
+
+        const row = latestRows.find((x) => x.ledger_id === keepLedgerId) ?? null;
+        if (row) {
+          if (!isCompleted(row)) setTab("active");
+          else setTab("completed");
+          setSelectedId(keepLedgerId);
+          return;
+        }
+      }
+
+      const latestRows = (((latestR.data ?? []) as unknown) as ForgeQueueItem[]) ?? [];
+      const archivedRows = (((archivedR.data ?? []) as unknown) as ForgeQueueItem[]) ?? [];
+
+      const next =
+        tab === "active"
+          ? latestRows.filter((r) => !isCompleted(r))
+          : tab === "completed"
+          ? latestRows.filter((r) => isCompleted(r) && !isArchived(r))
+          : archivedRows;
+
+      const nextFinal = tab === "active" && hideEnvelopes ? next.filter((r) => !r.envelope_id) : next;
+      setSelectedId(nextFinal[0]?.ledger_id ?? null);
+    } catch (e) {
+      console.error("refreshQueuesKeepSelection error", e);
     }
   }
 
@@ -929,7 +1040,7 @@ export default function ForgeClient() {
     }
   }
 
-  // ✅ MISSING UI FIX: direct archive-signed-resolution handler (NO wiring regression to existing buttons)
+  // ✅ direct archive-signed-resolution handler (operator-only legacy path)
   async function onArchiveSignedDirect() {
     setError(null);
     setInfo(null);
@@ -950,7 +1061,6 @@ export default function ForgeClient() {
     try {
       setPinned(selected);
 
-      // Be tolerant: send both record_id and ledger_id aliases + envelope_id
       const { data, error } = await supabase.functions.invoke("archive-signed-resolution", {
         body: {
           record_id: selected.ledger_id,
@@ -980,7 +1090,6 @@ export default function ForgeClient() {
         flashInfo("Archived Signed artifact (direct).");
       }
 
-      // Evidence + queue refresh (same as other flows)
       await loadArchiveEvidence(selected.ledger_id);
       await refreshQueuesKeepSelection(selected.ledger_id);
     } catch (e: any) {
@@ -991,247 +1100,45 @@ export default function ForgeClient() {
     }
   }
 
-  // ============================
-  // Intent loaders + actions
-  // ============================
+  async function onArchiveNow() {
+    setError(null);
+    setInfo(null);
 
-  async function loadIntentSidecarForLedger(ledgerId: string) {
-    setIntentLoading(true);
-    setIntentError(null);
-
-    try {
-      // Step 1: resolve intent_id from artifact (RPC is canonical)
-      let intentId: string | null = null;
-
-      const rr = await supabase.rpc(
-        "resolve_intent_from_artifact" as any,
-        {
-          p_artifact_type: "ledger",
-          p_artifact_id: ledgerId,
-        } as any
-      );
-
-      if (rr && !rr.error) {
-        const d: any = rr.data;
-        const row = Array.isArray(d) ? d[0] : d;
-        intentId = row?.intent_id ?? row?.id ?? row?.intent?.id ?? (typeof d === "string" ? d : null);
-      } else {
-        // Fallback: direct table read (only if exposed)
-        const gi = await supabase
-          .from("governance_intent_artifacts" as any)
-          .select("intent_id, created_at")
-          .eq("artifact_type", "ledger")
-          .eq("artifact_id", ledgerId)
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (!gi.error) intentId = (gi.data as any)?.intent_id ?? null;
-      }
-
-      if (!intentId) {
-        setIntentHeader(null);
-        setIntentArtifacts([]);
-        return;
-      }
-
-      // Step 2: header (best effort) — ✅ summary exists on governance_intents
-      let header: IntentHeader | null = null;
-
-      const ih = await supabase
-        .from("governance_intents" as any)
-        .select("id, title, summary, created_at, created_by")
-        .eq("id", intentId)
-        .maybeSingle();
-
-      if (!ih.error && ih.data) {
-        header = ih.data as any;
-      } else {
-        header = { id: intentId, title: null, summary: null, created_at: null };
-      }
-
-      setIntentHeader(header);
-
-      // Step 3: artifacts (best effort)
-      const ia = await supabase
-        .from("governance_intent_artifacts" as any)
-        .select("id, intent_id, artifact_type, artifact_id, created_at")
-        .eq("intent_id", intentId)
-        .order("created_at", { ascending: false });
-
-      if (!ia.error) setIntentArtifacts(((ia.data ?? []) as any) ?? []);
-      else setIntentArtifacts([]);
-    } catch (e) {
-      console.warn("loadIntentSidecarForLedger exception", e);
-      // Sidecar must never destabilize Forge
-      setIntentHeader(null);
-      setIntentArtifacts([]);
-    } finally {
-      setIntentLoading(false);
-    }
-  }
-
-  useEffect(() => {
     if (!selected?.ledger_id) return;
-    loadIntentSidecarForLedger(selected.ledger_id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected?.ledger_id, isTest]);
-
-  async function doCreateIntentAndLink() {
-    if (!selected?.ledger_id) return;
-
-    const title = intentTitle.trim();
-    const reason = intentReason.trim(); // UI label can say "Reason" — DB stores it as summary
-
-    if (!title) return flashIntentError("Title is required.");
-    if (!reason) return flashIntentError("Reason is required.");
-
-    setIntentCreating(true);
-    setIntentError(null);
-    setIntentInfo(null);
-
-    try {
-      const actorId = await getActorId(); // for guarded backfill helper
-
-      // HARD RULES: lane-safe + entity-safe
-      const entityId = (selected as any)?.entity_id as string | undefined;
-      if (!entityId) {
-        flashIntentError("Cannot create intent: entity_id missing on selected record.");
-        return;
-      }
-
-      // 1) create intent (canonical signature you granted execute on)
-      const cr = await supabase.rpc(
-        "governance_create_intent" as any,
-        {
-          p_entity_id: entityId,
-          p_is_test: !!isTest,
-          p_title: title,
-          p_intent_text: reason, // ✅ function expects intent_text; table stores summary
-          p_intent_kind: "forge",
-          p_slots: {
-            source: "ci-forge",
-            ledger_id: selected.ledger_id,
-            envelope_id: (selected as any)?.envelope_id ?? null,
-            entity_id: entityId,
-            entity_slug: (selected as any)?.entity_slug ?? null,
-            lane: isTest ? "SANDBOX" : "ROT",
-          },
-        } as any
-      );
-
-      if (!cr || cr.error) {
-        console.warn("governance_create_intent error:", cr?.error);
-        throw new Error(cr?.error?.message || "Unable to create intent (RPC).");
-      }
-
-      const cd: any = cr.data;
-      const cRow = Array.isArray(cd) ? cd[0] : cd;
-
-      const intentId =
-        cRow?.intent_id ?? cRow?.id ?? cRow?.intent?.id ?? cd?.intent_id ?? cd?.id ?? (typeof cd === "string" ? cd : null);
-
-      if (!intentId) throw new Error("Intent created but id could not be resolved.");
-
-      // 2) explicitly link ledger artifact (operator-driven)
-      const ar = await supabase.rpc(
-        "governance_attach_intent_artifact" as any,
-        {
-          p_intent_id: intentId,
-          p_artifact_type: "ledger",
-          p_artifact_id: selected.ledger_id,
-          p_role: "primary",
-        } as any
-      );
-
-      if (ar?.error) {
-        console.warn("governance_attach_intent_artifact error:", ar.error);
-        flashIntentError("Intent created, but linking the ledger artifact failed.");
-      }
-
-      // 3) Optional backfill (guarded helper; only works AFTER link exists)
-      if (intentBackfillAfterCreate) {
-        if (!actorId) {
-          flashIntentError("Intent created; cannot backfill because actor could not be resolved (auth).");
-        } else {
-          setIntentBackfilling(true);
-
-          const br = await supabase.rpc(
-            "attach_intent_artifacts_from_ledger" as any,
-            {
-              p_ledger_id: selected.ledger_id,
-              p_actor_id: actorId,
-            } as any
-          );
-
-          if (br?.error) {
-            console.warn("attach_intent_artifacts_from_ledger error:", br.error);
-            flashIntentError("Intent created; backfill blocked by guard (expected if artifacts/link not eligible).");
-          } else {
-            flashIntentInfo("Intent created + Forge artifacts attached.");
-          }
-        }
-      } else {
-        flashIntentInfo("Intent created (no backfill).");
-      }
-
-      // reset + reload sidecar
-      setIntentCreateOpen(false);
-      setIntentTitle("");
-      setIntentReason("");
-      setIntentBackfillAfterCreate(true);
-
-      await loadIntentSidecarForLedger(selected.ledger_id);
-      setRightTab("intent");
-    } catch (e: any) {
-      console.error("doCreateIntentAndLink error", e);
-      flashIntentError(e?.message || "Unable to create intent.");
-    } finally {
-      setIntentBackfilling(false);
-      setIntentCreating(false);
-    }
-  }
-
-  async function doBackfillIntentArtifacts() {
-    if (!selected?.ledger_id) return;
-
-    if (!intentHeader?.id) {
-      flashIntentError("No intent is linked (by design). Create an intent first.");
+    if (selected.envelope_status !== "completed") {
+      flashError("Archive requires a completed envelope.");
       return;
     }
 
-    setIntentBackfilling(true);
-    setIntentError(null);
-    setIntentInfo(null);
-
+    setIsArchiving(true);
     try {
-      const actorId = await getActorId();
-      if (!actorId) {
-        flashIntentError("Actor could not be resolved (auth).");
+      setPinned(selected);
+
+      const { data, error } = await supabase.functions.invoke("archive-save-document", {
+        body: { record_id: selected.ledger_id, is_test: isTest, trigger: "forge-archive" },
+      });
+
+      if (error) {
+        const msg = await extractFnError(error);
+        throw new Error(msg);
+      }
+
+      const res = data as ArchiveSaveDocumentResponse;
+      if (!res?.ok) {
+        flashError(res?.error ?? "Archive failed.");
         return;
       }
 
-      const r = await supabase.rpc(
-        "attach_intent_artifacts_from_ledger" as any,
-        {
-          p_ledger_id: selected.ledger_id,
-          p_actor_id: actorId,
-        } as any
-      );
+      if (res.already_archived) flashInfo("Record already archived — no action required.");
+      else flashInfo(res.repaired ? "Archived (repaired pointers)." : "Archived successfully.");
 
-      if (!r || r.error) {
-        console.warn("attach_intent_artifacts_from_ledger error:", r?.error);
-        flashIntentError("Backfill blocked by guard (expected if link/artifacts not eligible).");
-        return;
-      }
-
-      flashIntentInfo("Forge artifacts attached to intent.");
-      await loadIntentSidecarForLedger(selected.ledger_id);
+      await loadArchiveEvidence(selected.ledger_id);
+      await refreshQueuesKeepSelection(selected.ledger_id);
     } catch (e: any) {
-      console.error("doBackfillIntentArtifacts error", e);
-      flashIntentError(e?.message || "Backfill failed.");
+      console.error("onArchiveNow error", e);
+      flashError(e?.message || "Archive failed.");
     } finally {
-      setIntentBackfilling(false);
+      setIsArchiving(false);
     }
   }
 
@@ -1342,52 +1249,6 @@ export default function ForgeClient() {
   }
 
   // --------------------------
-  // Archive Now (completed envelopes only)
-  // --------------------------
-  async function onArchiveNow() {
-    setError(null);
-    setInfo(null);
-
-    if (!selected?.ledger_id) return;
-    if (selected.envelope_status !== "completed") {
-      flashError("Archive requires a completed envelope.");
-      return;
-    }
-
-    setIsArchiving(true);
-    try {
-      setPinned(selected);
-
-      // Canonical: archive-save-document is the stable wrapper calling seal RPC
-      const { data, error } = await supabase.functions.invoke("archive-save-document", {
-        body: { record_id: selected.ledger_id, is_test: isTest, trigger: "forge-archive" },
-      });
-
-      if (error) {
-        const msg = await extractFnError(error);
-        throw new Error(msg);
-      }
-
-      const res = data as ArchiveSaveDocumentResponse;
-      if (!res?.ok) {
-        flashError(res?.error ?? "Archive failed.");
-        return;
-      }
-
-      if (res.already_archived) flashInfo("Record already archived — no action required.");
-      else flashInfo(res.repaired ? "Archived (repaired pointers)." : "Archived successfully.");
-
-      await loadArchiveEvidence(selected.ledger_id);
-      await refreshQueuesKeepSelection(selected.ledger_id);
-    } catch (e: any) {
-      console.error("onArchiveNow error", e);
-      flashError(e?.message || "Archive failed.");
-    } finally {
-      setIsArchiving(false);
-    }
-  }
-
-  // --------------------------
   // AXIOM run (optional sidecar)
   // --------------------------
   async function onRunAxiom() {
@@ -1423,12 +1284,245 @@ export default function ForgeClient() {
     }
   }
 
+  // ============================
+  // Intent loaders + actions
+  // ============================
+
+  async function loadIntentSidecarForLedger(ledgerId: string) {
+    setIntentLoading(true);
+    setIntentError(null);
+
+    try {
+      let intentId: string | null = null;
+
+      const rr = await supabase.rpc(
+        "resolve_intent_from_artifact" as any,
+        {
+          p_artifact_type: "ledger",
+          p_artifact_id: ledgerId,
+        } as any
+      );
+
+      if (rr && !rr.error) {
+        const d: any = rr.data;
+        const row = Array.isArray(d) ? d[0] : d;
+        intentId = row?.intent_id ?? row?.id ?? row?.intent?.id ?? (typeof d === "string" ? d : null);
+      } else {
+        const gi = await supabase
+          .from("governance_intent_artifacts" as any)
+          .select("intent_id, created_at")
+          .eq("artifact_type", "ledger")
+          .eq("artifact_id", ledgerId)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (!gi.error) intentId = (gi.data as any)?.intent_id ?? null;
+      }
+
+      if (!intentId) {
+        setIntentHeader(null);
+        setIntentArtifacts([]);
+        return;
+      }
+
+      let header: IntentHeader | null = null;
+
+      const ih = await supabase
+        .from("governance_intents" as any)
+        .select("id, title, summary, created_at, created_by")
+        .eq("id", intentId)
+        .maybeSingle();
+
+      if (!ih.error && ih.data) {
+        header = ih.data as any;
+      } else {
+        header = { id: intentId, title: null, summary: null, created_at: null };
+      }
+
+      setIntentHeader(header);
+
+      const ia = await supabase
+        .from("governance_intent_artifacts" as any)
+        .select("id, intent_id, artifact_type, artifact_id, created_at")
+        .eq("intent_id", intentId)
+        .order("created_at", { ascending: false });
+
+      if (!ia.error) setIntentArtifacts(((ia.data ?? []) as any) ?? []);
+      else setIntentArtifacts([]);
+    } catch (e) {
+      console.warn("loadIntentSidecarForLedger exception", e);
+      setIntentHeader(null);
+      setIntentArtifacts([]);
+    } finally {
+      setIntentLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!selected?.ledger_id) return;
+    loadIntentSidecarForLedger(selected.ledger_id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.ledger_id, isTest]);
+
+  async function doCreateIntentAndLink() {
+    if (!selected?.ledger_id) return;
+
+    const title = intentTitle.trim();
+    const reason = intentReason.trim();
+
+    if (!title) return flashIntentError("Title is required.");
+    if (!reason) return flashIntentError("Reason is required.");
+
+    setIntentCreating(true);
+    setIntentError(null);
+    setIntentInfo(null);
+
+    try {
+      const actorId = await getActorId();
+
+      const entityId = (selected as any)?.entity_id as string | undefined;
+      if (!entityId) {
+        flashIntentError("Cannot create intent: entity_id missing on selected record.");
+        return;
+      }
+
+      const cr = await supabase.rpc(
+        "governance_create_intent" as any,
+        {
+          p_entity_id: entityId,
+          p_is_test: !!isTest,
+          p_title: title,
+          p_intent_text: reason,
+          p_intent_kind: "forge",
+          p_slots: {
+            source: "ci-forge",
+            ledger_id: selected.ledger_id,
+            envelope_id: (selected as any)?.envelope_id ?? null,
+            entity_id: entityId,
+            entity_slug: (selected as any)?.entity_slug ?? null,
+            lane: isTest ? "SANDBOX" : "ROT",
+          },
+        } as any
+      );
+
+      if (!cr || cr.error) {
+        console.warn("governance_create_intent error:", cr?.error);
+        throw new Error(cr?.error?.message || "Unable to create intent (RPC).");
+      }
+
+      const cd: any = cr.data;
+      const cRow = Array.isArray(cd) ? cd[0] : cd;
+
+      const intentId =
+        cRow?.intent_id ?? cRow?.id ?? cRow?.intent?.id ?? cd?.intent_id ?? cd?.id ?? (typeof cd === "string" ? cd : null);
+
+      if (!intentId) throw new Error("Intent created but id could not be resolved.");
+
+      const ar = await supabase.rpc(
+        "governance_attach_intent_artifact" as any,
+        {
+          p_intent_id: intentId,
+          p_artifact_type: "ledger",
+          p_artifact_id: selected.ledger_id,
+          p_role: "primary",
+        } as any
+      );
+
+      if (ar?.error) {
+        console.warn("governance_attach_intent_artifact error:", ar.error);
+        flashIntentError("Intent created, but linking the ledger artifact failed.");
+      }
+
+      if (intentBackfillAfterCreate) {
+        if (!actorId) {
+          flashIntentError("Intent created; cannot backfill because actor could not be resolved (auth).");
+        } else {
+          setIntentBackfilling(true);
+
+          const br = await supabase.rpc(
+            "attach_intent_artifacts_from_ledger" as any,
+            {
+              p_ledger_id: selected.ledger_id,
+              p_actor_id: actorId,
+            } as any
+          );
+
+          if (br?.error) {
+            console.warn("attach_intent_artifacts_from_ledger error:", br.error);
+            flashIntentError("Intent created; backfill blocked by guard (expected if artifacts/link not eligible).");
+          } else {
+            flashIntentInfo("Intent created + Forge artifacts attached.");
+          }
+        }
+      } else {
+        flashIntentInfo("Intent created (no backfill).");
+      }
+
+      setIntentCreateOpen(false);
+      setIntentTitle("");
+      setIntentReason("");
+      setIntentBackfillAfterCreate(true);
+
+      await loadIntentSidecarForLedger(selected.ledger_id);
+      setRightTab("intent");
+    } catch (e: any) {
+      console.error("doCreateIntentAndLink error", e);
+      flashIntentError(e?.message || "Unable to create intent.");
+    } finally {
+      setIntentBackfilling(false);
+      setIntentCreating(false);
+    }
+  }
+
+  async function doBackfillIntentArtifacts() {
+    if (!selected?.ledger_id) return;
+
+    if (!intentHeader?.id) {
+      flashIntentError("No intent is linked (by design). Create an intent first.");
+      return;
+    }
+
+    setIntentBackfilling(true);
+    setIntentError(null);
+    setIntentInfo(null);
+
+    try {
+      const actorId = await getActorId();
+      if (!actorId) {
+        flashIntentError("Actor could not be resolved (auth).");
+        return;
+      }
+
+      const r = await supabase.rpc(
+        "attach_intent_artifacts_from_ledger" as any,
+        {
+          p_ledger_id: selected.ledger_id,
+          p_actor_id: actorId,
+        } as any
+      );
+
+      if (!r || r.error) {
+        console.warn("attach_intent_artifacts_from_ledger error:", r?.error);
+        flashIntentError("Backfill blocked by guard (expected if link/artifacts not eligible).");
+        return;
+      }
+
+      flashIntentInfo("Forge artifacts attached to intent.");
+      await loadIntentSidecarForLedger(selected.ledger_id);
+    } catch (e: any) {
+      console.error("doBackfillIntentArtifacts error", e);
+      flashIntentError(e?.message || "Backfill failed.");
+    } finally {
+      setIntentBackfilling(false);
+    }
+  }
+
   const step = inferStep(selected);
 
   const statusPill = (item: ForgeQueueItem) => {
     const s = (item.envelope_status ?? "").toLowerCase();
-    const base =
-      "rounded-full px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase border whitespace-nowrap";
+    const base = "rounded-full px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase border whitespace-nowrap";
     if (!item.envelope_id)
       return <span className={cx(base, "border-slate-700 bg-slate-950/40 text-slate-300")}>No Envelope</span>;
     if (s === "completed")
@@ -1442,8 +1536,7 @@ export default function ForgeClient() {
 
   const ledgerStatusPill = (item: ForgeQueueItem) => {
     const s = (item.ledger_status ?? "").toUpperCase();
-    const base =
-      "rounded-full px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase border whitespace-nowrap";
+    const base = "rounded-full px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase border whitespace-nowrap";
     if (s === "ARCHIVED")
       return <span className={cx(base, "border-emerald-500/40 bg-emerald-500/10 text-emerald-200")}>Archived</span>;
     if (s === "APPROVED")
@@ -1475,15 +1568,7 @@ export default function ForgeClient() {
     </div>
   );
 
-  const EmptyState = ({
-    title,
-    detail,
-    action,
-  }: {
-    title: string;
-    detail?: string;
-    action?: ReactNode;
-  }) => (
+  const EmptyState = ({ title, detail, action }: { title: string; detail?: string; action?: ReactNode }) => (
     <div className="rounded-2xl border border-white/10 bg-black/25 p-5">
       <div className="text-sm font-semibold text-slate-100">{title}</div>
       {detail ? <div className="mt-1 text-[12px] text-slate-400">{detail}</div> : null}
@@ -1557,6 +1642,27 @@ export default function ForgeClient() {
     </button>
   );
 
+  const CopyRow = ({ label, value }: { label: string; value: string | null | undefined }) => {
+    if (!value) return null;
+    return (
+      <div className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+        <div className="min-w-0">
+          <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">{label}</div>
+          <div className="mt-1 font-mono text-[11px] text-slate-200 break-all">{value}</div>
+        </div>
+        <IconButton
+          title="Copy"
+          onClick={async () => {
+            const ok = await safeCopy(value);
+            setCopied(ok ? label : "Copy failed");
+          }}
+        >
+          <Copy className="h-4 w-4" />
+        </IconButton>
+      </div>
+    );
+  };
+
   // --------------------------
   // Render
   // --------------------------
@@ -1580,6 +1686,7 @@ export default function ForgeClient() {
               <div className="mt-1 flex items-center gap-2">
                 <div className="text-base font-semibold text-slate-100">Sign → Verify → Archive</div>
                 {envPill()}
+                {copied ? <MiniPill label={copied} tone={copied === "Copy failed" ? "rose" : "emerald"} /> : null}
               </div>
               <div className="mt-1 text-[12px] text-slate-400">
                 Entity-scoped via OS Global Bar • Lane-safe via <span className="font-mono">is_test</span> • No shortcuts
@@ -1619,14 +1726,17 @@ export default function ForgeClient() {
 
             <button
               type="button"
-              onClick={() => fetchQueues()}
+              onClick={() => fetchQueues(selectedId)}
               disabled={loadingQueue}
               className={cx(
                 "rounded-full border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:border-white/20 hover:bg-white/5 transition",
                 loadingQueue ? "opacity-60 cursor-not-allowed" : ""
               )}
             >
-              {loadingQueue ? "Refreshing…" : "Refresh"}
+              <span className="inline-flex items-center gap-2">
+                {loadingQueue ? <RefreshCw className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                {loadingQueue ? "Refreshing…" : "Refresh"}
+              </span>
             </button>
           </div>
         </div>
@@ -1731,8 +1841,13 @@ export default function ForgeClient() {
                         {ledgerStatusPill(selected)}
                         {stepsUi}
                       </div>
-                      <div className="mt-2 text-[11px] text-slate-500">
-                        Ledger ID <span className="font-mono text-slate-300">{selected.ledger_id}</span>
+
+                      <div className="mt-3 space-y-2">
+                        <CopyRow label="Ledger ID" value={selected.ledger_id} />
+                        {selected.envelope_id ? <CopyRow label="Envelope ID" value={selected.envelope_id} /> : null}
+                        {evidence.verified_document?.file_hash ? (
+                          <CopyRow label="Verified Hash" value={evidence.verified_document.file_hash} />
+                        ) : null}
                       </div>
                     </div>
 
@@ -1752,11 +1867,23 @@ export default function ForgeClient() {
                       />
 
                       <ActionButton
-                        label="Archive PDF"
+                        label="Open Best PDF"
                         tone="slate"
                         disabled={isOpeningArchive || !selected.ledger_id}
                         onClick={() => onViewArchivePdf()}
                       />
+
+                      {portal.verify_url ? (
+                        <button
+                          type="button"
+                          onClick={() => window.open(portal.verify_url as string, "_blank", "noopener,noreferrer")}
+                          className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:border-white/20 hover:bg-white/5 transition"
+                        >
+                          <span className="inline-flex items-center justify-center gap-2">
+                            <ExternalLink className="h-4 w-4" /> Open Verify
+                          </span>
+                        </button>
+                      ) : null}
                     </div>
                   </div>
                 </div>
@@ -1771,9 +1898,7 @@ export default function ForgeClient() {
                       <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
                         <div className="grid grid-cols-12 gap-3">
                           <div className="col-span-12 md:col-span-6">
-                            <label className="block text-[11px] uppercase tracking-[0.22em] text-slate-500">
-                              Signer name
-                            </label>
+                            <label className="block text-[11px] uppercase tracking-[0.22em] text-slate-500">Signer name</label>
                             <input
                               value={primarySignerName}
                               onChange={(e) => setPrimarySignerName(e.target.value)}
@@ -1782,9 +1907,7 @@ export default function ForgeClient() {
                             />
                           </div>
                           <div className="col-span-12 md:col-span-6">
-                            <label className="block text-[11px] uppercase tracking-[0.22em] text-slate-500">
-                              Signer email
-                            </label>
+                            <label className="block text-[11px] uppercase tracking-[0.22em] text-slate-500">Signer email</label>
                             <input
                               value={primarySignerEmail}
                               onChange={(e) => setPrimarySignerEmail(e.target.value)}
@@ -1845,7 +1968,7 @@ export default function ForgeClient() {
                               Archive writes Minute Book primary pointer + Verified registry (certified source).
                             </div>
 
-                            {/* ✅ MISSING UI FIX: explicit Archive Signed (Direct) button */}
+                            {/* Explicit Archive Signed (Direct) button */}
                             <div className="mt-3">
                               <ActionButton
                                 label={archiveLocked ? "Archive Signed (Already)" : "Archive Signed (Direct)"}
@@ -1867,8 +1990,8 @@ export default function ForgeClient() {
                             {archiveMissing ? (
                               <div className="mt-3 rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-100">
                                 Completed envelope detected, but archive pointers are missing. Use{" "}
-                                <span className="font-semibold">Re-seal / Repair</span>. If you specifically need the legacy
-                                signed-only archiver, use <span className="font-semibold">Archive Signed (Direct)</span>.
+                                <span className="font-semibold">Re-seal / Repair</span>. If you specifically need the legacy signed-only
+                                archiver, use <span className="font-semibold">Archive Signed (Direct)</span>.
                               </div>
                             ) : null}
                           </div>
@@ -1927,54 +2050,21 @@ export default function ForgeClient() {
                           {axiomInfo ? <div className="mt-2 text-[12px] text-emerald-200">{axiomInfo}</div> : null}
 
                           <div className="mt-3 flex gap-2 flex-wrap">
-                            <button
-                              type="button"
-                              onClick={() => setAxiomTab("advisory")}
-                              className={cx(
-                                "rounded-full px-3 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase border transition",
-                                axiomTab === "advisory"
-                                  ? "border-white/20 bg-white/10 text-slate-100"
-                                  : "border-white/10 bg-black/20 text-slate-300 hover:border-white/20 hover:bg-white/5"
-                              )}
-                            >
-                              Advisory
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setAxiomTab("summary")}
-                              className={cx(
-                                "rounded-full px-3 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase border transition",
-                                axiomTab === "summary"
-                                  ? "border-white/20 bg-white/10 text-slate-100"
-                                  : "border-white/10 bg-black/20 text-slate-300 hover:border-white/20 hover:bg-white/5"
-                              )}
-                            >
-                              Summary
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setAxiomTab("analysis")}
-                              className={cx(
-                                "rounded-full px-3 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase border transition",
-                                axiomTab === "analysis"
-                                  ? "border-white/20 bg-white/10 text-slate-100"
-                                  : "border-white/10 bg-black/20 text-slate-300 hover:border-white/20 hover:bg-white/5"
-                              )}
-                            >
-                              Analysis
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setAxiomTab("advice")}
-                              className={cx(
-                                "rounded-full px-3 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase border transition",
-                                axiomTab === "advice"
-                                  ? "border-white/20 bg-white/10 text-slate-100"
-                                  : "border-white/10 bg-black/20 text-slate-300 hover:border-white/20 hover:bg-white/5"
-                              )}
-                            >
-                              Advice
-                            </button>
+                            {(["advisory", "summary", "analysis", "advice"] as AxiomTab[]).map((k) => (
+                              <button
+                                key={k}
+                                type="button"
+                                onClick={() => setAxiomTab(k)}
+                                className={cx(
+                                  "rounded-full px-3 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase border transition",
+                                  axiomTab === k
+                                    ? "border-white/20 bg-white/10 text-slate-100"
+                                    : "border-white/10 bg-black/20 text-slate-300 hover:border-white/20 hover:bg-white/5"
+                                )}
+                              >
+                                {k}
+                              </button>
+                            ))}
                           </div>
 
                           <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3">
@@ -2077,14 +2167,15 @@ export default function ForgeClient() {
                               {evidence.verified_document?.id ? (
                                 <>
                                   <div className="font-semibold">Certified</div>
-                                  <div className="mt-1 text-slate-400">
-                                    Hash <span className="font-mono">{evidence.verified_document.file_hash || "—"}</span>
-                                  </div>
-                                  <div className="mt-1 text-slate-400">
-                                    Path{" "}
-                                    <span className="font-mono">
-                                      {evidence.verified_document.storage_bucket}/{evidence.verified_document.storage_path}
-                                    </span>
+                                  <div className="mt-2 flex flex-col gap-2">
+                                    <CopyRow label="Hash" value={evidence.verified_document.file_hash || "—"} />
+                                    {evidence.verified_document.storage_bucket && evidence.verified_document.storage_path ? (
+                                      <div className="text-[11px] text-slate-500 break-all">
+                                        <span className="font-mono">
+                                          {evidence.verified_document.storage_bucket}/{evidence.verified_document.storage_path}
+                                        </span>
+                                      </div>
+                                    ) : null}
                                   </div>
                                 </>
                               ) : (
@@ -2105,7 +2196,7 @@ export default function ForgeClient() {
                                       {d.file_name || d.doc_type || "Document"}
                                     </div>
                                     <div className="mt-1 text-[11px] text-slate-500">
-                                      {d.file_hash ? <span className="font-mono">{d.file_hash}</span> : "—"}
+                                      {d.file_hash ? <span className="font-mono break-all">{d.file_hash}</span> : "—"}
                                     </div>
                                   </div>
                                 ))
@@ -2113,12 +2204,7 @@ export default function ForgeClient() {
                             </div>
                           </div>
 
-                          <ActionButton
-                            label="Open Archive PDF"
-                            tone="slate"
-                            disabled={isOpeningArchive}
-                            onClick={() => onViewArchivePdf()}
-                          />
+                          <ActionButton label="Open Best PDF" tone="slate" disabled={isOpeningArchive} onClick={() => onViewArchivePdf()} />
                         </>
                       )}
                     </div>
@@ -2357,7 +2443,6 @@ export default function ForgeClient() {
         onClose={() => setArchiveModalOpen(false)}
       />
 
-      {/* ✅ MISSING UI FIX: archive-signed-resolution modal */}
       <Modal
         open={archiveSignedModalOpen}
         title="Archive Signed (Direct)"
