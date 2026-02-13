@@ -1,3 +1,4 @@
+// src/app/(console-ledger)/ci-onboarding/ci-billing/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -12,7 +13,7 @@ export const dynamic = "force-dynamic";
  * ✅ Customers are first-class (provider_entity_id + is_test scoped)
  * ✅ Subscription lifecycle (create / update / end)
  * ✅ Document registry:
- *    - Generate PDF (billing-generate-document) ✅ NEW
+ *    - Generate PDF (billing-generate-document) ✅
  *    - Attach external PDF (billing-attach-external-document)
  * ✅ Certification (billing-certify-document)
  * ✅ Resolver-backed Open PDF (resolve-billing-document)
@@ -217,6 +218,7 @@ type DocRow = {
   recipient_name?: string | null;
   recipient_email?: string | null;
 
+  // legacy/schema drift tolerances (do not depend on)
   title?: string | null;
   document_kind?: string | null;
 };
@@ -351,7 +353,7 @@ export default function CiBillingPage() {
   const [updateSubOpen, setUpdateSubOpen] = useState(false);
   const [endSubOpen, setEndSubOpen] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
-  const [generateOpen, setGenerateOpen] = useState(false); // ✅ NEW
+  const [generateOpen, setGenerateOpen] = useState(false);
   const [certifyOpen, setCertifyOpen] = useState(false);
 
   // New customer form
@@ -373,7 +375,7 @@ export default function CiBillingPage() {
   const [attachFile, setAttachFile] = useState<File | null>(null);
   const attachInputRef = useRef<HTMLInputElement | null>(null);
 
-  // ✅ Generate document form (billing-generate-document)
+  // Generate document form (billing-generate-document)
   const [genDocType, setGenDocType] = useState<
     "invoice" | "contract" | "statement" | "receipt" | "credit_note" | "other"
   >("invoice");
@@ -430,7 +432,7 @@ export default function CiBillingPage() {
   }, [delivery, selectedCustomerId]);
 
   const commercialIntent = useMemo(() => {
-    // “Commercial Intent” badge is visible when there is any active non-internal subscription in the lane.
+    // Badge visible when there is any active non-internal subscription in the lane.
     return subs.some((s) => (s.status || "").toLowerCase() === "active" && !s.is_internal);
   }, [subs]);
 
@@ -444,13 +446,7 @@ export default function CiBillingPage() {
       certified,
       delivery: deliveryForCustomer.length,
     };
-  }, [
-    filteredCustomers.length,
-    subsForCustomer.length,
-    docsForCustomer.length,
-    deliveryForCustomer.length,
-    docsForCustomer,
-  ]);
+  }, [filteredCustomers.length, subsForCustomer.length, docsForCustomer.length, deliveryForCustomer.length, docsForCustomer]);
 
   const activeSub = useMemo(() => {
     const list = subsForCustomer;
@@ -543,7 +539,8 @@ export default function CiBillingPage() {
         setSelectedCustomerId(rows[0].id);
       }
     })();
-  }, [providerEntityId, isTest, refreshKey]); // keep selectedCustomerId out to avoid loops
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providerEntityId, isTest, refreshKey]);
 
   useEffect(() => {
     (async () => {
@@ -573,7 +570,7 @@ export default function CiBillingPage() {
   useEffect(() => {
     if (!providerEntityId) return;
     (async () => {
-      // ✅ Robust: try entity_id first, fallback to provider_entity_id if schema differs
+      // Robust: try entity_id first, fallback to provider_entity_id if schema differs
       try {
         const { data: d, error } = await supabase
           .from("billing_documents")
@@ -625,8 +622,7 @@ export default function CiBillingPage() {
 
       const filtered = rows.filter((r) => {
         const sameLane = (r.is_test ?? null) === null ? true : Boolean(r.is_test) === isTest;
-        const sameEntity =
-          (r.entity_id ?? null) === null ? true : r.entity_id === providerEntityId;
+        const sameEntity = (r.entity_id ?? null) === null ? true : r.entity_id === providerEntityId;
         return sameLane && sameEntity;
       });
 
@@ -691,7 +687,7 @@ export default function CiBillingPage() {
     setBusy(true);
     setNote(null);
     try {
-      // ✅ Prefer Edge Function if deployed (no regression if it isn't)
+      // Prefer Edge Function if deployed (no regression if it isn't)
       try {
         const data = await invoke("billing-create-customer", {
           provider_entity_id: providerEntityId,
@@ -845,7 +841,7 @@ export default function CiBillingPage() {
     if (attachInputRef.current) attachInputRef.current.value = "";
   }
 
-  // ✅ NEW: Generate billing document
+  // Generate billing document
   async function generateBillingDocument() {
     if (!providerEntityId) return alert("Missing provider entity_id");
     if (!genReason.trim()) return alert("reason required");
@@ -887,9 +883,7 @@ export default function CiBillingPage() {
       ? new Date(`${genIssuedAt.trim()}T00:00:00.000Z`).toISOString()
       : new Date().toISOString();
 
-    const dueIso = genDueAt.trim()
-      ? new Date(`${genDueAt.trim()}T00:00:00.000Z`).toISOString()
-      : null;
+    const dueIso = genDueAt.trim() ? new Date(`${genDueAt.trim()}T00:00:00.000Z`).toISOString() : null;
 
     const psIso = genPeriodStart.trim()
       ? new Date(`${genPeriodStart.trim()}T00:00:00.000Z`).toISOString()
@@ -927,7 +921,6 @@ export default function CiBillingPage() {
 
     const data = await invoke("billing-generate-document", payload);
 
-    // Optional: open the PDF immediately (resolver) if we got id/hash back.
     const newId = data?.document_id || null;
     const newHash = data?.file_hash || null;
 
@@ -1001,28 +994,19 @@ export default function CiBillingPage() {
   const selectedDocStatus = useMemo(() => {
     const s = (selectedDoc as any)?.status;
     if (s) return String(s);
-    // fallback for generated docs which may not have status in schema
     return "registered";
   }, [selectedDoc]);
 
   const selectedDocAmountText = useMemo(() => {
     if (!selectedDoc) return "—";
     const currency = (selectedDoc.currency ?? "—").toString();
-    const cents =
-      (selectedDoc as any).amount_cents ??
-      (selectedDoc as any).total_cents ??
-      null;
+    const cents = (selectedDoc as any).amount_cents ?? (selectedDoc as any).total_cents ?? null;
 
     if (Number.isFinite(Number(cents))) {
       return `${currency} ${fromMoneyMinor(Number(cents))}`;
     }
 
-    // older schema uses total_amount (major units)
-    const totalMajor =
-      (selectedDoc as any).total_amount ??
-      (selectedDoc as any).subtotal_amount ??
-      null;
-
+    const totalMajor = (selectedDoc as any).total_amount ?? (selectedDoc as any).subtotal_amount ?? null;
     if (Number.isFinite(Number(totalMajor))) {
       return `${currency} ${Number(totalMajor).toFixed(2)}`;
     }
@@ -1064,8 +1048,7 @@ export default function CiBillingPage() {
           </div>
 
           <div className="mt-2 text-xs text-white/45">
-            Provider (OS Entity): {entityLabel} • provider_entity_id: {shortUUID(providerEntityId)} • Selected
-            customer:{" "}
+            Provider (OS Entity): {entityLabel} • provider_entity_id: {shortUUID(providerEntityId)} • Selected customer:{" "}
             {selectedCustomer ? `${selectedCustomer.legal_name} (${selectedCustomer.billing_email})` : "—"}
           </div>
         </div>
@@ -1156,9 +1139,7 @@ export default function CiBillingPage() {
                 <div className="mt-1 text-sm font-semibold text-white/90">
                   {activeSub ? (activeSub.plan_key || safeStr(activeSub.plan_id)) : "—"}
                 </div>
-                <div className="mt-1 text-xs text-white/45">
-                  {activeSub ? safeStr(activeSub.status) : "No active sub"}
-                </div>
+                <div className="mt-1 text-xs text-white/45">{activeSub ? safeStr(activeSub.status) : "No active sub"}</div>
               </div>
               <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                 <div className="text-[10px] uppercase tracking-[0.25em] text-white/40">Docs</div>
@@ -1225,7 +1206,6 @@ export default function CiBillingPage() {
               <button
                 disabled={!providerEntityId || busy}
                 onClick={() => {
-                  // seed recipient from selected customer (safe)
                   setGenRecipientName(selectedCustomer?.legal_name || "");
                   setGenRecipientEmail(selectedCustomer?.billing_email || "");
                   setGenReason("");
@@ -1458,8 +1438,7 @@ export default function CiBillingPage() {
                         {safeStr(selectedDocStatus)}
                       </div>
                       <div className="mt-1 text-xs text-white/55">
-                        doc_id: {shortUUID(selectedDoc.id)} • issued:{" "}
-                        {fmtISO((selectedDoc as any).issued_at || null)}
+                        doc_id: {shortUUID(selectedDoc.id)} • issued: {fmtISO((selectedDoc as any).issued_at || null)}
                       </div>
                     </div>
                     <span
@@ -1477,9 +1456,7 @@ export default function CiBillingPage() {
                   <div className="mt-3 space-y-2 text-xs text-white/70">
                     <div className="rounded-xl border border-white/10 bg-black/10 p-3">
                       <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Hash (source)</div>
-                      <div className="mt-1 break-all font-mono text-[11px] text-white/80">
-                        {selectedDoc.file_hash}
-                      </div>
+                      <div className="mt-1 break-all font-mono text-[11px] text-white/80">{selectedDoc.file_hash}</div>
                       <div className="mt-2 flex flex-wrap gap-2">
                         <button
                           disabled={busy}
@@ -1519,9 +1496,7 @@ export default function CiBillingPage() {
                         {selectedDoc.certified_at ? (
                           <span className="text-emerald-200">
                             Certified at {fmtISO(selectedDoc.certified_at)} • hash:{" "}
-                            <span className="font-mono">
-                              {selectedDoc.certified_file_hash?.slice(0, 12)}…
-                            </span>
+                            <span className="font-mono">{selectedDoc.certified_file_hash?.slice(0, 12)}…</span>
                           </span>
                         ) : (
                           <span className="text-white/55">Not certified</span>
@@ -1538,11 +1513,7 @@ export default function CiBillingPage() {
                         </button>
 
                         <button
-                          disabled={
-                            busy ||
-                            !selectedDoc.certified_storage_bucket ||
-                            !selectedDoc.certified_storage_path
-                          }
+                          disabled={busy || !selectedDoc.certified_storage_bucket || !selectedDoc.certified_storage_path}
                           onClick={() => openCertifiedPdfClient(selectedDoc)}
                           className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/80 hover:bg-white/10 disabled:opacity-60"
                         >
@@ -1570,8 +1541,7 @@ export default function CiBillingPage() {
                   {selectedDelivery.channel} • {selectedDelivery.status}
                 </div>
                 <div className="mt-1 text-xs text-white/55">
-                  delivery_id: {shortUUID(selectedDelivery.id)} • doc_id:{" "}
-                  {shortUUID(selectedDelivery.document_id)}
+                  delivery_id: {shortUUID(selectedDelivery.id)} • doc_id: {shortUUID(selectedDelivery.document_id)}
                 </div>
 
                 <div className="mt-3 space-y-2 text-xs text-white/70">
@@ -1582,8 +1552,7 @@ export default function CiBillingPage() {
                   <div className="rounded-xl border border-white/10 bg-black/10 p-3">
                     <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Provider</div>
                     <div className="mt-1">
-                      {safeStr(selectedDelivery.provider)} • msg:{" "}
-                      {safeStr(selectedDelivery.provider_message_id)}
+                      {safeStr(selectedDelivery.provider)} • msg: {safeStr(selectedDelivery.provider_message_id)}
                     </div>
                   </div>
                   <div className="rounded-xl border border-white/10 bg-black/10 p-3">
@@ -1690,8 +1659,7 @@ export default function CiBillingPage() {
                   >
                     <div className="font-semibold text-white/90">{p.code}</div>
                     <div className="text-white/45">
-                      {p.name} • {p.currency} {p.price_minor} / {p.billing_period} •{" "}
-                      {p.is_active ? "active" : "inactive"}
+                      {p.name} • {p.currency} {p.price_minor} / {p.billing_period} • {p.is_active ? "active" : "inactive"}
                     </div>
                   </button>
                 ))
@@ -1714,7 +1682,6 @@ export default function CiBillingPage() {
         </div>
       </OsModal>
 
-      {/* ✅ UPDATED: operator-independent dropdown + current plan context */}
       <OsModal
         open={updateSubOpen}
         title="Change subscription plan"
@@ -1762,12 +1729,9 @@ export default function CiBillingPage() {
               <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Selected</div>
               <div className="mt-1 text-sm font-semibold text-white/90">{selectedPlan.code}</div>
               <div className="mt-1 text-xs text-white/55">
-                {safeStr(selectedPlan.name)} • {selectedPlan.currency} {selectedPlan.price_minor} /{" "}
-                {selectedPlan.billing_period}
+                {safeStr(selectedPlan.name)} • {selectedPlan.currency} {selectedPlan.price_minor} / {selectedPlan.billing_period}
               </div>
-              {selectedPlan.description ? (
-                <div className="mt-2 text-xs text-white/45">{selectedPlan.description}</div>
-              ) : null}
+              {selectedPlan.description ? <div className="mt-2 text-xs text-white/45">{selectedPlan.description}</div> : null}
               <div className="mt-2 text-xs text-white/45">
                 plan_id: <span className="font-mono">{shortUUID(selectedPlan.id)}</span>
               </div>
@@ -1811,7 +1775,6 @@ export default function CiBillingPage() {
         </div>
       </OsModal>
 
-      {/* ✅ NEW: Generate Document */}
       <OsModal
         open={generateOpen}
         title="Generate billing document (PDF)"
@@ -2088,8 +2051,7 @@ export default function CiBillingPage() {
               className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/80 outline-none"
             />
             <div className="mt-1 text-xs text-white/45">
-              Selected:{" "}
-              {attachFile ? `${attachFile.name} (${Math.round(attachFile.size / 1024)} KB)` : "—"}
+              Selected: {attachFile ? `${attachFile.name} (${Math.round(attachFile.size / 1024)} KB)` : "—"}
             </div>
           </div>
 
@@ -2116,9 +2078,7 @@ export default function CiBillingPage() {
         <div className="space-y-3">
           <div className="text-xs text-white/70">
             This stamps a registry-grade certification page and writes:
-            <div className="mt-1 text-white/45">
-              certified_at • certified_storage_bucket/path • certified_file_hash • verify_url
-            </div>
+            <div className="mt-1 text-white/45">certified_at • certified_storage_bucket/path • certified_file_hash • verify_url</div>
           </div>
           <label className="flex items-center gap-2 text-xs text-white/70">
             <input
