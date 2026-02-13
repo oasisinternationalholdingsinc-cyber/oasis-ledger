@@ -23,6 +23,9 @@ import { ArrowLeft, ExternalLink, Copy, RefreshCw } from "lucide-react";
  * 3) "Open Best PDF" preference remains: Verified registry first → Minute Book primary → entry.
  * 4) Defensive evidence + intent loaders: never destabilize Forge if sidecars fail.
  * 5) Better disabled-state styling (NOT blacked out) — UI-only, logic unchanged.
+ * 6) ✅ Portal cleanup (PRODUCTION): ONLY public terminal exposed is VERIFY.
+ *    - Removed Portal tab + removed Viewer/Certificate links + removed "Open Signer" portal affordance.
+ *    - Signing remains via Forge actions (Start Envelope + Send Invite) — no portal-signer UI.
  */
 
 type ForgeQueueItem = {
@@ -95,8 +98,8 @@ type RiskLevel = "GREEN" | "AMBER" | "RED" | "IDLE";
 type TabKey = "active" | "completed" | "archived";
 type AxiomTab = "advisory" | "summary" | "analysis" | "advice";
 
-// ✅ Intent sidecar tab (same tier as Evidence / AXIOM / Portal)
-type RightTab = "evidence" | "axiom" | "portal" | "intent" | "notes";
+// ✅ Right sidecar tabs (Portal removed — VERIFY is the only public terminal and is surfaced as a single button)
+type RightTab = "evidence" | "axiom" | "intent" | "notes";
 
 type AxiomLatest = {
   summary?: { id: string; summary: string | null; generated_at: string | null; model: string | null } | null;
@@ -106,11 +109,9 @@ type AxiomLatest = {
     | null;
 };
 
+// ✅ Portal URLs now ONLY for public verify terminal
 type PortalUrls = {
-  signer_url?: string | null;
-  viewer_url?: string | null;
   verify_url?: string | null;
-  certificate_url?: string | null;
 };
 
 type ArchiveEvidence = {
@@ -390,6 +391,7 @@ export default function ForgeClient() {
   const [axiomInfo, setAxiomInfo] = useState<string | null>(null);
   const [axiomLatest, setAxiomLatest] = useState<AxiomLatest>({});
 
+  // ✅ VERIFY terminal only
   const [portal, setPortal] = useState<PortalUrls>({});
   const [portalError, setPortalError] = useState<string | null>(null);
 
@@ -693,7 +695,7 @@ export default function ForgeClient() {
   }, [selected?.ledger_id]);
 
   // --------------------------
-  // Portal URLs
+  // VERIFY URL (Portal URLs — only verify is surfaced)
   // --------------------------
   async function loadPortalUrls(envelopeId: string) {
     setPortalError(null);
@@ -708,7 +710,7 @@ export default function ForgeClient() {
 
       if (r.error) {
         console.warn("Portal RPC error:", r.error);
-        setPortalError("Portal URLs unavailable (RPC).");
+        setPortalError("Verify terminal unavailable (RPC).");
         return;
       }
 
@@ -716,14 +718,11 @@ export default function ForgeClient() {
       const row = Array.isArray(pu) ? pu[0] : pu;
 
       setPortal({
-        signer_url: row?.signer_url ?? row?.signer ?? null,
-        viewer_url: row?.viewer_url ?? row?.viewer ?? null,
         verify_url: row?.verify_url ?? row?.verify ?? null,
-        certificate_url: row?.certificate_url ?? row?.certificate ?? null,
       });
     } catch (e) {
       console.warn("loadPortalUrls exception:", e);
-      setPortalError("Portal URLs unavailable.");
+      setPortalError("Verify terminal unavailable.");
     }
   }
 
@@ -1858,18 +1857,12 @@ export default function ForgeClient() {
                     </div>
 
                     <div className="shrink-0 flex flex-col gap-2 w-[180px]">
+                      {/* ✅ No portal-signer UI: operator action is "Start / Reopen Envelope" (idempotent) */}
                       <ActionButton
-                        label={selected.envelope_id ? "Open Signer" : "Start Signature"}
-                        tone={selected.envelope_id ? "slate" : "amber"}
-                        disabled={isStarting || (selected.envelope_id ? !portal.signer_url : false)}
-                        onClick={() => {
-                          if (selected.envelope_id) {
-                            if (portal.signer_url) window.open(portal.signer_url, "_blank", "noopener,noreferrer");
-                            else flashError("Signer URL not available yet.");
-                            return;
-                          }
-                          setStartModalOpen(true);
-                        }}
+                        label={selected.envelope_id ? "Reopen Envelope" : "Start Signature"}
+                        tone="amber"
+                        disabled={isStarting || !selected.ledger_id}
+                        onClick={() => setStartModalOpen(true)}
                       />
 
                       <ActionButton
@@ -1879,6 +1872,7 @@ export default function ForgeClient() {
                         onClick={() => onViewArchivePdf()}
                       />
 
+                      {/* ✅ Only public terminal that belongs in Forge */}
                       {portal.verify_url ? (
                         <button
                           type="button"
@@ -2007,47 +2001,27 @@ export default function ForgeClient() {
 
                     <div className="col-span-12">
                       <div className="grid grid-cols-12 gap-3">
+                        {/* ✅ VERIFY ONLY (replaces old Portal card) */}
                         <div className="col-span-12 md:col-span-6 rounded-2xl border border-white/10 bg-black/25 p-4">
-                          <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Portal</div>
-                          {portalError ? (
-                            <div className="mt-2 text-[12px] text-rose-200">{portalError}</div>
-                          ) : (
-                            <div className="mt-3 flex flex-col gap-2">
-                              <a
-                                className={cx(
-                                  "rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-200 hover:border-white/20 hover:bg-white/5 transition",
-                                  !portal.viewer_url ? "opacity-60 pointer-events-none" : ""
-                                )}
-                                href={portal.viewer_url || "#"}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                Open Viewer
-                              </a>
-                              <a
-                                className={cx(
-                                  "rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-200 hover:border-white/20 hover:bg-white/5 transition",
-                                  !portal.verify_url ? "opacity-60 pointer-events-none" : ""
-                                )}
-                                href={portal.verify_url || "#"}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                Open Verify
-                              </a>
-                              <a
-                                className={cx(
-                                  "rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-200 hover:border-white/20 hover:bg-white/5 transition",
-                                  !portal.certificate_url ? "opacity-60 pointer-events-none" : ""
-                                )}
-                                href={portal.certificate_url || "#"}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                Open Certificate
-                              </a>
+                          <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Verify</div>
+                          {portalError ? <div className="mt-2 text-[12px] text-rose-200">{portalError}</div> : null}
+
+                          <div className="mt-3 flex flex-col gap-2">
+                            <a
+                              className={cx(
+                                "rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[12px] text-slate-200 hover:border-white/20 hover:bg-white/5 transition",
+                                !portal.verify_url ? "opacity-60 pointer-events-none" : ""
+                              )}
+                              href={portal.verify_url || "#"}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Open Verify
+                            </a>
+                            <div className="text-[11px] text-slate-500">
+                              Public, hash-first read-only terminal. No signer/viewer/certificate links live in Forge.
                             </div>
-                          )}
+                          </div>
                         </div>
 
                         <div className="col-span-12 md:col-span-6 rounded-2xl border border-white/10 bg-black/25 p-4">
@@ -2108,7 +2082,7 @@ export default function ForgeClient() {
 
                     <div className="col-span-12">
                       <div className="text-[11px] text-slate-500">
-                        Forge is signature-only. Archive is idempotent and lane-safe. No SQL shortcuts; all writes via RPC/Edge Functions.
+                        Forge is signature-only. Archive is idempotent and lane-safe. Verify is the only public terminal surfaced here.
                       </div>
                     </div>
                   </div>
@@ -2127,7 +2101,6 @@ export default function ForgeClient() {
                   <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Sidecar</div>
                   <div className="mt-2 flex flex-wrap gap-2">
                     <RightTabButton k="evidence" label="Evidence" />
-                    <RightTabButton k="portal" label="Portal" />
                     <RightTabButton k="axiom" label="AXIOM" />
                     <RightTabButton k="intent" label="Intent" />
                     <RightTabButton k="notes" label="Notes" />
@@ -2211,66 +2184,19 @@ export default function ForgeClient() {
                           </div>
 
                           <ActionButton label="Open Best PDF" tone="slate" disabled={isOpeningArchive} onClick={() => onViewArchivePdf()} />
-                        </>
-                      )}
-                    </div>
-                  ) : null}
 
-                  {/* Portal */}
-                  {rightTab === "portal" ? (
-                    <div className="space-y-3">
-                      {!selected.envelope_id ? (
-                        <EmptyState title="No envelope yet." detail="Start signature to generate portal URLs." />
-                      ) : portalError ? (
-                        <div className="rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-[12px] text-rose-100">
-                          {portalError}
-                        </div>
-                      ) : (
-                        <>
-                          <a
-                            className={cx(
-                              "block rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-[12px] text-slate-200 hover:border-white/20 hover:bg-white/5 transition",
-                              !portal.signer_url ? "opacity-60 pointer-events-none" : ""
-                            )}
-                            href={portal.signer_url || "#"}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            Open Signer Terminal
-                          </a>
-                          <a
-                            className={cx(
-                              "block rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-[12px] text-slate-200 hover:border-white/20 hover:bg-white/5 transition",
-                              !portal.viewer_url ? "opacity-60 pointer-events-none" : ""
-                            )}
-                            href={portal.viewer_url || "#"}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            Open Viewer
-                          </a>
-                          <a
-                            className={cx(
-                              "block rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-[12px] text-slate-200 hover:border-white/20 hover:bg-white/5 transition",
-                              !portal.verify_url ? "opacity-60 pointer-events-none" : ""
-                            )}
-                            href={portal.verify_url || "#"}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            Open Verify
-                          </a>
-                          <a
-                            className={cx(
-                              "block rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-[12px] text-slate-200 hover:border-white/20 hover:bg-white/5 transition",
-                              !portal.certificate_url ? "opacity-60 pointer-events-none" : ""
-                            )}
-                            href={portal.certificate_url || "#"}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            Open Certificate
-                          </a>
+                          {/* ✅ Verify quick-access (optional): only link, no portal tab */}
+                          {portal.verify_url ? (
+                            <button
+                              type="button"
+                              onClick={() => window.open(portal.verify_url as string, "_blank", "noopener,noreferrer")}
+                              className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:border-white/20 hover:bg-white/5 transition"
+                            >
+                              <span className="inline-flex items-center justify-center gap-2">
+                                <ExternalLink className="h-4 w-4" /> Open Verify
+                              </span>
+                            </button>
+                          ) : null}
                         </>
                       )}
                     </div>
@@ -2409,9 +2335,9 @@ export default function ForgeClient() {
       {/* Modals */}
       <Modal
         open={startModalOpen}
-        title="Start signature envelope"
+        title={selected?.envelope_id ? "Reopen signature envelope" : "Start signature envelope"}
         description="Creates (or reuses) a signature envelope for this record. No archive changes."
-        confirmLabel={isStarting ? "Starting…" : "Start"}
+        confirmLabel={isStarting ? "Starting…" : selected?.envelope_id ? "Reopen" : "Start"}
         confirmTone="amber"
         confirmDisabled={isStarting}
         onConfirm={async () => {
