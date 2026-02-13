@@ -1,19 +1,35 @@
+// supabase/functions/billing-send-document-email/index.ts
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
+/**
+ * billing-send-document-email (PRODUCTION — SCHEMA-ALIGNED)
+ *
+ * ✅ Resolves billing_documents by { document_id } OR { hash }
+ * ✅ Hash-first verification link (verify-billing.html?hash=...)
+ * ✅ Uses RESEND for delivery
+ * ✅ Best-effort writes billing_delivery_events (never blocks response)
+ *
+ * NOTE: billing_documents schema is canonical:
+ * - file_hash (hex64) REQUIRED
+ * - entity_id NOT NULL
+ * - is_test boolean lane flag
+ * - status exists, but void semantics are best represented by voided_at
+ */
+
 type ReqBody = {
-  document_id?: string; // uuid
-  hash?: string;        // sha256
-  to_email?: string;    // recipient
+  document_id?: string; // uuid (billing_documents.id)
+  hash?: string; // sha256 (billing_documents.file_hash)
+  to_email?: string; // recipient
   to_name?: string;
   subject?: string;
 
   // optional presentation
   message?: string;
 
-  // tolerated
-  expires_in?: number;  // not used (future)
+  // tolerated (future)
+  expires_in?: number;
 };
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
@@ -21,18 +37,25 @@ const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
 const RESEND_API_KEY = Deno.env.get("RESEND_API_KEY"); // REQUIRED
-const BILLING_FROM_EMAIL = Deno.env.get("BILLING_FROM_EMAIL") || "billing@oasisintlholdings.com";
+const BILLING_FROM_EMAIL =
+  Deno.env.get("BILLING_FROM_EMAIL") || "billing@oasisintlholdings.com";
 const VERIFY_BASE_URL =
-  Deno.env.get("BILLING_VERIFY_BASE_URL") || "https://sign.oasisintlholdings.com/verify-billing.html";
+  Deno.env.get("BILLING_VERIFY_BASE_URL") ||
+  "https://sign.oasisintlholdings.com/verify-billing.html";
 
-if (!SUPABASE_URL || !SERVICE_ROLE_KEY) throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
+if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
+  throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
+}
 
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { global: { fetch } });
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+  global: { fetch },
+});
 
 const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type",
   "Access-Control-Expose-Headers": "content-type, x-sb-request-id",
 };
 
@@ -43,15 +66,24 @@ function json(status: number, body: unknown) {
   });
 }
 
-function isUuid(v: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
-}
-function isSha256(v: string) {
-  return /^[a-f0-9]{64}$/i.test(v);
-}
 function safeText(v: unknown, fallback = "") {
   const s = (v ?? "").toString().trim();
   return s || fallback;
+}
+
+function isUuid(v: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    v,
+  );
+}
+
+function isSha256(v: string) {
+  return /^[a-f0-9]{64}$/i.test(v);
+}
+
+function isEmail(v: string) {
+  // simple, safe-enough validation (don’t overfit)
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 }
 
 async function resendSendEmail(args: {
@@ -65,7 +97,7 @@ async function resendSendEmail(args: {
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${RESEND_API_KEY}`,
+      Authorization: `Bearer ${RESEND_API_KEY}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
@@ -79,12 +111,17 @@ async function resendSendEmail(args: {
 
   const text = await res.text();
   let data: any = null;
-  try { data = JSON.parse(text); } catch {}
+  try {
+    data = JSON.parse(text);
+  } catch {
+    // ignore
+  }
 
   if (!res.ok) {
     const msg = data?.message || text || `HTTP ${res.status}`;
     throw new Error(`RESEND_FAILED: ${msg}`);
   }
+
   return data; // typically { id: "..." }
 }
 
@@ -97,13 +134,17 @@ serve(async (req) => {
 
     const document_id = safeText(body.document_id);
     const hash = safeText(body.hash).toLowerCase();
-    const to_email = safeText(body.to_email);
+    const to_email = safeText(body.to_email).toLowerCase();
     const to_name = safeText(body.to_name);
     const subjectOverride = safeText(body.subject);
     const message = safeText(body.message);
 
     if (!document_id && !hash) {
-      return json(400, { ok: false, error: "MISSING_IDENTIFIER", message: "Provide document_id OR hash." });
+      return json(400, {
+        ok: false,
+        error: "MISSING_IDENTIFIER",
+        message: "Provide document_id OR hash.",
+      });
     }
     if (document_id && !isUuid(document_id)) {
       return json(400, { ok: false, error: "INVALID_DOCUMENT_ID" });
@@ -114,8 +155,12 @@ serve(async (req) => {
     if (!to_email) {
       return json(400, { ok: false, error: "MISSING_TO_EMAIL" });
     }
+    if (!isEmail(to_email)) {
+      return json(400, { ok: false, error: "INVALID_TO_EMAIL" });
+    }
 
-    // Resolve billing document
+    // Resolve billing document (schema-aligned)
+    // IMPORTANT: do NOT assume a specific "void" status enum label; use voided_at which is canonical.
     let doc: any | null = null;
 
     if (document_id) {
@@ -124,16 +169,18 @@ serve(async (req) => {
         .select("*")
         .eq("id", document_id)
         .maybeSingle();
+
       if (error) return json(500, { ok: false, error: "DB_ERROR", details: error.message });
-      doc = data;
+      doc = data ?? null;
     } else {
       const { data, error } = await supabase
         .from("billing_documents")
         .select("*")
         .eq("file_hash", hash)
-        .neq("status", "void")
+        .is("voided_at", null) // ✅ canonical "not voided"
         .order("issued_at", { ascending: false, nullsFirst: false })
         .limit(1);
+
       if (error) return json(500, { ok: false, error: "DB_ERROR", details: error.message });
       doc = data?.[0] ?? null;
     }
@@ -151,7 +198,7 @@ serve(async (req) => {
       });
     }
 
-    // Best-effort entity snapshot
+    // Best-effort entity snapshot (optional — email only)
     let entity: any | null = null;
     if (doc.entity_id) {
       const { data: ent } = await supabase
@@ -162,14 +209,19 @@ serve(async (req) => {
       entity = ent ?? null;
     }
 
-    const lane = (typeof doc.is_test === "boolean") ? (doc.is_test ? "SANDBOX" : "RoT") : "—";
-    const title = safeText(doc.document_number) || safeText(doc.external_reference) || "Billing Document";
+    const lane =
+      typeof doc.is_test === "boolean" ? (doc.is_test ? "SANDBOX" : "RoT") : "—";
+
+    // Use canonical columns: invoice_number / document_number / external_reference
+    const title =
+      safeText(doc.invoice_number) ||
+      safeText(doc.document_number) ||
+      safeText(doc.external_reference) ||
+      "Billing Document";
 
     const verifyUrl = `${VERIFY_BASE_URL}?hash=${canonicalHash}`;
 
-    const subject =
-      subjectOverride ||
-      `Oasis Billing • ${title} • ${lane}`;
+    const subject = subjectOverride || `Oasis Billing • ${title} • ${lane}`;
 
     const html = `
 <div style="font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;line-height:1.5;color:#0b1220">
@@ -211,7 +263,7 @@ serve(async (req) => {
 
     // send (best effort)
     let provider_message_id: string | null = null;
-    let sendStatus = "sent";
+    let sendStatus: "sent" | "failed" = "sent";
     let sendError: string | null = null;
 
     try {
@@ -226,7 +278,7 @@ serve(async (req) => {
     try {
       await supabase.from("billing_delivery_events").insert({
         entity_id: doc.entity_id ?? null,
-        is_test: (typeof doc.is_test === "boolean") ? doc.is_test : null,
+        is_test: typeof doc.is_test === "boolean" ? doc.is_test : null,
         document_id: doc.id,
         file_hash: canonicalHash,
         channel: "email",
@@ -258,6 +310,10 @@ serve(async (req) => {
       error: sendError,
     });
   } catch (e) {
-    return json(500, { ok: false, error: "SEND_FAILED", details: e?.message ? String(e.message) : String(e) });
+    return json(500, {
+      ok: false,
+      error: "SEND_FAILED",
+      details: e?.message ? String(e.message) : String(e),
+    });
   }
 });
