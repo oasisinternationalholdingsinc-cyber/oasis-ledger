@@ -12,10 +12,11 @@ export const dynamic = "force-dynamic";
  *
  * Phase-2 enhancement (UI-only, NO schema/wiring drift):
  * ✅ Discovery Export button → calls Edge Function export-discovery-package (non-mutating ZIP)
- *    - body: { ledger_id }
- *    - expects: { ok:true, url:<signed_zip_url> }
+ *    - body: { ledger_id } OR { entry_id } (uploads)
+ *    - Edge returns a ZIP download (may be direct bytes or a signed URL depending on deployment)
  *
  * ✅ Promote to Verified Registry (Minute Book Entry Certification)
+ *    - PROMOTE IS UPLOADS-ONLY (source_record_id must be null)
  *    - calls Edge Function certify-minute-book-entry (mutating, controlled)
  *    - body: { entry_id, is_test, force? }  (actor resolved from JWT inside function)
  *    - expects: { ok:true, verified_document_id, reused?, verify_url? }
@@ -56,7 +57,7 @@ type MinuteBookEntry = {
   created_at?: string | null;
   created_by?: string | null;
   source?: string | null;
-  source_record_id?: string | null; // governance_ledger.id
+  source_record_id?: string | null; // governance_ledger.id (forge/ledger-origin)
 };
 
 type SupportingDoc = {
@@ -257,6 +258,52 @@ function edgeInvokeMessage(error: any, data: any) {
   return msg || "Request failed.";
 }
 
+function safeZipNameFromSelected(e: EntryWithDoc) {
+  const base = (e.title || e.file_name || "Oasis-Discovery-Export")
+    .toString()
+    .trim()
+    .replace(/[\/\\]+/g, "-")
+    .replace(/[^\w\-. ]+/g, "")
+    .replace(/\s+/g, "_")
+    .slice(0, 90);
+  return `${base || "Oasis-Discovery-Export"}.zip`;
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 2500);
+}
+
+function asZipBlobOrNull(data: any): Blob | null {
+  if (!data) return null;
+
+  // If supabase-js hands us a Blob already
+  if (typeof Blob !== "undefined" && data instanceof Blob) return data;
+
+  // ArrayBuffer
+  if (typeof ArrayBuffer !== "undefined" && data instanceof ArrayBuffer) {
+    return new Blob([data], { type: "application/zip" });
+  }
+
+  // Uint8Array
+  if (typeof Uint8Array !== "undefined" && data instanceof Uint8Array) {
+    return new Blob([data], { type: "application/zip" });
+  }
+
+  // Some runtimes return { data: Uint8Array }
+  if (data?.data && (data.data instanceof Uint8Array || data.data instanceof ArrayBuffer)) {
+    return new Blob([data.data], { type: "application/zip" });
+  }
+
+  return null;
+}
+
 const DOMAIN_ICON: Record<string, string> = {
   incorporation: "📜",
   formation: "📜",
@@ -326,7 +373,9 @@ async function loadSupportingDocs(entryIds: string[]): Promise<SupportingDoc[]> 
 
   const { data, error } = await sb
     .from("supporting_documents")
-    .select("id,entry_id,file_path,file_name,file_hash,file_size,mime_type,version,uploaded_at,registry_visible")
+    .select(
+      "id,entry_id,file_path,file_name,file_hash,file_size,mime_type,version,uploaded_at,registry_visible"
+    )
     .in("entry_id", entryIds)
     .order("registry_visible", { ascending: false })
     .order("version", { ascending: false })
@@ -402,7 +451,10 @@ async function resolveOfficialArtifact(
  * - Lane is implied by storage_bucket and matches current env
  * - This does NOT change any existing wiring; it only reads.
  */
-async function resolvePromotedArtifact(entryId: string, laneIsTest: boolean): Promise<OfficialArtifact | null> {
+async function resolvePromotedArtifact(
+  entryId: string,
+  laneIsTest: boolean
+): Promise<OfficialArtifact | null> {
   const sb = supabaseBrowser;
 
   const { data, error } = await sb
@@ -640,11 +692,23 @@ export default function MinuteBookClient() {
   // small UX: copy feedback (no global toast system assumed)
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
+  const selected = useMemo(() => {
+    if (!selectedId) return null;
+    return entries.find((e) => e.id === selectedId) || null;
+  }, [entries, selectedId]);
+
+  // ✅ uploads-only promote: if source_record_id exists, it is ledger/forge-origin (already certified)
+  const isUploadEntry = useMemo(() => {
+    if (!selected) return false;
+    return !String(selected.source_record_id || "").trim();
+  }, [selected?.id, selected?.source_record_id]);
+
   const canReissue = useMemo(() => {
-    // reissue is allowed iff there is already a promoted artifact (minute book certification)
-    // (official governance-linked verified docs are separate and should not be reissued from Minute Book)
-    return !!promoted;
-  }, [promoted]);
+    // reissue is allowed iff:
+    // - entry is an UPLOAD (uploads-only promotion policy)
+    // - there is already a promoted artifact (minute book certification)
+    return !!promoted && isUploadEntry;
+  }, [promoted, isUploadEntry]);
 
   const certifiedHash = useMemo(() => {
     return (promoted?.file_hash || "").toString().trim() || null;
@@ -653,6 +717,21 @@ export default function MinuteBookClient() {
   const officialHash = useMemo(() => {
     return (official?.file_hash || "").toString().trim() || null;
   }, [official?.file_hash]);
+
+  const authorityBadge = useMemo(() => {
+    if (!selected) return null;
+    if (official) return { label: "OFFICIAL", tone: "gold" as const };
+    if (promoted) return { label: "CERTIFIED", tone: "sky" as const };
+    return { label: "UPLOADED", tone: "neutral" as const };
+  }, [selected?.id, official, promoted]);
+
+  const promoteDisabledReason = useMemo(() => {
+    if (!selected) return "Select a record first.";
+    if (!isUploadEntry) {
+      return "Not applicable: governance resolutions are certified via Forge automatically.";
+    }
+    return null;
+  }, [selected?.id, isUploadEntry]);
 
   // Load domains
   useEffect(() => {
@@ -721,11 +800,7 @@ export default function MinuteBookClient() {
         const laneMap = new Map<string, { is_test: boolean; status: string }>();
 
         if (recordIds.length) {
-          const { data } = await supabaseBrowser
-            .from("governance_ledger")
-            .select("id,is_test,status")
-            .in("id", recordIds);
-
+          const { data } = await supabaseBrowser.from("governance_ledger").select("id,is_test,status").in("id", recordIds);
           for (const r of data ?? []) {
             laneMap.set(String((r as any).id), {
               is_test: !!(r as any).is_test,
@@ -813,11 +888,6 @@ export default function MinuteBookClient() {
     return [...list].sort((a, b) => getCreatedAtMs(b.created_at) - getCreatedAtMs(a.created_at));
   }, [entries, activeDomainKey, query]);
 
-  const selected = useMemo(() => {
-    if (!selectedId) return null;
-    return entries.find((e) => e.id === selectedId) || null;
-  }, [entries, selectedId]);
-
   const domainCounts = useMemo(() => {
     const m = new Map<string, number>();
     for (const d of domains) m.set(d.key, 0);
@@ -831,13 +901,6 @@ export default function MinuteBookClient() {
     if (activeDomainKey === "all") return "All";
     return domains.find((d) => d.key === activeDomainKey)?.label || "Domain";
   }, [activeDomainKey, domains]);
-
-  const authorityBadge = useMemo(() => {
-    if (!selected) return null;
-    if (official) return { label: "OFFICIAL", tone: "gold" as const };
-    if (promoted) return { label: "CERTIFIED", tone: "sky" as const };
-    return { label: "UPLOADED", tone: "neutral" as const };
-  }, [selected?.id, official, promoted]);
 
   // Resolve official + promoted artifact on selection (lane-aware)
   useEffect(() => {
@@ -966,7 +1029,10 @@ export default function MinuteBookClient() {
     }
   }
 
-  // ✅ Discovery Export (non-mutating)
+  // ✅ Discovery Export (non-mutating) — CORRECT EDGE FN: export-discovery-package
+  // - If linked to governance_ledger: send { ledger_id }
+  // - If upload-only: send { entry_id }
+  // - Supports either (a) direct zip bytes OR (b) { ok:true, url } (future-proof)
   async function exportDiscoveryPackage() {
     if (!selected) return;
 
@@ -974,13 +1040,13 @@ export default function MinuteBookClient() {
     setExportBusy(true);
 
     try {
-      const ledgerId = (selected.source_record_id || "").toString().trim();
-      if (!ledgerId) {
-        throw new Error("Discovery Export requires a linked governance record (missing source_record_id).");
-      }
+      const ledgerId = (selected.source_record_id || "").toString().trim() || null;
+      const entryId = (selected.id || "").toString().trim() || null;
+
+      const body: Record<string, any> = ledgerId ? { ledger_id: ledgerId } : { entry_id: entryId };
 
       const { data, error } = await supabaseBrowser.functions.invoke("export-discovery-package", {
-        body: { ledger_id: ledgerId },
+        body,
       });
 
       if (error) {
@@ -988,13 +1054,31 @@ export default function MinuteBookClient() {
         throw new Error(msg);
       }
 
-      const res = (data ?? {}) as ExportResult;
-      if (!res.ok || !res.url) {
-        const msg = (typeof res.error === "string" && res.error) || "Export failed (no ok=true/url returned).";
-        throw new Error(msg);
+      // Variant A: returns JSON with signed URL
+      if (data && typeof data === "object" && "url" in (data as any)) {
+        const res = (data ?? {}) as ExportResult;
+        if (!res.url) {
+          const msg =
+            (typeof res.error === "string" && res.error) || "Export failed (no url returned).";
+          throw new Error(msg);
+        }
+        window.open(res.url, "_blank", "noopener,noreferrer");
+        return;
       }
 
-      window.open(res.url, "_blank", "noopener,noreferrer");
+      // Variant B: returns direct zip bytes/blob
+      const blob = asZipBlobOrNull(data);
+      if (blob) {
+        downloadBlob(blob, safeZipNameFromSelected(selected));
+        return;
+      }
+
+      // If the runtime gave us a string, try to surface it (don’t lie)
+      if (typeof data === "string") {
+        throw new Error(data.length < 240 ? data : "Export returned an unexpected response format.");
+      }
+
+      throw new Error("Export returned an unexpected response format (no url, no zip bytes).");
     } catch (e: unknown) {
       setExportErr(e instanceof Error ? e.message : "Discovery Export failed.");
     } finally {
@@ -1004,11 +1088,18 @@ export default function MinuteBookClient() {
 
   /**
    * ✅ Promote / Reissue to Verified Registry (minute_book entry certification)
+   * - UPLOADS ONLY (source_record_id must be null)
    * - First-time: force=false
    * - Reissue: force=true (allowed, idempotent, overwrites/upserts certified PDF and updates hash/pointer)
    */
   async function promoteToVerifiedRegistry(opts?: { force?: boolean }) {
     if (!selected) return;
+
+    // hard guard (UI-only)
+    if (!isUploadEntry) {
+      setPromoteErr("Not applicable: governance resolutions are certified via Forge automatically.");
+      return;
+    }
 
     const force = !!opts?.force;
 
@@ -1031,7 +1122,9 @@ export default function MinuteBookClient() {
 
       const res = (data ?? {}) as PromoteResult;
       if (!res.ok || !res.verified_document_id) {
-        const msg = (typeof res.error === "string" && res.error) || "Certification failed (no ok=true/verified_document_id).";
+        const msg =
+          (typeof res.error === "string" && res.error) ||
+          "Certification failed (no ok=true/verified_document_id).";
         throw new Error(msg);
       }
 
@@ -1053,8 +1146,10 @@ export default function MinuteBookClient() {
   function openVerifyTerminal() {
     if (!selected) return;
 
-    // ✅ HASH-FIRST: prefer promoted (minute_book certification) hash, then official hash.
-    const hash = certifiedHash || officialHash || null;
+    // ✅ HASH-FIRST:
+    // - Uploads: prefer promoted certified hash
+    // - Resolutions: official hash (Forge-certified)
+    const hash = (isUploadEntry ? certifiedHash : null) || officialHash || certifiedHash || null;
     if (!hash) return;
 
     const url = buildVerifyHtmlUrlFromHash(hash);
@@ -1107,7 +1202,10 @@ export default function MinuteBookClient() {
         const laneMap = new Map<string, { is_test: boolean; status: string }>();
 
         if (recordIds.length) {
-          const { data: gl } = await supabaseBrowser.from("governance_ledger").select("id,is_test,status").in("id", recordIds);
+          const { data: gl } = await supabaseBrowser
+            .from("governance_ledger")
+            .select("id,is_test,status")
+            .in("id", recordIds);
 
           for (const r of gl ?? []) {
             laneMap.set(String((r as any).id), {
@@ -1502,6 +1600,17 @@ export default function MinuteBookClient() {
                           <span className="px-2 py-1 rounded-full bg-white/5 border border-white/10 text-[11px] text-slate-200">
                             {laneIsTest ? "SANDBOX" : "RoT"}
                           </span>
+                          <span
+                            className={cx(
+                              "px-2 py-1 rounded-full border text-[11px]",
+                              isUploadEntry
+                                ? "bg-sky-500/10 border-sky-500/30 text-sky-200"
+                                : "bg-white/5 border-white/10 text-slate-300"
+                            )}
+                            title={isUploadEntry ? "Upload evidence record" : "Governance record (Forge-certified)"}
+                          >
+                            {isUploadEntry ? "UPLOAD" : "FORGE"}
+                          </span>
                         </div>
 
                         {pdfErr ? (
@@ -1522,116 +1631,129 @@ export default function MinuteBookClient() {
                           </div>
                         ) : null}
 
-                        <div className="mt-3 flex flex-wrap items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => ensurePreviewUrl(true)}
-                            disabled={pdfBusy}
-                            className={cx(
-                              "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
-                              pdfBusy ? "bg-amber-500/20 text-amber-200/60" : "bg-amber-500 text-black hover:bg-amber-400"
-                            )}
-                            title="Open PDF in Reader Mode"
-                          >
-                            Reader
-                          </button>
+                        {/* Enterprise action grouping */}
+                        <div className="mt-3">
+                          <div className="text-[10px] uppercase tracking-[0.25em] text-slate-500">Actions</div>
 
-                          <button
-                            type="button"
-                            onClick={downloadPdf}
-                            disabled={pdfBusy}
-                            className={cx(
-                              "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
-                              pdfBusy ? "bg-white/10 text-slate-200/60" : "bg-slate-200 text-black hover:bg-white"
-                            )}
-                            title="Download PDF"
-                          >
-                            Download
-                          </button>
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                            {/* Primary */}
+                            <button
+                              type="button"
+                              onClick={() => ensurePreviewUrl(true)}
+                              disabled={pdfBusy}
+                              className={cx(
+                                "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
+                                pdfBusy ? "bg-amber-500/20 text-amber-200/60" : "bg-amber-500 text-black hover:bg-amber-400"
+                              )}
+                              title="Open PDF in Reader Mode"
+                            >
+                              Reader
+                            </button>
 
-                          <button
-                            type="button"
-                            onClick={openNewTab}
-                            disabled={pdfBusy}
-                            className={cx(
-                              "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
-                              pdfBusy
-                                ? "bg-white/5 text-slate-200/60 border-white/10"
-                                : "bg-white/5 border-white/10 text-slate-200 hover:bg-white/7 hover:border-amber-500/25"
-                            )}
-                            title="Open in new tab"
-                          >
-                            Open
-                          </button>
+                            <button
+                              type="button"
+                              onClick={downloadPdf}
+                              disabled={pdfBusy}
+                              className={cx(
+                                "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
+                                pdfBusy ? "bg-white/10 text-slate-200/60" : "bg-slate-200 text-black hover:bg-white"
+                              )}
+                              title="Download PDF"
+                            >
+                              Download
+                            </button>
 
-                          {/* ✅ Discovery Export (non-mutating, ledger-linked only) */}
-                          <button
-                            type="button"
-                            onClick={exportDiscoveryPackage}
-                            disabled={exportBusy || !selected.source_record_id}
-                            className={cx(
-                              "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
-                              exportBusy || !selected.source_record_id
-                                ? "bg-white/5 text-slate-200/40 border-white/10"
-                                : "bg-sky-500/10 border-sky-500/30 text-sky-200 hover:bg-sky-500/15"
-                            )}
-                            title={
-                              selected.source_record_id
-                                ? "Export discovery package (ZIP)"
-                                : "Discovery Export requires a linked governance record (source_record_id)."
-                            }
-                          >
-                            {exportBusy ? "Exporting…" : "Discovery Export"}
-                          </button>
+                            <button
+                              type="button"
+                              onClick={openNewTab}
+                              disabled={pdfBusy}
+                              className={cx(
+                                "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
+                                pdfBusy
+                                  ? "bg-white/5 text-slate-200/60 border-white/10"
+                                  : "bg-white/5 border-white/10 text-slate-200 hover:bg-white/7 hover:border-amber-500/25"
+                              )}
+                              title="Open in new tab"
+                            >
+                              Open
+                            </button>
 
-                          {/* ✅ Promote / Reissue (idempotent) */}
-                          <button
-                            type="button"
-                            onClick={() => promoteToVerifiedRegistry({ force: canReissue })}
-                            disabled={promoteBusy}
-                            className={cx(
-                              "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
-                              promoteBusy
-                                ? "bg-white/5 text-slate-200/40 border-white/10"
-                                : "bg-emerald-500/10 border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/15"
-                            )}
-                            title={
-                              canReissue
-                                ? "Reissue certification (force=true). Overwrites certified PDF and updates hash/pointer."
-                                : "Promote this entry into Verified Registry (certify PDF + QR)."
-                            }
-                          >
-                            {promoteBusy ? (canReissue ? "Reissuing…" : "Promoting…") : canReissue ? "Reissue" : "Promote"}
-                          </button>
+                            {/* Evidence export (always available; picks ledger_id or entry_id automatically) */}
+                            <button
+                              type="button"
+                              onClick={exportDiscoveryPackage}
+                              disabled={exportBusy}
+                              className={cx(
+                                "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
+                                exportBusy
+                                  ? "bg-white/5 text-slate-200/40 border-white/10"
+                                  : "bg-sky-500/10 border-sky-500/30 text-sky-200 hover:bg-sky-500/15"
+                              )}
+                              title="Discovery Export (ZIP) — non-mutating point-in-time export"
+                            >
+                              {exportBusy ? "Exporting…" : "Discovery Export"}
+                            </button>
 
-                          {/* ✅ Verify Terminal (HASH-FIRST) */}
-                          <button
-                            type="button"
-                            onClick={openVerifyTerminal}
-                            disabled={!(certifiedHash || officialHash)}
-                            className={cx(
-                              "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
-                              !(certifiedHash || officialHash)
-                                ? "bg-white/5 text-slate-200/40 border-white/10"
-                                : "bg-white/5 border-amber-500/25 text-amber-200 hover:bg-white/7 hover:border-amber-500/40"
-                            )}
-                            title="Open public verify.html terminal (hash-first)"
-                          >
-                            Verify
-                          </button>
+                            {/* Promote (UPLOADS ONLY) */}
+                            <button
+                              type="button"
+                              onClick={() => promoteToVerifiedRegistry({ force: canReissue })}
+                              disabled={promoteBusy || !isUploadEntry}
+                              className={cx(
+                                "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
+                                promoteBusy || !isUploadEntry
+                                  ? "bg-white/5 text-slate-200/40 border-white/10"
+                                  : "bg-emerald-500/10 border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/15"
+                              )}
+                              title={
+                                !isUploadEntry
+                                  ? promoteDisabledReason || ""
+                                  : canReissue
+                                  ? "Reissue certification (force=true). Overwrites certified PDF and updates hash/pointer."
+                                  : "Promote upload into Verified Registry (certify PDF + QR)."
+                              }
+                            >
+                              {promoteBusy ? (canReissue ? "Reissuing…" : "Promoting…") : canReissue ? "Reissue" : "Promote Upload"}
+                            </button>
 
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setDeleteErr(null);
-                              setDeleteReason("");
-                              setDeleteOpen(true);
-                            }}
-                            className="rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border border-red-500/30 bg-red-500/10 text-red-200 hover:bg-red-500/15"
-                            title="Hard delete entry + files"
-                          >
-                            Delete
-                          </button>
+                            {/* Verify Terminal (HASH-FIRST) */}
+                            <button
+                              type="button"
+                              onClick={openVerifyTerminal}
+                              disabled={!(certifiedHash || officialHash)}
+                              className={cx(
+                                "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
+                                !(certifiedHash || officialHash)
+                                  ? "bg-white/5 text-slate-200/40 border-white/10"
+                                  : "bg-white/5 border-amber-500/25 text-amber-200 hover:bg-white/7 hover:border-amber-500/40"
+                              )}
+                              title="Open public verify.html terminal (hash-first)"
+                            >
+                              Verify
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDeleteErr(null);
+                                setDeleteReason("");
+                                setDeleteOpen(true);
+                              }}
+                              className="rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border border-red-500/30 bg-red-500/10 text-red-200 hover:bg-red-500/15"
+                              title="Hard delete entry + files"
+                            >
+                              Delete
+                            </button>
+                          </div>
+
+                          {/* Action guidance (enterprise) */}
+                          <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-[10px] text-slate-500 leading-relaxed">
+                            <span className="text-slate-300 font-semibold">Discovery Export</span> is non-mutating.
+                            <span className="text-slate-700"> • </span>
+                            <span className="text-slate-300 font-semibold">Promote</span> applies to uploads only.
+                            <span className="text-slate-700"> • </span>
+                            Resolutions are certified via Forge automatically.
+                          </div>
                         </div>
 
                         <div className="mt-3 flex items-center justify-between text-[10px] text-slate-500">
@@ -1842,7 +1964,9 @@ export default function MinuteBookClient() {
                       {showHashInReader ? (
                         <>
                           <span className="w-1 h-1 rounded-full bg-slate-700" />
-                          <span className="font-mono text-slate-300">{shortHash(certifiedHash || selected?.file_hash || null)}</span>
+                          <span className="font-mono text-slate-300">
+                            {shortHash((isUploadEntry ? certifiedHash : null) || officialHash || selected?.file_hash || null)}
+                          </span>
                         </>
                       ) : null}
                     </div>
@@ -1881,37 +2005,35 @@ export default function MinuteBookClient() {
                     <button
                       type="button"
                       onClick={exportDiscoveryPackage}
-                      disabled={exportBusy || !selected?.source_record_id}
+                      disabled={exportBusy}
                       className={cx(
                         "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase",
-                        exportBusy || !selected?.source_record_id
+                        exportBusy
                           ? "border-white/10 bg-white/5 text-slate-200/40"
                           : "border-sky-500/30 bg-sky-500/10 text-sky-200 hover:bg-sky-500/15"
                       )}
-                      title={
-                        selected?.source_record_id
-                          ? "Export discovery package (ZIP)"
-                          : "Discovery Export requires a linked governance record (source_record_id)."
-                      }
+                      title="Discovery Export (ZIP) — non-mutating point-in-time export"
                     >
                       {exportBusy ? "Exporting…" : "Export"}
                     </button>
 
-                    {/* Promote / Reissue */}
+                    {/* Promote / Reissue (UPLOADS ONLY) */}
                     <button
                       type="button"
                       onClick={() => promoteToVerifiedRegistry({ force: canReissue })}
-                      disabled={promoteBusy}
+                      disabled={promoteBusy || !isUploadEntry}
                       className={cx(
                         "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase",
-                        promoteBusy
+                        promoteBusy || !isUploadEntry
                           ? "border-white/10 bg-white/5 text-slate-200/40"
                           : "border-emerald-500/30 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/15"
                       )}
                       title={
-                        canReissue
+                        !isUploadEntry
+                          ? promoteDisabledReason || ""
+                          : canReissue
                           ? "Reissue certification (force=true). Overwrites certified PDF and updates hash/pointer."
-                          : "Promote this entry into Verified Registry."
+                          : "Promote upload into Verified Registry."
                       }
                     >
                       {promoteBusy ? (canReissue ? "Reissuing…" : "Promoting…") : canReissue ? "Reissue" : "Promote"}
@@ -2036,6 +2158,8 @@ export default function MinuteBookClient() {
             <span>Lane boundary enforced via governance_ledger.is_test.</span>
             <span className="text-slate-700">•</span>
             <span>Verification is hash-first (verify.html?hash=…).</span>
+            <span className="text-slate-700">•</span>
+            <span>Promote applies to uploads only (Forge resolutions are already certified).</span>
           </div>
         </>
       )}
