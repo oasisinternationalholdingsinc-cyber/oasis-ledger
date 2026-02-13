@@ -125,6 +125,9 @@ type VerifiedDocRow = {
   created_at?: string | null;
 };
 
+type FlashKind = "success" | "info" | "error";
+type FlashMsg = { kind: FlashKind; message: string; id: string };
+
 /* ---------------- helpers ---------------- */
 
 function cx(...xs: Array<string | false | null | undefined>) {
@@ -213,6 +216,32 @@ async function copyToClipboard(text: string) {
   }
 }
 
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
+}
+
+function timestampCompact(d = new Date()) {
+  // local time (operator-friendly)
+  const yyyy = d.getFullYear();
+  const mm = pad2(d.getMonth() + 1);
+  const dd = pad2(d.getDate());
+  const hh = pad2(d.getHours());
+  const mi = pad2(d.getMinutes());
+  const ss = pad2(d.getSeconds());
+  return `${yyyy}${mm}${dd}_${hh}${mi}${ss}`;
+}
+
+function safeBaseName(s: string) {
+  return (s || "")
+    .toString()
+    .trim()
+    .replace(/[\/\\]+/g, "-")
+    .replace(/[^\w\-. ]+/g, "")
+    .replace(/\s+/g, "_")
+    .replace(/_+/g, "_")
+    .slice(0, 90);
+}
+
 /**
  * Lane bucket heuristic (read-only, UI-only)
  */
@@ -251,15 +280,12 @@ function edgeInvokeMessage(error: any, data: any) {
   return msg || "Request failed.";
 }
 
-function safeZipNameFromSelected(e: EntryWithDoc) {
-  const base = (e.title || e.file_name || "Oasis-Discovery-Export")
-    .toString()
-    .trim()
-    .replace(/[\/\\]+/g, "-")
-    .replace(/[^\w\-. ]+/g, "")
-    .replace(/\s+/g, "_")
-    .slice(0, 90);
-  return `${base || "Oasis-Discovery-Export"}.zip`;
+function safeZipNameFromSelected(entityKey: string, laneIsTest: boolean, e: EntryWithDoc) {
+  const base = safeBaseName(e.title || e.file_name || "Oasis-Discovery-Export") || "Oasis-Discovery-Export";
+  const ek = safeBaseName(entityKey || "entity");
+  const lane = laneIsTest ? "SANDBOX" : "RoT";
+  const ts = timestampCompact();
+  return `${ek}__${lane}__${base}__${ts}.zip`;
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -368,7 +394,7 @@ async function loadEntries(entityKey: string): Promise<MinuteBookEntry[]> {
     .limit(1000);
 
   if (error) throw error;
-  return (data ?? []) as MinuteBookEntry[];
+  return (data ?? []) as MinuteBookEntry[] as MinuteBookEntry[];
 }
 
 async function loadSupportingDocs(entryIds: string[]): Promise<SupportingDoc[]> {
@@ -411,11 +437,7 @@ async function resolveOfficialArtifact(
   if (!ledgerId) return null;
 
   try {
-    const { data: gl } = await sb
-      .from("governance_ledger")
-      .select("id,is_test")
-      .eq("id", ledgerId)
-      .limit(1);
+    const { data: gl } = await sb.from("governance_ledger").select("id,is_test").eq("id", ledgerId).limit(1);
 
     const isTest = gl?.[0]?.is_test;
     if (typeof isTest === "boolean" && isTest !== laneIsTest) return null;
@@ -450,10 +472,7 @@ async function resolveOfficialArtifact(
 /**
  * ✅ PROMOTED resolver (read-only) — Minute Book entry certification artifact
  */
-async function resolvePromotedArtifact(
-  entryId: string,
-  laneIsTest: boolean
-): Promise<OfficialArtifact | null> {
+async function resolvePromotedArtifact(entryId: string, laneIsTest: boolean): Promise<OfficialArtifact | null> {
   const sb = supabaseBrowser;
 
   const { data, error } = await sb
@@ -679,7 +698,7 @@ async function exportDiscoveryZipViaFetch(body: Record<string, any>, filename: s
     const json = (await res.json().catch(() => null)) as ExportResult | null;
     if (json?.url) {
       window.open(json.url, "_blank", "noopener,noreferrer");
-      return;
+      return { kind: "url" as const };
     }
     throw new Error(json?.error || "Export failed (no url).");
   }
@@ -689,13 +708,14 @@ async function exportDiscoveryZipViaFetch(body: Record<string, any>, filename: s
     const ab = await res.arrayBuffer();
     const blob = new Blob([ab], { type: "application/zip" });
     downloadBlob(blob, filename);
-    return;
+    return { kind: "zip" as const };
   }
 
   // fallback: try bytes anyway
   const ab = await res.arrayBuffer();
   const blob = new Blob([ab], { type: ct || "application/octet-stream" });
   downloadBlob(blob, filename);
+  return { kind: "bytes" as const };
 }
 
 export default function MinuteBookClient() {
@@ -740,6 +760,16 @@ export default function MinuteBookClient() {
   const [promoteErr, setPromoteErr] = useState<string | null>(null);
 
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  const [flash, setFlash] = useState<FlashMsg | null>(null);
+
+  function pushFlash(kind: FlashKind, message: string) {
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    setFlash({ kind, message, id });
+    window.setTimeout(() => {
+      setFlash((v) => (v?.id === id ? null : v));
+    }, 2600);
+  }
 
   const selected = useMemo(() => {
     if (!selectedId) return null;
@@ -821,6 +851,7 @@ export default function MinuteBookClient() {
       setPromoteBusy(false);
 
       setCopiedKey(null);
+      setFlash(null);
 
       if (!entityKey) {
         setLoading(false);
@@ -841,10 +872,7 @@ export default function MinuteBookClient() {
         const laneMap = new Map<string, { is_test: boolean; status: string }>();
 
         if (recordIds.length) {
-          const { data } = await supabaseBrowser
-            .from("governance_ledger")
-            .select("id,is_test,status")
-            .in("id", recordIds);
+          const { data } = await supabaseBrowser.from("governance_ledger").select("id,is_test,status").in("id", recordIds);
 
           for (const r of data ?? []) {
             laneMap.set(String((r as any).id), {
@@ -988,8 +1016,12 @@ export default function MinuteBookClient() {
 
     try {
       const preferred = official || promoted || null;
-      const { signedUrl, resolvedBucket: b, resolvedPath: p } =
-        await bestSignedUrlForMinuteBookEvidence(entityKey, selected, preferred, null);
+      const { signedUrl, resolvedBucket: b, resolvedPath: p } = await bestSignedUrlForMinuteBookEvidence(
+        entityKey,
+        selected,
+        preferred,
+        null
+      );
 
       setPreviewUrl(signedUrl);
       setResolvedBucket(b);
@@ -1012,8 +1044,12 @@ export default function MinuteBookClient() {
       const name = selected.file_name || `${norm(selected.title, "document")}.pdf`;
       const preferred = official || promoted || null;
 
-      const { signedUrl, resolvedBucket: b, resolvedPath: p } =
-        await bestSignedUrlForMinuteBookEvidence(entityKey, selected, preferred, name);
+      const { signedUrl, resolvedBucket: b, resolvedPath: p } = await bestSignedUrlForMinuteBookEvidence(
+        entityKey,
+        selected,
+        preferred,
+        name
+      );
 
       setResolvedBucket(b);
       setResolvedPath(p);
@@ -1039,8 +1075,12 @@ export default function MinuteBookClient() {
 
       const preferred = official || promoted || null;
 
-      const { signedUrl, resolvedBucket: b, resolvedPath: p } =
-        await bestSignedUrlForMinuteBookEvidence(entityKey, selected, preferred, null);
+      const { signedUrl, resolvedBucket: b, resolvedPath: p } = await bestSignedUrlForMinuteBookEvidence(
+        entityKey,
+        selected,
+        preferred,
+        null
+      );
 
       setResolvedBucket(b);
       setResolvedPath(p);
@@ -1067,7 +1107,11 @@ export default function MinuteBookClient() {
       const body: Record<string, any> = ledgerId ? { ledger_id: ledgerId } : { entry_id: entryId };
 
       // First, try fetch-based ZIP download (matches your logs: 200 application/zip)
-      await exportDiscoveryZipViaFetch(body, safeZipNameFromSelected(selected));
+      const fname = safeZipNameFromSelected(String(entityKey || "entity"), laneIsTest, selected);
+      const r = await exportDiscoveryZipViaFetch(body, fname);
+
+      pushFlash("success", r?.kind === "url" ? "Discovery export opened." : "Discovery export downloaded.");
+      return;
     } catch (e: unknown) {
       // Fallback to invoke() for deployments that return JSON {url}
       try {
@@ -1086,20 +1130,23 @@ export default function MinuteBookClient() {
           const res = (data ?? {}) as ExportResult;
           if (!res.url) throw new Error(res.error || "Export failed (no url returned).");
           window.open(res.url, "_blank", "noopener,noreferrer");
+          pushFlash("success", "Discovery export opened.");
           return;
         }
 
         const blob = asZipBlobOrNull(data);
         if (blob) {
-          downloadBlob(blob, safeZipNameFromSelected(selected));
+          const fname = safeZipNameFromSelected(String(entityKey || "entity"), laneIsTest, selected);
+          downloadBlob(blob, fname);
+          pushFlash("success", "Discovery export downloaded.");
           return;
         }
 
-        throw new Error(
-          e instanceof Error ? e.message : "Export returned an unexpected response format."
-        );
+        throw new Error(e instanceof Error ? e.message : "Export returned an unexpected response format.");
       } catch (inner: unknown) {
-        setExportErr(inner instanceof Error ? inner.message : "Discovery Export failed.");
+        const msg = inner instanceof Error ? inner.message : "Discovery Export failed.";
+        setExportErr(msg);
+        pushFlash("error", msg);
       }
     } finally {
       setExportBusy(false);
@@ -1110,7 +1157,9 @@ export default function MinuteBookClient() {
     if (!selected) return;
 
     if (!isUploadEntry) {
-      setPromoteErr("Not applicable: governance resolutions are certified via Forge automatically.");
+      const msg = "Not applicable: governance resolutions are certified via Forge automatically.";
+      setPromoteErr(msg);
+      pushFlash("info", msg);
       return;
     }
 
@@ -1136,8 +1185,7 @@ export default function MinuteBookClient() {
       const res = (data ?? {}) as PromoteResult;
       if (!res.ok || !res.verified_document_id) {
         const msg =
-          (typeof res.error === "string" && res.error) ||
-          "Certification failed (no ok=true/verified_document_id).";
+          (typeof res.error === "string" && res.error) || "Certification failed (no ok=true/verified_document_id).";
         throw new Error(msg);
       }
 
@@ -1147,8 +1195,14 @@ export default function MinuteBookClient() {
       if (previewUrl) {
         await ensurePreviewUrl(false);
       }
+
+      // subtle success feedback (no UX regression; banner auto-dismisses)
+      const label = force ? "Reissued" : res.reused ? "Updated" : "Certified";
+      pushFlash("success", `${label} ✓ Minute Book certification is live.`);
     } catch (e: unknown) {
-      setPromoteErr(e instanceof Error ? e.message : "Certification failed.");
+      const msg = e instanceof Error ? e.message : "Certification failed.";
+      setPromoteErr(msg);
+      pushFlash("error", msg);
     } finally {
       setPromoteBusy(false);
     }
@@ -1197,6 +1251,8 @@ export default function MinuteBookClient() {
 
       setCopiedKey(null);
 
+      pushFlash("success", "Entry deleted.");
+
       if (entityKey) {
         const base = await loadEntries(entityKey);
         const ids = base.map((e: MinuteBookEntry) => e.id);
@@ -1207,10 +1263,7 @@ export default function MinuteBookClient() {
         const laneMap = new Map<string, { is_test: boolean; status: string }>();
 
         if (recordIds.length) {
-          const { data: gl } = await supabaseBrowser
-            .from("governance_ledger")
-            .select("id,is_test,status")
-            .in("id", recordIds);
+          const { data: gl } = await supabaseBrowser.from("governance_ledger").select("id,is_test,status").in("id", recordIds);
 
           for (const r of gl ?? []) {
             laneMap.set(String((r as any).id), {
@@ -1247,7 +1300,9 @@ export default function MinuteBookClient() {
         setSelectedId(laneFiltered[0]?.id ?? null);
       }
     } catch (e: unknown) {
-      setDeleteErr(e instanceof Error ? e.message : "Delete failed.");
+      const msg = e instanceof Error ? e.message : "Delete failed.";
+      setDeleteErr(msg);
+      pushFlash("error", msg);
     } finally {
       setDeleteBusy(false);
     }
@@ -1277,8 +1332,57 @@ export default function MinuteBookClient() {
     <div className={cx(body, className)}>{children}</div>
   );
 
+  const FlashBanner = ({ msg }: { msg: FlashMsg }) => (
+    <div
+      className={cx(
+        "mb-3 rounded-2xl border px-3 py-2 text-[11px] leading-relaxed flex items-start justify-between gap-3",
+        msg.kind === "success"
+          ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-100"
+          : msg.kind === "error"
+          ? "border-red-500/25 bg-red-500/10 text-red-100"
+          : "border-amber-500/25 bg-amber-500/10 text-amber-100"
+      )}
+    >
+      <span className="min-w-0">{msg.message}</span>
+      <button
+        type="button"
+        onClick={() => setFlash(null)}
+        className="shrink-0 rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+      >
+        Close
+      </button>
+    </div>
+  );
+
   return (
     <Shell>
+      {/* tiny shimmer + micro-polish css (local, UI-only) */}
+      <style jsx global>{`
+        @keyframes oasisShimmer {
+          0% {
+            background-position: -200% 0;
+            opacity: 0.92;
+          }
+          50% {
+            opacity: 1;
+          }
+          100% {
+            background-position: 200% 0;
+            opacity: 0.92;
+          }
+        }
+        .oasis-shimmer {
+          background: linear-gradient(
+            90deg,
+            rgba(255, 214, 128, 0.10),
+            rgba(255, 214, 128, 0.32),
+            rgba(255, 214, 128, 0.10)
+          );
+          background-size: 200% 100%;
+          animation: oasisShimmer 2.25s linear infinite;
+        }
+      `}</style>
+
       <GlassCard className="mb-4">
         <CardHeader>
           <div className="flex items-start justify-between gap-3">
@@ -1340,6 +1444,8 @@ export default function MinuteBookClient() {
         </GlassCard>
       ) : (
         <>
+          {flash ? <FlashBanner msg={flash} /> : null}
+
           {/* MOBILE TOOLBAR */}
           <div className="sm:hidden mb-3 flex items-center gap-2">
             <button
@@ -1582,11 +1688,28 @@ export default function MinuteBookClient() {
                   ) : (
                     <>
                       <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                        <div className="text-sm font-semibold text-slate-100">
-                          {selected.title || selected.file_name || "Untitled filing"}
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold text-slate-100">
+                              {selected.title || selected.file_name || "Untitled filing"}
+                            </div>
+                            <div className="mt-1 text-[11px] text-slate-500">
+                              {selected.created_at ? new Date(selected.created_at).toLocaleString() : "—"}
+                            </div>
+                          </div>
+
+                          {/* Certified shimmer chip (tiny, non-invasive) */}
+                          {isUploadEntry && certifiedHash ? (
+                            <span className="shrink-0 inline-flex items-center gap-2 rounded-full border border-amber-500/25 bg-white/5 px-2 py-1">
+                              <span className="oasis-shimmer w-2.5 h-2.5 rounded-full border border-amber-500/30" />
+                              <span className="text-[10px] font-semibold tracking-[0.18em] uppercase text-amber-200">
+                                Certified ✓
+                              </span>
+                            </span>
+                          ) : null}
                         </div>
 
-                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
                           <span className="px-2 py-1 rounded-full bg-white/5 border border-white/10 text-[11px] text-slate-200 capitalize">
                             {selected.entry_type || "document"}
                           </span>
@@ -1599,9 +1722,7 @@ export default function MinuteBookClient() {
                           <span
                             className={cx(
                               "px-2 py-1 rounded-full border text-[11px]",
-                              isUploadEntry
-                                ? "bg-sky-500/10 border-sky-500/30 text-sky-200"
-                                : "bg-white/5 border-white/10 text-slate-300"
+                              isUploadEntry ? "bg-sky-500/10 border-sky-500/30 text-sky-200" : "bg-white/5 border-white/10 text-slate-300"
                             )}
                           >
                             {isUploadEntry ? "UPLOAD" : "FORGE"}
@@ -1690,6 +1811,8 @@ export default function MinuteBookClient() {
                                 "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
                                 promoteBusy || !isUploadEntry
                                   ? "bg-white/5 text-slate-200/40 border-white/10"
+                                  : canReissue
+                                  ? "bg-amber-500/10 border-amber-500/30 text-amber-200 hover:bg-amber-500/15"
                                   : "bg-emerald-500/10 border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/15"
                               )}
                               title={!isUploadEntry ? promoteDisabledReason || "" : ""}
@@ -1770,6 +1893,16 @@ export default function MinuteBookClient() {
                               <span className="text-slate-200 font-mono truncate max-w-[240px]">
                                 {certifiedHash ? shortHash(certifiedHash) : "—"}
                               </span>
+
+                              {certifiedHash ? (
+                                <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/25 bg-white/5 px-2 py-1">
+                                  <span className="oasis-shimmer w-2 h-2 rounded-full border border-amber-500/30" />
+                                  <span className="text-[10px] font-semibold tracking-[0.18em] uppercase text-amber-200">
+                                    ✓
+                                  </span>
+                                </span>
+                              ) : null}
+
                               <button
                                 type="button"
                                 disabled={!certifiedHash}
@@ -1778,6 +1911,7 @@ export default function MinuteBookClient() {
                                   const ok = await copyToClipboard(certifiedHash);
                                   if (ok) {
                                     setCopiedKey("cert-hash");
+                                    pushFlash("success", "Certified hash copied.");
                                     window.setTimeout(
                                       () => setCopiedKey((v) => (v === "cert-hash" ? null : v)),
                                       1200
@@ -1918,6 +2052,19 @@ export default function MinuteBookClient() {
                       <span>{laneIsTest ? "SANDBOX" : "RoT"}</span>
                       <span className="w-1 h-1 rounded-full bg-slate-700" />
                       <span>{authorityBadge?.label || "—"}</span>
+
+                      {isUploadEntry && certifiedHash ? (
+                        <>
+                          <span className="w-1 h-1 rounded-full bg-slate-700" />
+                          <span className="inline-flex items-center gap-2 rounded-full border border-amber-500/25 bg-white/5 px-2 py-1">
+                            <span className="oasis-shimmer w-2 h-2 rounded-full border border-amber-500/30" />
+                            <span className="text-[10px] font-semibold tracking-[0.18em] uppercase text-amber-200">
+                              Certified ✓
+                            </span>
+                          </span>
+                        </>
+                      ) : null}
+
                       {showHashInReader ? (
                         <>
                           <span className="w-1 h-1 rounded-full bg-slate-700" />
@@ -1980,6 +2127,8 @@ export default function MinuteBookClient() {
                         "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase",
                         promoteBusy || !isUploadEntry
                           ? "border-white/10 bg-white/5 text-slate-200/40"
+                          : canReissue
+                          ? "border-amber-500/30 bg-amber-500/10 text-amber-200 hover:bg-amber-500/15"
                           : "border-emerald-500/30 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/15"
                       )}
                     >
