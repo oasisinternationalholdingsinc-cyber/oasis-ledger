@@ -12,8 +12,8 @@ export const dynamic = "force-dynamic";
  *
  * Phase-2 enhancement (UI-only, NO schema/wiring drift):
  * ✅ Discovery Export button → calls Edge Function export-discovery-package (non-mutating ZIP)
- *    - body: { ledger_id } OR { entry_id } (uploads)
- *    - Edge returns a ZIP download (may be direct bytes or a signed URL depending on deployment)
+ *    - body: { ledger_id } OR { entry_id }
+ *    - Edge returns a ZIP download (bytes) OR { ok:true, url }
  *
  * ✅ Promote to Verified Registry (Minute Book Entry Certification)
  *    - PROMOTE IS UPLOADS-ONLY (source_record_id must be null)
@@ -21,13 +21,8 @@ export const dynamic = "force-dynamic";
  *    - body: { entry_id, is_test, force? }  (actor resolved from JWT inside function)
  *    - expects: { ok:true, verified_document_id, reused?, verify_url? }
  *
- * ✅ NEW: Re-Promote / Reissue allowed (idempotent + safe)
- *    - If already promoted, button becomes “Reissue” and sends { force:true }
- *    - No deletes required; same verified_documents row/pointer is updated and PDF is overwritten (update)
- *
  * ✅ IMPORTANT: verify.html is HASH-FIRST ONLY
  *    - Verify button opens verify.html?hash=<verified_documents.file_hash>
- *    - We never open verify by verified_id
  */
 
 import Link from "next/link";
@@ -81,7 +76,6 @@ type EntryWithDoc = MinuteBookEntry & {
   file_size?: number | null;
   mime_type?: string | null;
 
-  // lane-safe metadata (UI-only)
   lane_is_test?: boolean | null;
   ledger_status?: string | null;
 };
@@ -91,7 +85,7 @@ type OfficialArtifact = {
   storage_path: string;
   file_name?: string | null;
   kind?: "official" | "certified" | "verified";
-  verified_document_id?: string | null; // stored, but NOT used for verify.html
+  verified_document_id?: string | null;
   file_hash?: string | null; // ✅ used for verify.html (hash-first)
 };
 
@@ -227,8 +221,7 @@ function bucketCandidatesForPath(path: string) {
   const candidates: string[] = [];
 
   if (p.startsWith("sandbox/")) candidates.push("governance_sandbox");
-  if (p.startsWith("truth/")) candidates.push("governance_truth"); // harmless if absent
-  if (p.includes("/archive/")) candidates.push("governance_sandbox");
+  if (p.startsWith("truth/")) candidates.push("governance_truth");
 
   candidates.push("minute_book");
   candidates.push("governance_sandbox");
@@ -281,8 +274,7 @@ function downloadBlob(blob: Blob, filename: string) {
 }
 
 /**
- * ✅ TS-safe conversion: Uint8Array<ArrayBufferLike> → ArrayBuffer
- * (avoids SharedArrayBuffer typing mismatch for BlobPart in Next 16 DOM libs)
+ * ✅ TS-safe: Uint8Array<ArrayBufferLike> → ArrayBuffer
  */
 function u8ToArrayBuffer(u8: Uint8Array): ArrayBuffer {
   const buf = new ArrayBuffer(u8.byteLength);
@@ -290,24 +282,24 @@ function u8ToArrayBuffer(u8: Uint8Array): ArrayBuffer {
   return buf;
 }
 
+/**
+ * ✅ Robust ZIP handling:
+ * - If response is Blob/ArrayBuffer/Uint8Array → build zip blob safely
+ */
 function asZipBlobOrNull(data: any): Blob | null {
   if (!data) return null;
 
-  // If supabase-js hands us a Blob already
   if (typeof Blob !== "undefined" && data instanceof Blob) return data;
 
-  // ArrayBuffer
   if (typeof ArrayBuffer !== "undefined" && data instanceof ArrayBuffer) {
     return new Blob([data], { type: "application/zip" });
   }
 
-  // Uint8Array (TS-safe: convert to ArrayBuffer copy)
   if (typeof Uint8Array !== "undefined" && data instanceof Uint8Array) {
     const ab = u8ToArrayBuffer(data);
     return new Blob([ab], { type: "application/zip" });
   }
 
-  // Some runtimes return { data: Uint8Array | ArrayBuffer }
   if (data?.data && (data.data instanceof Uint8Array || data.data instanceof ArrayBuffer)) {
     const inner = data.data instanceof Uint8Array ? u8ToArrayBuffer(data.data) : data.data;
     return new Blob([inner], { type: "application/zip" });
@@ -408,7 +400,6 @@ function pickPrimaryDocByEntry(docs: SupportingDoc[]): Map<string, SupportingDoc
 
 /**
  * ✅ OFFICIAL resolver (read-only) — lane-aware (checks governance_ledger.is_test)
- * - This is the governance-record official artifact path (existing behavior; NO regression)
  */
 async function resolveOfficialArtifact(
   _entityKey: string,
@@ -420,7 +411,6 @@ async function resolveOfficialArtifact(
   if (!ledgerId) return null;
 
   try {
-    // lane gate
     const { data: gl } = await sb
       .from("governance_ledger")
       .select("id,is_test")
@@ -459,9 +449,6 @@ async function resolveOfficialArtifact(
 
 /**
  * ✅ PROMOTED resolver (read-only) — Minute Book entry certification artifact
- * - Looks for verified_documents where source_table='minute_book_entries' and source_record_id=entry.id
- * - Lane is implied by storage_bucket and matches current env
- * - This does NOT change any existing wiring; it only reads.
  */
 async function resolvePromotedArtifact(
   entryId: string,
@@ -485,7 +472,6 @@ async function resolvePromotedArtifact(
   const path = (row.storage_path || "").toString().trim();
   if (!bucket || !path) return null;
 
-  // lane gate (UI-only): sandbox bucket belongs to SANDBOX; truth bucket belongs to RoT
   if (bucket === "governance_sandbox" && !laneIsTest) return null;
   if (bucket === "governance_truth" && laneIsTest) return null;
 
@@ -515,7 +501,6 @@ async function signedUrlFor(
   const wantPath = normalizeSlashes(storagePath).replace(/^\/+/, "");
   const opts: { download?: string } | undefined = downloadName ? { download: downloadName } : undefined;
 
-  // 1) exact path
   {
     const { data, error } = await sb.storage.from(bucketId).createSignedUrl(wantPath, 60 * 10, opts);
     if (!error && data?.signedUrl) {
@@ -524,7 +509,6 @@ async function signedUrlFor(
     if (error && !looksLikeNotFound(error)) throw error;
   }
 
-  // 2) directory repair
   const dir = dirOf(wantPath);
   const base = baseOf(wantPath);
   const uuidPrefix = extractUuidPrefix(base);
@@ -648,60 +632,113 @@ async function bestSignedUrlForMinuteBookEvidence(
   throw new Error(msg);
 }
 
-/* ---------------- UI ---------------- */
+/* ---------------- ZIP EXPORT (FIXED) ---------------- */
+
+/**
+ * ✅ The Edge logs show: status 200 + content-type application/zip.
+ * Supabase `functions.invoke()` often assumes JSON; so we fetch directly and download bytes.
+ * NO new routes. NO backend changes.
+ */
+async function exportDiscoveryZipViaFetch(body: Record<string, any>, filename: string) {
+  const sb = supabaseBrowser;
+
+  const {
+    data: { session },
+  } = await sb.auth.getSession();
+
+  const accessToken = session?.access_token;
+  if (!accessToken) throw new Error("Not authenticated.");
+
+  const anonKey =
+    (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "").toString().trim() ||
+    // @ts-ignore
+    (sb as any)?.supabaseKey ||
+    "";
+
+  const url = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/export-discovery-package`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${accessToken}`,
+      apikey: anonKey,
+    },
+    body: JSON.stringify(body),
+  });
+
+  const ct = (res.headers.get("content-type") || "").toLowerCase();
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(txt || `Export failed (${res.status}).`);
+  }
+
+  // Variant: JSON {url}
+  if (ct.includes("application/json")) {
+    const json = (await res.json().catch(() => null)) as ExportResult | null;
+    if (json?.url) {
+      window.open(json.url, "_blank", "noopener,noreferrer");
+      return;
+    }
+    throw new Error(json?.error || "Export failed (no url).");
+  }
+
+  // Variant: ZIP bytes
+  if (ct.includes("application/zip") || ct.includes("application/octet-stream")) {
+    const ab = await res.arrayBuffer();
+    const blob = new Blob([ab], { type: "application/zip" });
+    downloadBlob(blob, filename);
+    return;
+  }
+
+  // fallback: try bytes anyway
+  const ab = await res.arrayBuffer();
+  const blob = new Blob([ab], { type: ct || "application/octet-stream" });
+  downloadBlob(blob, filename);
+}
 
 export default function MinuteBookClient() {
   const { entityKey } = useEntity();
   const { env } = useOsEnv();
   const laneIsTest = env === "SANDBOX";
 
-  // domains
   const [domains, setDomains] = useState<GovernanceDomain[]>([]);
   const [activeDomainKey, setActiveDomainKey] = useState<string>("all");
 
-  // entries
   const [entries, setEntries] = useState<EntryWithDoc[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  // ui state
   const [query, setQuery] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // evidence state (official-first)
   const [official, setOfficial] = useState<OfficialArtifact | null>(null);
-  const [promoted, setPromoted] = useState<OfficialArtifact | null>(null); // minute_book_entries certification
+  const [promoted, setPromoted] = useState<OfficialArtifact | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [pdfBusy, setPdfBusy] = useState<boolean>(false);
   const [pdfErr, setPdfErr] = useState<string | null>(null);
 
-  // show what actually got signed (bucket/path)
   const [resolvedBucket, setResolvedBucket] = useState<string | null>(null);
   const [resolvedPath, setResolvedPath] = useState<string | null>(null);
 
-  // mobile rails / sheets
   const [mobileDomainsOpen, setMobileDomainsOpen] = useState(false);
   const [mobileReaderOpen, setMobileReaderOpen] = useState(false);
 
-  // reader overlay (desktop + mobile)
   const [readerTone, setReaderTone] = useState<"glass" | "solid">("glass");
   const [showHashInReader, setShowHashInReader] = useState<boolean>(true);
 
-  // delete UX
   const [deleteOpen, setDeleteOpen] = useState<boolean>(false);
   const [deleteReason, setDeleteReason] = useState<string>("");
   const [deleteBusy, setDeleteBusy] = useState<boolean>(false);
   const [deleteErr, setDeleteErr] = useState<string | null>(null);
 
-  // discovery export (non-mutating)
   const [exportBusy, setExportBusy] = useState<boolean>(false);
   const [exportErr, setExportErr] = useState<string | null>(null);
 
-  // promote → verified registry (mutating Edge Function)
   const [promoteBusy, setPromoteBusy] = useState<boolean>(false);
   const [promoteErr, setPromoteErr] = useState<string | null>(null);
 
-  // small UX: copy feedback (no global toast system assumed)
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   const selected = useMemo(() => {
@@ -709,16 +746,12 @@ export default function MinuteBookClient() {
     return entries.find((e) => e.id === selectedId) || null;
   }, [entries, selectedId]);
 
-  // ✅ uploads-only promote: if source_record_id exists, it is ledger/forge-origin (already certified)
   const isUploadEntry = useMemo(() => {
     if (!selected) return false;
     return !String(selected.source_record_id || "").trim();
   }, [selected?.id, selected?.source_record_id]);
 
   const canReissue = useMemo(() => {
-    // reissue is allowed iff:
-    // - entry is an UPLOAD (uploads-only promotion policy)
-    // - there is already a promoted artifact (minute book certification)
     return !!promoted && isUploadEntry;
   }, [promoted, isUploadEntry]);
 
@@ -739,9 +772,7 @@ export default function MinuteBookClient() {
 
   const promoteDisabledReason = useMemo(() => {
     if (!selected) return "Select a record first.";
-    if (!isUploadEntry) {
-      return "Not applicable: governance resolutions are certified via Forge automatically.";
-    }
+    if (!isUploadEntry) return "Not applicable: governance resolutions are certified via Forge automatically.";
     return null;
   }, [selected?.id, isUploadEntry]);
 
@@ -759,13 +790,12 @@ export default function MinuteBookClient() {
         setErr(e instanceof Error ? e.message : "Failed to load governance domains.");
       }
     })();
-
     return () => {
       alive = false;
     };
   }, []);
 
-  // Load entries (entity-scoped) + resolve primary docs + lane filter
+  // Load entries + docs + lane filter
   useEffect(() => {
     let alive = true;
 
@@ -807,12 +837,15 @@ export default function MinuteBookClient() {
 
         const primary = pickPrimaryDocByEntry(docs);
 
-        // lane map from governance_ledger for source_record_id
         const recordIds = uniq(base.map((r) => r.source_record_id).filter(Boolean) as string[]);
         const laneMap = new Map<string, { is_test: boolean; status: string }>();
 
         if (recordIds.length) {
-          const { data } = await supabaseBrowser.from("governance_ledger").select("id,is_test,status").in("id", recordIds);
+          const { data } = await supabaseBrowser
+            .from("governance_ledger")
+            .select("id,is_test,status")
+            .in("id", recordIds);
+
           for (const r of data ?? []) {
             laneMap.set(String((r as any).id), {
               is_test: !!(r as any).is_test,
@@ -833,13 +866,11 @@ export default function MinuteBookClient() {
             file_hash: doc?.file_hash ?? null,
             file_size: doc?.file_size ?? null,
             mime_type: doc?.mime_type ?? null,
-
             lane_is_test: lm?.is_test ?? null,
             ledger_status: lm?.status ?? null,
           };
         });
 
-        // lane boundary: if we can resolve lane, enforce it; otherwise keep entry visible
         const laneFiltered = merged.filter((r) => {
           if (r.lane_is_test === null || r.lane_is_test === undefined) return true;
           return r.lane_is_test === laneIsTest;
@@ -909,7 +940,7 @@ export default function MinuteBookClient() {
     return domains.find((d) => d.key === activeDomainKey)?.label || "Domain";
   }, [activeDomainKey, domains]);
 
-  // Resolve official + promoted artifact on selection (lane-aware)
+  // Resolve official + promoted on selection
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -956,9 +987,7 @@ export default function MinuteBookClient() {
     setPdfBusy(true);
 
     try {
-      // ✅ preference order: OFFICIAL (governance-linked) → PROMOTED (minute book certified) → primary upload
       const preferred = official || promoted || null;
-
       const { signedUrl, resolvedBucket: b, resolvedPath: p } =
         await bestSignedUrlForMinuteBookEvidence(entityKey, selected, preferred, null);
 
@@ -1024,10 +1053,7 @@ export default function MinuteBookClient() {
     }
   }
 
-  // ✅ Discovery Export (non-mutating) — CORRECT EDGE FN: export-discovery-package
-  // - If linked to governance_ledger: send { ledger_id }
-  // - If upload-only: send { entry_id }
-  // - Supports either (a) direct zip bytes OR (b) { ok:true, url } (future-proof)
+  // ✅ Discovery Export (FIXED)
   async function exportDiscoveryPackage() {
     if (!selected) return;
 
@@ -1040,56 +1066,49 @@ export default function MinuteBookClient() {
 
       const body: Record<string, any> = ledgerId ? { ledger_id: ledgerId } : { entry_id: entryId };
 
-      const { data, error } = await supabaseBrowser.functions.invoke("export-discovery-package", {
-        body,
-      });
+      // First, try fetch-based ZIP download (matches your logs: 200 application/zip)
+      await exportDiscoveryZipViaFetch(body, safeZipNameFromSelected(selected));
+    } catch (e: unknown) {
+      // Fallback to invoke() for deployments that return JSON {url}
+      try {
+        const ledgerId = (selected.source_record_id || "").toString().trim() || null;
+        const entryId = (selected.id || "").toString().trim() || null;
+        const body: Record<string, any> = ledgerId ? { ledger_id: ledgerId } : { entry_id: entryId };
 
-      if (error) {
-        const msg = edgeInvokeMessage(error, data);
-        throw new Error(msg);
-      }
+        const { data, error } = await supabaseBrowser.functions.invoke("export-discovery-package", { body });
 
-      // Variant A: returns JSON with signed URL
-      if (data && typeof data === "object" && "url" in (data as any)) {
-        const res = (data ?? {}) as ExportResult;
-        if (!res.url) {
-          const msg = (typeof res.error === "string" && res.error) || "Export failed (no url returned).";
+        if (error) {
+          const msg = edgeInvokeMessage(error, data);
           throw new Error(msg);
         }
-        window.open(res.url, "_blank", "noopener,noreferrer");
-        return;
-      }
 
-      // Variant B: returns direct zip bytes/blob
-      const blob = asZipBlobOrNull(data);
-      if (blob) {
-        downloadBlob(blob, safeZipNameFromSelected(selected));
-        return;
-      }
+        if (data && typeof data === "object" && "url" in (data as any)) {
+          const res = (data ?? {}) as ExportResult;
+          if (!res.url) throw new Error(res.error || "Export failed (no url returned).");
+          window.open(res.url, "_blank", "noopener,noreferrer");
+          return;
+        }
 
-      // If the runtime gave us a string, try to surface it (don’t lie)
-      if (typeof data === "string") {
-        throw new Error(data.length < 240 ? data : "Export returned an unexpected response format.");
-      }
+        const blob = asZipBlobOrNull(data);
+        if (blob) {
+          downloadBlob(blob, safeZipNameFromSelected(selected));
+          return;
+        }
 
-      throw new Error("Export returned an unexpected response format (no url, no zip bytes).");
-    } catch (e: unknown) {
-      setExportErr(e instanceof Error ? e.message : "Discovery Export failed.");
+        throw new Error(
+          e instanceof Error ? e.message : "Export returned an unexpected response format."
+        );
+      } catch (inner: unknown) {
+        setExportErr(inner instanceof Error ? inner.message : "Discovery Export failed.");
+      }
     } finally {
       setExportBusy(false);
     }
   }
 
-  /**
-   * ✅ Promote / Reissue to Verified Registry (minute_book entry certification)
-   * - UPLOADS ONLY (source_record_id must be null)
-   * - First-time: force=false
-   * - Reissue: force=true (allowed, idempotent, overwrites/upserts certified PDF and updates hash/pointer)
-   */
   async function promoteToVerifiedRegistry(opts?: { force?: boolean }) {
     if (!selected) return;
 
-    // hard guard (UI-only)
     if (!isUploadEntry) {
       setPromoteErr("Not applicable: governance resolutions are certified via Forge automatically.");
       return;
@@ -1122,11 +1141,9 @@ export default function MinuteBookClient() {
         throw new Error(msg);
       }
 
-      // refresh promoted resolver (read-only)
       const prom = await resolvePromotedArtifact(selected.id, laneIsTest);
       setPromoted(prom);
 
-      // keep preview aligned after reissue
       if (previewUrl) {
         await ensurePreviewUrl(false);
       }
@@ -1139,15 +1156,9 @@ export default function MinuteBookClient() {
 
   function openVerifyTerminal() {
     if (!selected) return;
-
-    // ✅ HASH-FIRST:
-    // - Uploads: prefer promoted certified hash
-    // - Resolutions: official hash (Forge-certified)
     const hash = (isUploadEntry ? certifiedHash : null) || officialHash || certifiedHash || null;
     if (!hash) return;
-
-    const url = buildVerifyHtmlUrlFromHash(hash);
-    window.open(url, "_blank", "noopener,noreferrer");
+    window.open(buildVerifyHtmlUrlFromHash(hash), "_blank", "noopener,noreferrer");
   }
 
   async function runDelete() {
@@ -1242,7 +1253,7 @@ export default function MinuteBookClient() {
     }
   }
 
-  /* ---------------- UI atoms (MATCH VERIFIED/FORGE 1:1) ---------------- */
+  /* ---------------- UI atoms ---------------- */
 
   const shell =
     "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden";
@@ -1266,11 +1277,8 @@ export default function MinuteBookClient() {
     <div className={cx(body, className)}>{children}</div>
   );
 
-  /* ---------------- render ---------------- */
-
   return (
     <Shell>
-      {/* OS-aligned header (MATCH VERIFIED/FORGE grammar) */}
       <GlassCard className="mb-4">
         <CardHeader>
           <div className="flex items-start justify-between gap-3">
@@ -1332,7 +1340,7 @@ export default function MinuteBookClient() {
         </GlassCard>
       ) : (
         <>
-          {/* MOBILE TOOLBAR (domains + reader) */}
+          {/* MOBILE TOOLBAR */}
           <div className="sm:hidden mb-3 flex items-center gap-2">
             <button
               type="button"
@@ -1345,9 +1353,7 @@ export default function MinuteBookClient() {
 
             <button
               type="button"
-              onClick={async () => {
-                await ensurePreviewUrl(true);
-              }}
+              onClick={async () => ensurePreviewUrl(true)}
               disabled={!selected || pdfBusy}
               className={cx(
                 "rounded-2xl px-4 py-3 border text-sm font-semibold",
@@ -1360,7 +1366,6 @@ export default function MinuteBookClient() {
             </button>
           </div>
 
-          {/* DESKTOP: 3-column | MOBILE: 1-column rail */}
           <div className="grid grid-cols-12 gap-3 sm:gap-4">
             {/* DOMAINS (desktop) */}
             <div className="hidden sm:block col-span-12 lg:col-span-3">
@@ -1447,7 +1452,7 @@ export default function MinuteBookClient() {
               </GlassCard>
             </div>
 
-            {/* ENTRIES rail */}
+            {/* ENTRIES */}
             <div className="col-span-12 lg:col-span-5">
               <GlassCard>
                 <CardHeader>
@@ -1492,9 +1497,7 @@ export default function MinuteBookClient() {
                           <button
                             key={e.id}
                             type="button"
-                            onClick={() => {
-                              setSelectedId(e.id);
-                            }}
+                            onClick={() => setSelectedId(e.id)}
                             className={cx(
                               "w-full text-left px-4 py-4 border-b border-white/10 last:border-b-0 transition",
                               active ? "bg-white/5" : "hover:bg-white/5"
@@ -1514,7 +1517,6 @@ export default function MinuteBookClient() {
                                 </div>
                               </div>
 
-                              {/* badge for current selected only (keeps list quiet) */}
                               {selectedId === e.id && authorityBadge ? (
                                 <span
                                   className={cx(
@@ -1545,7 +1547,7 @@ export default function MinuteBookClient() {
               </GlassCard>
             </div>
 
-            {/* EVIDENCE (desktop only; mobile uses Reader Sheet) */}
+            {/* EVIDENCE (desktop) */}
             <div className="hidden lg:block col-span-12 lg:col-span-4">
               <GlassCard>
                 <CardHeader>
@@ -1597,9 +1599,10 @@ export default function MinuteBookClient() {
                           <span
                             className={cx(
                               "px-2 py-1 rounded-full border text-[11px]",
-                              isUploadEntry ? "bg-sky-500/10 border-sky-500/30 text-sky-200" : "bg-white/5 border-white/10 text-slate-300"
+                              isUploadEntry
+                                ? "bg-sky-500/10 border-sky-500/30 text-sky-200"
+                                : "bg-white/5 border-white/10 text-slate-300"
                             )}
-                            title={isUploadEntry ? "Upload evidence record" : "Governance record (Forge-certified)"}
                           >
                             {isUploadEntry ? "UPLOAD" : "FORGE"}
                           </span>
@@ -1623,12 +1626,10 @@ export default function MinuteBookClient() {
                           </div>
                         ) : null}
 
-                        {/* Enterprise action grouping */}
                         <div className="mt-3">
                           <div className="text-[10px] uppercase tracking-[0.25em] text-slate-500">Actions</div>
 
                           <div className="mt-2 flex flex-wrap items-center gap-2">
-                            {/* Primary */}
                             <button
                               type="button"
                               onClick={() => ensurePreviewUrl(true)}
@@ -1637,7 +1638,6 @@ export default function MinuteBookClient() {
                                 "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
                                 pdfBusy ? "bg-amber-500/20 text-amber-200/60" : "bg-amber-500 text-black hover:bg-amber-400"
                               )}
-                              title="Open PDF in Reader Mode"
                             >
                               Reader
                             </button>
@@ -1650,7 +1650,6 @@ export default function MinuteBookClient() {
                                 "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
                                 pdfBusy ? "bg-white/10 text-slate-200/60" : "bg-slate-200 text-black hover:bg-white"
                               )}
-                              title="Download PDF"
                             >
                               Download
                             </button>
@@ -1665,12 +1664,10 @@ export default function MinuteBookClient() {
                                   ? "bg-white/5 text-slate-200/60 border-white/10"
                                   : "bg-white/5 border-white/10 text-slate-200 hover:bg-white/7 hover:border-amber-500/25"
                               )}
-                              title="Open in new tab"
                             >
                               Open
                             </button>
 
-                            {/* Evidence export */}
                             <button
                               type="button"
                               onClick={exportDiscoveryPackage}
@@ -1681,12 +1678,10 @@ export default function MinuteBookClient() {
                                   ? "bg-white/5 text-slate-200/40 border-white/10"
                                   : "bg-sky-500/10 border-sky-500/30 text-sky-200 hover:bg-sky-500/15"
                               )}
-                              title="Discovery Export (ZIP) — non-mutating point-in-time export"
                             >
                               {exportBusy ? "Exporting…" : "Discovery Export"}
                             </button>
 
-                            {/* Promote (UPLOADS ONLY) */}
                             <button
                               type="button"
                               onClick={() => promoteToVerifiedRegistry({ force: canReissue })}
@@ -1697,18 +1692,11 @@ export default function MinuteBookClient() {
                                   ? "bg-white/5 text-slate-200/40 border-white/10"
                                   : "bg-emerald-500/10 border-emerald-500/30 text-emerald-200 hover:bg-emerald-500/15"
                               )}
-                              title={
-                                !isUploadEntry
-                                  ? promoteDisabledReason || ""
-                                  : canReissue
-                                  ? "Reissue certification (force=true). Overwrites certified PDF and updates hash/pointer."
-                                  : "Promote upload into Verified Registry (certify PDF + QR)."
-                              }
+                              title={!isUploadEntry ? promoteDisabledReason || "" : ""}
                             >
                               {promoteBusy ? (canReissue ? "Reissuing…" : "Promoting…") : canReissue ? "Reissue" : "Promote Upload"}
                             </button>
 
-                            {/* Verify Terminal (HASH-FIRST) */}
                             <button
                               type="button"
                               onClick={openVerifyTerminal}
@@ -1719,7 +1707,6 @@ export default function MinuteBookClient() {
                                   ? "bg-white/5 text-slate-200/40 border-white/10"
                                   : "bg-white/5 border-amber-500/25 text-amber-200 hover:bg-white/7 hover:border-amber-500/40"
                               )}
-                              title="Open public verify.html terminal (hash-first)"
                             >
                               Verify
                             </button>
@@ -1732,7 +1719,6 @@ export default function MinuteBookClient() {
                                 setDeleteOpen(true);
                               }}
                               className="rounded-full border px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border-red-500/30 bg-red-500/10 text-red-200 hover:bg-red-500/15"
-                              title="Hard delete entry + files"
                             >
                               Delete
                             </button>
@@ -1746,18 +1732,6 @@ export default function MinuteBookClient() {
                             Resolutions are certified via Forge automatically.
                           </div>
                         </div>
-
-                        <div className="mt-3 flex items-center justify-between text-[10px] text-slate-500">
-                          <span>Upload is the sole write entry point.</span>
-                          <button
-                            type="button"
-                            onClick={() => ensurePreviewUrl(false)}
-                            className="text-slate-400 hover:text-slate-200"
-                            title="Refresh preview URL (no overlay)"
-                          >
-                            Refresh
-                          </button>
-                        </div>
                       </div>
 
                       <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 overflow-hidden h-[46vh]">
@@ -1770,7 +1744,6 @@ export default function MinuteBookClient() {
                         )}
                       </div>
 
-                      {/* Metadata Zone */}
                       <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-4">
                         <div className="text-[10px] uppercase tracking-[0.25em] text-slate-500">Metadata Zone</div>
 
@@ -1788,9 +1761,7 @@ export default function MinuteBookClient() {
 
                           <div className="flex items-center justify-between gap-3">
                             <span className="text-slate-500">Upload Hash</span>
-                            <span className="text-slate-200 font-mono truncate max-w-[60%]">
-                              {shortHash(selected.file_hash)}
-                            </span>
+                            <span className="text-slate-200 font-mono truncate max-w-[60%]">{shortHash(selected.file_hash)}</span>
                           </div>
 
                           <div className="flex items-center justify-between gap-3">
@@ -1807,7 +1778,10 @@ export default function MinuteBookClient() {
                                   const ok = await copyToClipboard(certifiedHash);
                                   if (ok) {
                                     setCopiedKey("cert-hash");
-                                    window.setTimeout(() => setCopiedKey((v) => (v === "cert-hash" ? null : v)), 1200);
+                                    window.setTimeout(
+                                      () => setCopiedKey((v) => (v === "cert-hash" ? null : v)),
+                                      1200
+                                    );
                                   }
                                 }}
                                 className={cx(
@@ -1816,7 +1790,6 @@ export default function MinuteBookClient() {
                                     ? "border-white/10 bg-white/5 text-slate-200/40"
                                     : "border-amber-500/25 bg-white/5 text-amber-200 hover:bg-white/7 hover:border-amber-500/40"
                                 )}
-                                title={certifiedHash ? "Copy certified hash (hash-first verification)" : "Not certified yet"}
                               >
                                 {copiedKey === "cert-hash" ? "Copied" : "Copy"}
                               </button>
@@ -1834,11 +1807,6 @@ export default function MinuteBookClient() {
                             <span className="text-slate-500">Status</span>
                             <span className="text-slate-200 truncate max-w-[60%]">{norm(selected.ledger_status, "—")}</span>
                           </div>
-
-                          <div className="flex items-center justify-between gap-3">
-                            <span className="text-slate-500">Lane</span>
-                            <span className="text-slate-200 truncate max-w-[60%]">{laneIsTest ? "SANDBOX" : "RoT"}</span>
-                          </div>
                         </div>
                       </div>
                     </>
@@ -1848,7 +1816,7 @@ export default function MinuteBookClient() {
             </div>
           </div>
 
-          {/* ---------------- MOBILE: Domains Sheet ---------------- */}
+          {/* MOBILE: Domains Sheet */}
           {mobileDomainsOpen ? (
             <div className="sm:hidden fixed inset-0 z-[60]">
               <div className="absolute inset-0 bg-black/60" onClick={() => setMobileDomainsOpen(false)} />
@@ -1930,7 +1898,7 @@ export default function MinuteBookClient() {
             </div>
           ) : null}
 
-          {/* ---------------- READER OVERLAY (mobile + desktop) ---------------- */}
+          {/* READER OVERLAY */}
           {mobileReaderOpen ? (
             <div className="fixed inset-0 z-[70]">
               <div className="absolute inset-0 bg-black/70" onClick={() => setMobileReaderOpen(false)} />
@@ -1996,9 +1964,10 @@ export default function MinuteBookClient() {
                       disabled={exportBusy}
                       className={cx(
                         "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase",
-                        exportBusy ? "border-white/10 bg-white/5 text-slate-200/40" : "border-sky-500/30 bg-sky-500/10 text-sky-200 hover:bg-sky-500/15"
+                        exportBusy
+                          ? "border-white/10 bg-white/5 text-slate-200/40"
+                          : "border-sky-500/30 bg-sky-500/10 text-sky-200 hover:bg-sky-500/15"
                       )}
-                      title="Discovery Export (ZIP) — non-mutating point-in-time export"
                     >
                       {exportBusy ? "Exporting…" : "Export"}
                     </button>
@@ -2027,7 +1996,6 @@ export default function MinuteBookClient() {
                           ? "border-white/10 bg-white/5 text-slate-200/40"
                           : "border-amber-500/25 bg-white/5 text-amber-200 hover:bg-white/7 hover:border-amber-500/40"
                       )}
-                      title="Open public verify.html terminal (hash-first)"
                     >
                       Verify
                     </button>
@@ -2048,11 +2016,7 @@ export default function MinuteBookClient() {
                   ) : (
                     <div className="h-full w-full grid place-items-center text-[11px] text-slate-500">
                       No preview loaded. Tap{" "}
-                      <button
-                        type="button"
-                        onClick={() => ensurePreviewUrl(false)}
-                        className="text-amber-200 underline underline-offset-2"
-                      >
+                      <button type="button" onClick={() => ensurePreviewUrl(false)} className="text-amber-200 underline">
                         Refresh
                       </button>
                       .
@@ -2063,7 +2027,7 @@ export default function MinuteBookClient() {
             </div>
           ) : null}
 
-          {/* ---------------- DELETE MODAL ---------------- */}
+          {/* DELETE MODAL */}
           {deleteOpen ? (
             <div className="fixed inset-0 z-[80]">
               <div className="absolute inset-0 bg-black/70" onClick={() => setDeleteOpen(false)} />
@@ -2126,7 +2090,6 @@ export default function MinuteBookClient() {
             </div>
           ) : null}
 
-          {/* OS behavior footnote */}
           <div className="mt-4 text-[10px] text-slate-600 flex flex-wrap items-center gap-x-2 gap-y-1">
             <span>Minute Book is a registry view.</span>
             <span className="text-slate-700">•</span>
