@@ -27,6 +27,12 @@ export const dynamic = "force-dynamic";
  * ✅ Load billing_documents robustly across schema variants:
  *    - some schemas use entity_id, others use provider_entity_id
  * ✅ Customer create prefers Edge Function if present; safe fallback to direct insert (non-breaking)
+ *
+ * PATCH (EMAIL DELIVERY — UI-FIRST, NO BACKEND BREAKAGE):
+ * ✅ Adds Delivery → “Send Email” operator panel + modal
+ * ✅ Prefers Edge Function if present: billing-send-document-email (optional)
+ * ✅ Safe fallback: mailto: (no regression if Edge function not deployed)
+ * ✅ Uses resolver to obtain signed PDF URL (server-side) when available
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -86,11 +92,6 @@ async function fileToBase64(file: File): Promise<string> {
 function isMissingColumnErr(e: any, col: string) {
   const msg = (e?.message || e?.toString?.() || "").toLowerCase();
   return msg.includes("column") && msg.includes(col.toLowerCase()) && msg.includes("does not exist");
-}
-
-function toMoneyMinor(nMajor: number) {
-  const n = Number.isFinite(nMajor) ? nMajor : 0;
-  return Math.round(n * 100);
 }
 
 function fromMoneyMinor(nMinor: number | null | undefined) {
@@ -356,6 +357,21 @@ export default function CiBillingPage() {
   const [generateOpen, setGenerateOpen] = useState(false);
   const [certifyOpen, setCertifyOpen] = useState(false);
 
+  // EMAIL DELIVERY (UI)
+  const [sendEmailOpen, setSendEmailOpen] = useState(false);
+  const [emailTo, setEmailTo] = useState("");
+  const [emailSubject, setEmailSubject] = useState("");
+  const [emailBody, setEmailBody] = useState("");
+  const [emailIncludePdfLink, setEmailIncludePdfLink] = useState(true);
+  const [emailExpiresMins, setEmailExpiresMins] = useState(60 * 24 * 3); // 3 days
+  const [lastEmailPreview, setLastEmailPreview] = useState<{
+    to: string;
+    subject: string;
+    body: string;
+    pdf_url?: string | null;
+    verify_url?: string | null;
+  } | null>(null);
+
   // New customer form
   const [custLegalName, setCustLegalName] = useState("");
   const [custBillingEmail, setCustBillingEmail] = useState("");
@@ -446,7 +462,13 @@ export default function CiBillingPage() {
       certified,
       delivery: deliveryForCustomer.length,
     };
-  }, [filteredCustomers.length, subsForCustomer.length, docsForCustomer.length, deliveryForCustomer.length, docsForCustomer]);
+  }, [
+    filteredCustomers.length,
+    subsForCustomer.length,
+    docsForCustomer.length,
+    deliveryForCustomer.length,
+    docsForCustomer,
+  ]);
 
   const activeSub = useMemo(() => {
     const list = subsForCustomer;
@@ -506,11 +528,7 @@ export default function CiBillingPage() {
         setProviderEntityId(direct);
         return;
       }
-      const { data, error } = await supabase
-        .from("entities")
-        .select("id")
-        .eq("slug", entitySlug)
-        .maybeSingle();
+      const { data, error } = await supabase.from("entities").select("id").eq("slug", entitySlug).maybeSingle();
       if (error) {
         setProviderEntityId(null);
         return;
@@ -544,9 +562,7 @@ export default function CiBillingPage() {
 
   useEffect(() => {
     (async () => {
-      const { data: p } = await supabase.from("billing_plans").select("*").order("created_at", {
-        ascending: false,
-      });
+      const { data: p } = await supabase.from("billing_plans").select("*").order("created_at", { ascending: false });
       setPlans((p || []) as PlanRow[]);
     })();
   }, [refreshKey]);
@@ -612,11 +628,7 @@ export default function CiBillingPage() {
 
   useEffect(() => {
     (async () => {
-      const { data: e } = await supabase
-        .from("billing_delivery_events")
-        .select("*")
-        .order("created_at", { ascending: false })
-        .limit(200);
+      const { data: e } = await supabase.from("billing_delivery_events").select("*").order("created_at", { ascending: false }).limit(200);
 
       const rows = (e || []) as DeliveryRow[];
 
@@ -675,6 +687,117 @@ export default function CiBillingPage() {
       trigger: "ci_billing_certify",
     });
     if (data?.verify_url) setNote("Certified. Verify URL ready.");
+  }
+
+  /* ===================== EMAIL DELIVERY (UI-FIRST) ===================== */
+
+  function buildVerifyBillingUrl(fileHash: string) {
+    // keep it simple: same origin public terminal path (adjust if you host elsewhere)
+    const base = `${window.location.origin}/verify-billing.html`;
+    return `${base}?hash=${encodeURIComponent(fileHash)}`;
+  }
+
+  function openSendEmail(doc?: DocRow | null) {
+    const d = doc ?? selectedDoc;
+    if (d) setSelectedDoc(d);
+
+    const to = (selectedCustomer?.billing_email || (d as any)?.recipient_email || "").toString().trim();
+    setEmailTo(to);
+    const kind = safeStr((d as any)?.document_type || (d as any)?.document_kind || "billing");
+    const inv = ((d as any)?.invoice_number || (d as any)?.document_number || "").toString().trim();
+    const subj = inv ? `Oasis Billing — ${kind} • ${inv}` : `Oasis Billing — ${kind}`;
+    setEmailSubject(subj);
+
+    const verifyUrl = d?.file_hash ? buildVerifyBillingUrl(d.file_hash) : "";
+    const body =
+      `Hello,\n\n` +
+      `Attached / linked is your Oasis billing document.\n\n` +
+      (verifyUrl ? `Verify (hash-first): ${verifyUrl}\n\n` : "") +
+      `Regards,\nOasis Digital Parliament`;
+    setEmailBody(body);
+
+    setLastEmailPreview(null);
+    setSendEmailOpen(true);
+  }
+
+  async function sendEmailNow() {
+    if (!providerEntityId) return alert("Missing provider entity_id");
+    if (!selectedDoc) return alert("No document selected");
+    const to = emailTo.trim();
+    if (!to) return alert("Recipient email required");
+    if (!emailSubject.trim()) return alert("Subject required");
+
+    // Step 1: Get a server-signed PDF URL (preferred) via resolver
+    let pdfUrl: string | null = null;
+    let verifyUrl: string | null = null;
+
+    try {
+      verifyUrl = buildVerifyBillingUrl(selectedDoc.file_hash);
+
+      if (emailIncludePdfLink) {
+        const expiresIn = Math.max(5, Math.min(60 * 24 * 14, Number(emailExpiresMins || 0))) * 60; // secs
+        const resolved = await invoke("resolve-billing-document", {
+          hash: selectedDoc.file_hash,
+          document_id: selectedDoc.id,
+          is_test: isTest,
+          entity_id: providerEntityId,
+          expires_in: expiresIn, // optional if resolver supports it
+          trigger: "ci_billing_email_resolve_pdf",
+        });
+        pdfUrl = resolved?.urls?.pdf || null;
+      }
+    } catch {
+      // non-blocking: we still can mailto
+    }
+
+    const composedBody =
+      emailBody +
+      (emailIncludePdfLink && pdfUrl ? `\n\nPDF (signed link): ${pdfUrl}` : "") +
+      (verifyUrl ? `\n\nVerify (hash-first): ${verifyUrl}` : "");
+
+    setLastEmailPreview({
+      to,
+      subject: emailSubject.trim(),
+      body: composedBody,
+      pdf_url: pdfUrl,
+      verify_url: verifyUrl,
+    });
+
+    // Step 2: Prefer Edge function if present (optional)
+    // If it isn't deployed, we fall back to mailto without breaking.
+    try {
+      const data = await invoke("billing-send-document-email", {
+        provider_entity_id: providerEntityId,
+        is_test: isTest,
+        customer_id: selectedCustomerId,
+        document_id: selectedDoc.id,
+        file_hash: selectedDoc.file_hash,
+        to,
+        subject: emailSubject.trim(),
+        body: composedBody,
+        pdf_url: pdfUrl,
+        verify_url: verifyUrl,
+        trigger: "ci_billing_send_email",
+      });
+
+      // If backend returns ok, close modal.
+      if (data?.ok === true || data?.status === "sent") {
+        setNote("Email sent (Edge).");
+        setSendEmailOpen(false);
+        return;
+      }
+
+      // If backend returns something else, still fall back to mailto.
+      throw new Error("Email function did not confirm sent.");
+    } catch {
+      // Step 3: mailto fallback (always available)
+      const u = new URL("mailto:" + encodeURIComponent(to));
+      u.searchParams.set("subject", emailSubject.trim());
+      u.searchParams.set("body", composedBody);
+      window.location.href = u.toString();
+      setNote("Opened mail composer (mailto fallback).");
+      setSendEmailOpen(false);
+    }
   }
 
   /* ===================== mutations (Edge) ===================== */
@@ -850,11 +973,7 @@ export default function CiBillingPage() {
     const unit1 = Math.max(0, Number(genLI1Unit || "0") || 0);
 
     const li: any[] = [
-      {
-        description: (genLI1Desc || "Service").trim(),
-        quantity: qty1,
-        unit_price: unit1,
-      },
+      { description: (genLI1Desc || "Service").trim(), quantity: qty1, unit_price: unit1 },
     ];
 
     const desc2 = genLI2Desc.trim();
@@ -878,7 +997,6 @@ export default function CiBillingPage() {
                 ? "Credit Note"
                 : "Billing Document");
 
-    // Edge expects ISO strings; tolerate yyyy-mm-dd by appending time.
     const issuedIso = genIssuedAt.trim()
       ? new Date(`${genIssuedAt.trim()}T00:00:00.000Z`).toISOString()
       : new Date().toISOString();
@@ -926,7 +1044,6 @@ export default function CiBillingPage() {
 
     setGenerateOpen(false);
 
-    // reset (keep currency)
     setGenTitle("");
     setGenInvoiceNumber("");
     setGenIssuedAt(isoNowLocalDate());
@@ -944,7 +1061,6 @@ export default function CiBillingPage() {
     setGenLI2Qty("1");
     setGenLI2Unit("0.00");
 
-    // auto-open if possible
     if (newHash || newId) {
       try {
         const resolved = await invoke("resolve-billing-document", {
@@ -1139,7 +1255,9 @@ export default function CiBillingPage() {
                 <div className="mt-1 text-sm font-semibold text-white/90">
                   {activeSub ? (activeSub.plan_key || safeStr(activeSub.plan_id)) : "—"}
                 </div>
-                <div className="mt-1 text-xs text-white/45">{activeSub ? safeStr(activeSub.status) : "No active sub"}</div>
+                <div className="mt-1 text-xs text-white/45">
+                  {activeSub ? safeStr(activeSub.status) : "No active sub"}
+                </div>
               </div>
               <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                 <div className="text-[10px] uppercase tracking-[0.25em] text-white/40">Docs</div>
@@ -1222,6 +1340,15 @@ export default function CiBillingPage() {
                 className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10 disabled:opacity-60"
               >
                 Attach External Document (PDF)
+              </button>
+
+              <button
+                disabled={busy || !selectedDoc || !selectedCustomer?.billing_email}
+                onClick={() => openSendEmail(selectedDoc)}
+                className="w-full rounded-xl border border-amber-300/20 bg-amber-400/12 px-3 py-2 text-xs font-semibold text-amber-100 hover:bg-amber-400/18 disabled:opacity-60"
+                title={!selectedDoc ? "Select a document first" : !selectedCustomer?.billing_email ? "Select a customer with an email" : ""}
+              >
+                Send Email (Delivery)
               </button>
             </div>
           </div>
@@ -1386,8 +1513,7 @@ export default function CiBillingPage() {
                   <div className="rounded-xl border border-white/10 bg-black/10 p-3 col-span-2">
                     <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Provider IDs</div>
                     <div className="mt-1">
-                      customer: {safeStr(selectedSub.provider_customer_id)} • sub:{" "}
-                      {safeStr(selectedSub.provider_subscription_id)}
+                      customer: {safeStr(selectedSub.provider_customer_id)} • sub: {safeStr(selectedSub.provider_subscription_id)}
                     </div>
                   </div>
                 </div>
@@ -1475,6 +1601,13 @@ export default function CiBillingPage() {
                         >
                           Open PDF (resolver)
                         </button>
+                        <button
+                          disabled={busy || !selectedCustomer?.billing_email}
+                          onClick={() => openSendEmail(selectedDoc)}
+                          className="rounded-full border border-amber-300/20 bg-amber-400/12 px-3 py-1 text-xs font-semibold text-amber-100 hover:bg-amber-400/18 disabled:opacity-60"
+                        >
+                          Send Email
+                        </button>
                       </div>
                     </div>
 
@@ -1535,32 +1668,116 @@ export default function CiBillingPage() {
             )}
 
             {/* DELIVERY DETAILS */}
-            {tab === "DELIVERY" && selectedDelivery && (
-              <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                <div className="text-sm font-semibold text-white/90">
-                  {selectedDelivery.channel} • {selectedDelivery.status}
-                </div>
-                <div className="mt-1 text-xs text-white/55">
-                  delivery_id: {shortUUID(selectedDelivery.id)} • doc_id: {shortUUID(selectedDelivery.document_id)}
-                </div>
-
-                <div className="mt-3 space-y-2 text-xs text-white/70">
-                  <div className="rounded-xl border border-white/10 bg-black/10 p-3">
-                    <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Recipient</div>
-                    <div className="mt-1">{safeStr(selectedDelivery.recipient)}</div>
+            {tab === "DELIVERY" && (
+              <>
+                <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <div className="text-sm font-semibold text-white/90">Send Email</div>
+                      <div className="mt-1 text-xs text-white/55">
+                        Operator-only. Prefers Edge email function if present, otherwise opens your mail client.
+                      </div>
+                    </div>
+                    <span
+                      className={cx(
+                        "rounded-full border px-2 py-[2px] text-[10px] font-semibold",
+                        isTest
+                          ? "border-amber-300/20 bg-amber-400/12 text-amber-100"
+                          : "border-sky-300/20 bg-sky-400/12 text-sky-100",
+                      )}
+                    >
+                      {envLabel}
+                    </span>
                   </div>
-                  <div className="rounded-xl border border-white/10 bg-black/10 p-3">
-                    <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Provider</div>
-                    <div className="mt-1">
-                      {safeStr(selectedDelivery.provider)} • msg: {safeStr(selectedDelivery.provider_message_id)}
+
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-white/70">
+                    <div className="rounded-xl border border-white/10 bg-black/10 p-3 col-span-2">
+                      <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Recipient</div>
+                      <div className="mt-1">{safeStr(selectedCustomer?.billing_email)}</div>
+                    </div>
+                    <div className="rounded-xl border border-white/10 bg-black/10 p-3">
+                      <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Selected doc</div>
+                      <div className="mt-1">{selectedDoc ? shortUUID(selectedDoc.id) : "—"}</div>
+                    </div>
+                    <div className="rounded-xl border border-white/10 bg-black/10 p-3">
+                      <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Hash</div>
+                      <div className="mt-1 font-mono">{selectedDoc ? `${selectedDoc.file_hash.slice(0, 10)}…` : "—"}</div>
                     </div>
                   </div>
-                  <div className="rounded-xl border border-white/10 bg-black/10 p-3">
-                    <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Error</div>
-                    <div className="mt-1">{safeStr(selectedDelivery.error)}</div>
+
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      disabled={busy || !selectedDoc || !selectedCustomer?.billing_email}
+                      onClick={() => openSendEmail(selectedDoc)}
+                      className="rounded-full border border-amber-300/20 bg-amber-400/12 px-3 py-2 text-xs font-semibold text-amber-100 hover:bg-amber-400/18 disabled:opacity-60"
+                    >
+                      Compose / Send
+                    </button>
+                    <button
+                      disabled={busy || !selectedDoc}
+                      onClick={() => setTab("DOCUMENTS")}
+                      className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10 disabled:opacity-60"
+                    >
+                      Go to Documents
+                    </button>
                   </div>
+
+                  {lastEmailPreview && (
+                    <div className="mt-3 rounded-xl border border-white/10 bg-black/10 p-3 text-xs text-white/70">
+                      <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Last composed</div>
+                      <div className="mt-2">
+                        <div><span className="text-white/45">To:</span> {lastEmailPreview.to}</div>
+                        <div><span className="text-white/45">Subject:</span> {lastEmailPreview.subject}</div>
+                        {lastEmailPreview.pdf_url ? (
+                          <div className="mt-1 break-all"><span className="text-white/45">PDF:</span> {lastEmailPreview.pdf_url}</div>
+                        ) : null}
+                        {lastEmailPreview.verify_url ? (
+                          <div className="mt-1 break-all"><span className="text-white/45">Verify:</span> {lastEmailPreview.verify_url}</div>
+                        ) : null}
+                      </div>
+                      <div className="mt-2 flex gap-2">
+                        <button
+                          onClick={async () => {
+                            await copyToClipboard(JSON.stringify(lastEmailPreview, null, 2));
+                            setNote("Email preview copied");
+                          }}
+                          className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/80 hover:bg-white/10"
+                        >
+                          Copy Preview JSON
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
-              </div>
+
+                {selectedDelivery && (
+                  <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                    <div className="text-sm font-semibold text-white/90">
+                      {selectedDelivery.channel} • {selectedDelivery.status}
+                    </div>
+                    <div className="mt-1 text-xs text-white/55">
+                      delivery_id: {shortUUID(selectedDelivery.id)} • doc_id: {shortUUID(selectedDelivery.document_id)}
+                    </div>
+
+                    <div className="mt-3 space-y-2 text-xs text-white/70">
+                      <div className="rounded-xl border border-white/10 bg-black/10 p-3">
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Recipient</div>
+                        <div className="mt-1">{safeStr(selectedDelivery.recipient)}</div>
+                      </div>
+                      <div className="rounded-xl border border-white/10 bg-black/10 p-3">
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Provider</div>
+                        <div className="mt-1">
+                          {safeStr(selectedDelivery.provider)} • msg: {safeStr(selectedDelivery.provider_message_id)}
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-white/10 bg-black/10 p-3">
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Error</div>
+                        <div className="mt-1">{safeStr(selectedDelivery.error)}</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>
@@ -1659,7 +1876,8 @@ export default function CiBillingPage() {
                   >
                     <div className="font-semibold text-white/90">{p.code}</div>
                     <div className="text-white/45">
-                      {p.name} • {p.currency} {p.price_minor} / {p.billing_period} • {p.is_active ? "active" : "inactive"}
+                      {p.name} • {p.currency} {p.price_minor} / {p.billing_period} •{" "}
+                      {p.is_active ? "active" : "inactive"}
                     </div>
                   </button>
                 ))
@@ -1675,8 +1893,7 @@ export default function CiBillingPage() {
             className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
           />
           <div className="text-xs text-white/45">
-            Customer:{" "}
-            {selectedCustomer ? `${selectedCustomer.legal_name} (${selectedCustomer.billing_email})` : "—"} • Lane:{" "}
+            Customer: {selectedCustomer ? `${selectedCustomer.legal_name} (${selectedCustomer.billing_email})` : "—"} • Lane:{" "}
             {envLabel}
           </div>
         </div>
@@ -1729,9 +1946,12 @@ export default function CiBillingPage() {
               <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Selected</div>
               <div className="mt-1 text-sm font-semibold text-white/90">{selectedPlan.code}</div>
               <div className="mt-1 text-xs text-white/55">
-                {safeStr(selectedPlan.name)} • {selectedPlan.currency} {selectedPlan.price_minor} / {selectedPlan.billing_period}
+                {safeStr(selectedPlan.name)} • {selectedPlan.currency} {selectedPlan.price_minor} /{" "}
+                {selectedPlan.billing_period}
               </div>
-              {selectedPlan.description ? <div className="mt-2 text-xs text-white/45">{selectedPlan.description}</div> : null}
+              {selectedPlan.description ? (
+                <div className="mt-2 text-xs text-white/45">{selectedPlan.description}</div>
+              ) : null}
               <div className="mt-2 text-xs text-white/45">
                 plan_id: <span className="font-mono">{shortUUID(selectedPlan.id)}</span>
               </div>
@@ -1783,6 +2003,7 @@ export default function CiBillingPage() {
         onClose={() => setGenerateOpen(false)}
         onConfirm={generateBillingDocument}
       >
+        {/* (UNCHANGED CONTENT BELOW) */}
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -1988,6 +2209,7 @@ export default function CiBillingPage() {
         onClose={() => setAttachOpen(false)}
         onConfirm={attachExternalDocument}
       >
+        {/* (UNCHANGED CONTENT BELOW) */}
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -2078,18 +2300,87 @@ export default function CiBillingPage() {
         <div className="space-y-3">
           <div className="text-xs text-white/70">
             This stamps a registry-grade certification page and writes:
-            <div className="mt-1 text-white/45">certified_at • certified_storage_bucket/path • certified_file_hash • verify_url</div>
+            <div className="mt-1 text-white/45">
+              certified_at • certified_storage_bucket/path • certified_file_hash • verify_url
+            </div>
           </div>
           <label className="flex items-center gap-2 text-xs text-white/70">
-            <input
-              type="checkbox"
-              checked={certifyForce}
-              onChange={(e) => setCertifyForce(e.target.checked)}
-            />
+            <input type="checkbox" checked={certifyForce} onChange={(e) => setCertifyForce(e.target.checked)} />
             Force (overwrite certified PDF path if exists)
           </label>
           <div className="text-xs text-white/45">
             document_id: <span className="font-mono">{shortUUID(selectedDoc?.id)}</span>
+          </div>
+        </div>
+      </OsModal>
+
+      {/* EMAIL MODAL */}
+      <OsModal
+        open={sendEmailOpen}
+        title="Send billing document (email)"
+        confirmText="Send"
+        busy={busy}
+        onClose={() => setSendEmailOpen(false)}
+        onConfirm={sendEmailNow}
+      >
+        <div className="space-y-3">
+          <div className="text-xs text-white/60">
+            Doc: <span className="font-mono">{shortUUID(selectedDoc?.id)}</span> • Hash:{" "}
+            <span className="font-mono">{selectedDoc ? `${selectedDoc.file_hash.slice(0, 12)}…` : "—"}</span>
+          </div>
+
+          <div>
+            <div className="text-xs text-white/55">To *</div>
+            <input
+              value={emailTo}
+              onChange={(e) => setEmailTo(e.target.value)}
+              className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
+              placeholder="recipient@domain.com"
+            />
+          </div>
+
+          <div>
+            <div className="text-xs text-white/55">Subject *</div>
+            <input
+              value={emailSubject}
+              onChange={(e) => setEmailSubject(e.target.value)}
+              className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
+            />
+          </div>
+
+          <div>
+            <div className="text-xs text-white/55">Message</div>
+            <textarea
+              value={emailBody}
+              onChange={(e) => setEmailBody(e.target.value)}
+              className="mt-1 w-full rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/80 outline-none"
+              rows={6}
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <label className="flex items-center gap-2 text-xs text-white/70">
+              <input
+                type="checkbox"
+                checked={emailIncludePdfLink}
+                onChange={(e) => setEmailIncludePdfLink(e.target.checked)}
+              />
+              Include signed PDF link
+            </label>
+
+            <div>
+              <div className="text-xs text-white/55">Link expiry (minutes)</div>
+              <input
+                value={String(emailExpiresMins)}
+                onChange={(e) => setEmailExpiresMins(Number(e.target.value || "0"))}
+                className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
+                placeholder="4320"
+              />
+            </div>
+          </div>
+
+          <div className="text-xs text-white/45">
+            Prefers Edge function <span className="font-mono">billing-send-document-email</span> if deployed; otherwise opens mail client (mailto).
           </div>
         </div>
       </OsModal>
