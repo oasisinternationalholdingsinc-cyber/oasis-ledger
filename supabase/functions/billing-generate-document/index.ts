@@ -39,15 +39,16 @@ import { PNG } from "npm:pngjs@7.0.0";
  *
  * ---------------------------------------------------------------------------
  * ✅ Oasis PDF alignment (LAYOUT ONLY — NO WIRING/SCHEMA CHANGES)
- * - Keeps the same fields + storage + hash behavior (zero regressions)
  * - Prevents overlap by reserving a fixed footer block and stopping table rows before it
  * - ✅ QR encodes a REAL HTTPS verify URL (iPhone camera compatible)
  * - ✅ Canonical verify page URL: https://sign.oasisintlholdings.com/verify-billing.html
  *
- * ✅ Minor fixes (per your notes, no regression):
+ * ✅ Fixes (NO regression):
  * - QR is bottom-right on its own (dedicated panel)
  * - Notes is its own row
  * - Summary is its own row AFTER notes (full-width row)
+ * - ✅ Removes long verification URL from PDF (QR-only, no clutter)
+ * - ✅ Invoice # no longer runs off (wrap/truncate display only; full value preserved in registry)
  * - Hash/QR mismatch fixed by a fixed-point stabilization loop (QR always encodes FINAL hash)
  * ---------------------------------------------------------------------------
  */
@@ -73,13 +74,7 @@ type ReqBody = {
   recipient_email?: string | null;
 
   // Document
-  document_type:
-    | "invoice"
-    | "contract"
-    | "statement"
-    | "receipt"
-    | "credit_note"
-    | "other";
+  document_type: "invoice" | "contract" | "statement" | "receipt" | "credit_note" | "other";
 
   status?: string | null; // optional override, default to 'issued' (must match enum)
   document_number?: string | null;
@@ -132,10 +127,10 @@ function getRequestId(req: Request) {
 
 function json(status: number, body: unknown, req: Request) {
   const request_id = getRequestId(req);
-  return new Response(
-    JSON.stringify({ ...(body as any), request_id } satisfies Resp, null, 2),
-    { status, headers: { ...cors, "content-type": "application/json; charset=utf-8" } },
-  );
+  return new Response(JSON.stringify({ ...(body as any), request_id } satisfies Resp, null, 2), {
+    status,
+    headers: { ...cors, "content-type": "application/json; charset=utf-8" },
+  });
 }
 
 function pickBearer(req: Request) {
@@ -331,8 +326,6 @@ function wrapText(
 // Verify URL (CANONICAL)
 // -----------------------------------------------------------------------------
 function getVerifyPageUrl(): string {
-  // ✅ Canonical terminal you showed (NO 404):
-  // https://sign.oasisintlholdings.com/verify-billing.html?hash=...
   const env =
     Deno.env.get("BILLING_VERIFY_PAGE_URL") ||
     Deno.env.get("BILLING_VERIFY_BASE_URL") ||
@@ -340,6 +333,15 @@ function getVerifyPageUrl(): string {
   const v = String(env).trim();
   if (v) return v.replace(/\/+$/, "");
   return "https://sign.oasisintlholdings.com/verify-billing.html";
+}
+
+// -----------------------------------------------------------------------------
+// Helpers (layout-safe truncation)
+// -----------------------------------------------------------------------------
+function truncateMiddle(s: string, keepStart: number, keepEnd: number) {
+  const t = winAnsiSafe(s);
+  if (t.length <= keepStart + keepEnd + 1) return t;
+  return `${t.slice(0, keepStart)}…${t.slice(-keepEnd)}`;
 }
 
 // -----------------------------------------------------------------------------
@@ -430,7 +432,7 @@ async function buildOasisBillingPdf(args: {
     y: H - 64,
     size: 10,
     font,
-    color: rgb(0.86, 0.88, 0.90),
+    color: rgb(0.86, 0.88, 0.9),
   });
 
   const rightTop = winAnsiSafe(`${docType.toUpperCase()}  •  ${laneLabel}`);
@@ -567,19 +569,27 @@ async function buildOasisBillingPdf(args: {
       font: bold,
       color: muted,
     });
-    page.drawText(winAnsiSafe(value.slice(0, 46)), {
-      x: metaX + 120,
-      y,
-      size: 8.5,
-      font,
-      color: ink,
-    });
+
+    const valueX = metaX + 120;
+    const maxW = metaX + metaW - 14 - valueX; // remaining width
+    const safeVal = winAnsiSafe(value);
+
+    // Wrap to 2 lines if needed (prevents run-off)
+    const lines = wrapText(safeVal, font, 8.5, maxW, 2);
+    page.drawText(lines[0], { x: valueX, y, size: 8.5, font, color: ink });
+    if (lines[1]) {
+      page.drawText(lines[1], { x: valueX, y: y - 10, size: 8.5, font, color: ink });
+    }
   };
 
   metaRow("Issued:", issuedAtIso.slice(0, 10), cardTop - 24);
   metaRow("Due:", dueAtIso ? dueAtIso.slice(0, 10) : "—", cardTop - 40);
   metaRow("Currency:", currency, cardTop - 56);
-  metaRow("Invoice #:", invoiceNumber ?? "—", cardTop - 72);
+
+  // Invoice #: display-safe (no run-off), full value preserved in registry row/metadata
+  const invDisplay =
+    invoiceNumber && invoiceNumber.length > 34 ? truncateMiddle(invoiceNumber, 18, 12) : (invoiceNumber ?? "—");
+  metaRow("Invoice #:", invDisplay, cardTop - 72);
 
   // Divider below cards
   const dividerY = cardTop - cardH - 22;
@@ -593,7 +603,7 @@ async function buildOasisBillingPdf(args: {
   // ---- Reserve a fixed footer block (prevents overlap, always) ----
   const footerY = 54;
 
-  // Footer layout (minor fix): NOTES row → SUMMARY row → QR bottom-right alone
+  // Footer layout: NOTES row → SUMMARY row → QR bottom-right alone (NO URL printed)
   const footerH = 232;
   const footerTopY = footerY + footerH + 14;
 
@@ -648,9 +658,7 @@ async function buildOasisBillingPdf(args: {
     });
 
     page.drawText(descLines[0], { x: colDesc, y: rowTop, size: 9, font, color: ink });
-    if (descLines[1]) {
-      page.drawText(descLines[1], { x: colDesc, y: rowTop - 12, size: 9, font, color: ink });
-    }
+    if (descLines[1]) page.drawText(descLines[1], { x: colDesc, y: rowTop - 12, size: 9, font, color: ink });
 
     const qtyText = winAnsiSafe(String(it.quantity));
     const unitText = winAnsiSafe(money(currency, it.unit_price));
@@ -659,8 +667,8 @@ async function buildOasisBillingPdf(args: {
     page.drawText(qtyText, { x: colQty, y: rowTop, size: 9, font, color: muted });
     page.drawText(unitText, { x: colUnit, y: rowTop, size: 9, font, color: muted });
 
-    const amtW = font.widthOfTextAtSize(amtText, 9);
-    page.drawText(amtText, { x: colAmt - amtW, y: rowTop, size: 9, font, color: ink });
+    const amtW2 = font.widthOfTextAtSize(amtText, 9);
+    page.drawText(amtText, { x: colAmt - amtW2, y: rowTop, size: 9, font, color: ink });
 
     y -= rowHeight;
   }
@@ -754,7 +762,7 @@ async function buildOasisBillingPdf(args: {
 
   srow("Total:", money(currency, totalsMajor.total), leftColX, sumY + 4, true);
 
-  // Row 3: QR bottom-right alone (dedicated panel)
+  // Row 3: QR bottom-right alone (dedicated panel) — NO URL printed on PDF
   const qrPanelW = 220;
   const qrPanelH = 108;
   const qrPanelX = margin + fullW - qrPanelW;
@@ -798,36 +806,6 @@ async function buildOasisBillingPdf(args: {
     height: qrSize,
   });
 
-  // Left of QR: small URL preview (kept outside QR panel so QR stays “alone”)
-  const urlPreviewMaxW = fullW - qrPanelW - 14 - 10;
-  const urlPreview = (qrText.length > 120 ? qrText.slice(0, 120) + "..." : qrText).slice(0, 140);
-
-  page.drawText(winAnsiSafe("Verification URL:"), {
-    x: margin + 14,
-    y: footerY + 78,
-    size: 8,
-    font: bold,
-    color: muted,
-  });
-
-  const urlLines = wrapText(urlPreview, font, 7.5, urlPreviewMaxW, 2);
-  page.drawText(urlLines[0], {
-    x: margin + 14,
-    y: footerY + 64,
-    size: 7.5,
-    font,
-    color: rgb(0.58, 0.62, 0.68),
-  });
-  if (urlLines[1]) {
-    page.drawText(urlLines[1], {
-      x: margin + 14,
-      y: footerY + 52,
-      size: 7.5,
-      font,
-      color: rgb(0.58, 0.62, 0.68),
-    });
-  }
-
   // Tiny corner mark
   const corner = winAnsiSafe(providerSlug.toUpperCase().slice(0, 10) || "ODP");
   page.drawText(corner, {
@@ -835,7 +813,7 @@ async function buildOasisBillingPdf(args: {
     y: 28,
     size: 9,
     font: bold,
-    color: rgb(0.90, 0.92, 0.95),
+    color: rgb(0.9, 0.92, 0.95),
   });
 
   // Footer provenance
@@ -862,8 +840,7 @@ serve(async (req: Request) => {
 
   try {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-    const ANON_KEY =
-      Deno.env.get("SUPABASE_ANON_KEY") ?? Deno.env.get("SUPABASE_ANON_KEY_PUBLIC");
+    const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? Deno.env.get("SUPABASE_ANON_KEY_PUBLIC");
     const SERVICE_ROLE_KEY =
       Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
@@ -974,7 +951,7 @@ serve(async (req: Request) => {
     // -------------------------------------------------------------------------
     // Build PDF with hash-first verify URL (canonical sign domain)
     // -------------------------------------------------------------------------
-    const VERIFY_PAGE = getVerifyPageUrl(); // ✅ https://sign.oasisintlholdings.com/verify-billing.html
+    const VERIFY_PAGE = getVerifyPageUrl();
 
     const buildWithHash = async (hashHex: string) => {
       const verifyUrl = `${VERIFY_PAGE}?hash=${hashHex}`;
@@ -1000,7 +977,7 @@ serve(async (req: Request) => {
       });
     };
 
-    // ✅ Fixed-point stabilization (minor fix): QR ALWAYS matches FINAL hash
+    // ✅ Fixed-point stabilization: QR ALWAYS matches FINAL hash
     let file_hash = "0".repeat(64);
     let pdfBytes = new Uint8Array();
     for (let i = 0; i < 4; i++) {
@@ -1128,9 +1105,7 @@ serve(async (req: Request) => {
         if (!upd.ok) return json(500, { ok: false, error: "DOCUMENT_UPDATE_FAILED", details: upd.error }, req);
       } else {
         const ins = await insertNew();
-        if (!ins.ok || !ins.id) {
-          return json(500, { ok: false, error: "DOCUMENT_INSERT_FAILED", details: ins.error }, req);
-        }
+        if (!ins.ok || !ins.id) return json(500, { ok: false, error: "DOCUMENT_INSERT_FAILED", details: ins.error }, req);
         document_id = ins.id;
       }
     } else if (document_number) {
@@ -1153,9 +1128,7 @@ serve(async (req: Request) => {
         if (!upd.ok) return json(500, { ok: false, error: "DOCUMENT_UPDATE_FAILED", details: upd.error }, req);
       } else {
         const ins = await insertNew();
-        if (!ins.ok || !ins.id) {
-          return json(500, { ok: false, error: "DOCUMENT_INSERT_FAILED", details: ins.error }, req);
-        }
+        if (!ins.ok || !ins.id) return json(500, { ok: false, error: "DOCUMENT_INSERT_FAILED", details: ins.error }, req);
         document_id = ins.id;
       }
     } else {
@@ -1165,15 +1138,11 @@ serve(async (req: Request) => {
         .select("id")
         .maybeSingle();
 
-      if (error) {
-        return json(500, { ok: false, error: "DOCUMENT_UPSERT_FAILED", details: error }, req);
-      }
+      if (error) return json(500, { ok: false, error: "DOCUMENT_UPSERT_FAILED", details: error }, req);
       document_id = data?.id ? String(data.id) : null;
     }
 
-    if (!document_id) {
-      return json(500, { ok: false, error: "DOCUMENT_ID_MISSING" }, req);
-    }
+    if (!document_id) return json(500, { ok: false, error: "DOCUMENT_ID_MISSING" }, req);
 
     // Best-effort audit (never blocks)
     try {
