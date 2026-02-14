@@ -11,25 +11,25 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
  * ✅ Uses RESEND for delivery
  * ✅ Best-effort writes billing_delivery_events (never blocks response)
  *
- * NOTE: billing_documents schema is canonical:
- * - file_hash (hex64) REQUIRED
- * - entity_id NOT NULL
- * - is_test boolean lane flag
- * - status exists, but void semantics are best represented by voided_at
+ * HARDENING (NO REGRESSION):
+ * ✅ Accepts common UI aliases:
+ *    - document_id: document_id | documentId | doc_id | docId | billing_document_id | id | document
+ *    - hash: hash | file_hash | fileHash
+ *    - to_email: to_email | to | recipient | recipient_email | email
+ *    - subject: subject | title
+ * ✅ Accepts expiry as seconds OR minutes:
+ *    - expires_in (seconds) OR expires_in_minutes (minutes)
  */
 
-type ReqBody = {
-  document_id?: string; // uuid (billing_documents.id)
-  hash?: string; // sha256 (billing_documents.file_hash)
-  to_email?: string; // recipient
+type ReqBody = Record<string, unknown> & {
+  document_id?: string;
+  hash?: string;
+  to_email?: string;
   to_name?: string;
   subject?: string;
-
-  // optional presentation
   message?: string;
-
-  // tolerated (future)
   expires_in?: number;
+  expires_in_minutes?: number;
 };
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
@@ -71,6 +71,19 @@ function safeText(v: unknown, fallback = "") {
   return s || fallback;
 }
 
+function safeNumber(v: unknown): number | null {
+  const n = typeof v === "number" ? v : Number((v ?? "").toString().trim());
+  return Number.isFinite(n) ? n : null;
+}
+
+function pickFirstText(body: Record<string, unknown>, keys: string[]) {
+  for (const k of keys) {
+    const v = safeText(body[k]);
+    if (v) return v;
+  }
+  return "";
+}
+
 function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
     v,
@@ -82,7 +95,6 @@ function isSha256(v: string) {
 }
 
 function isEmail(v: string) {
-  // simple, safe-enough validation (don’t overfit)
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 }
 
@@ -130,14 +142,40 @@ serve(async (req) => {
     if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
     if (req.method !== "POST") return json(405, { ok: false, error: "METHOD_NOT_ALLOWED" });
 
-    const body = (await req.json().catch(() => ({}))) as ReqBody;
+    const raw = (await req.json().catch(() => ({}))) as ReqBody;
 
-    const document_id = safeText(body.document_id);
-    const hash = safeText(body.hash).toLowerCase();
-    const to_email = safeText(body.to_email).toLowerCase();
-    const to_name = safeText(body.to_name);
-    const subjectOverride = safeText(body.subject);
-    const message = safeText(body.message);
+    // ✅ tolerant alias mapping (NO REGRESSION)
+    const document_id = safeText(
+      pickFirstText(raw, [
+        "document_id",
+        "documentId",
+        "doc_id",
+        "docId",
+        "billing_document_id",
+        "billingDocumentId",
+        "id",
+        "document",
+      ]),
+    );
+
+    const hash = safeText(
+      pickFirstText(raw, ["hash", "file_hash", "fileHash"]),
+    ).toLowerCase();
+
+    const to_email = safeText(
+      pickFirstText(raw, ["to_email", "to", "recipient", "recipient_email", "email"]),
+    ).toLowerCase();
+
+    const to_name = safeText(pickFirstText(raw, ["to_name", "toName", "name"]));
+    const subjectOverride = safeText(pickFirstText(raw, ["subject", "title"]));
+    const message = safeText(raw.message);
+
+    // expiry (optional, for future signed-PDF link support)
+    const expiresSeconds =
+      safeNumber(raw.expires_in) ??
+      (safeNumber((raw as any).expires_in_minutes) != null
+        ? Math.max(60, Math.floor((safeNumber((raw as any).expires_in_minutes) as number) * 60))
+        : null);
 
     if (!document_id && !hash) {
       return json(400, {
@@ -153,14 +191,18 @@ serve(async (req) => {
       return json(400, { ok: false, error: "INVALID_HASH" });
     }
     if (!to_email) {
-      return json(400, { ok: false, error: "MISSING_TO_EMAIL" });
+      return json(400, {
+        ok: false,
+        error: "MISSING_TO_EMAIL",
+        message:
+          "Missing recipient email. Expected one of: to_email | to | recipient | recipient_email | email",
+      });
     }
     if (!isEmail(to_email)) {
       return json(400, { ok: false, error: "INVALID_TO_EMAIL" });
     }
 
     // Resolve billing document (schema-aligned)
-    // IMPORTANT: do NOT assume a specific "void" status enum label; use voided_at which is canonical.
     let doc: any | null = null;
 
     if (document_id) {
@@ -177,7 +219,7 @@ serve(async (req) => {
         .from("billing_documents")
         .select("*")
         .eq("file_hash", hash)
-        .is("voided_at", null) // ✅ canonical "not voided"
+        .is("voided_at", null)
         .order("issued_at", { ascending: false, nullsFirst: false })
         .limit(1);
 
@@ -198,7 +240,7 @@ serve(async (req) => {
       });
     }
 
-    // Best-effort entity snapshot (optional — email only)
+    // Optional entity snapshot
     let entity: any | null = null;
     if (doc.entity_id) {
       const { data: ent } = await supabase
@@ -212,7 +254,6 @@ serve(async (req) => {
     const lane =
       typeof doc.is_test === "boolean" ? (doc.is_test ? "SANDBOX" : "RoT") : "—";
 
-    // Use canonical columns: invoice_number / document_number / external_reference
     const title =
       safeText(doc.invoice_number) ||
       safeText(doc.document_number) ||
@@ -220,7 +261,6 @@ serve(async (req) => {
       "Billing Document";
 
     const verifyUrl = `${VERIFY_BASE_URL}?hash=${canonicalHash}`;
-
     const subject = subjectOverride || `Oasis Billing • ${title} • ${lane}`;
 
     const html = `
@@ -291,11 +331,12 @@ serve(async (req) => {
           subject,
           to_name: to_name || null,
           verify_url: verifyUrl,
+          expires_in_seconds: expiresSeconds,
         },
         created_by: doc.created_by ?? null,
       });
     } catch {
-      // intentionally ignore
+      // ignore
     }
 
     return json(200, {
