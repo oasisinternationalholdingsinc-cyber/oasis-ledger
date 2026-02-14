@@ -42,6 +42,10 @@ export const dynamic = "force-dynamic";
  * PATCH (RESOLVER AUTHORITY — CERTIFIED):
  * ✅ Open Certified PDF now uses resolve-billing-document (NO client-side storage signing)
  * ✅ Email resolver prefers certified PDF when available
+ *
+ * PATCH (BILLING-GENERATE-DOCUMENT SCHEMA ALIGNMENT — NO REGRESSION):
+ * ✅ Send entity_id (issuer) in addition to provider_entity_id
+ *    (some deployments expect entity_id as canonical issuer field)
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -175,14 +179,14 @@ type DocRow = {
   id: string;
 
   // schema variants:
-  entity_id?: string; // some schemas
-  provider_entity_id?: string; // newer billing direction
+  entity_id?: string;
+  provider_entity_id?: string;
 
   is_test: boolean;
 
   subscription_id?: string | null;
-  document_type: string; // enum
-  status?: string; // enum (some schemas)
+  document_type: string;
+  status?: string;
   document_number?: string | null;
   invoice_number?: string | null;
 
@@ -196,7 +200,6 @@ type DocRow = {
 
   currency?: string | null;
 
-  // schema variants:
   amount_cents?: number | null;
   total_cents?: number | null;
   subtotal_amount?: number | null;
@@ -283,7 +286,7 @@ function OsModal({
           <div className="border-b border-white/10 p-4 text-lg font-semibold text-white/90">
             {title}
           </div>
-          <div className="p-4 space-y-3">{children}</div>
+          <div className="space-y-3 p-4">{children}</div>
           <div className="flex justify-end gap-2 border-t border-white/10 p-4">
             <button
               disabled={busy}
@@ -544,11 +547,7 @@ export default function CiBillingPage() {
         setProviderEntityId(direct);
         return;
       }
-      const { data, error } = await supabase
-        .from("entities")
-        .select("id")
-        .eq("slug", entitySlug)
-        .maybeSingle();
+      const { data, error } = await supabase.from("entities").select("id").eq("slug", entitySlug).maybeSingle();
       if (error) {
         setProviderEntityId(null);
         return;
@@ -582,10 +581,7 @@ export default function CiBillingPage() {
 
   useEffect(() => {
     (async () => {
-      const { data: p } = await supabase
-        .from("billing_plans")
-        .select("*")
-        .order("created_at", { ascending: false });
+      const { data: p } = await supabase.from("billing_plans").select("*").order("created_at", { ascending: false });
       setPlans((p || []) as PlanRow[]);
     })();
   }, [refreshKey]);
@@ -669,11 +665,9 @@ export default function CiBillingPage() {
         setSelectedDelivery(rows[0] ?? null);
       } catch {
         // fallback: schema drift tolerant
-        const { data: e2 } = await supabase
-          .from("billing_delivery_events")
-          .select("*")
-          .order("created_at", { ascending: false })
-          .limit(200);
+        const { data: e2 } = await supabase.from("billing_delivery_events").select("*").order("created_at", {
+          ascending: false,
+        }).limit(200);
 
         const rows2 = (e2 || []) as DeliveryRow[];
 
@@ -698,7 +692,6 @@ export default function CiBillingPage() {
 
   async function openPdfViaResolver(doc: DocRow) {
     const data = await invoke("resolve-billing-document", {
-      // resolver prefers hash-first; also tolerates document_id
       hash: doc.file_hash,
       document_id: doc.id,
       is_test: isTest,
@@ -796,8 +789,8 @@ export default function CiBillingPage() {
             document_id: selectedDoc.id,
             is_test: isTest,
             entity_id: providerEntityId,
-            expires_in: expiresInSeconds, // tolerated even if resolver ignores it
-            prefer_certified: true, // ✅ prefer certified if available
+            expires_in: expiresInSeconds,
+            prefer_certified: true,
             trigger: "ci_billing_email_resolve_pdf",
           });
 
@@ -1037,7 +1030,9 @@ export default function CiBillingPage() {
     const qty1 = Math.max(0, Number(genLI1Qty || "1") || 1);
     const unit1 = Math.max(0, Number(genLI1Unit || "0") || 0);
 
-    const li: any[] = [{ description: (genLI1Desc || "Service").trim(), quantity: qty1, unit_price: unit1 }];
+    const li: any[] = [
+      { description: (genLI1Desc || "Service").trim(), quantity: qty1, unit_price: unit1 },
+    ];
 
     const desc2 = genLI2Desc.trim();
     if (desc2) {
@@ -1075,7 +1070,12 @@ export default function CiBillingPage() {
       : null;
 
     const payload: any = {
+      // ✅ CRITICAL: canonical issuer field (some deployments require this)
+      entity_id: providerEntityId,
+
+      // keep provider alias for backward compatibility
       provider_entity_id: providerEntityId,
+
       is_test: isTest,
 
       customer_id: selectedCustomerId ?? null,
@@ -1083,6 +1083,8 @@ export default function CiBillingPage() {
       recipient_email: genRecipientEmail.trim() || selectedCustomer?.billing_email || null,
 
       document_type: genDocType,
+
+      // tolerated by some generators (safe if ignored); does NOT affect DB schema
       title,
 
       invoice_number: genInvoiceNumber.trim() || null,
@@ -1227,8 +1229,7 @@ export default function CiBillingPage() {
           </div>
 
           <div className="mt-2 text-xs text-white/45">
-            Provider (OS Entity): {entityLabel} • provider_entity_id: {shortUUID(providerEntityId)} • Selected
-            customer:{" "}
+            Provider (OS Entity): {entityLabel} • provider_entity_id: {shortUUID(providerEntityId)} • Selected customer:{" "}
             {selectedCustomer ? `${selectedCustomer.legal_name} (${selectedCustomer.billing_email})` : "—"}
           </div>
         </div>
@@ -1261,7 +1262,7 @@ export default function CiBillingPage() {
         {/* BODY */}
         <div className="grid grid-cols-12 gap-4 p-4">
           {/* LEFT RAIL */}
-          <div className="col-span-12 lg:col-span-3 space-y-3">
+          <div className="col-span-12 space-y-3 lg:col-span-3">
             {/* Customer selector */}
             <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
               <div className="text-xs font-semibold text-white/80">Customer</div>
@@ -1286,10 +1287,10 @@ export default function CiBillingPage() {
                         setTab("SUBSCRIPTIONS");
                       }}
                       className={cx(
-                        "w-full px-3 py-2 text-left text-xs border-b border-white/5 last:border-b-0",
+                        "w-full border-b border-white/5 px-3 py-2 text-left text-xs last:border-b-0",
                         selectedCustomerId === c.id
                           ? "bg-amber-400/10 text-white/90"
-                          : "hover:bg-white/5 text-white/70",
+                          : "text-white/70 hover:bg-white/5",
                       )}
                     >
                       <div className="font-semibold">{c.legal_name}</div>
@@ -1319,9 +1320,7 @@ export default function CiBillingPage() {
                 <div className="mt-1 text-sm font-semibold text-white/90">
                   {activeSub ? (activeSub.plan_key || safeStr(activeSub.plan_id)) : "—"}
                 </div>
-                <div className="mt-1 text-xs text-white/45">
-                  {activeSub ? safeStr(activeSub.status) : "No active sub"}
-                </div>
+                <div className="mt-1 text-xs text-white/45">{activeSub ? safeStr(activeSub.status) : "No active sub"}</div>
               </div>
               <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                 <div className="text-[10px] uppercase tracking-[0.25em] text-white/40">Docs</div>
@@ -1349,7 +1348,7 @@ export default function CiBillingPage() {
             </button>
 
             {/* Mutation actions */}
-            <div className="rounded-2xl border border-white/10 bg-black/20 p-3 space-y-2">
+            <div className="space-y-2 rounded-2xl border border-white/10 bg-black/20 p-3">
               <button
                 disabled={!providerEntityId || busy}
                 onClick={() => {
@@ -1424,7 +1423,7 @@ export default function CiBillingPage() {
           </div>
 
           {/* MIDDLE LIST */}
-          <div className="col-span-12 lg:col-span-5 space-y-2">
+          <div className="col-span-12 space-y-2 lg:col-span-5">
             {listRows.length === 0 ? (
               <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-white/55">
                 No records in this tab (lane + provider + customer scoped).
@@ -1466,9 +1465,7 @@ export default function CiBillingPage() {
                     onClick={() => selectRow(r)}
                     className={cx(
                       "w-full rounded-2xl border p-3 text-left transition",
-                      isSelected
-                        ? "border-amber-300/25 bg-black/40"
-                        : "border-white/10 bg-black/20 hover:bg-black/30",
+                      isSelected ? "border-amber-300/25 bg-black/40" : "border-white/10 bg-black/20 hover:bg-black/30",
                     )}
                   >
                     <div className="flex items-center justify-between gap-2">
@@ -1476,9 +1473,7 @@ export default function CiBillingPage() {
                       <span
                         className={cx(
                           "rounded-full border px-2 py-[2px] text-[10px] font-semibold",
-                          laneBadge
-                            ? "border-amber-300/20 bg-amber-400/12 text-amber-100"
-                            : "border-sky-300/20 bg-sky-400/12 text-sky-100",
+                          laneBadge ? "border-amber-300/20 bg-amber-400/12 text-amber-100" : "border-sky-300/20 bg-sky-400/12 text-sky-100",
                         )}
                       >
                         {laneBadge ? "SANDBOX" : "RoT"}
@@ -1493,7 +1488,7 @@ export default function CiBillingPage() {
           </div>
 
           {/* RIGHT DETAILS */}
-          <div className="col-span-12 lg:col-span-4 space-y-3">
+          <div className="col-span-12 space-y-3 lg:col-span-4">
             {/* CUSTOMER DETAILS */}
             {tab === "CUSTOMERS" && selectedCustomer && (
               <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
@@ -1508,7 +1503,7 @@ export default function CiBillingPage() {
                     <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Lane</div>
                     <div className="mt-1">{selectedCustomer.is_test ? "SANDBOX" : "RoT"}</div>
                   </div>
-                  <div className="rounded-xl border border-white/10 bg-black/10 p-3 col-span-2">
+                  <div className="col-span-2 rounded-xl border border-white/10 bg-black/10 p-3">
                     <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Contact</div>
                     <div className="mt-1">
                       {safeStr(selectedCustomer.contact_name)} • {safeStr(selectedCustomer.phone)}
@@ -1580,7 +1575,7 @@ export default function CiBillingPage() {
                     <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Period end</div>
                     <div className="mt-1">{fmtISO(selectedSub.current_period_end || null)}</div>
                   </div>
-                  <div className="rounded-xl border border-white/10 bg-black/10 p-3 col-span-2">
+                  <div className="col-span-2 rounded-xl border border-white/10 bg-black/10 p-3">
                     <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Provider IDs</div>
                     <div className="mt-1">
                       customer: {safeStr(selectedSub.provider_customer_id)} • sub:{" "}
@@ -1764,7 +1759,7 @@ export default function CiBillingPage() {
                   </div>
 
                   <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-white/70">
-                    <div className="rounded-xl border border-white/10 bg-black/10 p-3 col-span-2">
+                    <div className="col-span-2 rounded-xl border border-white/10 bg-black/10 p-3">
                       <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Recipient</div>
                       <div className="mt-1">{safeStr(selectedCustomer?.billing_email)}</div>
                     </div>
@@ -1774,9 +1769,7 @@ export default function CiBillingPage() {
                     </div>
                     <div className="rounded-xl border border-white/10 bg-black/10 p-3">
                       <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Hash</div>
-                      <div className="mt-1 font-mono">
-                        {selectedDoc ? `${selectedDoc.file_hash.slice(0, 10)}…` : "—"}
-                      </div>
+                      <div className="mt-1 font-mono">{selectedDoc ? `${selectedDoc.file_hash.slice(0, 10)}…` : "—"}</div>
                     </div>
                   </div>
 
@@ -1946,7 +1939,7 @@ export default function CiBillingPage() {
           />
           <div className="rounded-xl border border-white/10 bg-black/10 p-3">
             <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Available plans (catalog)</div>
-            <div className="mt-2 max-h-[140px] overflow-auto space-y-2">
+            <div className="mt-2 max-h-[140px] space-y-2 overflow-auto">
               {plans.length === 0 ? (
                 <div className="text-xs text-white/50">No plans loaded.</div>
               ) : (
@@ -1959,7 +1952,8 @@ export default function CiBillingPage() {
                   >
                     <div className="font-semibold text-white/90">{p.code}</div>
                     <div className="text-white/45">
-                      {p.name} • {p.currency} {p.price_minor} / {p.billing_period} • {p.is_active ? "active" : "inactive"}
+                      {p.name} • {p.currency} {p.price_minor} / {p.billing_period} •{" "}
+                      {p.is_active ? "active" : "inactive"}
                     </div>
                   </button>
                 ))
@@ -1975,8 +1969,8 @@ export default function CiBillingPage() {
             className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
           />
           <div className="text-xs text-white/45">
-            Customer: {selectedCustomer ? `${selectedCustomer.legal_name} (${selectedCustomer.billing_email})` : "—"} • Lane:{" "}
-            {envLabel}
+            Customer: {selectedCustomer ? `${selectedCustomer.legal_name} (${selectedCustomer.billing_email})` : "—"} •
+            Lane: {envLabel}
           </div>
         </div>
       </OsModal>
@@ -2028,9 +2022,12 @@ export default function CiBillingPage() {
               <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Selected</div>
               <div className="mt-1 text-sm font-semibold text-white/90">{selectedPlan.code}</div>
               <div className="mt-1 text-xs text-white/55">
-                {safeStr(selectedPlan.name)} • {selectedPlan.currency} {selectedPlan.price_minor} / {selectedPlan.billing_period}
+                {safeStr(selectedPlan.name)} • {selectedPlan.currency} {selectedPlan.price_minor} /{" "}
+                {selectedPlan.billing_period}
               </div>
-              {selectedPlan.description ? <div className="mt-2 text-xs text-white/45">{selectedPlan.description}</div> : null}
+              {selectedPlan.description ? (
+                <div className="mt-2 text-xs text-white/45">{selectedPlan.description}</div>
+              ) : null}
               <div className="mt-2 text-xs text-white/45">
                 plan_id: <span className="font-mono">{shortUUID(selectedPlan.id)}</span>
               </div>
