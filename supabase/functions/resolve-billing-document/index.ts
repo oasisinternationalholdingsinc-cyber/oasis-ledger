@@ -8,8 +8,8 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
  * ✅ hash-first resolver (file_hash OR certified_file_hash)
  * ✅ tolerant identifiers (document_id/id)
  * ✅ service_role signs URLs (private buckets OK)
- * ✅ NO REGRESSION: preserves existing response shape
- * ✅ OPTIONAL certified support (prefer_certified + urls.certified_pdf)
+ * ✅ schema-locked: reads ONLY real billing_documents columns
+ * ✅ optional certified support (prefer_certified + urls.certified_pdf)
  */
 
 type ReqBody = {
@@ -21,13 +21,13 @@ type ReqBody = {
   document_id?: string | null;
   id?: string | null;
 
-  // tolerated extras (non-breaking)
+  // tolerated extras (non-breaking, ignored for resolution)
   is_test?: boolean | null;
   entity_id?: string | null;
   trigger?: string | null;
 
-  // optional enhancements (non-breaking)
-  expires_in?: number | null; // seconds
+  // optional
+  expires_in?: number | null; // seconds (default 10 min)
   prefer_certified?: boolean | null;
 };
 
@@ -39,28 +39,26 @@ type Resp =
       entity_id: string | null;
       is_test: boolean | null;
 
-      // tolerate schema drift (UI can ignore)
-      title: string | null;
-      document_kind: string | null;
-      currency: string | null;
-      amount_cents: number | null;
+      // UI-friendly (derived from canonical schema)
+      title: string | null; // derived from document_type / document_number / invoice_number
+      document_kind: string | null; // document_type
+      currency: string | null; // currency
+      amount_cents: number | null; // derived from total_cents OR amount_cents OR total_amount
 
       storage: { bucket: string; path: string };
 
       urls: {
-        pdf: string; // signed url (source OR certified depending on prefer_certified)
-        certified_pdf?: string | null; // signed url (if certified pointers exist)
-        source_pdf?: string | null; // signed url (source pointer)
+        pdf: string; // prefer certified if requested + available
+        certified_pdf?: string | null;
+        source_pdf?: string | null;
       };
 
       created_at?: string | null;
       issued_at?: string | null;
 
-      // optional pointers (handy for UI)
       certified_storage?: { bucket: string; path: string } | null;
       certified_file_hash?: string | null;
 
-      // non-breaking extra (helps debugging)
       resolved_by?: "file_hash" | "certified_file_hash" | "id";
     }
   | {
@@ -98,7 +96,6 @@ function pickId(b: ReqBody) {
 }
 
 function cleanPath(p: string) {
-  // storage paths must NOT start with "/"
   const s = (p ?? "").toString().trim();
   return s.replace(/^\/+/, "");
 }
@@ -110,6 +107,48 @@ function clampExpiresInSeconds(v: any) {
   return Math.max(60, Math.min(60 * 60 * 24 * 14, Math.floor(n)));
 }
 
+function toCentsFromNumeric(n: any): number | null {
+  // billing_documents has numeric totals sometimes; convert to cents safely
+  if (n === null || n === undefined) return null;
+  const num = Number(n);
+  if (!Number.isFinite(num)) return null;
+  return Math.round(num * 100);
+}
+
+function deriveAmountCents(row: any): number | null {
+  // Prefer canonical bigint fields if present
+  const candidates = [
+    row.total_cents,
+    row.amount_cents,
+    row.subtotal_cents,
+  ];
+  for (const c of candidates) {
+    const v = Number(c);
+    if (Number.isFinite(v) && v >= 0) return Math.floor(v);
+  }
+  // Fall back to numeric columns (total_amount, etc.)
+  const numericCandidates = [row.total_amount, row.amount, row.subtotal_amount];
+  for (const n of numericCandidates) {
+    const cents = toCentsFromNumeric(n);
+    if (cents !== null && cents >= 0) return cents;
+  }
+  return null;
+}
+
+function deriveTitle(row: any): string | null {
+  // Schema-locked: billing_documents does NOT have "title" canonically.
+  // Give UI something stable.
+  const docType = (row.document_type ?? "").toString().trim();
+  const n =
+    (row.invoice_number ?? row.document_number ?? row.external_reference ?? "")
+      .toString()
+      .trim();
+
+  const base = docType ? docType.toUpperCase() : "DOCUMENT";
+  if (n) return `${base} • ${n}`;
+  return base;
+}
+
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
 const SERVICE_ROLE_KEY =
   Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
@@ -118,7 +157,6 @@ if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
   throw new Error("Missing SUPABASE_URL or SERVICE_ROLE_KEY");
 }
 
-// service_role client (internal read + signed urls)
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
   global: { fetch },
   auth: { persistSession: false },
@@ -178,14 +216,12 @@ serve(async (req) => {
   }
 
   try {
-    // -----------------------------
-    // Resolve billing_documents row (hash-first; tolerant)
-    // -----------------------------
+    // Resolve billing_documents row
     let row: any = null;
     let resolved_by: "file_hash" | "certified_file_hash" | "id" = "id";
 
     if (hash) {
-      // 1) try file_hash first (back-compat)
+      // file_hash first
       const r1 = await supabase
         .from("billing_documents")
         .select("*")
@@ -198,7 +234,7 @@ serve(async (req) => {
       row = r1.data;
       if (row) resolved_by = "file_hash";
 
-      // 2) if not found, try certified_file_hash (CERT hash-first)
+      // certified_file_hash fallback
       if (!row) {
         const r2 = await supabase
           .from("billing_documents")
@@ -215,7 +251,7 @@ serve(async (req) => {
       }
     }
 
-    // 3) fallback by id
+    // id fallback
     if (!row && docId) {
       const r3 = await supabase.from("billing_documents").select("*").eq("id", docId).maybeSingle();
       if (r3.error) throw r3.error;
@@ -257,9 +293,7 @@ serve(async (req) => {
     const certPath = cleanPath((row.certified_storage_path ?? "").toString().trim());
     const hasCertifiedPointer = Boolean(certBucket && certPath);
 
-    // -----------------------------
     // Signed URLs
-    // -----------------------------
     const srcSigned = await sign(srcBucket, srcPath, expiresIn);
     if (!srcSigned.signedUrl) {
       return json(
@@ -278,25 +312,22 @@ serve(async (req) => {
     if (hasCertifiedPointer) {
       const certSigned = await sign(certBucket, certPath, expiresIn);
       certSignedUrl = certSigned.signedUrl;
-      // If certified pointer exists but signing fails, do not fail resolver.
+      // If signing fails, do not fail resolver.
     }
 
-    // decide primary pdf url
     const primaryPdf = preferCertified && certSignedUrl ? certSignedUrl : srcSigned.signedUrl;
 
-    // IMPORTANT: preserve existing shape: file_hash stays row.file_hash.
-    // Certified hash is exposed separately in certified_file_hash.
     const resp: Resp = {
       ok: true,
       document_id: row.id,
       file_hash: row.file_hash,
-      entity_id: row.entity_id ?? row.provider_entity_id ?? null,
+      entity_id: row.entity_id ?? null,
       is_test: row.is_test ?? null,
 
-      title: row.title ?? row.document_type ?? null,
-      document_kind: row.document_kind ?? row.document_type ?? row.kind ?? null,
+      title: deriveTitle(row),
+      document_kind: (row.document_type ?? null) as any,
       currency: row.currency ?? null,
-      amount_cents: row.amount_cents ?? row.total_cents ?? null,
+      amount_cents: deriveAmountCents(row),
 
       storage: { bucket: srcBucket, path: srcPath },
 
@@ -307,7 +338,7 @@ serve(async (req) => {
       },
 
       created_at: row.created_at ?? null,
-      issued_at: row.issued_at ?? row.period_start ?? null,
+      issued_at: row.issued_at ?? null,
 
       certified_storage: hasCertifiedPointer ? { bucket: certBucket, path: certPath } : null,
       certified_file_hash: row.certified_file_hash ?? null,
