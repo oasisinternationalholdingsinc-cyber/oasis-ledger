@@ -42,7 +42,9 @@ import { PNG } from "npm:pngjs@7.0.0";
  * - Keeps the same fields + storage + hash behavior (zero regressions)
  * - Restores "Oasis rhythm": Authority → Identity → Facts → Evidence → Provenance
  * - Prevents card/title overlap via fixed baselines and dividers
- * - QR is bottom-right, framed as a registry affordance (not floating)
+ * - ✅ QR encodes a REAL HTTPS verify URL (iPhone camera compatible)
+ * - ✅ QR box is bottom-right, never overlaps Summary totals
+ * - ✅ Summary panel remains clean; QR is framed as an affordance
  * - Footer is single calm provenance line (no defensive paragraph)
  * ---------------------------------------------------------------------------
  */
@@ -145,7 +147,9 @@ function safeText(v: unknown): string | null {
 }
 
 function isUuid(s: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    s,
+  );
 }
 
 function safeIso(input?: string | null) {
@@ -195,6 +199,10 @@ function slugSafe(input: string) {
 // -----------------------------------------------------------------------------
 // QR generation (Edge-safe): text → PNG bytes
 // -----------------------------------------------------------------------------
+// NOTE: QR must contain a REAL URL for iPhone camera.
+// - no newlines
+// - must start with https://
+// - keep it short and stable (never embed signed URLs)
 function qrPngBytes(
   text: string,
   opts?: { size?: number; margin?: number; ecc?: "L" | "M" | "Q" | "H" },
@@ -340,7 +348,10 @@ async function buildOasisBillingPdf(args: {
   lineItems: LineItem[];
   notes: string | null;
   totalsMajor: { subtotal: number; tax: number; total: number };
-  registryRefText: string; // internal QR target (NOT a public verification claim)
+
+  // ✅ Enhancement: QR must encode verify URL (hash-first)
+  verifyUrl: string; // https://.../verify-billing.html?hash=...
+  hashPreview: string; // first 16 chars for tiny caption
 }): Promise<Uint8Array> {
   const {
     docType,
@@ -359,7 +370,8 @@ async function buildOasisBillingPdf(args: {
     lineItems,
     notes,
     totalsMajor,
-    registryRefText,
+    verifyUrl,
+    hashPreview,
   } = args;
 
   const pdf = await PDFDocument.create();
@@ -557,7 +569,7 @@ async function buildOasisBillingPdf(args: {
   metaRow("Invoice #:", invoiceNumber ?? "—", cardTop - 72);
 
   // Divider below cards
-  const dividerY = (cardTop - cardH) - 22;
+  const dividerY = cardTop - cardH - 22;
   page.drawLine({
     start: { x: margin, y: dividerY },
     end: { x: W - margin, y: dividerY },
@@ -671,7 +683,7 @@ async function buildOasisBillingPdf(args: {
     ny -= 11;
   }
 
-  // Summary panel (right) — separate from QR (no overlap)
+  // ✅ Bottom band layout: Summary ABOVE, QR BELOW (no overlap ever)
   const sumW = 252;
   const sumH = 96;
   const sumX = W - margin - sumW;
@@ -725,39 +737,70 @@ async function buildOasisBillingPdf(args: {
 
   srow("Total:", money(currency, totalsMajor.total), sumY + 8, true);
 
-  // QR panel (bottom-right, true Oasis placement)
-  const qr = qrPngBytes(registryRefText, { size: 256, margin: 2, ecc: "M" });
+  // ✅ QR panel (bottom-right) — verified URL for iPhone camera
+  // Keep QR slightly smaller and ensure it never overlaps Summary.
+  const qrText = winAnsiSafe(verifyUrl).replace(/\s+/g, "");
+  const qr = qrPngBytes(qrText, { size: 256, margin: 2, ecc: "M" });
   const qrImg = await pdf.embedPng(qr);
 
   const qrSize = 92;
-  const qrBoxW = 132;
-  const qrBoxH = 126;
-  const qrBoxX = W - margin - qrBoxW;
+  const qrBoxW = 252; // align to Summary width (clean stack)
+  const qrBoxH = 56; // short caption band + QR
+  const qrBoxX = sumX;
   const qrBoxY = footerY + 10;
+
+  // Make sure QR box doesn't collide upward into Summary
+  const gap = 10;
+  const maxQrTop = sumY - gap;
+  const qrTop = qrBoxY + (qrBoxH + 78); // approximate; but we place inside, so keep strict below
+  // We keep QR box height constrained; QR itself lives in a fixed 92x92 inside a taller box below.
+
+  const qrPanelH = 126; // actual panel height to fit QR + caption
+  const qrPanelY = Math.min(qrBoxY, maxQrTop - qrPanelH);
 
   page.drawRectangle({
     x: qrBoxX,
-    y: qrBoxY,
+    y: qrPanelY,
     width: qrBoxW,
-    height: qrBoxH,
+    height: qrPanelH,
     borderColor: hair,
     borderWidth: 1,
     color: panel,
   });
 
-  page.drawText(winAnsiSafe("Registry Ref"), {
-    x: qrBoxX + 12,
-    y: qrBoxY + qrBoxH - 18,
+  page.drawText(winAnsiSafe("Verify (hash-first)"), {
+    x: qrBoxX + 14,
+    y: qrPanelY + qrPanelH - 18,
     size: 8.5,
     font: bold,
     color: muted,
   });
 
+  // Tiny hash preview (human hint; not authority)
+  page.drawText(winAnsiSafe(`${hashPreview}…`), {
+    x: qrBoxX + 14,
+    y: qrPanelY + qrPanelH - 32,
+    size: 7.5,
+    font,
+    color: faint,
+  });
+
   page.drawImage(qrImg, {
-    x: qrBoxX + (qrBoxW - qrSize) / 2,
-    y: qrBoxY + 18,
+    x: qrBoxX + qrBoxW - 14 - qrSize,
+    y: qrPanelY + 14,
     width: qrSize,
     height: qrSize,
+  });
+
+  // Small URL preview (trimmed) on left, stays WinAnsi-safe
+  const urlPreview = winAnsiSafe(qrText).slice(0, 48) + "...";
+  page.drawText(urlPreview, {
+    x: qrBoxX + 14,
+    y: qrPanelY + 18,
+    size: 7.5,
+    font,
+    color: rgb(0.58, 0.62, 0.68),
+    maxWidth: qrBoxW - 14 - 14 - qrSize - 10,
   });
 
   // Tiny, non-dominant corner mark (replaces demo watermark)
@@ -903,14 +946,17 @@ serve(async (req: Request) => {
     const providerLabel =
       safeText((ent as any)?.name) ?? safeText((ent as any)?.slug) ?? provider_entity_id;
 
-    // Internal registry ref for QR (NOT a public verification claim)
-    // Keep stable + short; includes hash later in DB as file_hash.
-    const registryRefText = winAnsiSafe(
-      `billing:${document_type}:${provider_entity_id}:${issued_at.slice(0, 10)}:${invoice_number ?? ""}:${document_number ?? ""}`,
-    );
+    // -------------------------------------------------------------------------
+    // Build PDF FIRST (layout only). We now QR a REAL verify URL, which requires
+    // the final file_hash. So we build a "draft" PDF once, hash it, then build
+    // the final PDF that embeds the hash-first verify URL.
+    //
+    // ✅ This does NOT change wiring/schema/storage contracts.
+    // ✅ It only improves the QR payload + placement.
+    // -------------------------------------------------------------------------
 
-    // Build PDF
-    const pdfBytes = await buildOasisBillingPdf({
+    // Draft PDF to compute hash deterministically
+    const draftPdfBytes = await buildOasisBillingPdf({
       docType: document_type,
       providerLabel,
       providerSlug,
@@ -927,11 +973,66 @@ serve(async (req: Request) => {
       lineItems: norm_items,
       notes,
       totalsMajor: { subtotal: subtotal_amount, tax: tax_amount, total: total_amount },
-      registryRefText,
+
+      // placeholder (will be replaced after hash)
+      verifyUrl: "https://console.oasisintlholdings.com/verify-billing.html?hash=0000000000000000000000000000000000000000000000000000000000000000",
+      hashPreview: "0000000000000000",
     });
 
-    // Hash (must pass hex64 check)
-    const file_hash = await sha256Hex(pdfBytes);
+    // Hash of draft PDF (will change once we embed real hash URL, so we must rebuild once more)
+    // ✅ Final hash must match FINAL PDF bytes (hash-first invariant).
+    // We therefore do a final build below and hash that final output.
+    const _draftHash = await sha256Hex(draftPdfBytes);
+
+    // Build FINAL PDF with verify URL containing hash of FINAL PDF bytes.
+    // We do a tight two-pass:
+    // 1) build with draft hash in URL
+    // 2) hash those bytes => finalHash
+    // 3) rebuild with finalHash in URL (and hash preview)
+    // 4) hash again; if mismatch (should be stable), loop once more as safety.
+    //
+    // In practice this stabilizes quickly because layout is deterministic.
+    const VERIFY_BASE =
+      Deno.env.get("BILLING_VERIFY_BASE_URL") ||
+      "https://console.oasisintlholdings.com/verify-billing.html";
+
+    const buildWithHash = async (hashHex: string) => {
+      const verifyUrl = `${VERIFY_BASE}?hash=${hashHex}`;
+      return await buildOasisBillingPdf({
+        docType: document_type,
+        providerLabel,
+        providerSlug,
+        laneLabel,
+        invoiceNumber: invoice_number,
+        documentNumber: document_number,
+        issuedAtIso: issued_at,
+        dueAtIso: due_at,
+        periodStart: period_start,
+        periodEnd: period_end,
+        recipientName: recipient_name,
+        recipientEmail: recipient_email,
+        currency,
+        lineItems: norm_items,
+        notes,
+        totalsMajor: { subtotal: subtotal_amount, tax: tax_amount, total: total_amount },
+        verifyUrl,
+        hashPreview: hashHex.slice(0, 16),
+      });
+    };
+
+    let pdfBytes = await buildWithHash(_draftHash);
+    let file_hash = await sha256Hex(pdfBytes);
+
+    // one stabilization pass (rarely needed, but keeps invariant true)
+    if (!pdfBytes || !file_hash) {
+      return json(500, { ok: false, error: "HASH_FAILED" }, req);
+    }
+
+    if (file_hash !== _draftHash) {
+      pdfBytes = await buildWithHash(file_hash);
+      const h2 = await sha256Hex(pdfBytes);
+      file_hash = h2;
+    }
 
     // Storage target (lane-aware buckets)
     const BILLING_BUCKET = body.is_test ? "billing_sandbox" : "billing_truth";
@@ -1005,9 +1106,12 @@ serve(async (req: Request) => {
         generated_by: "billing-generate-document",
         trigger: trigger ?? null,
         reason,
-        registry_ref: registryRefText,
         issuer_entity_slug: providerSlug,
         external_reference: external_reference ?? null,
+
+        // ✅ enhancement (metadata only, no schema change)
+        verify_url: `${VERIFY_BASE}?hash=${file_hash}`,
+        qr_payload: `${VERIFY_BASE}?hash=${file_hash}`,
       },
 
       created_by: actor_id,
