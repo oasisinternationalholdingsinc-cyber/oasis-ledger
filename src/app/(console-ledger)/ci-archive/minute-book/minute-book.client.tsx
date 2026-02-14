@@ -296,8 +296,7 @@ function edgeInvokeMessage(error: any, data: any) {
 
 function safeZipNameFromSelected(entityKey: string, laneIsTest: boolean, e: EntryWithDoc) {
   const base =
-    safeBaseName(e.title || e.file_name || "Oasis-Discovery-Export") ||
-    "Oasis-Discovery-Export";
+    safeBaseName(e.title || e.file_name || "Oasis-Discovery-Export") || "Oasis-Discovery-Export";
   const ek = safeBaseName(entityKey || "entity");
   const lane = laneIsTest ? "SANDBOX" : "RoT";
   const ts = timestampCompact();
@@ -506,10 +505,7 @@ async function resolveOfficialArtifact(
 /**
  * ✅ PROMOTED resolver (read-only) — Minute Book entry certification artifact
  */
-async function resolvePromotedArtifact(
-  entryId: string,
-  laneIsTest: boolean
-): Promise<OfficialArtifact | null> {
+async function resolvePromotedArtifact(entryId: string, laneIsTest: boolean): Promise<OfficialArtifact | null> {
   const sb = supabaseBrowser;
 
   const { data, error } = await sb
@@ -546,12 +542,7 @@ async function resolvePromotedArtifact(
 /**
  * Signed URL with auto-repair (read-only)
  */
-async function signedUrlFor(
-  bucketId: string,
-  storagePath: string,
-  downloadName?: string | null,
-  extraDirs?: string[]
-) {
+async function signedUrlFor(bucketId: string, storagePath: string, downloadName?: string | null, extraDirs?: string[]) {
   const sb = supabaseBrowser;
 
   const wantPath = normalizeSlashes(storagePath).replace(/^\/+/, "");
@@ -755,6 +746,76 @@ async function exportDiscoveryZipViaFetch(body: Record<string, any>, filename: s
   return { kind: "bytes" as const };
 }
 
+/* ---------------- EMAIL (FETCH INVOKE — NO REGRESSION) ---------------- */
+
+/**
+ * ✅ Like Billing: fetch Edge directly so we can read JSON error bodies + x-sb-request-id.
+ * NO backend changes. NO schema drift. UI-only enhancement.
+ */
+async function invokeEdgeJson<T = any>(functionName: string, body: Record<string, any>) {
+  const sb = supabaseBrowser;
+
+  const {
+    data: { session },
+  } = await sb.auth.getSession();
+
+  const accessToken = session?.access_token;
+  if (!accessToken) throw new Error("Not authenticated.");
+
+  const anonKey =
+    (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "").toString().trim() ||
+    // @ts-ignore
+    (sb as any)?.supabaseKey ||
+    "";
+
+  const base = (process.env.NEXT_PUBLIC_SUPABASE_URL || "").toString().trim();
+  if (!base) throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL.");
+
+  const url = `${base}/functions/v1/${functionName}`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${accessToken}`,
+      apikey: anonKey,
+    },
+    body: JSON.stringify(body ?? {}),
+  });
+
+  const ct = (res.headers.get("content-type") || "").toLowerCase();
+  const requestId = res.headers.get("x-sb-request-id") || "";
+
+  let data: any = null;
+  let rawText = "";
+
+  if (ct.includes("application/json")) {
+    data = await res.json().catch(() => null);
+  } else {
+    rawText = await res.text().catch(() => "");
+    try {
+      data = rawText ? JSON.parse(rawText) : null;
+    } catch {
+      data = rawText || null;
+    }
+  }
+
+  if (!res.ok) {
+    const msg =
+      (data && typeof data === "object" && (data.error || data.message || data.details)
+        ? String(data.error || data.message || data.details)
+        : typeof data === "string" && data
+        ? data
+        : `Request failed (${res.status}).`) || `Request failed (${res.status}).`;
+
+    const rid = (data && typeof data === "object" && data.request_id ? String(data.request_id) : "") || requestId;
+
+    throw new Error(rid ? `${msg} • request_id=${rid}` : msg);
+  }
+
+  return data as T;
+}
+
 export default function MinuteBookClient() {
   const { entityKey } = useEntity();
   const { env } = useOsEnv();
@@ -929,10 +990,7 @@ export default function MinuteBookClient() {
         const laneMap = new Map<string, { is_test: boolean; status: string }>();
 
         if (recordIds.length) {
-          const { data } = await supabaseBrowser
-            .from("governance_ledger")
-            .select("id,is_test,status")
-            .in("id", recordIds);
+          const { data } = await supabaseBrowser.from("governance_ledger").select("id,is_test,status").in("id", recordIds);
 
           for (const r of data ?? []) {
             laneMap.set(String((r as any).id), {
@@ -1294,9 +1352,10 @@ export default function MinuteBookClient() {
     // gentle default body (operator editable)
     const title = (selected.title || selected.file_name || "Minute Book Entry").toString().trim();
     const lane = laneIsTest ? "SANDBOX" : "RoT";
-    const domainLabel =
-      domains.find((d) => d.key === selected.domain_key)?.label || norm(selected.domain_key, "—");
-    const hash = preferredHash ? `\n\nVerified Hash: ${preferredHash}\nVerify: ${buildVerifyHtmlUrlFromHash(preferredHash)}` : "";
+    const domainLabel = domains.find((d) => d.key === selected.domain_key)?.label || norm(selected.domain_key, "—");
+    const hash = preferredHash
+      ? `\n\nVerified Hash: ${preferredHash}\nVerify: ${buildVerifyHtmlUrlFromHash(preferredHash)}`
+      : "";
     const msg =
       `Please find the Minute Book entry below.\n\n` +
       `Entity: ${String(entityKey || "—")}\n` +
@@ -1332,24 +1391,23 @@ export default function MinuteBookClient() {
         is_test: laneIsTest,
 
         to_email: to,
-        subject: (emailSubject || "").toString().trim() || defaultEmailSubject(String(entityKey || "entity"), laneIsTest, selected),
+        subject:
+          (emailSubject || "").toString().trim() ||
+          defaultEmailSubject(String(entityKey || "entity"), laneIsTest, selected),
         message: (emailMessage || "").toString().trim() || null,
 
         // provide hash if available (hash-first UX)
         hash: preferredHash || null,
       };
 
-      const { data, error } = await supabaseBrowser.functions.invoke("email-minute-book-entry", { body });
+      // ✅ NO REGRESSION: same function name + same body contract
+      // ✅ Enhancement: fetch directly so we see JSON errors + request_id (like Billing)
+      const res = await invokeEdgeJson<EmailResult>("email-minute-book-entry", body);
 
-      if (error) {
-        const msg = edgeInvokeMessage(error, data);
-        throw new Error(msg);
-      }
-
-      const res = (data ?? {}) as EmailResult;
-      if (!res.ok) {
-        const msg = (typeof res.error === "string" && res.error) || "Email failed (no ok=true returned).";
-        throw new Error(msg);
+      if (!res?.ok) {
+        const msg = (typeof res?.error === "string" && res.error) || "Email failed (no ok=true returned).";
+        const rid = res?.request_id ? ` • request_id=${String(res.request_id)}` : "";
+        throw new Error(`${msg}${rid}`);
       }
 
       setEmailOpen(false);
@@ -1421,10 +1479,7 @@ export default function MinuteBookClient() {
         const laneMap = new Map<string, { is_test: boolean; status: string }>();
 
         if (recordIds.length) {
-          const { data: gl } = await supabaseBrowser
-            .from("governance_ledger")
-            .select("id,is_test,status")
-            .in("id", recordIds);
+          const { data: gl } = await supabaseBrowser.from("governance_ledger").select("id,is_test,status").in("id", recordIds);
 
           for (const r of gl ?? []) {
             laneMap.set(String((r as any).id), {
@@ -1986,13 +2041,7 @@ export default function MinuteBookClient() {
                               )}
                               title={!isUploadEntry ? promoteDisabledReason || "" : ""}
                             >
-                              {promoteBusy
-                                ? canReissue
-                                  ? "Reissuing…"
-                                  : "Promoting…"
-                                : canReissue
-                                ? "Reissue"
-                                : "Promote Upload"}
+                              {promoteBusy ? (canReissue ? "Reissuing…" : "Promoting…") : canReissue ? "Reissue" : "Promote Upload"}
                             </button>
 
                             <button
@@ -2089,9 +2138,7 @@ export default function MinuteBookClient() {
                               {certifiedHash ? (
                                 <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/25 bg-white/5 px-2 py-1">
                                   <span className="oasis-shimmer w-2 h-2 rounded-full border border-amber-500/30" />
-                                  <span className="text-[10px] font-semibold tracking-[0.18em] uppercase text-amber-200">
-                                    ✓
-                                  </span>
+                                  <span className="text-[10px] font-semibold tracking-[0.18em] uppercase text-amber-200">✓</span>
                                 </span>
                               ) : null}
 
