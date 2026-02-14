@@ -25,6 +25,9 @@ import { initialize, svg2png } from "https://esm.sh/svg2png-wasm@1.4.1";
  * ✅ Schema-safe: touches ONLY known billing_documents columns:
  *    - certified_at, certified_by, certified_storage_bucket, certified_storage_path, certified_file_hash, metadata
  *
+ * ✅ Canonical verify page URL (NO 404):
+ *    https://sign.oasisintlholdings.com/verify-billing.html?hash=...
+ *
  * Auth:
  * ✅ Requires valid operator JWT (ANON auth.getUser()) then uses SERVICE_ROLE for storage/db writes.
  */
@@ -34,7 +37,7 @@ type ReqBody = {
   document_id?: string; // alias
   actor_id?: string; // optional override (normally from JWT user id)
   force?: boolean;
-  verify_base_url?: string; // optional override; default = https://sign.oasisintlholdings.com
+  verify_page_url?: string; // optional override; FULL page URL (no hash)
 };
 
 type Resp = {
@@ -125,9 +128,15 @@ function winAnsiSafe(input: unknown): string {
   return out;
 }
 
-function defaultVerifyBaseUrl() {
-  // Canonical public authority door for terminals
-  return "https://sign.oasisintlholdings.com";
+function getVerifyPageUrl(): string {
+  // ✅ Canonical URL you showed (NO 404)
+  const env =
+    Deno.env.get("BILLING_VERIFY_PAGE_URL") ||
+    Deno.env.get("BILLING_VERIFY_BASE_URL") ||
+    "";
+  const v = String(env).trim();
+  if (v) return v.replace(/\/+$/, "");
+  return "https://sign.oasisintlholdings.com/verify-billing.html";
 }
 
 /**
@@ -139,9 +148,7 @@ function buildCertifiedPath(originalPath: string) {
   const p = String(originalPath ?? "").trim();
   if (!p) return null;
 
-  // Already certified-looking path → keep it
   if (/-certified\.pdf$/i.test(p)) return p;
-
   if (/\.pdf$/i.test(p)) return p.replace(/\.pdf$/i, "-certified.pdf");
   return `${p}-certified.pdf`;
 }
@@ -173,7 +180,6 @@ async function bestEffortAuthorizeOperator(
     if (data !== true) throw new Error("FORBIDDEN");
   } catch (e: any) {
     if (String(e?.message ?? "").includes("FORBIDDEN")) throw e;
-    // otherwise ignore
   }
 }
 
@@ -209,7 +215,7 @@ async function appendCertificationPage(args: {
 
   const pdf = await PDFDocument.load(srcBytes, { ignoreEncryption: true });
 
-  // Always append a NEW certification page (enterprise invariant)
+  // Always append a NEW certification page
   const page = pdf.addPage([612, 792]); // Letter
   const W = page.getWidth();
   const H = page.getHeight();
@@ -218,7 +224,7 @@ async function appendCertificationPage(args: {
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
 
-  // Palette (clean paper / ink / gold signal)
+  // Palette
   const ink = rgb(0.12, 0.14, 0.18);
   const muted = rgb(0.45, 0.48, 0.55);
   const hair = rgb(0.86, 0.88, 0.91);
@@ -227,7 +233,6 @@ async function appendCertificationPage(args: {
   const teal = rgb(0.1, 0.78, 0.72);
   const paper = rgb(1, 1, 1);
 
-  // Background
   page.drawRectangle({ x: 0, y: 0, width: W, height: H, color: paper });
 
   // Header band
@@ -312,7 +317,7 @@ async function appendCertificationPage(args: {
     });
   };
 
-  const docType = meta.document_type ? meta.document_type.toUpperCase() : "—";
+  const docType = meta.document_type ? String(meta.document_type).toUpperCase() : "—";
   row("Type:", docType, leftY + boxH - 42);
   row("Doc #:", meta.document_number ?? "—", leftY + boxH - 58);
   row("Invoice #:", meta.invoice_number ?? "—", leftY + boxH - 74);
@@ -321,6 +326,7 @@ async function appendCertificationPage(args: {
   const rightX = margin + 340;
   const rightY = leftY;
   const rightWb = W - margin - rightX;
+
   page.drawRectangle({
     x: rightX,
     y: rightY,
@@ -355,8 +361,8 @@ async function appendCertificationPage(args: {
     color: muted,
   });
 
-  const issued = meta.issued_at ? meta.issued_at.slice(0, 10) : "—";
-  const due = meta.due_at ? meta.due_at.slice(0, 10) : "—";
+  const issued = meta.issued_at ? String(meta.issued_at).slice(0, 10) : "—";
+  const due = meta.due_at ? String(meta.due_at).slice(0, 10) : "—";
   page.drawText(winAnsiSafe(`Issued: ${issued}   Due: ${due}`), {
     x: rightX + 12,
     y: rightY + 18,
@@ -522,12 +528,14 @@ serve(async (req: Request) => {
     }
 
     const force = Boolean(body.force);
-    const actor_id = (cleanUuid(body.actor_id) && isUuid(String(body.actor_id))) ? String(body.actor_id) : user_id;
+    const actor_id =
+      (cleanUuid(body.actor_id) && isUuid(String(body.actor_id)))
+        ? String(body.actor_id)
+        : user_id;
 
-    const verifyBase = (String(body.verify_base_url ?? "").trim() || defaultVerifyBaseUrl()).replace(
-      /\/+$/,
-      "",
-    );
+    // ✅ FULL verify page URL (no hash)
+    const verifyPage =
+      (String(body.verify_page_url ?? "").trim() || getVerifyPageUrl()).replace(/\/+$/, "");
 
     // SERVICE ROLE client (writes + storage)
     const svc = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
@@ -535,7 +543,7 @@ serve(async (req: Request) => {
       auth: { persistSession: false },
     });
 
-    // Load billing document (schema-safe select; NO title/verify_url assumptions)
+    // Load billing document (schema-safe select)
     const { data: doc, error: docErr } = await svc
       .from("billing_documents")
       .select(
@@ -588,7 +596,7 @@ serve(async (req: Request) => {
     const existing_path = String((doc as any).certified_storage_path ?? "").trim();
 
     if (!force && existing_hash && existing_bucket && existing_path) {
-      const verify_url = `${verifyBase}/verify-billing.html?hash=${existing_hash}`;
+      const verify_url = `${verifyPage}?hash=${existing_hash}`;
       return json(req, 200, {
         ok: true,
         billing_document_id: document_id,
@@ -621,15 +629,14 @@ serve(async (req: Request) => {
     }
     const srcBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // Fixed-point loop: render → hash → re-render with that hash, repeat a few times until stable.
-    // This guarantees: QR/hash reflect FINAL certified bytes.
+    // Fixed-point loop (hash must match final certified bytes)
     let hash = "0".repeat(64);
     let certifiedBytes = srcBytes;
 
     const meta = {
       entity_id,
       is_test,
-      document_type: cleanUuid((doc as any).document_type) ? String((doc as any).document_type) : String((doc as any).document_type ?? null),
+      document_type: (doc as any).document_type ? String((doc as any).document_type) : null,
       document_number: (doc as any).document_number ? String((doc as any).document_number) : null,
       invoice_number: (doc as any).invoice_number ? String((doc as any).invoice_number) : null,
       currency: (doc as any).currency ? String((doc as any).currency) : null,
@@ -644,7 +651,7 @@ serve(async (req: Request) => {
     };
 
     for (let i = 0; i < 4; i++) {
-      const verifyUrl = `${verifyBase}/verify-billing.html?hash=${hash}`;
+      const verifyUrl = `${verifyPage}?hash=${hash}`;
       const bytes = await appendCertificationPage({
         srcBytes,
         certHash: hash,
@@ -660,7 +667,7 @@ serve(async (req: Request) => {
     }
 
     const certified_hash = await sha256Hex(certifiedBytes);
-    const verify_url = `${verifyBase}/verify-billing.html?hash=${certified_hash}`;
+    const verify_url = `${verifyPage}?hash=${certified_hash}`;
 
     // Certified pointers (same lane bucket recorded on the row)
     const certified_bucket = src_bucket;
@@ -672,7 +679,7 @@ serve(async (req: Request) => {
       .from(certified_bucket)
       .upload(certified_path, new Blob([certifiedBytes], { type: "application/pdf" }), {
         contentType: "application/pdf",
-        upsert: force, // if force => overwrite; else require empty or existing
+        upsert: force,
       });
 
     if (up.error) {
@@ -684,8 +691,6 @@ serve(async (req: Request) => {
         msg.toLowerCase().includes("duplicate") ||
         msg.toLowerCase().includes("409");
 
-      // If not forcing and object exists, we can still proceed to update pointers/hash
-      // (idempotent behavior).
       if (!(alreadyExists && !force)) {
         return json(req, 500, { ok: false, error: "UPLOAD_FAILED", details: up.error });
       }
@@ -693,12 +698,14 @@ serve(async (req: Request) => {
 
     // Update billing_documents (schema-safe patch)
     const nowIso = new Date().toISOString();
-    const prevMeta = (doc as any).metadata && typeof (doc as any).metadata === "object" ? (doc as any).metadata : {};
+    const prevMeta =
+      (doc as any).metadata && typeof (doc as any).metadata === "object" ? (doc as any).metadata : {};
     const nextMeta = {
       ...(prevMeta ?? {}),
       certification: {
         ...(prevMeta?.certification ?? {}),
         verify_url,
+        verify_page: verifyPage,
         certified_file_hash: certified_hash,
         certified_storage_bucket: certified_bucket,
         certified_storage_path: certified_path,
