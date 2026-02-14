@@ -5,11 +5,11 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 
 /**
  * resolve-billing-document (PRODUCTION — LOCKED)
- * ✅ hash-first resolver (file_hash)
+ * ✅ hash-first resolver (file_hash OR certified_file_hash)
  * ✅ tolerant identifiers (document_id/id)
  * ✅ service_role signs URLs (private buckets OK)
  * ✅ NO REGRESSION: preserves existing response shape
- * ✅ adds OPTIONAL certified support (prefer_certified + urls.certified_pdf)
+ * ✅ OPTIONAL certified support (prefer_certified + urls.certified_pdf)
  */
 
 type ReqBody = {
@@ -59,6 +59,9 @@ type Resp =
       // optional pointers (handy for UI)
       certified_storage?: { bucket: string; path: string } | null;
       certified_file_hash?: string | null;
+
+      // non-breaking extra (helps debugging)
+      resolved_by?: "file_hash" | "certified_file_hash" | "id";
     }
   | {
       ok: false;
@@ -127,14 +130,20 @@ async function sign(bucket: string, path: string, expiresIn: number) {
   if (!b || !p) return { signedUrl: null as string | null, error: "missing pointer" };
 
   const { data, error } = await supabase.storage.from(b).createSignedUrl(p, expiresIn);
-  if (error || !data?.signedUrl) return { signedUrl: null as string | null, error: error?.message || "sign failed" };
+  if (error || !data?.signedUrl) {
+    return { signedUrl: null as string | null, error: error?.message || "sign failed" };
+  }
   return { signedUrl: data.signedUrl, error: null as string | null };
 }
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
 
-  const request_id = req.headers.get("x-sb-request-id");
+  const request_id =
+    req.headers.get("x-sb-request-id") ||
+    req.headers.get("x-sb-requestid") ||
+    req.headers.get("sb-request-id") ||
+    null;
 
   if (req.method !== "POST") {
     return json(
@@ -170,12 +179,14 @@ serve(async (req) => {
 
   try {
     // -----------------------------
-    // Resolve billing_documents row (hash-first)
+    // Resolve billing_documents row (hash-first; tolerant)
     // -----------------------------
     let row: any = null;
+    let resolved_by: "file_hash" | "certified_file_hash" | "id" = "id";
 
     if (hash) {
-      const { data, error } = await supabase
+      // 1) try file_hash first (back-compat)
+      const r1 = await supabase
         .from("billing_documents")
         .select("*")
         .eq("file_hash", hash)
@@ -183,14 +194,33 @@ serve(async (req) => {
         .limit(1)
         .maybeSingle();
 
-      if (error) throw error;
-      row = data;
+      if (r1.error) throw r1.error;
+      row = r1.data;
+      if (row) resolved_by = "file_hash";
+
+      // 2) if not found, try certified_file_hash (CERT hash-first)
+      if (!row) {
+        const r2 = await supabase
+          .from("billing_documents")
+          .select("*")
+          .eq("certified_file_hash", hash)
+          .order("certified_at", { ascending: false })
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (r2.error) throw r2.error;
+        row = r2.data;
+        if (row) resolved_by = "certified_file_hash";
+      }
     }
 
+    // 3) fallback by id
     if (!row && docId) {
-      const { data, error } = await supabase.from("billing_documents").select("*").eq("id", docId).maybeSingle();
-      if (error) throw error;
-      row = data;
+      const r3 = await supabase.from("billing_documents").select("*").eq("id", docId).maybeSingle();
+      if (r3.error) throw r3.error;
+      row = r3.data;
+      if (row) resolved_by = "id";
     }
 
     if (!row) {
@@ -248,13 +278,14 @@ serve(async (req) => {
     if (hasCertifiedPointer) {
       const certSigned = await sign(certBucket, certPath, expiresIn);
       certSignedUrl = certSigned.signedUrl;
-      // NOTE: if certified pointer exists but signing fails, we do NOT fail the resolver.
-      // We still return the source PDF to avoid regressions.
+      // If certified pointer exists but signing fails, do not fail resolver.
     }
 
     // decide primary pdf url
     const primaryPdf = preferCertified && certSignedUrl ? certSignedUrl : srcSigned.signedUrl;
 
+    // IMPORTANT: preserve existing shape: file_hash stays row.file_hash.
+    // Certified hash is exposed separately in certified_file_hash.
     const resp: Resp = {
       ok: true,
       document_id: row.id,
@@ -262,7 +293,6 @@ serve(async (req) => {
       entity_id: row.entity_id ?? row.provider_entity_id ?? null,
       is_test: row.is_test ?? null,
 
-      // tolerate drift
       title: row.title ?? row.document_type ?? null,
       document_kind: row.document_kind ?? row.document_type ?? row.kind ?? null,
       currency: row.currency ?? null,
@@ -281,6 +311,8 @@ serve(async (req) => {
 
       certified_storage: hasCertifiedPointer ? { bucket: certBucket, path: certPath } : null,
       certified_file_hash: row.certified_file_hash ?? null,
+
+      resolved_by,
     };
 
     return json(resp, 200);
