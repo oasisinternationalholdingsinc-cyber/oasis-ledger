@@ -40,12 +40,9 @@ import { PNG } from "npm:pngjs@7.0.0";
  * ---------------------------------------------------------------------------
  * ✅ Oasis PDF alignment (LAYOUT ONLY — NO WIRING/SCHEMA CHANGES)
  * - Keeps the same fields + storage + hash behavior (zero regressions)
- * - Restores "Oasis rhythm": Authority → Identity → Facts → Evidence → Provenance
- * - Prevents card/title overlap via fixed baselines and dividers
+ * - Prevents overlap by reserving a fixed footer block and stopping table rows before it
  * - ✅ QR encodes a REAL HTTPS verify URL (iPhone camera compatible)
- * - ✅ QR box is bottom-right, never overlaps Summary totals
- * - ✅ Summary panel remains clean; QR is framed as an affordance
- * - Footer is single calm provenance line (no defensive paragraph)
+ * - ✅ Canonical verify page URL: https://sign.oasisintlholdings.com/verify-billing.html
  * ---------------------------------------------------------------------------
  */
 
@@ -199,10 +196,6 @@ function slugSafe(input: string) {
 // -----------------------------------------------------------------------------
 // QR generation (Edge-safe): text → PNG bytes
 // -----------------------------------------------------------------------------
-// NOTE: QR must contain a REAL URL for iPhone camera.
-// - no newlines
-// - must start with https://
-// - keep it short and stable (never embed signed URLs)
 function qrPngBytes(
   text: string,
   opts?: { size?: number; margin?: number; ecc?: "L" | "M" | "Q" | "H" },
@@ -319,13 +312,28 @@ function wrapText(
   }
   if (lines.length < maxLines && line) lines.push(line);
 
-  // hard truncate if still too wide (single long token)
+  // hard truncate if still too wide
   return lines.slice(0, maxLines).map((ln) => {
     if (fits(ln)) return ln;
     let out = ln;
     while (out.length > 1 && !fits(out + "...")) out = out.slice(0, -1);
     return out.length < ln.length ? out + "..." : out;
   });
+}
+
+// -----------------------------------------------------------------------------
+// Verify URL (CANONICAL)
+// -----------------------------------------------------------------------------
+function getVerifyPageUrl(): string {
+  // ✅ Canonical terminal you showed (NO 404):
+  // https://sign.oasisintlholdings.com/verify-billing.html?hash=...
+  const env =
+    Deno.env.get("BILLING_VERIFY_PAGE_URL") ||
+    Deno.env.get("BILLING_VERIFY_BASE_URL") ||
+    "";
+  const v = String(env).trim();
+  if (v) return v.replace(/\/+$/, "");
+  return "https://sign.oasisintlholdings.com/verify-billing.html";
 }
 
 // -----------------------------------------------------------------------------
@@ -349,9 +357,9 @@ async function buildOasisBillingPdf(args: {
   notes: string | null;
   totalsMajor: { subtotal: number; tax: number; total: number };
 
-  // ✅ Enhancement: QR must encode verify URL (hash-first)
-  verifyUrl: string; // https://.../verify-billing.html?hash=...
-  hashPreview: string; // first 16 chars for tiny caption
+  // ✅ QR encodes verify URL
+  verifyUrl: string; // https://sign.oasisintlholdings.com/verify-billing.html?hash=...
+  hashPreview: string; // first 16 chars
 }): Promise<Uint8Array> {
   const {
     docType,
@@ -387,7 +395,7 @@ async function buildOasisBillingPdf(args: {
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
 
-  // Palette (quiet authority; close to certify-minute-book-entry)
+  // Palette (quiet authority)
   const ink = rgb(0.12, 0.14, 0.18);
   const muted = rgb(0.45, 0.48, 0.55);
   const faint = rgb(0.62, 0.66, 0.72);
@@ -399,7 +407,7 @@ async function buildOasisBillingPdf(args: {
 
   page.drawRectangle({ x: 0, y: 0, width: W, height: H, color: paper });
 
-  // Header band (Authority)
+  // Header band
   const bandH = 92;
   page.drawRectangle({ x: 0, y: H - bandH, width: W, height: bandH, color: band });
 
@@ -429,7 +437,7 @@ async function buildOasisBillingPdf(args: {
     color: rgb(0.78, 0.82, 0.86),
   });
 
-  // Identity / Title zone (never overlapped by cards)
+  // Title zone
   const titleY = H - bandH - 48;
   const title =
     docType === "invoice"
@@ -452,8 +460,7 @@ async function buildOasisBillingPdf(args: {
     color: ink,
   });
 
-  const issuerLine = winAnsiSafe(`Issuer: ${providerLabel}`.slice(0, 160));
-  page.drawText(issuerLine, {
+  page.drawText(winAnsiSafe(`Issuer: ${providerLabel}`.slice(0, 160)), {
     x: margin,
     y: titleY - 18,
     size: 9.5,
@@ -461,7 +468,7 @@ async function buildOasisBillingPdf(args: {
     color: muted,
   });
 
-  // Compact context line (doc#, period) — stays under title, above cards
+  // Context line(s)
   let ctxY = titleY - 36;
   if (documentNumber) {
     page.drawText(winAnsiSafe(`Doc #: ${documentNumber}`.slice(0, 96)), {
@@ -490,7 +497,7 @@ async function buildOasisBillingPdf(args: {
     ctxY -= 12;
   }
 
-  // Cards baseline: fixed distance from title/context, prevents overlap
+  // Cards baseline (fixed)
   const cardTop = ctxY - 18;
   const cardH = 84;
 
@@ -577,6 +584,19 @@ async function buildOasisBillingPdf(args: {
     color: hair,
   });
 
+  // ---- Reserve a fixed footer block (prevents overlap, always) ----
+  const footerY = 54;
+  const footerH = 210; // ✅ enough for Notes + Summary + QR stack
+  const footerTopY = footerY + footerH + 14;
+
+  // Divider above footer band
+  page.drawLine({
+    start: { x: margin, y: footerTopY },
+    end: { x: W - margin, y: footerTopY },
+    thickness: 0.8,
+    color: hair,
+  });
+
   // Table header
   const { items } = sumLineItems(lineItems);
 
@@ -599,17 +619,21 @@ async function buildOasisBillingPdf(args: {
   page.drawLine({ start: { x: margin, y }, end: { x: W - margin, y }, thickness: 0.8, color: hair });
   y -= 16;
 
-  // Rows (stable, compact; no mid-page void)
-  const maxRows = 14;
-  const rowBase = 12;
+  // Rows (stop before footerTopY)
+  const minYForRows = footerTopY + 10; // breathing room above footer
+  const maxRowsHard = 18;
 
-  for (let i = 0; i < Math.min(items.length, maxRows); i++) {
+  for (let i = 0; i < Math.min(items.length, maxRowsHard); i++) {
     const it = items[i];
 
     const descLines = wrapText(it.description, font, 9, colQty - colDesc - 12, 2);
+    const rowHeight = 12 + (descLines[1] ? 12 : 0);
+
+    // ✅ hard stop before footer
+    if (y - rowHeight < minYForRows) break;
+
     const rowTop = y;
 
-    // very light rule
     page.drawLine({
       start: { x: margin, y: rowTop - 6 },
       end: { x: W - margin, y: rowTop - 6 },
@@ -619,7 +643,7 @@ async function buildOasisBillingPdf(args: {
 
     page.drawText(descLines[0], { x: colDesc, y: rowTop, size: 9, font, color: ink });
     if (descLines[1]) {
-      page.drawText(descLines[1], { x: colDesc, y: rowTop - rowBase, size: 9, font, color: ink });
+      page.drawText(descLines[1], { x: colDesc, y: rowTop - 12, size: 9, font, color: ink });
     }
 
     const qtyText = winAnsiSafe(String(it.quantity));
@@ -632,21 +656,8 @@ async function buildOasisBillingPdf(args: {
     const amtW = font.widthOfTextAtSize(amtText, 9);
     page.drawText(amtText, { x: colAmt - amtW, y: rowTop, size: 9, font, color: ink });
 
-    y -= 12 + (descLines[1] ? rowBase : 0);
+    y -= rowHeight;
   }
-
-  // Footer band anchor (prevents weird spacing)
-  const footerMinY = 54;
-  const footerH = 160;
-  const footerY = Math.max(footerMinY, y - 20 - footerH);
-
-  // Divider above footer band
-  page.drawLine({
-    start: { x: margin, y: footerY + footerH + 14 },
-    end: { x: W - margin, y: footerY + footerH + 14 },
-    thickness: 0.8,
-    color: hair,
-  });
 
   // Notes panel (left)
   const notesX = margin;
@@ -683,9 +694,9 @@ async function buildOasisBillingPdf(args: {
     ny -= 11;
   }
 
-  // ✅ Bottom band layout: Summary ABOVE, QR BELOW (no overlap ever)
+  // Summary panel (top-right inside footer)
   const sumW = 252;
-  const sumH = 96;
+  const sumH = 90;
   const sumX = W - margin - sumW;
   const sumY = footerY + footerH - sumH;
 
@@ -725,43 +736,32 @@ async function buildOasisBillingPdf(args: {
     });
   };
 
-  srow("Subtotal:", money(currency, totalsMajor.subtotal), sumY + 50);
-  srow("Tax:", money(currency, totalsMajor.tax), sumY + 34);
+  srow("Subtotal:", money(currency, totalsMajor.subtotal), sumY + 44);
+  srow("Tax:", money(currency, totalsMajor.tax), sumY + 28);
 
   page.drawLine({
-    start: { x: sumX + 14, y: sumY + 24 },
-    end: { x: sumX + sumW - 14, y: sumY + 24 },
+    start: { x: sumX + 14, y: sumY + 20 },
+    end: { x: sumX + sumW - 14, y: sumY + 20 },
     thickness: 0.8,
     color: hair,
   });
 
-  srow("Total:", money(currency, totalsMajor.total), sumY + 8, true);
+  srow("Total:", money(currency, totalsMajor.total), sumY + 6, true);
 
-  // ✅ QR panel (bottom-right) — verified URL for iPhone camera
-  // Keep QR slightly smaller and ensure it never overlaps Summary.
+  // QR panel (bottom-right inside footer) — NEVER overlaps summary now
   const qrText = winAnsiSafe(verifyUrl).replace(/\s+/g, "");
   const qr = qrPngBytes(qrText, { size: 256, margin: 2, ecc: "M" });
   const qrImg = await pdf.embedPng(qr);
 
-  const qrSize = 92;
-  const qrBoxW = 252; // align to Summary width (clean stack)
-  const qrBoxH = 56; // short caption band + QR
-  const qrBoxX = sumX;
-  const qrBoxY = footerY + 10;
-
-  // Make sure QR box doesn't collide upward into Summary
-  const gap = 10;
-  const maxQrTop = sumY - gap;
-  const qrTop = qrBoxY + (qrBoxH + 78); // approximate; but we place inside, so keep strict below
-  // We keep QR box height constrained; QR itself lives in a fixed 92x92 inside a taller box below.
-
-  const qrPanelH = 126; // actual panel height to fit QR + caption
-  const qrPanelY = Math.min(qrBoxY, maxQrTop - qrPanelH);
+  const qrPanelW = 252;
+  const qrPanelH = 110;
+  const qrPanelX = sumX;
+  const qrPanelY = footerY + 10;
 
   page.drawRectangle({
-    x: qrBoxX,
+    x: qrPanelX,
     y: qrPanelY,
-    width: qrBoxW,
+    width: qrPanelW,
     height: qrPanelH,
     borderColor: hair,
     borderWidth: 1,
@@ -769,41 +769,40 @@ async function buildOasisBillingPdf(args: {
   });
 
   page.drawText(winAnsiSafe("Verify (hash-first)"), {
-    x: qrBoxX + 14,
+    x: qrPanelX + 14,
     y: qrPanelY + qrPanelH - 18,
     size: 8.5,
     font: bold,
     color: muted,
   });
 
-  // Tiny hash preview (human hint; not authority)
   page.drawText(winAnsiSafe(`${hashPreview}…`), {
-    x: qrBoxX + 14,
+    x: qrPanelX + 14,
     y: qrPanelY + qrPanelH - 32,
     size: 7.5,
     font,
     color: faint,
   });
 
+  const qrSize = 84;
   page.drawImage(qrImg, {
-    x: qrBoxX + qrBoxW - 14 - qrSize,
+    x: qrPanelX + qrPanelW - 14 - qrSize,
     y: qrPanelY + 14,
     width: qrSize,
     height: qrSize,
   });
 
-  // Small URL preview (trimmed) on left, stays WinAnsi-safe
-  const urlPreview = winAnsiSafe(qrText).slice(0, 48) + "...";
+  const urlPreview = (winAnsiSafe(qrText).slice(0, 54) + "...").slice(0, 60);
   page.drawText(urlPreview, {
-    x: qrBoxX + 14,
+    x: qrPanelX + 14,
     y: qrPanelY + 18,
     size: 7.5,
     font,
     color: rgb(0.58, 0.62, 0.68),
-    maxWidth: qrBoxW - 14 - 14 - qrSize - 10,
+    maxWidth: qrPanelW - 14 - 14 - qrSize - 10,
   });
 
-  // Tiny, non-dominant corner mark (replaces demo watermark)
+  // Tiny corner mark
   const corner = winAnsiSafe(providerSlug.toUpperCase().slice(0, 10) || "ODP");
   page.drawText(corner, {
     x: margin,
@@ -813,7 +812,7 @@ async function buildOasisBillingPdf(args: {
     color: rgb(0.90, 0.92, 0.95),
   });
 
-  // Footer provenance (single calm line)
+  // Footer provenance
   const foot =
     "Registry artifact generated by Oasis Billing. Authority and lifecycle status are conferred by the internal registry.";
   page.drawText(winAnsiSafe(foot), {
@@ -913,7 +912,7 @@ serve(async (req: Request) => {
         ? body.line_items
         : [{ description: "Service", quantity: 1, unit_price: 0 }];
 
-    // Totals (no tax enforcement here; tax=0 unless you add later)
+    // Totals
     const { items: norm_items, subtotal, subtotal_cents } = sumLineItems(line_items);
     const tax_cents = 0;
     const total_cents = subtotal_cents + tax_cents;
@@ -947,57 +946,12 @@ serve(async (req: Request) => {
       safeText((ent as any)?.name) ?? safeText((ent as any)?.slug) ?? provider_entity_id;
 
     // -------------------------------------------------------------------------
-    // Build PDF FIRST (layout only). We now QR a REAL verify URL, which requires
-    // the final file_hash. So we build a "draft" PDF once, hash it, then build
-    // the final PDF that embeds the hash-first verify URL.
-    //
-    // ✅ This does NOT change wiring/schema/storage contracts.
-    // ✅ It only improves the QR payload + placement.
+    // Build PDF with hash-first verify URL (canonical sign domain)
     // -------------------------------------------------------------------------
-
-    // Draft PDF to compute hash deterministically
-    const draftPdfBytes = await buildOasisBillingPdf({
-      docType: document_type,
-      providerLabel,
-      providerSlug,
-      laneLabel,
-      invoiceNumber: invoice_number,
-      documentNumber: document_number,
-      issuedAtIso: issued_at,
-      dueAtIso: due_at,
-      periodStart: period_start,
-      periodEnd: period_end,
-      recipientName: recipient_name,
-      recipientEmail: recipient_email,
-      currency,
-      lineItems: norm_items,
-      notes,
-      totalsMajor: { subtotal: subtotal_amount, tax: tax_amount, total: total_amount },
-
-      // placeholder (will be replaced after hash)
-      verifyUrl: "https://console.oasisintlholdings.com/verify-billing.html?hash=0000000000000000000000000000000000000000000000000000000000000000",
-      hashPreview: "0000000000000000",
-    });
-
-    // Hash of draft PDF (will change once we embed real hash URL, so we must rebuild once more)
-    // ✅ Final hash must match FINAL PDF bytes (hash-first invariant).
-    // We therefore do a final build below and hash that final output.
-    const _draftHash = await sha256Hex(draftPdfBytes);
-
-    // Build FINAL PDF with verify URL containing hash of FINAL PDF bytes.
-    // We do a tight two-pass:
-    // 1) build with draft hash in URL
-    // 2) hash those bytes => finalHash
-    // 3) rebuild with finalHash in URL (and hash preview)
-    // 4) hash again; if mismatch (should be stable), loop once more as safety.
-    //
-    // In practice this stabilizes quickly because layout is deterministic.
-    const VERIFY_BASE =
-      Deno.env.get("BILLING_VERIFY_BASE_URL") ||
-      "https://console.oasisintlholdings.com/verify-billing.html";
+    const VERIFY_PAGE = getVerifyPageUrl(); // ✅ https://sign.oasisintlholdings.com/verify-billing.html
 
     const buildWithHash = async (hashHex: string) => {
-      const verifyUrl = `${VERIFY_BASE}?hash=${hashHex}`;
+      const verifyUrl = `${VERIFY_PAGE}?hash=${hashHex}`;
       return await buildOasisBillingPdf({
         docType: document_type,
         providerLabel,
@@ -1020,32 +974,26 @@ serve(async (req: Request) => {
       });
     };
 
-    let pdfBytes = await buildWithHash(_draftHash);
+    // Two-pass stabilization (hash must match final bytes)
+    const placeholder = "0".repeat(64);
+    let pdfBytes = await buildWithHash(placeholder);
     let file_hash = await sha256Hex(pdfBytes);
 
-    // one stabilization pass (rarely needed, but keeps invariant true)
-    if (!pdfBytes || !file_hash) {
-      return json(500, { ok: false, error: "HASH_FAILED" }, req);
-    }
-
-    if (file_hash !== _draftHash) {
-      pdfBytes = await buildWithHash(file_hash);
-      const h2 = await sha256Hex(pdfBytes);
-      file_hash = h2;
-    }
+    pdfBytes = await buildWithHash(file_hash);
+    const h2 = await sha256Hex(pdfBytes);
+    file_hash = h2;
 
     // Storage target (lane-aware buckets)
     const BILLING_BUCKET = body.is_test ? "billing_sandbox" : "billing_truth";
     const yyyy = issued_at.slice(0, 4);
     const mm = issued_at.slice(5, 7);
 
-    // Stable path if invoice_number exists; else hash-based
     const keyPart = invoice_number
       ? `inv-${slugSafe(invoice_number)}`
       : `${document_type}-${file_hash.slice(0, 16)}`;
     const storage_path = `${providerSlug}/billing/${yyyy}/${mm}/${keyPart}.pdf`;
 
-    // Upload with upsert:true to avoid 409 on repeated clicks
+    // Upload (upsert true)
     const up = await svc.storage
       .from(BILLING_BUCKET)
       .upload(storage_path, new Blob([pdfBytes], { type: "application/pdf" }), {
@@ -1058,10 +1006,9 @@ serve(async (req: Request) => {
     }
 
     // ✅ Insert ONLY existing columns (per locked schema)
-    // entity_id is canonical issuer scope
     const row: any = {
       entity_id: provider_entity_id,
-      provider_entity_id: provider_entity_id, // passes CHECK (provider_entity_id = entity_id)
+      provider_entity_id: provider_entity_id,
       is_test: body.is_test,
 
       subscription_id: subscription_id ?? null,
@@ -1100,7 +1047,7 @@ serve(async (req: Request) => {
       content_type: "application/pdf",
       file_size_bytes: pdfBytes.length,
 
-      line_items: norm_items, // jsonb
+      line_items: norm_items,
       metadata: {
         notes: notes ?? null,
         generated_by: "billing-generate-document",
@@ -1109,21 +1056,17 @@ serve(async (req: Request) => {
         issuer_entity_slug: providerSlug,
         external_reference: external_reference ?? null,
 
-        // ✅ enhancement (metadata only, no schema change)
-        verify_url: `${VERIFY_BASE}?hash=${file_hash}`,
-        qr_payload: `${VERIFY_BASE}?hash=${file_hash}`,
+        // ✅ canonical verify URL (NO 404)
+        verify_url: `${VERIFY_PAGE}?hash=${file_hash}`,
+        qr_payload: `${VERIFY_PAGE}?hash=${file_hash}`,
+        verify_page: VERIFY_PAGE,
       },
 
       created_by: actor_id,
       updated_at: nowIso,
     };
 
-    // -----------------------------------------------------------------
-    // ✅ Enterprise idempotent strategy (NO regression, fixes 42P10)
-    // - invoice_number & document_number are PARTIAL UNIQUE indexes => cannot use ON CONFLICT(column list)
-    // - do explicit SELECT then UPDATE/INSERT
-    // - file_hash is FULL UNIQUE => can UPSERT safely
-    // -----------------------------------------------------------------
+    // Idempotent strategy (NO regression)
     let document_id: string | null = null;
 
     const updateById = async (id: string) => {
@@ -1137,7 +1080,6 @@ serve(async (req: Request) => {
       return { ok: true as const, id: data?.id ? String(data.id) : null };
     };
 
-    // 1) invoice_number path (manual idempotency)
     if (invoice_number) {
       const existing = await svc
         .from("billing_documents")
@@ -1163,9 +1105,7 @@ serve(async (req: Request) => {
         }
         document_id = ins.id;
       }
-    }
-    // 2) document_number path (manual idempotency)
-    else if (document_number) {
+    } else if (document_number) {
       const existing = await svc
         .from("billing_documents")
         .select("id")
@@ -1190,9 +1130,7 @@ serve(async (req: Request) => {
         }
         document_id = ins.id;
       }
-    }
-    // 3) fallback: file_hash unique (FULL UNIQUE) — safe upsert
-    else {
+    } else {
       const { data, error } = await svc
         .from("billing_documents")
         .upsert(row, { onConflict: "file_hash" })
@@ -1231,6 +1169,7 @@ serve(async (req: Request) => {
           total_cents,
           reason,
           trigger: trigger ?? null,
+          verify_page: VERIFY_PAGE,
         },
       } as any);
     } catch {
