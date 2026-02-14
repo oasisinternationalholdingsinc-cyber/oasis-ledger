@@ -33,6 +33,11 @@ export const dynamic = "force-dynamic";
  * ✅ Prefers Edge Function if present: billing-send-document-email (optional)
  * ✅ Safe fallback: mailto: (no regression if Edge function not deployed)
  * ✅ Uses resolver to obtain signed PDF URL (server-side) when available
+ *
+ * PATCH (RESOLVER NO-REGRESSION ALIGNMENT):
+ * ✅ mailto encoding fixed (do NOT encode the recipient in the mailto: scheme)
+ * ✅ “Silent invoke” helper to avoid refresh/note spam when resolving PDF inside email compose
+ * ✅ Delivery events load is lane+entity scoped when columns exist; safe fallback if columns missing
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -498,7 +503,7 @@ export default function CiBillingPage() {
     return list;
   }, [plans]);
 
-  /* ===================== core: Edge invoke helper ===================== */
+  /* ===================== core: Edge invoke helpers ===================== */
 
   async function invoke(fn: string, body: any) {
     setBusy(true);
@@ -517,6 +522,13 @@ export default function CiBillingPage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  // Silent invoke: no note spam, no refresh spam (used for resolver inside compose flows)
+  async function invokeSilent(fn: string, body: any) {
+    const { data, error } = await supabase.functions.invoke(fn, { body });
+    if (error) throw error;
+    return data;
   }
 
   /* ===================== resolve provider entity_id ===================== */
@@ -627,19 +639,42 @@ export default function CiBillingPage() {
   }, [providerEntityId, isTest, refreshKey]);
 
   useEffect(() => {
+    if (!providerEntityId) return;
     (async () => {
-      const { data: e } = await supabase.from("billing_delivery_events").select("*").order("created_at", { ascending: false }).limit(200);
+      // Prefer DB-side filtering if columns exist; fallback to client filter if not.
+      try {
+        const { data: e, error } = await supabase
+          .from("billing_delivery_events")
+          .select("*")
+          .eq("entity_id", providerEntityId)
+          .eq("is_test", isTest)
+          .order("created_at", { ascending: false })
+          .limit(200);
 
-      const rows = (e || []) as DeliveryRow[];
+        if (error) throw error;
 
-      const filtered = rows.filter((r) => {
-        const sameLane = (r.is_test ?? null) === null ? true : Boolean(r.is_test) === isTest;
-        const sameEntity = (r.entity_id ?? null) === null ? true : r.entity_id === providerEntityId;
-        return sameLane && sameEntity;
-      });
+        const rows = (e || []) as DeliveryRow[];
+        setDelivery(rows);
+        setSelectedDelivery(rows[0] ?? null);
+      } catch (err: any) {
+        // fallback: schema drift tolerant
+        const { data: e2 } = await supabase
+          .from("billing_delivery_events")
+          .select("*")
+          .order("created_at", { ascending: false })
+          .limit(200);
 
-      setDelivery(filtered);
-      setSelectedDelivery(filtered[0] ?? null);
+        const rows2 = (e2 || []) as DeliveryRow[];
+
+        const filtered = rows2.filter((r) => {
+          const sameLane = (r.is_test ?? null) === null ? true : Boolean(r.is_test) === isTest;
+          const sameEntity = (r.entity_id ?? null) === null ? true : r.entity_id === providerEntityId;
+          return sameLane && sameEntity;
+        });
+
+        setDelivery(filtered);
+        setSelectedDelivery(filtered[0] ?? null);
+      }
     })();
   }, [providerEntityId, isTest, refreshKey]);
 
@@ -652,6 +687,7 @@ export default function CiBillingPage() {
 
   async function openPdfViaResolver(doc: DocRow) {
     const data = await invoke("resolve-billing-document", {
+      // resolver prefers hash-first; also tolerates document_id
       hash: doc.file_hash,
       document_id: doc.id,
       is_test: isTest,
@@ -692,7 +728,6 @@ export default function CiBillingPage() {
   /* ===================== EMAIL DELIVERY (UI-FIRST) ===================== */
 
   function buildVerifyBillingUrl(fileHash: string) {
-    // keep it simple: same origin public terminal path (adjust if you host elsewhere)
     const base = `${window.location.origin}/verify-billing.html`;
     return `${base}?hash=${encodeURIComponent(fileHash)}`;
   }
@@ -703,6 +738,7 @@ export default function CiBillingPage() {
 
     const to = (selectedCustomer?.billing_email || (d as any)?.recipient_email || "").toString().trim();
     setEmailTo(to);
+
     const kind = safeStr((d as any)?.document_type || (d as any)?.document_kind || "billing");
     const inv = ((d as any)?.invoice_number || (d as any)?.document_number || "").toString().trim();
     const subj = inv ? `Oasis Billing — ${kind} • ${inv}` : `Oasis Billing — ${kind}`;
@@ -727,76 +763,87 @@ export default function CiBillingPage() {
     if (!to) return alert("Recipient email required");
     if (!emailSubject.trim()) return alert("Subject required");
 
-    // Step 1: Get a server-signed PDF URL (preferred) via resolver
-    let pdfUrl: string | null = null;
-    let verifyUrl: string | null = null;
-
+    setBusy(true);
+    setNote(null);
     try {
-      verifyUrl = buildVerifyBillingUrl(selectedDoc.file_hash);
+      // Step 1: Get a server-signed PDF URL (preferred) via resolver
+      let pdfUrl: string | null = null;
+      const verifyUrl = buildVerifyBillingUrl(selectedDoc.file_hash);
 
-      if (emailIncludePdfLink) {
-        const expiresIn = Math.max(5, Math.min(60 * 24 * 14, Number(emailExpiresMins || 0))) * 60; // secs
-        const resolved = await invoke("resolve-billing-document", {
-          hash: selectedDoc.file_hash,
-          document_id: selectedDoc.id,
-          is_test: isTest,
-          entity_id: providerEntityId,
-          expires_in: expiresIn, // optional if resolver supports it
-          trigger: "ci_billing_email_resolve_pdf",
-        });
-        pdfUrl = resolved?.urls?.pdf || null;
+      try {
+        if (emailIncludePdfLink) {
+          const expiresInSeconds =
+            Math.max(5, Math.min(60 * 24 * 14, Number(emailExpiresMins || 0))) * 60; // secs
+
+          // Silent to avoid note/refresh spam during compose
+          const resolved = await invokeSilent("resolve-billing-document", {
+            hash: selectedDoc.file_hash,
+            document_id: selectedDoc.id,
+            is_test: isTest,
+            entity_id: providerEntityId,
+            expires_in: expiresInSeconds, // tolerated even if resolver ignores it
+            trigger: "ci_billing_email_resolve_pdf",
+          });
+
+          pdfUrl = resolved?.urls?.pdf || null;
+        }
+      } catch {
+        // non-blocking: still can mailto fallback
       }
-    } catch {
-      // non-blocking: we still can mailto
-    }
 
-    const composedBody =
-      emailBody +
-      (emailIncludePdfLink && pdfUrl ? `\n\nPDF (signed link): ${pdfUrl}` : "") +
-      (verifyUrl ? `\n\nVerify (hash-first): ${verifyUrl}` : "");
+      const composedBody =
+        emailBody +
+        (emailIncludePdfLink && pdfUrl ? `\n\nPDF (signed link): ${pdfUrl}` : "") +
+        (verifyUrl ? `\n\nVerify (hash-first): ${verifyUrl}` : "");
 
-    setLastEmailPreview({
-      to,
-      subject: emailSubject.trim(),
-      body: composedBody,
-      pdf_url: pdfUrl,
-      verify_url: verifyUrl,
-    });
-
-    // Step 2: Prefer Edge function if present (optional)
-    // If it isn't deployed, we fall back to mailto without breaking.
-    try {
-      const data = await invoke("billing-send-document-email", {
-        provider_entity_id: providerEntityId,
-        is_test: isTest,
-        customer_id: selectedCustomerId,
-        document_id: selectedDoc.id,
-        file_hash: selectedDoc.file_hash,
+      setLastEmailPreview({
         to,
         subject: emailSubject.trim(),
         body: composedBody,
         pdf_url: pdfUrl,
         verify_url: verifyUrl,
-        trigger: "ci_billing_send_email",
       });
 
-      // If backend returns ok, close modal.
-      if (data?.ok === true || data?.status === "sent") {
-        setNote("Email sent (Edge).");
+      // Step 2: Prefer Edge function if present (optional)
+      try {
+        const data = await invokeSilent("billing-send-document-email", {
+          provider_entity_id: providerEntityId,
+          is_test: isTest,
+          customer_id: selectedCustomerId,
+          document_id: selectedDoc.id,
+          file_hash: selectedDoc.file_hash,
+          to,
+          subject: emailSubject.trim(),
+          body: composedBody,
+          pdf_url: pdfUrl,
+          verify_url: verifyUrl,
+          trigger: "ci_billing_send_email",
+        });
+
+        if (data?.ok === true || data?.status === "sent") {
+          setNote("Email sent (Edge).");
+          setSendEmailOpen(false);
+          setRefreshKey((n) => n + 1);
+          return;
+        }
+
+        throw new Error("Email function did not confirm sent.");
+      } catch {
+        // Step 3: mailto fallback (always available)
+        const u = new URL(`mailto:${to}`); // IMPORTANT: do not encode the address in the scheme
+        u.searchParams.set("subject", emailSubject.trim());
+        u.searchParams.set("body", composedBody);
+        window.location.href = u.toString();
+        setNote("Opened mail composer (mailto fallback).");
         setSendEmailOpen(false);
         return;
       }
-
-      // If backend returns something else, still fall back to mailto.
-      throw new Error("Email function did not confirm sent.");
-    } catch {
-      // Step 3: mailto fallback (always available)
-      const u = new URL("mailto:" + encodeURIComponent(to));
-      u.searchParams.set("subject", emailSubject.trim());
-      u.searchParams.set("body", composedBody);
-      window.location.href = u.toString();
-      setNote("Opened mail composer (mailto fallback).");
-      setSendEmailOpen(false);
+    } catch (e: any) {
+      const msg = e?.message || "Send email failed";
+      setNote(msg);
+      alert(msg);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -812,7 +859,7 @@ export default function CiBillingPage() {
     try {
       // Prefer Edge Function if deployed (no regression if it isn't)
       try {
-        const data = await invoke("billing-create-customer", {
+        const data = await invokeSilent("billing-create-customer", {
           provider_entity_id: providerEntityId,
           is_test: isTest,
           legal_name: custLegalName.trim(),
@@ -871,7 +918,9 @@ export default function CiBillingPage() {
       setCustPhone("");
       setCustStatus("active");
     } catch (e: any) {
-      alert(e?.message || "Create customer failed");
+      const msg = e?.message || "Create customer failed";
+      setNote(msg);
+      alert(msg);
     } finally {
       setBusy(false);
     }
@@ -972,9 +1021,7 @@ export default function CiBillingPage() {
     const qty1 = Math.max(0, Number(genLI1Qty || "1") || 1);
     const unit1 = Math.max(0, Number(genLI1Unit || "0") || 0);
 
-    const li: any[] = [
-      { description: (genLI1Desc || "Service").trim(), quantity: qty1, unit_price: unit1 },
-    ];
+    const li: any[] = [{ description: (genLI1Desc || "Service").trim(), quantity: qty1, unit_price: unit1 }];
 
     const desc2 = genLI2Desc.trim();
     if (desc2) {
@@ -1346,7 +1393,13 @@ export default function CiBillingPage() {
                 disabled={busy || !selectedDoc || !selectedCustomer?.billing_email}
                 onClick={() => openSendEmail(selectedDoc)}
                 className="w-full rounded-xl border border-amber-300/20 bg-amber-400/12 px-3 py-2 text-xs font-semibold text-amber-100 hover:bg-amber-400/18 disabled:opacity-60"
-                title={!selectedDoc ? "Select a document first" : !selectedCustomer?.billing_email ? "Select a customer with an email" : ""}
+                title={
+                  !selectedDoc
+                    ? "Select a document first"
+                    : !selectedCustomer?.billing_email
+                      ? "Select a customer with an email"
+                      : ""
+                }
               >
                 Send Email (Delivery)
               </button>
@@ -1513,7 +1566,8 @@ export default function CiBillingPage() {
                   <div className="rounded-xl border border-white/10 bg-black/10 p-3 col-span-2">
                     <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Provider IDs</div>
                     <div className="mt-1">
-                      customer: {safeStr(selectedSub.provider_customer_id)} • sub: {safeStr(selectedSub.provider_subscription_id)}
+                      customer: {safeStr(selectedSub.provider_customer_id)} • sub:{" "}
+                      {safeStr(selectedSub.provider_subscription_id)}
                     </div>
                   </div>
                 </div>
@@ -1564,7 +1618,8 @@ export default function CiBillingPage() {
                         {safeStr(selectedDocStatus)}
                       </div>
                       <div className="mt-1 text-xs text-white/55">
-                        doc_id: {shortUUID(selectedDoc.id)} • issued: {fmtISO((selectedDoc as any).issued_at || null)}
+                        doc_id: {shortUUID(selectedDoc.id)} • issued:{" "}
+                        {fmtISO((selectedDoc as any).issued_at || null)}
                       </div>
                     </div>
                     <span
@@ -1701,7 +1756,9 @@ export default function CiBillingPage() {
                     </div>
                     <div className="rounded-xl border border-white/10 bg-black/10 p-3">
                       <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Hash</div>
-                      <div className="mt-1 font-mono">{selectedDoc ? `${selectedDoc.file_hash.slice(0, 10)}…` : "—"}</div>
+                      <div className="mt-1 font-mono">
+                        {selectedDoc ? `${selectedDoc.file_hash.slice(0, 10)}…` : "—"}
+                      </div>
                     </div>
                   </div>
 
@@ -1726,13 +1783,21 @@ export default function CiBillingPage() {
                     <div className="mt-3 rounded-xl border border-white/10 bg-black/10 p-3 text-xs text-white/70">
                       <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Last composed</div>
                       <div className="mt-2">
-                        <div><span className="text-white/45">To:</span> {lastEmailPreview.to}</div>
-                        <div><span className="text-white/45">Subject:</span> {lastEmailPreview.subject}</div>
+                        <div>
+                          <span className="text-white/45">To:</span> {lastEmailPreview.to}
+                        </div>
+                        <div>
+                          <span className="text-white/45">Subject:</span> {lastEmailPreview.subject}
+                        </div>
                         {lastEmailPreview.pdf_url ? (
-                          <div className="mt-1 break-all"><span className="text-white/45">PDF:</span> {lastEmailPreview.pdf_url}</div>
+                          <div className="mt-1 break-all">
+                            <span className="text-white/45">PDF:</span> {lastEmailPreview.pdf_url}
+                          </div>
                         ) : null}
                         {lastEmailPreview.verify_url ? (
-                          <div className="mt-1 break-all"><span className="text-white/45">Verify:</span> {lastEmailPreview.verify_url}</div>
+                          <div className="mt-1 break-all">
+                            <span className="text-white/45">Verify:</span> {lastEmailPreview.verify_url}
+                          </div>
                         ) : null}
                       </div>
                       <div className="mt-2 flex gap-2">
@@ -1756,7 +1821,8 @@ export default function CiBillingPage() {
                       {selectedDelivery.channel} • {selectedDelivery.status}
                     </div>
                     <div className="mt-1 text-xs text-white/55">
-                      delivery_id: {shortUUID(selectedDelivery.id)} • doc_id: {shortUUID(selectedDelivery.document_id)}
+                      delivery_id: {shortUUID(selectedDelivery.id)} • doc_id:{" "}
+                      {shortUUID(selectedDelivery.document_id)}
                     </div>
 
                     <div className="mt-3 space-y-2 text-xs text-white/70">
@@ -1767,7 +1833,8 @@ export default function CiBillingPage() {
                       <div className="rounded-xl border border-white/10 bg-black/10 p-3">
                         <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Provider</div>
                         <div className="mt-1">
-                          {safeStr(selectedDelivery.provider)} • msg: {safeStr(selectedDelivery.provider_message_id)}
+                          {safeStr(selectedDelivery.provider)} • msg:{" "}
+                          {safeStr(selectedDelivery.provider_message_id)}
                         </div>
                       </div>
                       <div className="rounded-xl border border-white/10 bg-black/10 p-3">
@@ -1800,7 +1867,7 @@ export default function CiBillingPage() {
               value={custLegalName}
               onChange={(e) => setCustLegalName(e.target.value)}
               className="mt-1 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
-              placeholder="e.g., Holdings Test Customer"
+              placeholder="e.g., Test Customer"
             />
           </div>
           <div className="col-span-2">
@@ -1893,8 +1960,8 @@ export default function CiBillingPage() {
             className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
           />
           <div className="text-xs text-white/45">
-            Customer: {selectedCustomer ? `${selectedCustomer.legal_name} (${selectedCustomer.billing_email})` : "—"} • Lane:{" "}
-            {envLabel}
+            Customer: {selectedCustomer ? `${selectedCustomer.legal_name} (${selectedCustomer.billing_email})` : "—"} •
+            Lane: {envLabel}
           </div>
         </div>
       </OsModal>
@@ -2003,7 +2070,6 @@ export default function CiBillingPage() {
         onClose={() => setGenerateOpen(false)}
         onConfirm={generateBillingDocument}
       >
-        {/* (UNCHANGED CONTENT BELOW) */}
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -2209,7 +2275,6 @@ export default function CiBillingPage() {
         onClose={() => setAttachOpen(false)}
         onConfirm={attachExternalDocument}
       >
-        {/* (UNCHANGED CONTENT BELOW) */}
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <div>
