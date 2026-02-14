@@ -38,6 +38,10 @@ export const dynamic = "force-dynamic";
  * ✅ mailto encoding fixed (do NOT encode the recipient in the mailto: scheme)
  * ✅ “Silent invoke” helper to avoid refresh/note spam when resolving PDF inside email compose
  * ✅ Delivery events load is lane+entity scoped when columns exist; safe fallback if columns missing
+ *
+ * PATCH (RESOLVER AUTHORITY — CERTIFIED):
+ * ✅ Open Certified PDF now uses resolve-billing-document (NO client-side storage signing)
+ * ✅ Email resolver prefers certified PDF when available
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -540,7 +544,11 @@ export default function CiBillingPage() {
         setProviderEntityId(direct);
         return;
       }
-      const { data, error } = await supabase.from("entities").select("id").eq("slug", entitySlug).maybeSingle();
+      const { data, error } = await supabase
+        .from("entities")
+        .select("id")
+        .eq("slug", entitySlug)
+        .maybeSingle();
       if (error) {
         setProviderEntityId(null);
         return;
@@ -574,7 +582,10 @@ export default function CiBillingPage() {
 
   useEffect(() => {
     (async () => {
-      const { data: p } = await supabase.from("billing_plans").select("*").order("created_at", { ascending: false });
+      const { data: p } = await supabase
+        .from("billing_plans")
+        .select("*")
+        .order("created_at", { ascending: false });
       setPlans((p || []) as PlanRow[]);
     })();
   }, [refreshKey]);
@@ -656,7 +667,7 @@ export default function CiBillingPage() {
         const rows = (e || []) as DeliveryRow[];
         setDelivery(rows);
         setSelectedDelivery(rows[0] ?? null);
-      } catch (err: any) {
+      } catch {
         // fallback: schema drift tolerant
         const { data: e2 } = await supabase
           .from("billing_delivery_events")
@@ -697,13 +708,17 @@ export default function CiBillingPage() {
     if (data?.urls?.pdf) window.open(data.urls.pdf, "_blank", "noopener,noreferrer");
   }
 
-  async function openCertifiedPdfClient(doc: DocRow) {
-    const b = (doc.certified_storage_bucket ?? "").toString().trim();
-    const p = (doc.certified_storage_path ?? "").toString().trim();
-    if (!b || !p) return alert("No certified storage pointer on this document.");
-    const { data, error } = await supabase.storage.from(b).createSignedUrl(p, 60 * 10);
-    if (error || !data?.signedUrl) return alert(error?.message || "Failed to sign certified PDF URL.");
-    window.open(data.signedUrl, "_blank", "noopener,noreferrer");
+  // ✅ NO CLIENT-SIDE STORAGE SIGNING (resolver is authority)
+  async function openCertifiedPdfViaResolver(doc: DocRow) {
+    const data = await invoke("resolve-billing-document", {
+      hash: doc.file_hash,
+      document_id: doc.id,
+      is_test: isTest,
+      entity_id: providerEntityId,
+      prefer_certified: true,
+      trigger: "ci_billing_open_certified_pdf",
+    });
+    if (data?.urls?.pdf) window.open(data.urls.pdf, "_blank", "noopener,noreferrer");
   }
 
   async function exportDiscovery(doc: DocRow) {
@@ -782,6 +797,7 @@ export default function CiBillingPage() {
             is_test: isTest,
             entity_id: providerEntityId,
             expires_in: expiresInSeconds, // tolerated even if resolver ignores it
+            prefer_certified: true, // ✅ prefer certified if available
             trigger: "ci_billing_email_resolve_pdf",
           });
 
@@ -1211,7 +1227,8 @@ export default function CiBillingPage() {
           </div>
 
           <div className="mt-2 text-xs text-white/45">
-            Provider (OS Entity): {entityLabel} • provider_entity_id: {shortUUID(providerEntityId)} • Selected customer:{" "}
+            Provider (OS Entity): {entityLabel} • provider_entity_id: {shortUUID(providerEntityId)} • Selected
+            customer:{" "}
             {selectedCustomer ? `${selectedCustomer.legal_name} (${selectedCustomer.billing_email})` : "—"}
           </div>
         </div>
@@ -1701,9 +1718,10 @@ export default function CiBillingPage() {
                         </button>
 
                         <button
-                          disabled={busy || !selectedDoc.certified_storage_bucket || !selectedDoc.certified_storage_path}
-                          onClick={() => openCertifiedPdfClient(selectedDoc)}
+                          disabled={busy || !selectedDoc.certified_at}
+                          onClick={() => openCertifiedPdfViaResolver(selectedDoc)}
                           className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/80 hover:bg-white/10 disabled:opacity-60"
+                          title={!selectedDoc.certified_at ? "Not certified yet" : "Open certified PDF via resolver"}
                         >
                           Open Certified PDF
                         </button>
@@ -1821,8 +1839,7 @@ export default function CiBillingPage() {
                       {selectedDelivery.channel} • {selectedDelivery.status}
                     </div>
                     <div className="mt-1 text-xs text-white/55">
-                      delivery_id: {shortUUID(selectedDelivery.id)} • doc_id:{" "}
-                      {shortUUID(selectedDelivery.document_id)}
+                      delivery_id: {shortUUID(selectedDelivery.id)} • doc_id: {shortUUID(selectedDelivery.document_id)}
                     </div>
 
                     <div className="mt-3 space-y-2 text-xs text-white/70">
@@ -1833,8 +1850,7 @@ export default function CiBillingPage() {
                       <div className="rounded-xl border border-white/10 bg-black/10 p-3">
                         <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Provider</div>
                         <div className="mt-1">
-                          {safeStr(selectedDelivery.provider)} • msg:{" "}
-                          {safeStr(selectedDelivery.provider_message_id)}
+                          {safeStr(selectedDelivery.provider)} • msg: {safeStr(selectedDelivery.provider_message_id)}
                         </div>
                       </div>
                       <div className="rounded-xl border border-white/10 bg-black/10 p-3">
@@ -1943,8 +1959,7 @@ export default function CiBillingPage() {
                   >
                     <div className="font-semibold text-white/90">{p.code}</div>
                     <div className="text-white/45">
-                      {p.name} • {p.currency} {p.price_minor} / {p.billing_period} •{" "}
-                      {p.is_active ? "active" : "inactive"}
+                      {p.name} • {p.currency} {p.price_minor} / {p.billing_period} • {p.is_active ? "active" : "inactive"}
                     </div>
                   </button>
                 ))
@@ -1960,8 +1975,8 @@ export default function CiBillingPage() {
             className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/90 outline-none"
           />
           <div className="text-xs text-white/45">
-            Customer: {selectedCustomer ? `${selectedCustomer.legal_name} (${selectedCustomer.billing_email})` : "—"} •
-            Lane: {envLabel}
+            Customer: {selectedCustomer ? `${selectedCustomer.legal_name} (${selectedCustomer.billing_email})` : "—"} • Lane:{" "}
+            {envLabel}
           </div>
         </div>
       </OsModal>
@@ -2013,12 +2028,9 @@ export default function CiBillingPage() {
               <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">Selected</div>
               <div className="mt-1 text-sm font-semibold text-white/90">{selectedPlan.code}</div>
               <div className="mt-1 text-xs text-white/55">
-                {safeStr(selectedPlan.name)} • {selectedPlan.currency} {selectedPlan.price_minor} /{" "}
-                {selectedPlan.billing_period}
+                {safeStr(selectedPlan.name)} • {selectedPlan.currency} {selectedPlan.price_minor} / {selectedPlan.billing_period}
               </div>
-              {selectedPlan.description ? (
-                <div className="mt-2 text-xs text-white/45">{selectedPlan.description}</div>
-              ) : null}
+              {selectedPlan.description ? <div className="mt-2 text-xs text-white/45">{selectedPlan.description}</div> : null}
               <div className="mt-2 text-xs text-white/45">
                 plan_id: <span className="font-mono">{shortUUID(selectedPlan.id)}</span>
               </div>
@@ -2445,7 +2457,8 @@ export default function CiBillingPage() {
           </div>
 
           <div className="text-xs text-white/45">
-            Prefers Edge function <span className="font-mono">billing-send-document-email</span> if deployed; otherwise opens mail client (mailto).
+            Prefers Edge function <span className="font-mono">billing-send-document-email</span> if deployed; otherwise opens
+            mail client (mailto).
           </div>
         </div>
       </OsModal>
