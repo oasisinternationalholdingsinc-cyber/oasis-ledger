@@ -23,30 +23,30 @@ import { PNG } from "npm:pngjs@7.0.0";
  *    is_test=false -> billing_truth
  *
  * Idempotency (enterprise, no regression):
- * - Your billing_documents has PARTIAL UNIQUE indexes for (entity_id,is_test,invoice_number) and
- *   (entity_id,is_test,document_number), so ON CONFLICT(columnlist) will FAIL.
+ * - billing_documents has PARTIAL UNIQUE indexes for:
+ *    (entity_id,is_test,invoice_number) WHERE invoice_number IS NOT NULL
+ *    (entity_id,is_test,document_number) WHERE document_number IS NOT NULL
+ * - Therefore ON CONFLICT(columnlist) is NOT usable.
  *
- * ✅ Therefore:
+ * ✅ Strategy:
  * - If invoice_number provided: SELECT existing by (entity_id,is_test,invoice_number) → UPDATE else INSERT
  * - Else if document_number provided: SELECT existing by (entity_id,is_test,document_number) → UPDATE else INSERT
  * - Else: UPSERT by file_hash (FULL UNIQUE) is allowed and used
  *
- * ✅ Writes ONLY columns that EXIST on billing_documents (locked schema)
- * ✅ Uses entity_id as canonical issuer scope
- * ✅ provider_entity_id is set equal to entity_id (passes CHECK constraint)
+ * ✅ QR correctness (no drift):
+ * - QR encodes stable identifier: verify-billing.html?document_id=<uuid>
+ * - Hash is computed from final PDF bytes once (no fixed-point loop)
+ * - verify terminal/resolver can display/copy hash (hash-first still supported there)
  *
- * ---------------------------------------------------------------------------
- * ✅ PDF layout hardening (NO wiring/DB regressions)
- * - Meta card values NEVER clip (wrap to 2 lines; invoice # safe)
- * - Bottom area is split: Summary LEFT + QR RIGHT (no overlap ever)
- * - Notes gets its own row above bottom split
- * - Table rows stop above footer region deterministically
- * - QR encodes RAW verify URL (hash-first) — iPhone camera compatible
- * - Canonical verify page: https://sign.oasisintlholdings.com/verify-billing.html
+ * ✅ Optional tax (computed in function):
+ * - Defaults to 0 unless explicitly enabled
+ * - Inputs (optional):
+ *    tax_mode: "none" | "auto" | "manual"
+ *    tax_region: e.g. "ON"
+ *    tax_rate: e.g. 0.13 (manual)
  *
- * ✅ Hash/QR correctness:
- * - Fixed-point stabilization loop so QR always encodes FINAL hash.
- * ---------------------------------------------------------------------------
+ * Verify page (canonical):
+ * - https://sign.oasisintlholdings.com/verify-billing.html
  */
 
 type LineItem = {
@@ -95,6 +95,12 @@ type ReqBody = {
   // Audit
   reason: string; // REQUIRED
   trigger?: string; // tolerated
+
+  // Optional tax inputs (computed in function)
+  tax_mode?: "none" | "auto" | "manual" | string | null;
+  tax_region?: string | null; // e.g. "ON"
+  tax_rate?: number | string | null; // e.g. 0.13 (manual)
+  tax_cents_override?: number | string | null; // manual cents override
 };
 
 type Resp = {
@@ -131,7 +137,10 @@ function json(status: number, body: unknown, req: Request) {
   const request_id = getRequestId(req);
   return new Response(
     JSON.stringify({ ...(body as any), request_id } satisfies Resp, null, 2),
-    { status, headers: { ...cors, "content-type": "application/json; charset=utf-8" } },
+    {
+      status,
+      headers: { ...cors, "content-type": "application/json; charset=utf-8" },
+    },
   );
 }
 
@@ -315,7 +324,6 @@ function wrapText(
   }
   if (lines.length < maxLines && line) lines.push(line);
 
-  // hard truncate if still too wide
   return lines.slice(0, maxLines).map((ln) => {
     if (fits(ln)) return ln;
     let out = ln;
@@ -335,6 +343,47 @@ function getVerifyPageUrl(): string {
   const v = String(env).trim();
   if (v) return v.replace(/\/+$/, "");
   return "https://sign.oasisintlholdings.com/verify-billing.html";
+}
+
+// -----------------------------------------------------------------------------
+// Tax computation (optional, enterprise-safe)
+// -----------------------------------------------------------------------------
+function computeTax(params: {
+  currency: string;
+  subtotal_cents: number;
+  tax_mode?: string | null;
+  tax_region?: string | null;
+  tax_rate?: unknown;
+  tax_cents_override?: unknown;
+}) {
+  const currency = (params.currency || "USD").toUpperCase();
+  const subtotal_cents = Number.isFinite(params.subtotal_cents) ? params.subtotal_cents : 0;
+
+  const mode = String(params.tax_mode ?? "none").trim().toLowerCase();
+  const region = String(params.tax_region ?? "").trim().toUpperCase();
+
+  // Manual override cents wins (explicit)
+  const override = Number(params.tax_cents_override);
+  if (Number.isFinite(override) && override >= 0) {
+    const tax_cents = Math.round(override);
+    return { tax_cents, tax_rate: null, tax_mode: "override" };
+  }
+
+  let tax_rate = 0;
+
+  if (mode === "manual") {
+    const r = Number(params.tax_rate);
+    if (Number.isFinite(r) && r >= 0) tax_rate = r;
+  } else if (mode === "auto") {
+    // Minimal safe auto rule (you can refine later)
+    // Ontario HST 13% when CAD + ON
+    if (currency === "CAD" && region === "ON") tax_rate = 0.13;
+  } else {
+    tax_rate = 0;
+  }
+
+  const tax_cents = Math.round(subtotal_cents * tax_rate);
+  return { tax_cents, tax_rate, tax_mode: mode };
 }
 
 // -----------------------------------------------------------------------------
@@ -358,9 +407,9 @@ async function buildOasisBillingPdf(args: {
   notes: string | null;
   totalsMajor: { subtotal: number; tax: number; total: number };
 
-  // ✅ QR encodes verify URL (RAW, untouched)
-  verifyUrl: string; // https://.../verify-billing.html?hash=...
-  hashPreview: string; // first 16 chars
+  // ✅ QR encodes verify URL (stable)
+  verifyUrl: string; // https://.../verify-billing.html?document_id=...
+  idPreview: string; // first 12 of doc id for display
 }): Promise<Uint8Array> {
   const {
     docType,
@@ -380,7 +429,7 @@ async function buildOasisBillingPdf(args: {
     notes,
     totalsMajor,
     verifyUrl,
-    hashPreview,
+    idPreview,
   } = args;
 
   const pdf = await PDFDocument.create();
@@ -488,9 +537,9 @@ async function buildOasisBillingPdf(args: {
     ctxY -= 12;
   }
 
-  // Cards baseline (fixed)
+  // Cards baseline
   const cardTop = ctxY - 18;
-  const cardH = 96; // 🔒 a bit taller so meta can wrap (no clip)
+  const cardH = 96;
 
   // Bill To card (left)
   const billX = margin;
@@ -544,7 +593,7 @@ async function buildOasisBillingPdf(args: {
   });
 
   const labelX = metaX + 14;
-  const valueX = metaX + 106; // 🔒 keeps a consistent gutter
+  const valueX = metaX + 106;
   const valueMaxW = metaX + metaW - 14 - valueX;
 
   const metaRowWrap = (label: string, value: string, yTop: number) => {
@@ -560,7 +609,7 @@ async function buildOasisBillingPdf(args: {
     page.drawText(lines[0], { x: valueX, y: yTop, size: 8.5, font, color: ink });
     if (lines[1]) {
       page.drawText(lines[1], { x: valueX, y: yTop - 11, size: 8.5, font, color: ink });
-      return 22; // consumed height
+      return 22;
     }
     return 11;
   };
@@ -568,7 +617,6 @@ async function buildOasisBillingPdf(args: {
   const issued = issuedAtIso.slice(0, 10);
   const due = dueAtIso ? dueAtIso.slice(0, 10) : "—";
 
-  // 4 rows, with safe wrap
   let my = cardTop - 24;
   my -= metaRowWrap("Issued:", issued, my);
   my -= metaRowWrap("Due:", due, my);
@@ -584,18 +632,15 @@ async function buildOasisBillingPdf(args: {
     color: hair,
   });
 
-  // ---- Footer geometry (never overlaps) ----
+  // ---- Footer geometry ----
   const footerBottomY = 54;
-
-  // Footer: Notes row + (Summary LEFT + QR RIGHT) row
   const notesH = 78;
   const splitH = 92;
   const footerGap = 10;
 
-  const splitY = footerBottomY + 10; // bottom split row Y
+  const splitY = footerBottomY + 10;
   const notesY = splitY + splitH + footerGap;
 
-  // Top line separating table from footer
   const footerTopY = notesY + notesH + 14;
   page.drawLine({
     start: { x: margin, y: footerTopY },
@@ -626,7 +671,6 @@ async function buildOasisBillingPdf(args: {
   page.drawLine({ start: { x: margin, y }, end: { x: W - margin, y }, thickness: 0.8, color: hair });
   y -= 16;
 
-  // Rows stop before footerTopY
   const minYForRows = footerTopY + 10;
   const maxRowsHard = 18;
 
@@ -667,7 +711,7 @@ async function buildOasisBillingPdf(args: {
 
   const fullW = W - margin * 2;
 
-  // Notes row (full width)
+  // Notes row
   page.drawRectangle({
     x: margin,
     y: notesY,
@@ -697,7 +741,7 @@ async function buildOasisBillingPdf(args: {
     ny -= 11;
   }
 
-  // Split row: Summary LEFT + QR RIGHT (no overlap)
+  // Split row: Summary LEFT + QR RIGHT
   const qrPanelW = 200;
   const gap = 12;
   const summaryW = fullW - qrPanelW - gap;
@@ -705,7 +749,6 @@ async function buildOasisBillingPdf(args: {
   const summaryX = margin;
   const qrX = margin + summaryW + gap;
 
-  // Summary panel
   page.drawRectangle({
     x: summaryX,
     y: splitY,
@@ -752,10 +795,9 @@ async function buildOasisBillingPdf(args: {
     color: hair,
   });
 
-  // ✅ Total is always visible (never under QR now)
   srow("Total:", money(currency, totalsMajor.total), splitY + 8, true);
 
-  // QR panel (right)
+  // QR panel
   page.drawRectangle({
     x: qrX,
     y: splitY,
@@ -766,7 +808,7 @@ async function buildOasisBillingPdf(args: {
     color: panel,
   });
 
-  page.drawText(winAnsiSafe("Verify (hash-first)"), {
+  page.drawText(winAnsiSafe("Verify (document-id)"), {
     x: qrX + 12,
     y: splitY + splitH - 18,
     size: 8.5,
@@ -774,7 +816,7 @@ async function buildOasisBillingPdf(args: {
     color: muted,
   });
 
-  page.drawText(winAnsiSafe(`${hashPreview}…`), {
+  page.drawText(winAnsiSafe(`${idPreview}…`), {
     x: qrX + 12,
     y: splitY + splitH - 32,
     size: 7.5,
@@ -782,7 +824,7 @@ async function buildOasisBillingPdf(args: {
     color: faint,
   });
 
-  // ✅ IMPORTANT: QR encodes RAW verifyUrl (do NOT winAnsiSafe it; do NOT truncate)
+  // ✅ QR encodes RAW verifyUrl (do NOT winAnsiSafe it; do NOT truncate)
   const qr = qrPngBytes(verifyUrl, { size: 256, margin: 2, ecc: "M" });
   const qrImg = await pdf.embedPng(qr);
 
@@ -797,12 +839,24 @@ async function buildOasisBillingPdf(args: {
   // Left-of-QR: tiny URL preview inside QR panel (safe wrap)
   const previewW = qrPanelW - 12 - 10 - qrSize - 10;
   const pLines = wrapText(verifyUrl, font, 7.0, previewW, 2);
-  page.drawText(pLines[0], { x: qrX + 12, y: splitY + 34, size: 7.0, font, color: rgb(0.58, 0.62, 0.68) });
+  page.drawText(pLines[0], {
+    x: qrX + 12,
+    y: splitY + 34,
+    size: 7.0,
+    font,
+    color: rgb(0.58, 0.62, 0.68),
+  });
   if (pLines[1]) {
-    page.drawText(pLines[1], { x: qrX + 12, y: splitY + 24, size: 7.0, font, color: rgb(0.58, 0.62, 0.68) });
+    page.drawText(pLines[1], {
+      x: qrX + 12,
+      y: splitY + 24,
+      size: 7.0,
+      font,
+      color: rgb(0.58, 0.62, 0.68),
+    });
   }
 
-  // Tiny corner mark
+  // Footer left mark
   const corner = winAnsiSafe(providerSlug.toUpperCase().slice(0, 10) || "ODP");
   page.drawText(corner, {
     x: margin,
@@ -812,7 +866,6 @@ async function buildOasisBillingPdf(args: {
     color: rgb(0.90, 0.92, 0.95),
   });
 
-  // Footer provenance
   const foot =
     "Registry artifact generated by Oasis Billing. Authority and lifecycle status are conferred by the internal registry.";
   page.drawText(winAnsiSafe(foot), {
@@ -855,7 +908,9 @@ serve(async (req: Request) => {
     });
 
     const { data: userRes, error: userErr } = await userClient.auth.getUser();
-    if (userErr || !userRes?.user?.id) return json(401, { ok: false, error: "INVALID_SESSION" }, req);
+    if (userErr || !userRes?.user?.id) {
+      return json(401, { ok: false, error: "INVALID_SESSION" }, req);
+    }
 
     const actor_id = userRes.user.id;
     const actor_email = userRes.user.email ?? null;
@@ -912,14 +967,25 @@ serve(async (req: Request) => {
         ? body.line_items
         : [{ description: "Service", quantity: 1, unit_price: 0 }];
 
-    // Totals
-    const { items: norm_items, subtotal, subtotal_cents } = sumLineItems(line_items);
-    const tax_cents = 0;
+    // Totals (subtotal first)
+    const { items: norm_items, subtotal_cents } = sumLineItems(line_items);
+
+    // Tax (optional)
+    const taxCalc = computeTax({
+      currency,
+      subtotal_cents,
+      tax_mode: safeText((body as any).tax_mode),
+      tax_region: safeText((body as any).tax_region),
+      tax_rate: (body as any).tax_rate,
+      tax_cents_override: (body as any).tax_cents_override,
+    });
+
+    const tax_cents = taxCalc.tax_cents;
     const total_cents = subtotal_cents + tax_cents;
 
-    const subtotal_amount = subtotal;
-    const tax_amount = 0;
-    const total_amount = subtotal;
+    const subtotal_amount = subtotal_cents / 100;
+    const tax_amount = tax_cents / 100;
+    const total_amount = total_cents / 100;
 
     const laneLabel = body.is_test ? "SANDBOX" : "TRUTH";
     const nowIso = new Date().toISOString();
@@ -930,7 +996,7 @@ serve(async (req: Request) => {
       auth: { persistSession: false },
     });
 
-    // Provider label lookup (safe)
+    // Provider label lookup
     const { data: ent, error: entErr } = await svc
       .from("entities")
       .select("id, slug, name")
@@ -945,45 +1011,75 @@ serve(async (req: Request) => {
     const providerLabel =
       safeText((ent as any)?.name) ?? safeText((ent as any)?.slug) ?? provider_entity_id;
 
-    // -------------------------------------------------------------------------
-    // Build PDF with hash-first verify URL (canonical sign domain)
-    // -------------------------------------------------------------------------
-    const VERIFY_PAGE = getVerifyPageUrl(); // ✅ https://sign.oasisintlholdings.com/verify-billing.html
+    const VERIFY_PAGE = getVerifyPageUrl();
 
-    const buildWithHash = async (hashHex: string) => {
-      const verifyUrl = `${VERIFY_PAGE}?hash=${hashHex}`;
-      return await buildOasisBillingPdf({
-        docType: document_type,
-        providerLabel,
-        providerSlug,
-        laneLabel,
-        invoiceNumber: invoice_number,
-        documentNumber: document_number,
-        issuedAtIso: issued_at,
-        dueAtIso: due_at,
-        periodStart: period_start,
-        periodEnd: period_end,
-        recipientName: recipient_name,
-        recipientEmail: recipient_email,
-        currency,
-        lineItems: norm_items,
-        notes,
-        totalsMajor: { subtotal: subtotal_amount, tax: tax_amount, total: total_amount },
-        verifyUrl,
-        hashPreview: hashHex.slice(0, 16),
-      });
-    };
+    // -------------------------------------------------------------------------
+    // ✅ Determine document_id FIRST (stable QR payload)
+    // -------------------------------------------------------------------------
+    let doc_id: string | null = null;
 
-    // ✅ Fixed-point stabilization (QR ALWAYS matches FINAL hash)
-    let file_hash = "0".repeat(64);
-    let pdfBytes = new Uint8Array();
-    for (let i = 0; i < 4; i++) {
-      const bytes = await buildWithHash(file_hash);
-      const next = await sha256Hex(bytes);
-      pdfBytes = bytes;
-      if (next === file_hash) break;
-      file_hash = next;
+    if (invoice_number) {
+      const existing = await svc
+        .from("billing_documents")
+        .select("id")
+        .eq("entity_id", provider_entity_id)
+        .eq("is_test", body.is_test)
+        .eq("invoice_number", invoice_number)
+        .limit(1)
+        .maybeSingle();
+
+      if (existing.error) {
+        return json(500, { ok: false, error: "DOCUMENT_LOOKUP_FAILED", details: existing.error }, req);
+      }
+      if (existing.data?.id) doc_id = String(existing.data.id);
     }
+
+    if (!doc_id && document_number) {
+      const existing = await svc
+        .from("billing_documents")
+        .select("id")
+        .eq("entity_id", provider_entity_id)
+        .eq("is_test", body.is_test)
+        .eq("document_number", document_number)
+        .limit(1)
+        .maybeSingle();
+
+      if (existing.error) {
+        return json(500, { ok: false, error: "DOCUMENT_LOOKUP_FAILED", details: existing.error }, req);
+      }
+      if (existing.data?.id) doc_id = String(existing.data.id);
+    }
+
+    if (!doc_id) doc_id = crypto.randomUUID();
+
+    const verifyUrl = `${VERIFY_PAGE}?document_id=${doc_id}`;
+
+    // -------------------------------------------------------------------------
+    // Build PDF (QR always correct)
+    // -------------------------------------------------------------------------
+    const pdfBytes = await buildOasisBillingPdf({
+      docType: document_type,
+      providerLabel,
+      providerSlug,
+      laneLabel,
+      invoiceNumber: invoice_number,
+      documentNumber: document_number,
+      issuedAtIso: issued_at,
+      dueAtIso: due_at,
+      periodStart: period_start,
+      periodEnd: period_end,
+      recipientName: recipient_name,
+      recipientEmail: recipient_email,
+      currency,
+      lineItems: norm_items,
+      notes,
+      totalsMajor: { subtotal: subtotal_amount, tax: tax_amount, total: total_amount },
+      verifyUrl,
+      idPreview: String(doc_id).slice(0, 12),
+    });
+
+    // ✅ Hash final bytes (truth)
+    const file_hash = await sha256Hex(pdfBytes);
 
     // Storage target (lane-aware buckets)
     const BILLING_BUCKET = body.is_test ? "billing_sandbox" : "billing_truth";
@@ -993,6 +1089,7 @@ serve(async (req: Request) => {
     const keyPart = invoice_number
       ? `inv-${slugSafe(invoice_number)}`
       : `${document_type}-${file_hash.slice(0, 16)}`;
+
     const storage_path = `${providerSlug}/billing/${yyyy}/${mm}/${keyPart}.pdf`;
 
     // Upload (upsert true)
@@ -1007,10 +1104,13 @@ serve(async (req: Request) => {
       return json(500, { ok: false, error: "UPLOAD_FAILED", details: up.error }, req);
     }
 
-    // ✅ Insert ONLY existing columns (per locked schema)
+    // ✅ Row payload (LOCKED schema only)
     const row: any = {
+      // ✅ ensure QR document_id matches DB id
+      id: doc_id,
+
       entity_id: provider_entity_id,
-      provider_entity_id: provider_entity_id,
+      provider_entity_id: provider_entity_id, // passes CHECK(provider_entity_id IS NULL OR provider_entity_id = entity_id)
       is_test: body.is_test,
 
       subscription_id: subscription_id ?? null,
@@ -1033,9 +1133,9 @@ serve(async (req: Request) => {
 
       currency: currency,
 
-      subtotal_amount: subtotal_amount,
-      tax_amount: tax_amount,
-      total_amount: total_amount,
+      subtotal_amount,
+      tax_amount,
+      total_amount,
 
       amount_cents: total_cents,
       subtotal_cents: subtotal_cents,
@@ -1058,17 +1158,24 @@ serve(async (req: Request) => {
         issuer_entity_slug: providerSlug,
         external_reference: external_reference ?? null,
 
-        // ✅ canonical verify URL (NO 404)
-        verify_url: `${VERIFY_PAGE}?hash=${file_hash}`,
-        qr_payload: `${VERIFY_PAGE}?hash=${file_hash}`,
+        // ✅ stable QR + verify URL
+        verify_url: verifyUrl,
+        qr_payload: verifyUrl,
         verify_page: VERIFY_PAGE,
+
+        // ✅ optional tax trace (non-authoritative display)
+        tax_mode: taxCalc.tax_mode,
+        tax_region: safeText((body as any).tax_region) ?? null,
+        tax_rate: taxCalc.tax_rate,
       },
 
       created_by: actor_id,
       updated_at: nowIso,
     };
 
-    // Idempotent strategy (NO regression)
+    // -------------------------------------------------------------------------
+    // Idempotent persistence (NO invalid ON CONFLICT)
+    // -------------------------------------------------------------------------
     let document_id: string | null = null;
 
     const updateById = async (id: string) => {
@@ -1083,65 +1190,35 @@ serve(async (req: Request) => {
     };
 
     if (invoice_number) {
-      const existing = await svc
-        .from("billing_documents")
-        .select("id")
-        .eq("entity_id", provider_entity_id)
-        .eq("is_test", body.is_test)
-        .eq("invoice_number", invoice_number)
-        .limit(1)
-        .maybeSingle();
-
-      if (existing.error) {
-        return json(500, { ok: false, error: "DOCUMENT_LOOKUP_FAILED", details: existing.error }, req);
-      }
-
-      if (existing.data?.id) {
-        document_id = String(existing.data.id);
+      // if existed, doc_id already set to existing id
+      if (doc_id) {
+        document_id = String(doc_id);
         const upd = await updateById(document_id);
         if (!upd.ok) return json(500, { ok: false, error: "DOCUMENT_UPDATE_FAILED", details: upd.error }, req);
       } else {
         const ins = await insertNew();
-        if (!ins.ok || !ins.id) {
-          return json(500, { ok: false, error: "DOCUMENT_INSERT_FAILED", details: ins.error }, req);
-        }
+        if (!ins.ok || !ins.id) return json(500, { ok: false, error: "DOCUMENT_INSERT_FAILED", details: ins.error }, req);
         document_id = ins.id;
       }
     } else if (document_number) {
-      const existing = await svc
-        .from("billing_documents")
-        .select("id")
-        .eq("entity_id", provider_entity_id)
-        .eq("is_test", body.is_test)
-        .eq("document_number", document_number)
-        .limit(1)
-        .maybeSingle();
-
-      if (existing.error) {
-        return json(500, { ok: false, error: "DOCUMENT_LOOKUP_FAILED", details: existing.error }, req);
-      }
-
-      if (existing.data?.id) {
-        document_id = String(existing.data.id);
+      if (doc_id) {
+        document_id = String(doc_id);
         const upd = await updateById(document_id);
         if (!upd.ok) return json(500, { ok: false, error: "DOCUMENT_UPDATE_FAILED", details: upd.error }, req);
       } else {
         const ins = await insertNew();
-        if (!ins.ok || !ins.id) {
-          return json(500, { ok: false, error: "DOCUMENT_INSERT_FAILED", details: ins.error }, req);
-        }
+        if (!ins.ok || !ins.id) return json(500, { ok: false, error: "DOCUMENT_INSERT_FAILED", details: ins.error }, req);
         document_id = ins.id;
       }
     } else {
+      // hash-unique upsert allowed
       const { data, error } = await svc
         .from("billing_documents")
         .upsert(row, { onConflict: "file_hash" })
         .select("id")
         .maybeSingle();
 
-      if (error) {
-        return json(500, { ok: false, error: "DOCUMENT_UPSERT_FAILED", details: error }, req);
-      }
+      if (error) return json(500, { ok: false, error: "DOCUMENT_UPSERT_FAILED", details: error }, req);
       document_id = data?.id ? String(data.id) : null;
     }
 
@@ -1168,10 +1245,13 @@ serve(async (req: Request) => {
           file_hash,
           storage_bucket: BILLING_BUCKET,
           storage_path,
+          subtotal_cents,
+          tax_cents,
           total_cents,
           reason,
           trigger: trigger ?? null,
           verify_page: VERIFY_PAGE,
+          verify_url: verifyUrl,
         },
       } as any);
     } catch {
