@@ -1,3 +1,4 @@
+// supabase/functions/email-minute-book-entry/index.ts
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -12,7 +13,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
  *
  * ENHANCEMENTS (NO REWIRING / NO REGRESSION):
  * ✅ Restores “authority” look: subtle gold accents, depth, and hierarchy
- * ✅ Outlook/Gmail-safe (table-based layout fallback friendly)
+ * ✅ Outlook/Gmail-safe (table-based layout + bulletproof buttons + VML)
  * ✅ Adds “Certified ✓” micro-shimmer (safe CSS; ignored by strict clients)
  * ✅ Tightens micro-spacing + badge hierarchy
  * ✅ Download button clearly secondary
@@ -71,8 +72,7 @@ function rid() {
 }
 
 function cleanEmail(s?: string | null) {
-  const x = (s || "").trim();
-  return x;
+  return (s || "").trim();
 }
 
 function isHex64(s?: string | null) {
@@ -287,7 +287,6 @@ serve(async (req) => {
   }
 
   const subject = "Minute Book Entry — Verified Copy";
-
   const introName = to_name ? `Hello ${esc(to_name)},` : "Hello,";
 
   const msgBlock = message
@@ -311,6 +310,80 @@ serve(async (req) => {
     }
   `;
 
+  const gold = "#FFD680";
+  const ink = "#0B0F17";
+  const bg0 = "#05070C";
+  const glass = "rgba(14,22,36,.58)";
+  const stroke = "rgba(255,255,255,.08)";
+
+  // Bulletproof button helpers (Outlook-safe)
+  function bulletproofGoldButton(href: string, label: string, widthPx = 170) {
+    const safeHref = esc(href);
+    const safeLabel = esc(label);
+    return `
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline-block; border-collapse:separate;">
+        <tr>
+          <td bgcolor="${gold}" style="background-color:${gold}; border-radius:999px;">
+            <!--[if mso]>
+            <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="${safeHref}"
+              style="height:38px;v-text-anchor:middle;width:${widthPx}px;" arcsize="60%" strokecolor="${gold}" fillcolor="${gold}">
+              <w:anchorlock/>
+              <center style="color:${ink};font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:bold;letter-spacing:.02em;">
+                ${safeLabel}
+              </center>
+            </v:roundrect>
+            <![endif]-->
+            <!--[if !mso]><!-- -->
+            <a href="${safeHref}"
+              style="display:inline-block;padding:11px 16px;border-radius:999px;background-color:${gold};color:${ink};
+                     font-weight:900;text-decoration:none;font-size:12px;letter-spacing:.02em;">
+              ${safeLabel}
+            </a>
+            <!--<![endif]-->
+          </td>
+        </tr>
+      </table>
+    `.trim();
+  }
+
+  function bulletproofSecondaryButton(href: string, label: string, widthPx = 220) {
+    const safeHref = esc(href);
+    const safeLabel = esc(label);
+    // Secondary uses dark fill + light stroke; VML for Outlook
+    const fill = "#101827";
+    const strokeCol = "rgba(255,255,255,.18)";
+    const text = "rgba(255,255,255,.86)";
+    return `
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline-block; border-collapse:separate;">
+        <tr>
+          <td bgcolor="${fill}" style="background-color:${fill}; border-radius:999px; border:1px solid ${strokeCol};">
+            <!--[if mso]>
+            <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="${safeHref}"
+              style="height:38px;v-text-anchor:middle;width:${widthPx}px;" arcsize="60%" strokecolor="#2A3448" fillcolor="${fill}">
+              <w:anchorlock/>
+              <center style="color:#E5E7EB;font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:bold;letter-spacing:.01em;">
+                ${safeLabel}
+              </center>
+            </v:roundrect>
+            <![endif]-->
+            <!--[if !mso]><!-- -->
+            <a href="${safeHref}"
+              style="display:inline-block;padding:11px 16px;border-radius:999px;background-color:${fill};color:${text};
+                     font-weight:800;text-decoration:none;font-size:12px;letter-spacing:.01em;border:1px solid ${strokeCol};">
+              ${safeLabel}
+            </a>
+            <!--<![endif]-->
+          </td>
+        </tr>
+      </table>
+    `.trim();
+  }
+
+  const verifyBtn = bulletproofGoldButton(verify_url, "Verify (Hash-first)", 180);
+  const downloadBtn = download_url
+    ? bulletproofSecondaryButton(download_url, "Download PDF (time-limited)", 230)
+    : "";
+
   const html = `
 <!doctype html>
 <html>
@@ -320,34 +393,44 @@ serve(async (req) => {
     <meta name="color-scheme" content="dark" />
     <meta name="supported-color-schemes" content="dark" />
     <title>${esc(subject)}</title>
+    <!--[if mso]>
+    <xml>
+      <o:OfficeDocumentSettings>
+        <o:AllowPNG/>
+        <o:PixelsPerInch>96</o:PixelsPerInch>
+      </o:OfficeDocumentSettings>
+    </xml>
+    <![endif]-->
     <style>
       ${shimmerKeyframes}
-      /* Some clients strip <style>; we keep everything inline too. */
+      /* Some clients strip <style>; we keep everything important inline too. */
     </style>
   </head>
-  <body style="margin:0; padding:0; background:#05070c;">
-    <!-- Outer background -->
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#05070c; padding:24px 10px;">
+  <body style="margin:0; padding:0; background:${bg0}; background-color:${bg0};">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="${bg0}" style="background:${bg0}; background-color:${bg0}; padding:24px 10px;">
       <tr>
         <td align="center" style="padding:0;">
 
-          <!-- Container -->
           <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="720" style="width:100%; max-width:720px; border-collapse:separate;">
             <tr>
-              <td style="
-                background: radial-gradient(1200px 600px at 50% -200px, rgba(255,214,128,.14), rgba(0,0,0,0)) , #05070c;
-                border:1px solid rgba(255,255,255,.08);
+              <td bgcolor="${bg0}" style="
+                background:${bg0};
+                background-color:${bg0};
+                border:1px solid ${stroke};
                 border-radius:18px;
                 overflow:hidden;
                 box-shadow: 0 18px 60px rgba(0,0,0,.55);
               ">
 
-                <!-- Inner padding -->
+                <!-- Gradient “authority” wash (safe even if stripped; bg stays solid) -->
+                <div style="display:none; max-height:0; overflow:hidden;">
+                  Oasis Digital Parliament Verification
+                </div>
+
                 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
                   <tr>
                     <td style="padding:22px 22px 18px 22px;">
 
-                      <!-- Header -->
                       <div style="letter-spacing:.34em; text-transform:uppercase; font-size:11px; color:rgba(255,255,255,.60);">
                         OASIS DIGITAL PARLIAMENT
                       </div>
@@ -366,12 +449,11 @@ serve(async (req) => {
 
                       <div style="height:14px; line-height:14px; font-size:14px;">&nbsp;</div>
 
-                      <!-- Message -->
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
                         ${msgBlock}
                       </table>
 
-                      <!-- Badge row -->
+                      <!-- Certified badge -->
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
                         <tr>
                           <td style="padding:0 0 10px 0;">
@@ -379,12 +461,12 @@ serve(async (req) => {
                               display:inline-block;
                               padding:6px 10px;
                               border-radius:999px;
-                              border:1px solid rgba(255,214,128,.28);
+                              border:1px solid rgba(255,214,128,.30);
                               background: rgba(255,214,128,.10);
                               color: rgba(255,214,128,.95);
-                              font-weight:800;
+                              font-weight:900;
                               font-size:11px;
-                              letter-spacing:.08em;
+                              letter-spacing:.10em;
                               text-transform:uppercase;
                               animation: odpShimmer 2.6s ease-in-out infinite;
                             ">Certified ✓</span>
@@ -399,7 +481,8 @@ serve(async (req) => {
                             padding:14px 14px;
                             border-radius:16px;
                             border:1px solid rgba(255,255,255,.10);
-                            background: rgba(14,22,36,.58);
+                            background:${glass};
+                            background-color:${glass};
                           ">
                             <div style="font-size:11px; letter-spacing:.22em; text-transform:uppercase; color:rgba(255,255,255,.58);">
                               Verification Hash
@@ -417,44 +500,15 @@ serve(async (req) => {
 
                       <div style="height:16px; line-height:16px; font-size:16px;">&nbsp;</div>
 
-                      <!-- Buttons -->
+                      <!-- Buttons row (bulletproof, Outlook-safe) -->
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;">
                         <tr>
                           <td style="padding:0 10px 0 0;">
-                            <a href="${esc(verify_url)}"
-                              style="
-                                display:inline-block;
-                                padding:11px 16px;
-                                border-radius:999px;
-                                background: rgba(255,214,128,.95);
-                                color:#0b0f17;
-                                font-weight:900;
-                                text-decoration:none;
-                                font-size:12px;
-                                letter-spacing:.02em;
-                              "
-                            >Verify (Hash-first)</a>
+                            ${verifyBtn}
                           </td>
                           ${
-                            download_url
-                              ? `
-                                <td style="padding:0;">
-                                  <a href="${esc(download_url)}"
-                                    style="
-                                      display:inline-block;
-                                      padding:11px 16px;
-                                      border-radius:999px;
-                                      background: rgba(255,255,255,.06);
-                                      border:1px solid rgba(255,255,255,.14);
-                                      color: rgba(255,255,255,.82);
-                                      font-weight:800;
-                                      text-decoration:none;
-                                      font-size:12px;
-                                      letter-spacing:.01em;
-                                    "
-                                  >Download PDF (time-limited)</a>
-                                </td>
-                              `
+                            downloadBtn
+                              ? `<td style="padding:0;">${downloadBtn}</td>`
                               : ""
                           }
                         </tr>
@@ -462,7 +516,6 @@ serve(async (req) => {
 
                       <div style="height:16px; line-height:16px; font-size:16px;">&nbsp;</div>
 
-                      <!-- Footer note -->
                       <div style="font-size:11px; line-height:1.55; color:rgba(255,255,255,.56);">
                         This email contains a hash-first verification link. The public verification terminal is authoritative.
                       </div>
@@ -476,7 +529,6 @@ serve(async (req) => {
                     </td>
                   </tr>
 
-                  <!-- Bottom hairline -->
                   <tr>
                     <td style="padding:0 22px 18px 22px;">
                       <div style="height:1px; background:rgba(255,255,255,.08);"></div>
