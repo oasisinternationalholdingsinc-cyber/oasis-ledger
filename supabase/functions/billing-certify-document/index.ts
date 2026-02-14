@@ -4,17 +4,13 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { PDFDocument, StandardFonts, rgb } from "https://esm.sh/pdf-lib@1.17.1";
 
-// ✅ Edge-safe QR (NO canvas / NO wasm)
-import QRGen from "npm:qrcode-generator@1.4.4";
-import { PNG } from "npm:pngjs@7.0.0";
-
 /**
  * CI-Billing — billing-certify-document (PRODUCTION — LOCKED)
  *
  * ✅ Explicit authority action (NOT implied by generation)
  * ✅ Appends a NEW final certification page (mirror pattern)
  * ✅ Hash-first: certified hash is SHA-256 of FINAL certified bytes
- * ✅ QR points to verify-billing.html?hash=<certified_hash>
+ * ✅ Certification page is INTERNAL (NO QR, NO public URL printed)
  * ✅ Idempotent:
  *    - if already certified and !force => returns existing certified pointers
  *    - if force => re-certifies (upserts certified PDF + updates certified_* columns)
@@ -24,7 +20,7 @@ import { PNG } from "npm:pngjs@7.0.0";
  * ✅ Schema-safe: touches ONLY known billing_documents columns:
  *    - certified_at, certified_by, certified_storage_bucket, certified_storage_path, certified_file_hash, metadata
  *
- * ✅ Canonical verify page URL (NO 404):
+ * ✅ Canonical verify URL stored/returned (NOT printed):
  *    https://sign.oasisintlholdings.com/verify-billing.html?hash=...
  *
  * Auth:
@@ -152,62 +148,6 @@ function buildCertifiedPath(originalPath: string) {
   return `${p}-certified.pdf`;
 }
 
-// -----------------------------------------------------------------------------
-// QR generation (Edge-safe): text → PNG bytes
-// -----------------------------------------------------------------------------
-function qrPngBytes(
-  text: string,
-  opts?: { size?: number; margin?: number; ecc?: "L" | "M" | "Q" | "H" },
-): Uint8Array {
-  const size = opts?.size ?? 256;
-  const margin = opts?.margin ?? 2;
-  const ecc = opts?.ecc ?? "M";
-
-  const qr = QRGen(0, ecc);
-  qr.addData(text);
-  qr.make();
-
-  const count = qr.getModuleCount();
-  const scale = Math.max(1, Math.floor(size / (count + margin * 2)));
-  const imgSize = (count + margin * 2) * scale;
-
-  const png = new PNG({ width: imgSize, height: imgSize });
-
-  // white bg
-  for (let y = 0; y < imgSize; y++) {
-    for (let x = 0; x < imgSize; x++) {
-      const idx = (png.width * y + x) << 2;
-      png.data[idx + 0] = 255;
-      png.data[idx + 1] = 255;
-      png.data[idx + 2] = 255;
-      png.data[idx + 3] = 255;
-    }
-  }
-
-  // black modules
-  for (let r = 0; r < count; r++) {
-    for (let c = 0; c < count; c++) {
-      if (!qr.isDark(r, c)) continue;
-      const x0 = (c + margin) * scale;
-      const y0 = (r + margin) * scale;
-
-      for (let yy = 0; yy < scale; yy++) {
-        for (let xx = 0; xx < scale; xx++) {
-          const x = x0 + xx;
-          const y = y0 + yy;
-          const idx = (png.width * y + x) << 2;
-          png.data[idx + 0] = 0;
-          png.data[idx + 1] = 0;
-          png.data[idx + 2] = 0;
-          png.data[idx + 3] = 255;
-        }
-      }
-    }
-  }
-
-  return PNG.sync.write(png);
-}
-
 /**
  * Optional operator authorization hook:
  * - If you have an RPC, we enforce it.
@@ -231,14 +171,14 @@ async function bestEffortAuthorizeOperator(
 }
 
 /**
- * Build a certification page (Oasis OS style) onto a NEW final page.
- * We pass the hash we want printed + encoded, then we run a deterministic 2–3 pass
- * fixed-point loop in the handler to ensure the printed hash and QR match FINAL bytes.
+ * Build a certification page (minimal, registry-seal style) onto a NEW final page.
+ * - NO QR
+ * - NO public verify URL printed
+ * - Tight hash section with generous whitespace
  */
 async function appendCertificationPage(args: {
   srcBytes: Uint8Array;
-  certHash: string; // hash to print + encode (placeholder in pass 1)
-  verifyUrl: string;
+  certHash: string; // hash to print (placeholder in pass 1)
   meta: {
     entity_id: string;
     is_test: boolean;
@@ -256,7 +196,7 @@ async function appendCertificationPage(args: {
     total_cents: number | null;
   };
 }): Promise<Uint8Array> {
-  const { srcBytes, certHash, verifyUrl, meta } = args;
+  const { srcBytes, certHash, meta } = args;
 
   const pdf = await PDFDocument.load(srcBytes, { ignoreEncryption: true });
 
@@ -264,39 +204,38 @@ async function appendCertificationPage(args: {
   const page = pdf.addPage([612, 792]); // Letter
   const W = page.getWidth();
   const H = page.getHeight();
-  const margin = 56;
+  const margin = 64;
 
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
 
-  // Palette
+  // Palette (paper + quiet ink)
+  const paper = rgb(1, 1, 1);
   const ink = rgb(0.12, 0.14, 0.18);
   const muted = rgb(0.45, 0.48, 0.55);
   const hair = rgb(0.86, 0.88, 0.91);
   const band = rgb(0.06, 0.09, 0.12);
   const gold = rgb(0.95, 0.78, 0.33);
   const teal = rgb(0.1, 0.78, 0.72);
-  const paper = rgb(1, 1, 1);
-  const panel = rgb(0.99, 0.99, 1);
 
   page.drawRectangle({ x: 0, y: 0, width: W, height: H, color: paper });
 
-  // Header band
-  const bandH = 92;
+  // Header band (slimmer)
+  const bandH = 76;
   page.drawRectangle({ x: 0, y: H - bandH, width: W, height: bandH, color: band });
 
   page.drawText(winAnsiSafe("Oasis Digital Parliament"), {
     x: margin,
-    y: H - 42,
-    size: 14,
+    y: H - 40,
+    size: 13,
     font: bold,
     color: teal,
   });
 
   page.drawText(winAnsiSafe("Billing Certification"), {
     x: margin,
-    y: H - 64,
-    size: 10,
+    y: H - 58,
+    size: 9.5,
     font,
     color: rgb(0.86, 0.88, 0.9),
   });
@@ -306,223 +245,170 @@ async function appendCertificationPage(args: {
   const rightW = font.widthOfTextAtSize(rightTop, 9);
   page.drawText(rightTop, {
     x: W - margin - rightW,
-    y: H - 60,
+    y: H - 56,
     size: 9,
     font,
     color: rgb(0.78, 0.82, 0.86),
   });
 
-  // Title
-  const topY = H - bandH - 52;
-  page.drawText(winAnsiSafe("Certified Billing Artifact"), {
+  // Title + seal line
+  const topY = H - bandH - 64;
+  page.drawText(winAnsiSafe("Registry Seal"), {
     x: margin,
     y: topY,
-    size: 18,
+    size: 22,
     font: bold,
     color: ink,
   });
 
-  // Meta blocks
+  page.drawLine({
+    start: { x: margin, y: topY - 14 },
+    end: { x: W - margin, y: topY - 14 },
+    thickness: 1,
+    color: hair,
+  });
+
+  // Compact two-column meta (lots of whitespace)
+  const metaY = topY - 56;
+  const colGap = 24;
+  const colW = (W - margin * 2 - colGap) / 2;
   const leftX = margin;
-  const leftY = topY - 64;
-  const leftW = 320;
-  const boxH = 108;
+  const rightX = margin + colW + colGap;
 
-  page.drawRectangle({
-    x: leftX,
-    y: leftY,
-    width: leftW,
-    height: boxH,
-    borderColor: hair,
-    borderWidth: 1,
-    color: panel,
-  });
+  const labelSize = 9;
+  const valueSize = 10.5;
+  const rowH = 20;
 
-  page.drawText(winAnsiSafe("Certified Record"), {
-    x: leftX + 12,
-    y: leftY + boxH - 22,
-    size: 9,
-    font: bold,
-    color: muted,
-  });
-
-  const row = (label: string, value: string, y: number) => {
+  const drawKV = (x: number, y: number, label: string, value: string, maxChars = 48) => {
     page.drawText(winAnsiSafe(label), {
-      x: leftX + 12,
+      x,
       y,
-      size: 8.5,
+      size: labelSize,
       font: bold,
       color: muted,
     });
-    page.drawText(winAnsiSafe(value).slice(0, 80), {
-      x: leftX + 120,
-      y,
-      size: 8.5,
+    page.drawText(winAnsiSafe(value).slice(0, maxChars), {
+      x,
+      y: y - 12,
+      size: valueSize,
       font,
       color: ink,
     });
   };
 
   const docType = meta.document_type ? String(meta.document_type).toUpperCase() : "—";
-  row("Type:", docType, leftY + boxH - 42);
-  row("Doc #:", meta.document_number ?? "—", leftY + boxH - 58);
-  row("Invoice #:", meta.invoice_number ?? "—", leftY + boxH - 74);
-  row("Entity:", meta.entity_id, leftY + boxH - 90);
+  const issued = meta.issued_at ? String(meta.issued_at).slice(0, 10) : "—";
+  const due = meta.due_at ? String(meta.due_at).slice(0, 10) : "—";
 
-  const rightX = margin + 340;
-  const rightY = leftY;
-  const rightWb = W - margin - rightX;
+  drawKV(leftX, metaY, "Document Type", docType, 32);
+  drawKV(leftX, metaY - rowH * 1.4, "Document #", meta.document_number ?? "—", 44);
+  drawKV(leftX, metaY - rowH * 2.8, "Invoice #", meta.invoice_number ?? "—", 44);
 
-  page.drawRectangle({
-    x: rightX,
-    y: rightY,
-    width: rightWb,
-    height: boxH,
-    borderColor: hair,
-    borderWidth: 1,
-    color: panel,
-  });
+  drawKV(rightX, metaY, "Recipient", meta.recipient_name ?? "—", 42);
+  drawKV(rightX, metaY - rowH * 1.4, "Email", meta.recipient_email ?? "—", 52);
+  drawKV(rightX, metaY - rowH * 2.8, "Issued / Due", `${issued}   •   ${due}`, 42);
 
-  page.drawText(winAnsiSafe("Recipient"), {
-    x: rightX + 12,
-    y: rightY + boxH - 22,
+  // Entity + internal note (quiet)
+  const noteY = metaY - rowH * 4.2;
+  page.drawText(winAnsiSafe("Entity"), {
+    x: margin,
+    y: noteY,
     size: 9,
     font: bold,
     color: muted,
   });
-
-  page.drawText(winAnsiSafe((meta.recipient_name ?? "—").slice(0, 44)), {
-    x: rightX + 12,
-    y: rightY + boxH - 44,
-    size: 10,
-    font: bold,
+  page.drawText(winAnsiSafe(meta.entity_id), {
+    x: margin,
+    y: noteY - 12,
+    size: 9.8,
+    font,
     color: ink,
   });
 
-  page.drawText(winAnsiSafe((meta.recipient_email ?? "—").slice(0, 56)), {
-    x: rightX + 12,
-    y: rightY + boxH - 62,
+  page.drawText(winAnsiSafe("Internal registry seal — verification is hash-first via the Billing Registry."), {
+    x: margin,
+    y: noteY - 36,
     size: 8.5,
     font,
     color: muted,
+    maxWidth: W - margin * 2,
   });
 
-  const issued = meta.issued_at ? String(meta.issued_at).slice(0, 10) : "—";
-  const due = meta.due_at ? String(meta.due_at).slice(0, 10) : "—";
-  page.drawText(winAnsiSafe(`Issued: ${issued}   Due: ${due}`), {
-    x: rightX + 12,
-    y: rightY + 18,
-    size: 8.5,
-    font,
-    color: muted,
-  });
+  // Hash section (tight + centered, no overlap)
+  const hashBlockTop = noteY - 90;
 
-  const period =
-    meta.period_start || meta.period_end
-      ? `${(meta.period_start ?? "—").slice(0, 10)} -> ${(meta.period_end ?? "—").slice(0, 10)}`
-      : null;
-
-  if (period) {
-    page.drawText(winAnsiSafe(`Period: ${period}`), {
-      x: margin,
-      y: leftY - 18,
-      size: 8.5,
-      font,
-      color: muted,
-    });
-  }
-
-  // Hash block
-  const hashY = period ? leftY - 46 : leftY - 36;
   page.drawText(winAnsiSafe("SHA-256 (Certified PDF)"), {
     x: margin,
-    y: hashY,
-    size: 9.5,
+    y: hashBlockTop,
+    size: 10,
     font: bold,
     color: muted,
   });
 
+  const hashBoxY = hashBlockTop - 44;
+  const hashBoxH = 52;
+
   page.drawRectangle({
     x: margin,
-    y: hashY - 30,
+    y: hashBoxY,
     width: W - margin * 2,
-    height: 34,
+    height: hashBoxH,
     borderColor: hair,
     borderWidth: 1,
-    color: panel,
+    color: rgb(0.99, 0.99, 1),
   });
 
-  page.drawText(winAnsiSafe(certHash), {
-    x: margin + 12,
-    y: hashY - 18,
-    size: 8.5,
-    font,
-    color: ink,
-  });
-
-  // Verification URL (hash-first)
-  page.drawText(winAnsiSafe("Verification (hash-first)"), {
-    x: margin,
-    y: hashY - 56,
-    size: 9.5,
-    font: bold,
-    color: muted,
-  });
-
-  page.drawText(winAnsiSafe(verifyUrl).slice(0, 120), {
-    x: margin,
-    y: hashY - 72,
-    size: 8.5,
-    font,
-    color: ink,
-  });
-
-  // QR (bottom-right) — Edge-safe PNG
-  const qrPng = qrPngBytes(verifyUrl, { size: 256, margin: 2, ecc: "M" });
-  const qrImg = await pdf.embedPng(qrPng);
-
-  const qrSize = 128;
-  const qrX = W - margin - qrSize;
-  const qrY = 64;
-
-  page.drawRectangle({
-    x: qrX - 6,
-    y: qrY - 6,
-    width: qrSize + 12,
-    height: qrSize + 12,
-    borderColor: gold,
-    borderWidth: 1,
-    opacity: 0.5,
-  });
-
-  page.drawImage(qrImg, { x: qrX, y: qrY, width: qrSize, height: qrSize });
-
-  page.drawText(winAnsiSafe("Scan to verify"), {
-    x: qrX,
-    y: qrY + qrSize + 10,
-    size: 8.5,
-    font: bold,
-    color: muted,
-  });
-
-  // Footer
+  // subtle gold tick mark (registry vibe) – tiny, not decorative
   page.drawLine({
-    start: { x: margin, y: 46 },
-    end: { x: W - margin, y: 46 },
+    start: { x: margin + 14, y: hashBoxY + hashBoxH - 12 },
+    end: { x: margin + 42, y: hashBoxY + hashBoxH - 12 },
+    thickness: 2,
+    color: gold,
+    opacity: 0.35,
+  });
+
+  // hash in two lines (prevents any mid overlap / runaway width)
+  const h = winAnsiSafe(certHash);
+  const h1 = h.slice(0, 32);
+  const h2 = h.slice(32);
+
+  page.drawText(h1, {
+    x: margin + 14,
+    y: hashBoxY + 30,
+    size: 10.2,
+    font,
+    color: ink,
+  });
+
+  page.drawText(h2, {
+    x: margin + 14,
+    y: hashBoxY + 14,
+    size: 10.2,
+    font,
+    color: ink,
+  });
+
+  // Footer (quiet)
+  page.drawLine({
+    start: { x: margin, y: 58 },
+    end: { x: W - margin, y: 58 },
     thickness: 0.7,
     color: hair,
   });
 
-  const footer =
-    "Registry-grade certification • Authority is explicit and conferred by the Billing Registry (not by rendering).";
-  page.drawText(winAnsiSafe(footer), {
-    x: margin,
-    y: 32,
-    size: 7.8,
-    font,
-    color: rgb(0.6, 0.64, 0.7),
-    maxWidth: W - margin * 2 - 160,
-  });
+  page.drawText(
+    winAnsiSafe(
+      "Registry-grade certification • Authority is explicit and conferred by the Billing Registry (not by rendering).",
+    ),
+    {
+      x: margin,
+      y: 40,
+      size: 7.8,
+      font,
+      color: rgb(0.6, 0.64, 0.7),
+      maxWidth: W - margin * 2,
+    },
+  );
 
   return new Uint8Array(await pdf.save({ useObjectStreams: false }));
 }
@@ -567,7 +453,7 @@ serve(async (req: Request) => {
     const actor_id =
       cleanUuid(body.actor_id) && isUuid(String(body.actor_id)) ? String(body.actor_id) : user_id;
 
-    // ✅ FULL verify page URL (no hash)
+    // ✅ FULL verify page URL (no hash) — stored/returned (NOT printed)
     const verifyPage =
       (String(body.verify_page_url ?? "").trim() || getVerifyPageUrl()).replace(/\/+$/, "");
 
@@ -664,7 +550,6 @@ serve(async (req: Request) => {
     }
     const srcBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // Deterministic fixed-point loop (hash printed + QR must match FINAL bytes)
     const meta = {
       entity_id,
       is_test,
@@ -682,35 +567,27 @@ serve(async (req: Request) => {
       total_cents: (doc as any).total_cents != null ? Number((doc as any).total_cents) : null,
     };
 
+    // Deterministic fixed-point loop (printed hash must match FINAL bytes)
     let hash = "0".repeat(64);
     let certifiedBytes = srcBytes;
 
     // Pass 1: placeholder → hash1
     {
-      const verifyUrl = `${verifyPage}?hash=${hash}`;
-      const bytes = await appendCertificationPage({ srcBytes, certHash: hash, verifyUrl, meta });
+      const bytes = await appendCertificationPage({ srcBytes, certHash: hash, meta });
       const hash1 = await sha256Hex(bytes);
       certifiedBytes = bytes;
       hash = hash1;
     }
 
-    // Pass 2: hash1 embedded → hash2
+    // Pass 2: hash1 embedded → hash2 (stabilize)
     {
-      const verifyUrl = `${verifyPage}?hash=${hash}`;
-      const bytes = await appendCertificationPage({ srcBytes, certHash: hash, verifyUrl, meta });
+      const bytes = await appendCertificationPage({ srcBytes, certHash: hash, meta });
       const hash2 = await sha256Hex(bytes);
       certifiedBytes = bytes;
 
-      // If stabilized, we're done; else do one final pass with hash2.
       if (hash2 !== hash) {
         hash = hash2;
-        const verifyUrl3 = `${verifyPage}?hash=${hash}`;
-        const bytes3 = await appendCertificationPage({
-          srcBytes,
-          certHash: hash,
-          verifyUrl: verifyUrl3,
-          meta,
-        });
+        const bytes3 = await appendCertificationPage({ srcBytes, certHash: hash, meta });
         const hash3 = await sha256Hex(bytes3);
         certifiedBytes = bytes3;
         hash = hash3; // final
@@ -765,7 +642,7 @@ serve(async (req: Request) => {
         certified_at: nowIso,
         certified_by: actor_id,
         method: "billing-certify-document",
-        version: 1,
+        version: 2, // bumped for "no-QR internal seal" layout
       },
     };
 
