@@ -10,6 +10,13 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
  * ✅ Optional time-limited download link (signed URL)
  * ✅ Lane-safe: validates storage_bucket vs is_test hint (best-effort)
  *
+ * ENHANCEMENTS (NO REWIRING / NO REGRESSION):
+ * ✅ Restores “authority” look: subtle gold accents, depth, and hierarchy
+ * ✅ Outlook/Gmail-safe (table-based layout fallback friendly)
+ * ✅ Adds “Certified ✓” micro-shimmer (safe CSS; ignored by strict clients)
+ * ✅ Tightens micro-spacing + badge hierarchy
+ * ✅ Download button clearly secondary
+ *
  * Requires env:
  * - SUPABASE_URL
  * - SUPABASE_SERVICE_ROLE_KEY
@@ -36,7 +43,13 @@ type ReqBody = {
 };
 
 type Resp =
-  | { ok: true; request_id: string; to_email: string; verify_url: string; download_url?: string | null }
+  | {
+      ok: true;
+      request_id: string;
+      to_email: string;
+      verify_url: string;
+      download_url?: string | null;
+    }
   | { ok: false; request_id: string; error: string; details?: unknown };
 
 const cors: Record<string, string> = {
@@ -128,8 +141,13 @@ serve(async (req) => {
   const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
   if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
     return json(
-      { ok: false, request_id, error: "SERVER_MISCONFIGURED", details: "Missing SUPABASE_URL/SERVICE_ROLE." },
-      500
+      {
+        ok: false,
+        request_id,
+        error: "SERVER_MISCONFIGURED",
+        details: "Missing SUPABASE_URL/SERVICE_ROLE.",
+      },
+      500,
     );
   }
 
@@ -212,9 +230,10 @@ serve(async (req) => {
         ok: false,
         request_id,
         error: "NOT_REGISTERED",
-        details: "No verified_documents.file_hash found for this Minute Book entry (must be certified/verified first).",
+        details:
+          "No verified_documents.file_hash found for this Minute Book entry (must be certified/verified first).",
       },
-      404
+      404,
     );
   }
 
@@ -263,49 +282,223 @@ serve(async (req) => {
         error: "EMAIL_PROVIDER_NOT_CONFIGURED",
         details: "Set RESEND_API_KEY and EMAIL_FROM in Supabase Edge Function env.",
       },
-      500
+      500,
     );
   }
 
   const subject = "Minute Book Entry — Verified Copy";
 
   const introName = to_name ? `Hello ${esc(to_name)},` : "Hello,";
+
   const msgBlock = message
-    ? `<p style="margin:12px 0 0;color:#cbd5e1;font-size:13px;line-height:1.5">${esc(message)}</p>`
+    ? `
+      <tr>
+        <td style="padding:0 0 14px 0">
+          <div style="font-size:13px; line-height:1.55; color:rgba(255,255,255,.74)">
+            ${esc(message)}
+          </div>
+        </td>
+      </tr>
+    `
     : "";
 
-  const html = `
-  <div style="font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; background:#05070c; color:#e5e7eb; padding:24px; border-radius:16px">
-    <div style="max-width:720px; margin:0 auto;">
-      <div style="letter-spacing:.28em; text-transform:uppercase; font-size:11px; color:rgba(255,255,255,.55)">Oasis Digital Parliament</div>
-      <h1 style="margin:10px 0 0; font-size:18px; font-weight:700; color:#fff">Minute Book Entry — Verified Copy</h1>
-      <p style="margin:10px 0 0; color:rgba(255,255,255,.68); font-size:13px; line-height:1.5">${introName}</p>
-      ${msgBlock}
-
-      <div style="margin:18px 0 0; padding:14px; border:1px solid rgba(255,255,255,.10); border-radius:14px; background:rgba(14,22,36,.55)">
-        <div style="font-size:11px; letter-spacing:.20em; text-transform:uppercase; color:rgba(255,255,255,.55)">Verification Hash</div>
-        <div style="margin-top:8px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:12px; color:#fff; word-break:break-all">${esc(file_hash)}</div>
-      </div>
-
-      <div style="margin:16px 0 0; display:flex; gap:10px; flex-wrap:wrap">
-        <a href="${esc(verify_url)}" style="display:inline-block; padding:10px 14px; border-radius:999px; background:rgba(255,214,128,.95); color:#0b0f17; font-weight:700; text-decoration:none; font-size:12px">
-          Verify (Hash-first)
-        </a>
-        ${
-          download_url
-            ? `<a href="${esc(download_url)}" style="display:inline-block; padding:10px 14px; border-radius:999px; background:rgba(56,189,248,.16); color:#bae6fd; border:1px solid rgba(56,189,248,.30); font-weight:700; text-decoration:none; font-size:12px">
-                Download PDF (time-limited)
-              </a>`
-            : ""
-        }
-      </div>
-
-      <p style="margin:16px 0 0; color:rgba(255,255,255,.55); font-size:11px; line-height:1.5">
-        This email contains a hash-first verification link. The public verification terminal is authoritative.
-      </p>
-    </div>
-  </div>
+  // Optional tiny shimmer on “Certified ✓” (ignored by strict clients; harmless)
+  const shimmerKeyframes = `
+    @keyframes odpShimmer {
+      0% { opacity: .55; }
+      45% { opacity: 1; }
+      100% { opacity: .70; }
+    }
   `;
+
+  const html = `
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="supported-color-schemes" content="dark" />
+    <title>${esc(subject)}</title>
+    <style>
+      ${shimmerKeyframes}
+      /* Some clients strip <style>; we keep everything inline too. */
+    </style>
+  </head>
+  <body style="margin:0; padding:0; background:#05070c;">
+    <!-- Outer background -->
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#05070c; padding:24px 10px;">
+      <tr>
+        <td align="center" style="padding:0;">
+
+          <!-- Container -->
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="720" style="width:100%; max-width:720px; border-collapse:separate;">
+            <tr>
+              <td style="
+                background: radial-gradient(1200px 600px at 50% -200px, rgba(255,214,128,.14), rgba(0,0,0,0)) , #05070c;
+                border:1px solid rgba(255,255,255,.08);
+                border-radius:18px;
+                overflow:hidden;
+                box-shadow: 0 18px 60px rgba(0,0,0,.55);
+              ">
+
+                <!-- Inner padding -->
+                <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
+                  <tr>
+                    <td style="padding:22px 22px 18px 22px;">
+
+                      <!-- Header -->
+                      <div style="letter-spacing:.34em; text-transform:uppercase; font-size:11px; color:rgba(255,255,255,.60);">
+                        OASIS DIGITAL PARLIAMENT
+                      </div>
+
+                      <div style="height:10px; line-height:10px; font-size:10px;">&nbsp;</div>
+
+                      <div style="font-size:20px; font-weight:800; color:#ffffff; margin:0; padding:0;">
+                        Minute Book Entry — Verified Copy
+                      </div>
+
+                      <div style="height:10px; line-height:10px; font-size:10px;">&nbsp;</div>
+
+                      <div style="font-size:13px; line-height:1.5; color:rgba(255,255,255,.70);">
+                        ${introName}
+                      </div>
+
+                      <div style="height:14px; line-height:14px; font-size:14px;">&nbsp;</div>
+
+                      <!-- Message -->
+                      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
+                        ${msgBlock}
+                      </table>
+
+                      <!-- Badge row -->
+                      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
+                        <tr>
+                          <td style="padding:0 0 10px 0;">
+                            <span style="
+                              display:inline-block;
+                              padding:6px 10px;
+                              border-radius:999px;
+                              border:1px solid rgba(255,214,128,.28);
+                              background: rgba(255,214,128,.10);
+                              color: rgba(255,214,128,.95);
+                              font-weight:800;
+                              font-size:11px;
+                              letter-spacing:.08em;
+                              text-transform:uppercase;
+                              animation: odpShimmer 2.6s ease-in-out infinite;
+                            ">Certified ✓</span>
+                          </td>
+                        </tr>
+                      </table>
+
+                      <!-- Hash card -->
+                      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
+                        <tr>
+                          <td style="
+                            padding:14px 14px;
+                            border-radius:16px;
+                            border:1px solid rgba(255,255,255,.10);
+                            background: rgba(14,22,36,.58);
+                          ">
+                            <div style="font-size:11px; letter-spacing:.22em; text-transform:uppercase; color:rgba(255,255,255,.58);">
+                              Verification Hash
+                            </div>
+                            <div style="height:8px; line-height:8px; font-size:8px;">&nbsp;</div>
+                            <div style="
+                              font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+                              font-size:12px;
+                              color:#ffffff;
+                              word-break:break-all;
+                            ">${esc(file_hash)}</div>
+                          </td>
+                        </tr>
+                      </table>
+
+                      <div style="height:16px; line-height:16px; font-size:16px;">&nbsp;</div>
+
+                      <!-- Buttons -->
+                      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;">
+                        <tr>
+                          <td style="padding:0 10px 0 0;">
+                            <a href="${esc(verify_url)}"
+                              style="
+                                display:inline-block;
+                                padding:11px 16px;
+                                border-radius:999px;
+                                background: rgba(255,214,128,.95);
+                                color:#0b0f17;
+                                font-weight:900;
+                                text-decoration:none;
+                                font-size:12px;
+                                letter-spacing:.02em;
+                              "
+                            >Verify (Hash-first)</a>
+                          </td>
+                          ${
+                            download_url
+                              ? `
+                                <td style="padding:0;">
+                                  <a href="${esc(download_url)}"
+                                    style="
+                                      display:inline-block;
+                                      padding:11px 16px;
+                                      border-radius:999px;
+                                      background: rgba(255,255,255,.06);
+                                      border:1px solid rgba(255,255,255,.14);
+                                      color: rgba(255,255,255,.82);
+                                      font-weight:800;
+                                      text-decoration:none;
+                                      font-size:12px;
+                                      letter-spacing:.01em;
+                                    "
+                                  >Download PDF (time-limited)</a>
+                                </td>
+                              `
+                              : ""
+                          }
+                        </tr>
+                      </table>
+
+                      <div style="height:16px; line-height:16px; font-size:16px;">&nbsp;</div>
+
+                      <!-- Footer note -->
+                      <div style="font-size:11px; line-height:1.55; color:rgba(255,255,255,.56);">
+                        This email contains a hash-first verification link. The public verification terminal is authoritative.
+                      </div>
+
+                      <div style="height:12px; line-height:12px; font-size:12px;">&nbsp;</div>
+
+                      <div style="font-size:11px; line-height:1.55; color:rgba(255,255,255,.42);">
+                        If you did not request this message, you may ignore it.
+                      </div>
+
+                    </td>
+                  </tr>
+
+                  <!-- Bottom hairline -->
+                  <tr>
+                    <td style="padding:0 22px 18px 22px;">
+                      <div style="height:1px; background:rgba(255,255,255,.08);"></div>
+                      <div style="height:12px; line-height:12px; font-size:12px;">&nbsp;</div>
+                      <div style="font-size:10px; letter-spacing:.26em; text-transform:uppercase; color:rgba(255,255,255,.38);">
+                        ODP.AI • Verification
+                      </div>
+                    </td>
+                  </tr>
+
+                </table>
+
+              </td>
+            </tr>
+          </table>
+
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+  `.trim();
 
   const text =
     `Minute Book Entry — Verified Copy\n\n` +
@@ -327,6 +520,9 @@ serve(async (req) => {
     return json({ ok: true, request_id, to_email, verify_url, download_url });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Email send failed.";
-    return json({ ok: false, request_id, error: "SEND_FAILED", details: msg }, 500);
+    return json(
+      { ok: false, request_id, error: "SEND_FAILED", details: msg },
+      500,
+    );
   }
 });
