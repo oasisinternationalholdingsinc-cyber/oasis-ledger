@@ -28,6 +28,14 @@ export const dynamic = "force-dynamic";
  *
  * ✅ IMPORTANT: verify.html is HASH-FIRST ONLY
  *    - Verify button opens verify.html?hash=<verified_documents.file_hash>
+ *
+ * UI polish additions (NO rewiring / NO regressions):
+ * ✅ Sticky search bar (desktop registry list)
+ * ✅ Selection sync when filter/search changes (no “dead” Evidence panel)
+ * ✅ Keyboard shortcuts: R=Reader, E=Export, V=Verify, M=Email, Esc=Close
+ * ✅ Quick copy chips: Copy Hash + Copy Record
+ * ✅ Verify tooltip when hash missing
+ * ✅ Inline status chip (“Certified ✓” / “Not certified”)
  */
 
 import Link from "next/link";
@@ -505,7 +513,10 @@ async function resolveOfficialArtifact(
 /**
  * ✅ PROMOTED resolver (read-only) — Minute Book entry certification artifact
  */
-async function resolvePromotedArtifact(entryId: string, laneIsTest: boolean): Promise<OfficialArtifact | null> {
+async function resolvePromotedArtifact(
+  entryId: string,
+  laneIsTest: boolean
+): Promise<OfficialArtifact | null> {
   const sb = supabaseBrowser;
 
   const { data, error } = await sb
@@ -542,7 +553,12 @@ async function resolvePromotedArtifact(entryId: string, laneIsTest: boolean): Pr
 /**
  * Signed URL with auto-repair (read-only)
  */
-async function signedUrlFor(bucketId: string, storagePath: string, downloadName?: string | null, extraDirs?: string[]) {
+async function signedUrlFor(
+  bucketId: string,
+  storagePath: string,
+  downloadName?: string | null,
+  extraDirs?: string[]
+) {
   const sb = supabaseBrowser;
 
   const wantPath = normalizeSlashes(storagePath).replace(/^\/+/, "");
@@ -613,7 +629,9 @@ async function signedUrlFor(bucketId: string, storagePath: string, downloadName?
     })[0];
 
   if (!best?.name) {
-    throw new Error(`Object not found. No matching PDF in bucket "${bucketId}" for "${wantPath}".`);
+    throw new Error(
+      `Object not found. No matching PDF in bucket "${bucketId}" for "${wantPath}".`
+    );
   }
 
   const { data: data2, error: err2 } = await sb.storage.from(bucketId).createSignedUrl(best.name, 60 * 10, opts);
@@ -808,7 +826,8 @@ async function invokeEdgeJson<T = any>(functionName: string, body: Record<string
         ? data
         : `Request failed (${res.status}).`) || `Request failed (${res.status}).`;
 
-    const rid = (data && typeof data === "object" && data.request_id ? String(data.request_id) : "") || requestId;
+    const rid =
+      (data && typeof data === "object" && data.request_id ? String(data.request_id) : "") || requestId;
 
     throw new Error(rid ? `${msg} • request_id=${rid}` : msg);
   }
@@ -861,7 +880,7 @@ export default function MinuteBookClient() {
 
   const [flash, setFlash] = useState<FlashMsg | null>(null);
 
-  // ✅ NEW: Email modal (email-minute-book-entry)
+  // ✅ Email modal (email-minute-book-entry)
   const [emailOpen, setEmailOpen] = useState<boolean>(false);
   const [emailTo, setEmailTo] = useState<string>("");
   const [emailSubject, setEmailSubject] = useState<string>("");
@@ -990,7 +1009,10 @@ export default function MinuteBookClient() {
         const laneMap = new Map<string, { is_test: boolean; status: string }>();
 
         if (recordIds.length) {
-          const { data } = await supabaseBrowser.from("governance_ledger").select("id,is_test,status").in("id", recordIds);
+          const { data } = await supabaseBrowser
+            .from("governance_ledger")
+            .select("id,is_test,status")
+            .in("id", recordIds);
 
           for (const r of data ?? []) {
             laneMap.set(String((r as any).id), {
@@ -1071,6 +1093,21 @@ export default function MinuteBookClient() {
 
     return [...list].sort((a, b) => getCreatedAtMs(b.created_at) - getCreatedAtMs(a.created_at));
   }, [entries, activeDomainKey, query]);
+
+  // ✅ Selection sync when filter/search changes (prevents “dead” Evidence)
+  useEffect(() => {
+    if (!filteredEntries.length) {
+      setSelectedId(null);
+      return;
+    }
+    if (!selectedId) {
+      setSelectedId(filteredEntries[0].id);
+      return;
+    }
+    const stillThere = filteredEntries.some((x) => x.id === selectedId);
+    if (!stillThere) setSelectedId(filteredEntries[0].id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredEntries.length, activeDomainKey, query]);
 
   const domainCounts = useMemo(() => {
     const m = new Map<string, number>();
@@ -1311,7 +1348,8 @@ export default function MinuteBookClient() {
       const res = (data ?? {}) as PromoteResult;
       if (!res.ok || !res.verified_document_id) {
         const msg =
-          (typeof res.error === "string" && res.error) || "Certification failed (no ok=true/verified_document_id).";
+          (typeof res.error === "string" && res.error) ||
+          "Certification failed (no ok=true/verified_document_id).";
         throw new Error(msg);
       }
 
@@ -1341,7 +1379,7 @@ export default function MinuteBookClient() {
     window.open(buildVerifyHtmlUrlFromHash(hash), "_blank", "noopener,noreferrer");
   }
 
-  // ✅ NEW: Email Minute Book Entry
+  // ✅ Email Minute Book Entry
   function openEmailModal() {
     if (!selected) return;
     setEmailErr(null);
@@ -1479,7 +1517,10 @@ export default function MinuteBookClient() {
         const laneMap = new Map<string, { is_test: boolean; status: string }>();
 
         if (recordIds.length) {
-          const { data: gl } = await supabaseBrowser.from("governance_ledger").select("id,is_test,status").in("id", recordIds);
+          const { data: gl } = await supabaseBrowser
+            .from("governance_ledger")
+            .select("id,is_test,status")
+            .in("id", recordIds);
 
           for (const r of gl ?? []) {
             laneMap.set(String((r as any).id), {
@@ -1523,6 +1564,46 @@ export default function MinuteBookClient() {
       setDeleteBusy(false);
     }
   }
+
+  // ✅ Keyboard shortcuts (UI-only, no wiring)
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (!selected) return;
+
+      const t = e.target as any;
+      const tag = (t?.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea" || t?.isContentEditable) return;
+
+      const k = e.key;
+
+      if (k === "r" || k === "R") {
+        e.preventDefault();
+        ensurePreviewUrl(true);
+      }
+      if (k === "e" || k === "E") {
+        e.preventDefault();
+        exportDiscoveryPackage();
+      }
+      if (k === "v" || k === "V") {
+        e.preventDefault();
+        openVerifyTerminal();
+      }
+      if (k === "m" || k === "M") {
+        e.preventDefault();
+        openEmailModal();
+      }
+      if (k === "Escape") {
+        setMobileDomainsOpen(false);
+        setEmailOpen(false);
+        setDeleteOpen(false);
+        setMobileReaderOpen(false);
+      }
+    }
+
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id, previewUrl, exportBusy, promoteBusy, emailBusy, preferredHash]);
 
   /* ---------------- UI atoms ---------------- */
 
@@ -1570,6 +1651,14 @@ export default function MinuteBookClient() {
     </div>
   );
 
+  // for quick-copy chip labeling (UI-only)
+  const copyRecordValue = useMemo(() => {
+    if (!selected) return null;
+    const ledgerId = (selected.source_record_id || "").toString().trim();
+    if (ledgerId) return { label: "Copy Record", value: ledgerId };
+    return { label: "Copy Entry", value: String(selected.id || "").trim() };
+  }, [selected?.id, selected?.source_record_id]);
+
   return (
     <Shell>
       {/* tiny shimmer + micro-polish css (local, UI-only) */}
@@ -1603,8 +1692,12 @@ export default function MinuteBookClient() {
         <CardHeader>
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">CI • Archive</div>
-              <h1 className="mt-1 text-lg sm:text-xl font-semibold text-slate-50 truncate">Minute Book</h1>
+              <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">
+                CI • Archive
+              </div>
+              <h1 className="mt-1 text-lg sm:text-xl font-semibold text-slate-50 truncate">
+                Minute Book
+              </h1>
               <p className="mt-1 max-w-3xl text-[11px] sm:text-xs text-slate-400 leading-relaxed">
                 Evidence-first registry indexed by governance domain. Official artifacts are preferred when linked.
               </p>
@@ -1698,7 +1791,9 @@ export default function MinuteBookClient() {
                       <div className="text-sm font-semibold text-slate-200">Domains</div>
                       <div className="text-[11px] text-slate-500">Source: governance_domains</div>
                     </div>
-                    <div className="text-[10px] uppercase tracking-[0.25em] text-slate-500">{domains.length || "—"}</div>
+                    <div className="text-[10px] uppercase tracking-[0.25em] text-slate-500">
+                      {domains.length || "—"}
+                    </div>
                   </div>
                 </CardHeader>
 
@@ -1793,7 +1888,8 @@ export default function MinuteBookClient() {
                 </CardHeader>
 
                 <CardBody className="pt-3">
-                  <div className="mb-3">
+                  {/* ✅ Sticky search bar (desktop list) */}
+                  <div className="mb-3 sticky top-0 z-10 bg-black/0 backdrop-blur-sm">
                     <input
                       value={query}
                       onChange={(e) => setQuery(e.target.value)}
@@ -1808,7 +1904,9 @@ export default function MinuteBookClient() {
                     ) : filteredEntries.length === 0 ? (
                       <div className="p-4 text-[11px] text-slate-400">
                         No records filed under <span className="text-slate-200">{activeDomainLabel}</span> yet.
-                        <div className="mt-2 text-[10px] text-slate-500">Upload later — it will appear here automatically.</div>
+                        <div className="mt-2 text-[10px] text-slate-500">
+                          Upload later — it will appear here automatically.
+                        </div>
                       </div>
                     ) : (
                       filteredEntries.map((e) => {
@@ -2048,6 +2146,11 @@ export default function MinuteBookClient() {
                               type="button"
                               onClick={openVerifyTerminal}
                               disabled={!preferredHash}
+                              title={
+                                !preferredHash
+                                  ? "No certified hash available yet."
+                                  : "Open verify terminal (hash-first)."
+                              }
                               className={cx(
                                 "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
                                 !preferredHash
@@ -2084,6 +2187,66 @@ export default function MinuteBookClient() {
                             >
                               Delete
                             </button>
+
+                            {/* ✅ Quick-copy chips (UI-only) */}
+                            <button
+                              type="button"
+                              disabled={!preferredHash}
+                              onClick={async () => {
+                                if (!preferredHash) return;
+                                const ok = await copyToClipboard(preferredHash);
+                                if (ok) pushFlash("success", "Hash copied.");
+                              }}
+                              className={cx(
+                                "rounded-full border px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
+                                !preferredHash
+                                  ? "bg-white/5 text-slate-200/40 border-white/10"
+                                  : "bg-white/5 border-white/10 text-slate-200 hover:bg-white/7 hover:border-amber-500/25"
+                              )}
+                            >
+                              Copy Hash
+                            </button>
+
+                            <button
+                              type="button"
+                              disabled={!copyRecordValue?.value}
+                              onClick={async () => {
+                                const rid = (copyRecordValue?.value || "").trim();
+                                if (!rid) return;
+                                const ok = await copyToClipboard(rid);
+                                if (ok) pushFlash("success", `${copyRecordValue?.label} copied.`);
+                              }}
+                              className={cx(
+                                "rounded-full border px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition",
+                                !copyRecordValue?.value
+                                  ? "bg-white/5 text-slate-200/40 border-white/10"
+                                  : "bg-white/5 border-white/10 text-slate-200 hover:bg-white/7 hover:border-amber-500/25"
+                              )}
+                            >
+                              {copyRecordValue?.label || "Copy Record"}
+                            </button>
+                          </div>
+
+                          {/* ✅ Inline status chip (UI-only) */}
+                          <div className="mt-2 flex items-center gap-2 text-[10px] text-slate-500">
+                            {isUploadEntry ? (
+                              certifiedHash ? (
+                                <span className="inline-flex items-center gap-2 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-1 text-emerald-200">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-300" />
+                                  Certified ✓ (hash present)
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-2 rounded-full border border-amber-500/25 bg-amber-500/10 px-2 py-1 text-amber-200">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-amber-300" />
+                                  Not certified (Promote Upload)
+                                </span>
+                              )
+                            ) : (
+                              <span className="inline-flex items-center gap-2 rounded-full border border-amber-500/25 bg-amber-500/10 px-2 py-1 text-amber-200">
+                                <span className="w-1.5 h-1.5 rounded-full bg-amber-300" />
+                                Forge resolution (certified via Verified registry)
+                              </span>
+                            )}
                           </div>
 
                           <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-[10px] text-slate-500 leading-relaxed">
@@ -2379,6 +2542,9 @@ export default function MinuteBookClient() {
                       type="button"
                       onClick={openVerifyTerminal}
                       disabled={!preferredHash}
+                      title={
+                        !preferredHash ? "No certified hash available yet." : "Open verify terminal (hash-first)."
+                      }
                       className={cx(
                         "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase",
                         !preferredHash
@@ -2609,6 +2775,8 @@ export default function MinuteBookClient() {
             <span>Promote applies to uploads only (Forge resolutions are already certified).</span>
             <span className="text-slate-700">•</span>
             <span>Email uses email-minute-book-entry (authority-safe).</span>
+            <span className="text-slate-700">•</span>
+            <span>Shortcuts: R Reader • E Export • V Verify • M Email • Esc Close</span>
           </div>
         </>
       )}
