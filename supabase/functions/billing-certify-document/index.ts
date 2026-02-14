@@ -4,10 +4,9 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { PDFDocument, StandardFonts, rgb } from "https://esm.sh/pdf-lib@1.17.1";
 
-// ✅ Server-safe QR → SVG (NO canvas)
-import QRCode from "https://esm.sh/qrcode-svg@1.1.0";
-// ✅ SVG → PNG in Deno (NO canvas)
-import { initialize, svg2png } from "https://esm.sh/svg2png-wasm@1.4.1";
+// ✅ Edge-safe QR (NO canvas / NO wasm)
+import QRGen from "npm:qrcode-generator@1.4.4";
+import { PNG } from "npm:pngjs@7.0.0";
 
 /**
  * CI-Billing — billing-certify-document (PRODUCTION — LOCKED)
@@ -129,7 +128,7 @@ function winAnsiSafe(input: unknown): string {
 }
 
 function getVerifyPageUrl(): string {
-  // ✅ Canonical URL you showed (NO 404)
+  // ✅ Canonical URL (NO 404)
   const env =
     Deno.env.get("BILLING_VERIFY_PAGE_URL") ||
     Deno.env.get("BILLING_VERIFY_BASE_URL") ||
@@ -153,12 +152,60 @@ function buildCertifiedPath(originalPath: string) {
   return `${p}-certified.pdf`;
 }
 
-// svg2png-wasm init (cached)
-let _svg2pngReady = false;
-async function ensureSvg2Png() {
-  if (_svg2pngReady) return;
-  await initialize();
-  _svg2pngReady = true;
+// -----------------------------------------------------------------------------
+// QR generation (Edge-safe): text → PNG bytes
+// -----------------------------------------------------------------------------
+function qrPngBytes(
+  text: string,
+  opts?: { size?: number; margin?: number; ecc?: "L" | "M" | "Q" | "H" },
+): Uint8Array {
+  const size = opts?.size ?? 256;
+  const margin = opts?.margin ?? 2;
+  const ecc = opts?.ecc ?? "M";
+
+  const qr = QRGen(0, ecc);
+  qr.addData(text);
+  qr.make();
+
+  const count = qr.getModuleCount();
+  const scale = Math.max(1, Math.floor(size / (count + margin * 2)));
+  const imgSize = (count + margin * 2) * scale;
+
+  const png = new PNG({ width: imgSize, height: imgSize });
+
+  // white bg
+  for (let y = 0; y < imgSize; y++) {
+    for (let x = 0; x < imgSize; x++) {
+      const idx = (png.width * y + x) << 2;
+      png.data[idx + 0] = 255;
+      png.data[idx + 1] = 255;
+      png.data[idx + 2] = 255;
+      png.data[idx + 3] = 255;
+    }
+  }
+
+  // black modules
+  for (let r = 0; r < count; r++) {
+    for (let c = 0; c < count; c++) {
+      if (!qr.isDark(r, c)) continue;
+      const x0 = (c + margin) * scale;
+      const y0 = (r + margin) * scale;
+
+      for (let yy = 0; yy < scale; yy++) {
+        for (let xx = 0; xx < scale; xx++) {
+          const x = x0 + xx;
+          const y = y0 + yy;
+          const idx = (png.width * y + x) << 2;
+          png.data[idx + 0] = 0;
+          png.data[idx + 1] = 0;
+          png.data[idx + 2] = 0;
+          png.data[idx + 3] = 255;
+        }
+      }
+    }
+  }
+
+  return PNG.sync.write(png);
 }
 
 /**
@@ -185,12 +232,12 @@ async function bestEffortAuthorizeOperator(
 
 /**
  * Build a certification page (Oasis OS style) onto a NEW final page.
- * IMPORTANT: We pass the *hash we want printed + encoded*, and we do a short
- * fixed-point loop so the QR/hash reflect the FINAL bytes.
+ * We pass the hash we want printed + encoded, then we run a deterministic 2–3 pass
+ * fixed-point loop in the handler to ensure the printed hash and QR match FINAL bytes.
  */
 async function appendCertificationPage(args: {
   srcBytes: Uint8Array;
-  certHash: string; // hash to print + encode (may be placeholder during iteration)
+  certHash: string; // hash to print + encode (placeholder in pass 1)
   verifyUrl: string;
   meta: {
     entity_id: string;
@@ -211,8 +258,6 @@ async function appendCertificationPage(args: {
 }): Promise<Uint8Array> {
   const { srcBytes, certHash, verifyUrl, meta } = args;
 
-  await ensureSvg2Png();
-
   const pdf = await PDFDocument.load(srcBytes, { ignoreEncryption: true });
 
   // Always append a NEW certification page
@@ -232,6 +277,7 @@ async function appendCertificationPage(args: {
   const gold = rgb(0.95, 0.78, 0.33);
   const teal = rgb(0.1, 0.78, 0.72);
   const paper = rgb(1, 1, 1);
+  const panel = rgb(0.99, 0.99, 1);
 
   page.drawRectangle({ x: 0, y: 0, width: W, height: H, color: paper });
 
@@ -289,7 +335,7 @@ async function appendCertificationPage(args: {
     height: boxH,
     borderColor: hair,
     borderWidth: 1,
-    color: rgb(0.99, 0.99, 1),
+    color: panel,
   });
 
   page.drawText(winAnsiSafe("Certified Record"), {
@@ -334,7 +380,7 @@ async function appendCertificationPage(args: {
     height: boxH,
     borderColor: hair,
     borderWidth: 1,
-    color: rgb(0.99, 0.99, 1),
+    color: panel,
   });
 
   page.drawText(winAnsiSafe("Recipient"), {
@@ -387,7 +433,7 @@ async function appendCertificationPage(args: {
   }
 
   // Hash block
-  const hashY = (period ? leftY - 46 : leftY - 36);
+  const hashY = period ? leftY - 46 : leftY - 36;
   page.drawText(winAnsiSafe("SHA-256 (Certified PDF)"), {
     x: margin,
     y: hashY,
@@ -403,7 +449,7 @@ async function appendCertificationPage(args: {
     height: 34,
     borderColor: hair,
     borderWidth: 1,
-    color: rgb(0.99, 0.99, 1),
+    color: panel,
   });
 
   page.drawText(winAnsiSafe(certHash), {
@@ -431,18 +477,8 @@ async function appendCertificationPage(args: {
     color: ink,
   });
 
-  // QR (bottom-right)
-  const qrSvg = new QRCode({
-    content: verifyUrl,
-    padding: 0,
-    width: 256,
-    height: 256,
-    color: "#0B0E14",
-    background: "#FFFFFF",
-    ecl: "M",
-  }).svg();
-
-  const qrPng = await svg2png(qrSvg, { width: 256, height: 256 });
+  // QR (bottom-right) — Edge-safe PNG
+  const qrPng = qrPngBytes(verifyUrl, { size: 256, margin: 2, ecc: "M" });
   const qrImg = await pdf.embedPng(qrPng);
 
   const qrSize = 128;
@@ -529,9 +565,7 @@ serve(async (req: Request) => {
 
     const force = Boolean(body.force);
     const actor_id =
-      (cleanUuid(body.actor_id) && isUuid(String(body.actor_id)))
-        ? String(body.actor_id)
-        : user_id;
+      cleanUuid(body.actor_id) && isUuid(String(body.actor_id)) ? String(body.actor_id) : user_id;
 
     // ✅ FULL verify page URL (no hash)
     const verifyPage =
@@ -577,7 +611,8 @@ serve(async (req: Request) => {
       .eq("id", document_id)
       .maybeSingle();
 
-    if (docErr) return json(req, 500, { ok: false, error: "DOCUMENT_LOOKUP_FAILED", details: docErr.message });
+    if (docErr)
+      return json(req, 500, { ok: false, error: "DOCUMENT_LOOKUP_FAILED", details: docErr.message });
     if (!doc) return json(req, 404, { ok: false, error: "DOCUMENT_NOT_FOUND" });
 
     const entity_id = cleanUuid((doc as any).entity_id);
@@ -629,10 +664,7 @@ serve(async (req: Request) => {
     }
     const srcBytes = new Uint8Array(await dl.data.arrayBuffer());
 
-    // Fixed-point loop (hash must match final certified bytes)
-    let hash = "0".repeat(64);
-    let certifiedBytes = srcBytes;
-
+    // Deterministic fixed-point loop (hash printed + QR must match FINAL bytes)
     const meta = {
       entity_id,
       is_test,
@@ -650,23 +682,44 @@ serve(async (req: Request) => {
       total_cents: (doc as any).total_cents != null ? Number((doc as any).total_cents) : null,
     };
 
-    for (let i = 0; i < 4; i++) {
+    let hash = "0".repeat(64);
+    let certifiedBytes = srcBytes;
+
+    // Pass 1: placeholder → hash1
+    {
       const verifyUrl = `${verifyPage}?hash=${hash}`;
-      const bytes = await appendCertificationPage({
-        srcBytes,
-        certHash: hash,
-        verifyUrl,
-        meta,
-      });
-
-      const next = await sha256Hex(bytes);
+      const bytes = await appendCertificationPage({ srcBytes, certHash: hash, verifyUrl, meta });
+      const hash1 = await sha256Hex(bytes);
       certifiedBytes = bytes;
-
-      if (next === hash) break;
-      hash = next;
+      hash = hash1;
     }
 
-    const certified_hash = await sha256Hex(certifiedBytes);
+    // Pass 2: hash1 embedded → hash2
+    {
+      const verifyUrl = `${verifyPage}?hash=${hash}`;
+      const bytes = await appendCertificationPage({ srcBytes, certHash: hash, verifyUrl, meta });
+      const hash2 = await sha256Hex(bytes);
+      certifiedBytes = bytes;
+
+      // If stabilized, we're done; else do one final pass with hash2.
+      if (hash2 !== hash) {
+        hash = hash2;
+        const verifyUrl3 = `${verifyPage}?hash=${hash}`;
+        const bytes3 = await appendCertificationPage({
+          srcBytes,
+          certHash: hash,
+          verifyUrl: verifyUrl3,
+          meta,
+        });
+        const hash3 = await sha256Hex(bytes3);
+        certifiedBytes = bytes3;
+        hash = hash3; // final
+      } else {
+        hash = hash2;
+      }
+    }
+
+    const certified_hash = hash;
     const verify_url = `${verifyPage}?hash=${certified_hash}`;
 
     // Certified pointers (same lane bucket recorded on the row)
@@ -679,7 +732,7 @@ serve(async (req: Request) => {
       .from(certified_bucket)
       .upload(certified_path, new Blob([certifiedBytes], { type: "application/pdf" }), {
         contentType: "application/pdf",
-        upsert: force,
+        upsert: force, // if force, overwrite; else allow 409 and continue
       });
 
     if (up.error) {
@@ -749,9 +802,11 @@ serve(async (req: Request) => {
   } catch (e: any) {
     const msg = String(e?.message ?? e);
     const status =
-      msg.includes("Invalid session") || msg.includes("UNAUTHORIZED") ? 401
-      : msg.includes("FORBIDDEN") ? 403
-      : 500;
+      msg.includes("Invalid session") || msg.includes("UNAUTHORIZED")
+        ? 401
+        : msg.includes("FORBIDDEN")
+          ? 403
+          : 500;
 
     return json(req, status, {
       ok: false,
