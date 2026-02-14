@@ -21,6 +21,11 @@ export const dynamic = "force-dynamic";
  *    - body: { entry_id, is_test, force? }  (actor resolved from JWT inside function)
  *    - expects: { ok:true, verified_document_id, reused?, verify_url? }
  *
+ * ✅ Email Minute Book Entry (NEW — UI-only enhancement)
+ *    - calls Edge Function email-minute-book-entry
+ *    - body includes: { entry_id, ledger_id?, is_test, to_email, subject?, message?, hash? }
+ *    - NO schema changes; relies on existing resolver/cert artifacts server-side
+ *
  * ✅ IMPORTANT: verify.html is HASH-FIRST ONLY
  *    - Verify button opens verify.html?hash=<verified_documents.file_hash>
  */
@@ -123,6 +128,15 @@ type VerifiedDocRow = {
   file_hash?: string | null;
   verification_level?: string | null;
   created_at?: string | null;
+};
+
+type EmailResult = {
+  ok?: boolean;
+  request_id?: string | null;
+  sent?: boolean;
+  reused?: boolean;
+  error?: string;
+  details?: unknown;
 };
 
 type FlashKind = "success" | "info" | "error";
@@ -281,7 +295,9 @@ function edgeInvokeMessage(error: any, data: any) {
 }
 
 function safeZipNameFromSelected(entityKey: string, laneIsTest: boolean, e: EntryWithDoc) {
-  const base = safeBaseName(e.title || e.file_name || "Oasis-Discovery-Export") || "Oasis-Discovery-Export";
+  const base =
+    safeBaseName(e.title || e.file_name || "Oasis-Discovery-Export") ||
+    "Oasis-Discovery-Export";
   const ek = safeBaseName(entityKey || "entity");
   const lane = laneIsTest ? "SANDBOX" : "RoT";
   const ts = timestampCompact();
@@ -332,6 +348,20 @@ function asZipBlobOrNull(data: any): Blob | null {
   }
 
   return null;
+}
+
+function isValidEmail(s: string) {
+  const x = (s || "").trim();
+  if (!x) return false;
+  // simple + safe (UI-only)
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x);
+}
+
+function defaultEmailSubject(entityKey: string, laneIsTest: boolean, e: EntryWithDoc) {
+  const lane = laneIsTest ? "SANDBOX" : "RoT";
+  const title = (e.title || e.file_name || "Minute Book Entry").toString().trim();
+  const ek = (entityKey || "entity").toString().trim();
+  return `${ek} • ${lane} • ${title}`;
 }
 
 const DOMAIN_ICON: Record<string, string> = {
@@ -437,7 +467,11 @@ async function resolveOfficialArtifact(
   if (!ledgerId) return null;
 
   try {
-    const { data: gl } = await sb.from("governance_ledger").select("id,is_test").eq("id", ledgerId).limit(1);
+    const { data: gl } = await sb
+      .from("governance_ledger")
+      .select("id,is_test")
+      .eq("id", ledgerId)
+      .limit(1);
 
     const isTest = gl?.[0]?.is_test;
     if (typeof isTest === "boolean" && isTest !== laneIsTest) return null;
@@ -472,7 +506,10 @@ async function resolveOfficialArtifact(
 /**
  * ✅ PROMOTED resolver (read-only) — Minute Book entry certification artifact
  */
-async function resolvePromotedArtifact(entryId: string, laneIsTest: boolean): Promise<OfficialArtifact | null> {
+async function resolvePromotedArtifact(
+  entryId: string,
+  laneIsTest: boolean
+): Promise<OfficialArtifact | null> {
   const sb = supabaseBrowser;
 
   const { data, error } = await sb
@@ -763,6 +800,14 @@ export default function MinuteBookClient() {
 
   const [flash, setFlash] = useState<FlashMsg | null>(null);
 
+  // ✅ NEW: Email modal (email-minute-book-entry)
+  const [emailOpen, setEmailOpen] = useState<boolean>(false);
+  const [emailTo, setEmailTo] = useState<string>("");
+  const [emailSubject, setEmailSubject] = useState<string>("");
+  const [emailMessage, setEmailMessage] = useState<string>("");
+  const [emailBusy, setEmailBusy] = useState<boolean>(false);
+  const [emailErr, setEmailErr] = useState<string | null>(null);
+
   function pushFlash(kind: FlashKind, message: string) {
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     setFlash({ kind, message, id });
@@ -792,6 +837,11 @@ export default function MinuteBookClient() {
   const officialHash = useMemo(() => {
     return (official?.file_hash || "").toString().trim() || null;
   }, [official?.file_hash]);
+
+  const preferredHash = useMemo(() => {
+    // Upload entries should prefer certified hash; Forge/official prefers official hash
+    return (isUploadEntry ? certifiedHash : null) || officialHash || certifiedHash || null;
+  }, [isUploadEntry, certifiedHash, officialHash]);
 
   const authorityBadge = useMemo(() => {
     if (!selected) return null;
@@ -850,6 +900,13 @@ export default function MinuteBookClient() {
       setPromoteErr(null);
       setPromoteBusy(false);
 
+      setEmailErr(null);
+      setEmailBusy(false);
+      setEmailOpen(false);
+      setEmailTo("");
+      setEmailSubject("");
+      setEmailMessage("");
+
       setCopiedKey(null);
       setFlash(null);
 
@@ -872,7 +929,10 @@ export default function MinuteBookClient() {
         const laneMap = new Map<string, { is_test: boolean; status: string }>();
 
         if (recordIds.length) {
-          const { data } = await supabaseBrowser.from("governance_ledger").select("id,is_test,status").in("id", recordIds);
+          const { data } = await supabaseBrowser
+            .from("governance_ledger")
+            .select("id,is_test,status")
+            .in("id", recordIds);
 
           for (const r of data ?? []) {
             laneMap.set(String((r as any).id), {
@@ -985,6 +1045,10 @@ export default function MinuteBookClient() {
       setPromoteErr(null);
       setPromoteBusy(false);
 
+      setEmailErr(null);
+      setEmailBusy(false);
+      setEmailOpen(false);
+
       setCopiedKey(null);
 
       if (!entityKey || !selected) return;
@@ -998,6 +1062,10 @@ export default function MinuteBookClient() {
         if (!alive) return;
         setOfficial(off);
         setPromoted(prom);
+
+        // Seed email subject when selection resolves (non-invasive)
+        const subj = defaultEmailSubject(String(entityKey || "entity"), laneIsTest, selected);
+        setEmailSubject(subj);
       } finally {
         if (alive) setPdfBusy(false);
       }
@@ -1210,9 +1278,92 @@ export default function MinuteBookClient() {
 
   function openVerifyTerminal() {
     if (!selected) return;
-    const hash = (isUploadEntry ? certifiedHash : null) || officialHash || certifiedHash || null;
+    const hash = preferredHash;
     if (!hash) return;
     window.open(buildVerifyHtmlUrlFromHash(hash), "_blank", "noopener,noreferrer");
+  }
+
+  // ✅ NEW: Email Minute Book Entry
+  function openEmailModal() {
+    if (!selected) return;
+    setEmailErr(null);
+
+    const subj = defaultEmailSubject(String(entityKey || "entity"), laneIsTest, selected);
+    setEmailSubject((s) => (String(s || "").trim() ? s : subj));
+
+    // gentle default body (operator editable)
+    const title = (selected.title || selected.file_name || "Minute Book Entry").toString().trim();
+    const lane = laneIsTest ? "SANDBOX" : "RoT";
+    const domainLabel =
+      domains.find((d) => d.key === selected.domain_key)?.label || norm(selected.domain_key, "—");
+    const hash = preferredHash ? `\n\nVerified Hash: ${preferredHash}\nVerify: ${buildVerifyHtmlUrlFromHash(preferredHash)}` : "";
+    const msg =
+      `Please find the Minute Book entry below.\n\n` +
+      `Entity: ${String(entityKey || "—")}\n` +
+      `Lane: ${lane}\n` +
+      `Domain: ${domainLabel}\n` +
+      `Title: ${title}${hash}`;
+
+    setEmailMessage((m) => (String(m || "").trim() ? m : msg));
+    setEmailOpen(true);
+  }
+
+  async function sendEmailMinuteBookEntry() {
+    if (!selected) return;
+
+    const to = (emailTo || "").trim();
+    if (!isValidEmail(to)) {
+      const msg = "Enter a valid recipient email.";
+      setEmailErr(msg);
+      pushFlash("error", msg);
+      return;
+    }
+
+    setEmailErr(null);
+    setEmailBusy(true);
+
+    try {
+      const ledgerId = (selected.source_record_id || "").toString().trim() || null;
+      const entryId = (selected.id || "").toString().trim() || null;
+
+      const body: Record<string, any> = {
+        entry_id: entryId,
+        ledger_id: ledgerId,
+        is_test: laneIsTest,
+
+        to_email: to,
+        subject: (emailSubject || "").toString().trim() || defaultEmailSubject(String(entityKey || "entity"), laneIsTest, selected),
+        message: (emailMessage || "").toString().trim() || null,
+
+        // provide hash if available (hash-first UX)
+        hash: preferredHash || null,
+      };
+
+      const { data, error } = await supabaseBrowser.functions.invoke("email-minute-book-entry", { body });
+
+      if (error) {
+        const msg = edgeInvokeMessage(error, data);
+        throw new Error(msg);
+      }
+
+      const res = (data ?? {}) as EmailResult;
+      if (!res.ok) {
+        const msg = (typeof res.error === "string" && res.error) || "Email failed (no ok=true returned).";
+        throw new Error(msg);
+      }
+
+      setEmailOpen(false);
+      setEmailTo("");
+      setEmailErr(null);
+
+      pushFlash("success", "Email queued ✓ Minute Book entry sent.");
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Email failed.";
+      setEmailErr(msg);
+      pushFlash("error", msg);
+    } finally {
+      setEmailBusy(false);
+    }
   }
 
   async function runDelete() {
@@ -1249,6 +1400,13 @@ export default function MinuteBookClient() {
       setPromoted(null);
       setOfficial(null);
 
+      setEmailErr(null);
+      setEmailBusy(false);
+      setEmailOpen(false);
+      setEmailTo("");
+      setEmailSubject("");
+      setEmailMessage("");
+
       setCopiedKey(null);
 
       pushFlash("success", "Entry deleted.");
@@ -1263,7 +1421,10 @@ export default function MinuteBookClient() {
         const laneMap = new Map<string, { is_test: boolean; status: string }>();
 
         if (recordIds.length) {
-          const { data: gl } = await supabaseBrowser.from("governance_ledger").select("id,is_test,status").in("id", recordIds);
+          const { data: gl } = await supabaseBrowser
+            .from("governance_ledger")
+            .select("id,is_test,status")
+            .in("id", recordIds);
 
           for (const r of gl ?? []) {
             laneMap.set(String((r as any).id), {
@@ -1722,7 +1883,9 @@ export default function MinuteBookClient() {
                           <span
                             className={cx(
                               "px-2 py-1 rounded-full border text-[11px]",
-                              isUploadEntry ? "bg-sky-500/10 border-sky-500/30 text-sky-200" : "bg-white/5 border-white/10 text-slate-300"
+                              isUploadEntry
+                                ? "bg-sky-500/10 border-sky-500/30 text-sky-200"
+                                : "bg-white/5 border-white/10 text-slate-300"
                             )}
                           >
                             {isUploadEntry ? "UPLOAD" : "FORGE"}
@@ -1744,6 +1907,12 @@ export default function MinuteBookClient() {
                         {promoteErr ? (
                           <div className="mt-3 rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
                             {promoteErr}
+                          </div>
+                        ) : null}
+
+                        {emailErr ? (
+                          <div className="mt-3 rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
+                            {emailErr}
                           </div>
                         ) : null}
 
@@ -1817,21 +1986,42 @@ export default function MinuteBookClient() {
                               )}
                               title={!isUploadEntry ? promoteDisabledReason || "" : ""}
                             >
-                              {promoteBusy ? (canReissue ? "Reissuing…" : "Promoting…") : canReissue ? "Reissue" : "Promote Upload"}
+                              {promoteBusy
+                                ? canReissue
+                                  ? "Reissuing…"
+                                  : "Promoting…"
+                                : canReissue
+                                ? "Reissue"
+                                : "Promote Upload"}
                             </button>
 
                             <button
                               type="button"
                               onClick={openVerifyTerminal}
-                              disabled={!(certifiedHash || officialHash)}
+                              disabled={!preferredHash}
                               className={cx(
                                 "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
-                                !(certifiedHash || officialHash)
+                                !preferredHash
                                   ? "bg-white/5 text-slate-200/40 border-white/10"
                                   : "bg-white/5 border-amber-500/25 text-amber-200 hover:bg-white/7 hover:border-amber-500/40"
                               )}
                             >
                               Verify
+                            </button>
+
+                            {/* ✅ NEW: Email */}
+                            <button
+                              type="button"
+                              onClick={openEmailModal}
+                              disabled={!selected || emailBusy}
+                              className={cx(
+                                "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
+                                !selected || emailBusy
+                                  ? "bg-white/5 text-slate-200/40 border-white/10"
+                                  : "bg-white/5 border-slate-400/20 text-slate-200 hover:bg-white/7 hover:border-amber-500/25"
+                              )}
+                            >
+                              {emailBusy ? "Emailing…" : "Email"}
                             </button>
 
                             <button
@@ -1853,6 +2043,8 @@ export default function MinuteBookClient() {
                             <span className="text-slate-300 font-semibold">Promote</span> applies to uploads only.
                             <span className="text-slate-700"> • </span>
                             Resolutions are certified via Forge automatically.
+                            <span className="text-slate-700"> • </span>
+                            <span className="text-slate-300 font-semibold">Email</span> sends an authority-safe link + hash-first verification.
                           </div>
                         </div>
                       </div>
@@ -1912,10 +2104,7 @@ export default function MinuteBookClient() {
                                   if (ok) {
                                     setCopiedKey("cert-hash");
                                     pushFlash("success", "Certified hash copied.");
-                                    window.setTimeout(
-                                      () => setCopiedKey((v) => (v === "cert-hash" ? null : v)),
-                                      1200
-                                    );
+                                    window.setTimeout(() => setCopiedKey((v) => (v === "cert-hash" ? null : v)), 1200);
                                   }
                                 }}
                                 className={cx(
@@ -2068,9 +2257,7 @@ export default function MinuteBookClient() {
                       {showHashInReader ? (
                         <>
                           <span className="w-1 h-1 rounded-full bg-slate-700" />
-                          <span className="font-mono text-slate-300">
-                            {shortHash((isUploadEntry ? certifiedHash : null) || officialHash || selected?.file_hash || null)}
-                          </span>
+                          <span className="font-mono text-slate-300">{shortHash(preferredHash)}</span>
                         </>
                       ) : null}
                     </div>
@@ -2084,6 +2271,12 @@ export default function MinuteBookClient() {
                     {promoteErr ? (
                       <div className="mt-2 rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
                         {promoteErr}
+                      </div>
+                    ) : null}
+
+                    {emailErr ? (
+                      <div className="mt-2 rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
+                        {emailErr}
                       </div>
                     ) : null}
                   </div>
@@ -2138,15 +2331,30 @@ export default function MinuteBookClient() {
                     <button
                       type="button"
                       onClick={openVerifyTerminal}
-                      disabled={!(certifiedHash || officialHash)}
+                      disabled={!preferredHash}
                       className={cx(
                         "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase",
-                        !(certifiedHash || officialHash)
+                        !preferredHash
                           ? "border-white/10 bg-white/5 text-slate-200/40"
                           : "border-amber-500/25 bg-white/5 text-amber-200 hover:bg-white/7 hover:border-amber-500/40"
                       )}
                     >
                       Verify
+                    </button>
+
+                    {/* ✅ NEW: Email (from reader) */}
+                    <button
+                      type="button"
+                      onClick={openEmailModal}
+                      disabled={!selected || emailBusy}
+                      className={cx(
+                        "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase",
+                        !selected || emailBusy
+                          ? "border-white/10 bg-white/5 text-slate-200/40"
+                          : "border-slate-400/20 bg-white/5 text-slate-200 hover:bg-white/7 hover:border-amber-500/25"
+                      )}
+                    >
+                      {emailBusy ? "Emailing…" : "Email"}
                     </button>
 
                     <button
@@ -2171,6 +2379,109 @@ export default function MinuteBookClient() {
                       .
                     </div>
                   )}
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {/* ✅ EMAIL MODAL */}
+          {emailOpen ? (
+            <div className="fixed inset-0 z-[85]">
+              <div className="absolute inset-0 bg-black/70" onClick={() => (emailBusy ? null : setEmailOpen(false))} />
+              <div className="absolute inset-x-0 bottom-0 sm:inset-0 sm:flex sm:items-center sm:justify-center p-3">
+                <div className="w-full sm:max-w-[560px] rounded-3xl border border-white/10 bg-black/70 backdrop-blur-xl overflow-hidden">
+                  <div className="px-4 py-4 border-b border-white/10">
+                    <div className="text-[10px] uppercase tracking-[0.25em] text-slate-500">Authority Action</div>
+                    <div className="mt-1 text-sm font-semibold text-slate-100">Email Minute Book Entry</div>
+                    <div className="mt-1 text-[11px] text-slate-400">
+                      Sends an authority-safe message with hash-first verification (and server-resolved artifact).
+                    </div>
+                  </div>
+
+                  <div className="px-4 py-4 space-y-3">
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-[0.25em] text-slate-500">To</label>
+                      <input
+                        value={emailTo}
+                        onChange={(e) => setEmailTo(e.target.value)}
+                        placeholder="recipient@domain.com"
+                        className="mt-2 w-full rounded-2xl bg-black/20 border border-white/10 px-3 py-3 text-sm text-slate-100 placeholder:text-slate-600 outline-none focus:border-amber-500/40"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-[0.25em] text-slate-500">Subject</label>
+                      <input
+                        value={emailSubject}
+                        onChange={(e) => setEmailSubject(e.target.value)}
+                        placeholder="Subject…"
+                        className="mt-2 w-full rounded-2xl bg-black/20 border border-white/10 px-3 py-3 text-sm text-slate-100 placeholder:text-slate-600 outline-none focus:border-amber-500/40"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-[0.25em] text-slate-500">Message</label>
+                      <textarea
+                        value={emailMessage}
+                        onChange={(e) => setEmailMessage(e.target.value)}
+                        rows={7}
+                        placeholder="Optional message…"
+                        className="mt-2 w-full rounded-2xl bg-black/20 border border-white/10 px-3 py-3 text-sm text-slate-100 placeholder:text-slate-600 outline-none focus:border-amber-500/40 resize-none"
+                      />
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-[10px] text-slate-500 leading-relaxed">
+                      <div className="flex items-center justify-between gap-3">
+                        <span>
+                          Record: <span className="text-slate-300 font-mono">{shortHash(selected?.id || "")}</span>
+                        </span>
+                        <span>
+                          Lane: <span className="text-slate-200">{laneIsTest ? "SANDBOX" : "RoT"}</span>
+                        </span>
+                      </div>
+                      <div className="mt-1">
+                        Verify:{" "}
+                        <span className={cx("font-mono", preferredHash ? "text-amber-200" : "text-slate-500")}>
+                          {preferredHash ? shortHash(preferredHash) : "—"}
+                        </span>
+                      </div>
+                    </div>
+
+                    {emailErr ? (
+                      <div className="rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
+                        {emailErr}
+                      </div>
+                    ) : null}
+
+                    <div className="flex items-center justify-end gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => (emailBusy ? null : setEmailOpen(false))}
+                        className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200"
+                      >
+                        Cancel
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={emailBusy || !isValidEmail(emailTo)}
+                        onClick={sendEmailMinuteBookEntry}
+                        className={cx(
+                          "rounded-full px-4 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase transition border",
+                          emailBusy || !isValidEmail(emailTo)
+                            ? "border-amber-500/20 bg-amber-500/10 text-amber-200/50"
+                            : "border-amber-500/40 bg-amber-500/15 text-amber-200 hover:bg-amber-500/20"
+                        )}
+                      >
+                        {emailBusy ? "Sending…" : "Send Email"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="px-4 py-3 border-t border-white/10 text-[10px] text-slate-500 flex items-center justify-between">
+                    <span>Entity: {String(entityKey)}</span>
+                    <span>Function: email-minute-book-entry</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -2249,6 +2560,8 @@ export default function MinuteBookClient() {
             <span>Verification is hash-first (verify.html?hash=…).</span>
             <span className="text-slate-700">•</span>
             <span>Promote applies to uploads only (Forge resolutions are already certified).</span>
+            <span className="text-slate-700">•</span>
+            <span>Email uses email-minute-book-entry (authority-safe).</span>
           </div>
         </>
       )}
