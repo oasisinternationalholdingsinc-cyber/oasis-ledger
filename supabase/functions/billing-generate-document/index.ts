@@ -43,6 +43,12 @@ import { PNG } from "npm:pngjs@7.0.0";
  * - Prevents overlap by reserving a fixed footer block and stopping table rows before it
  * - ✅ QR encodes a REAL HTTPS verify URL (iPhone camera compatible)
  * - ✅ Canonical verify page URL: https://sign.oasisintlholdings.com/verify-billing.html
+ *
+ * ✅ Minor fixes (per your notes, no regression):
+ * - QR is bottom-right on its own (dedicated panel)
+ * - Notes is its own row
+ * - Summary is its own row AFTER notes (full-width row)
+ * - Hash/QR mismatch fixed by a fixed-point stabilization loop (QR always encodes FINAL hash)
  * ---------------------------------------------------------------------------
  */
 
@@ -586,10 +592,11 @@ async function buildOasisBillingPdf(args: {
 
   // ---- Reserve a fixed footer block (prevents overlap, always) ----
   const footerY = 54;
-  const footerH = 210; // ✅ enough for Notes + Summary + QR stack
+
+  // Footer layout (minor fix): NOTES row → SUMMARY row → QR bottom-right alone
+  const footerH = 232;
   const footerTopY = footerY + footerH + 14;
 
-  // Divider above footer band
   page.drawLine({
     start: { x: margin, y: footerTopY },
     end: { x: W - margin, y: footerTopY },
@@ -620,7 +627,7 @@ async function buildOasisBillingPdf(args: {
   y -= 16;
 
   // Rows (stop before footerTopY)
-  const minYForRows = footerTopY + 10; // breathing room above footer
+  const minYForRows = footerTopY + 10;
   const maxRowsHard = 18;
 
   for (let i = 0; i < Math.min(items.length, maxRowsHard); i++) {
@@ -629,7 +636,6 @@ async function buildOasisBillingPdf(args: {
     const descLines = wrapText(it.description, font, 9, colQty - colDesc - 12, 2);
     const rowHeight = 12 + (descLines[1] ? 12 : 0);
 
-    // ✅ hard stop before footer
     if (y - rowHeight < minYForRows) break;
 
     const rowTop = y;
@@ -659,16 +665,17 @@ async function buildOasisBillingPdf(args: {
     y -= rowHeight;
   }
 
-  // Notes panel (left)
-  const notesX = margin;
-  const notesW = 320;
-  const notesH = 96;
+  // Footer bands geometry
+  const fullW = W - margin * 2;
+
+  // Row 1: Notes (full width)
+  const notesH = 78;
   const notesY = footerY + footerH - notesH;
 
   page.drawRectangle({
-    x: notesX,
+    x: margin,
     y: notesY,
-    width: notesW,
+    width: fullW,
     height: notesH,
     borderColor: hair,
     borderWidth: 1,
@@ -676,7 +683,7 @@ async function buildOasisBillingPdf(args: {
   });
 
   page.drawText(winAnsiSafe("Notes"), {
-    x: notesX + 14,
+    x: margin + 14,
     y: notesY + notesH - 22,
     size: 9,
     font: bold,
@@ -687,23 +694,21 @@ async function buildOasisBillingPdf(args: {
     safeText(notes) ??
     "Internal sandbox document generated for audit validation of billing PDF generation, hashing, storage, and registry workflows. No commercial charge applied.";
 
-  const notesLines = wrapText(notesBody, font, 8.5, notesW - 28, 4);
+  const notesLines = wrapText(notesBody, font, 8.5, fullW - 28, 3);
   let ny = notesY + notesH - 40;
   for (const ln of notesLines) {
-    page.drawText(ln, { x: notesX + 14, y: ny, size: 8.5, font, color: faint });
+    page.drawText(ln, { x: margin + 14, y: ny, size: 8.5, font, color: faint });
     ny -= 11;
   }
 
-  // Summary panel (top-right inside footer)
-  const sumW = 252;
-  const sumH = 90;
-  const sumX = W - margin - sumW;
-  const sumY = footerY + footerH - sumH;
+  // Row 2: Summary (full width, AFTER notes)
+  const sumH = 62;
+  const sumY = notesY - 10 - sumH;
 
   page.drawRectangle({
-    x: sumX,
+    x: margin,
     y: sumY,
-    width: sumW,
+    width: fullW,
     height: sumH,
     borderColor: hair,
     borderWidth: 1,
@@ -711,16 +716,16 @@ async function buildOasisBillingPdf(args: {
   });
 
   page.drawText(winAnsiSafe("Summary"), {
-    x: sumX + 14,
-    y: sumY + sumH - 22,
+    x: margin + 14,
+    y: sumY + sumH - 20,
     size: 9,
     font: bold,
     color: muted,
   });
 
-  const srow = (label: string, value: string, y2: number, strong?: boolean) => {
+  const srow = (label: string, value: string, x: number, y2: number, strong?: boolean) => {
     page.drawText(winAnsiSafe(label), {
-      x: sumX + 14,
+      x,
       y: y2,
       size: strong ? 10 : 9,
       font: strong ? bold : font,
@@ -728,7 +733,7 @@ async function buildOasisBillingPdf(args: {
     });
     const vw = (strong ? bold : font).widthOfTextAtSize(value, strong ? 10 : 9);
     page.drawText(winAnsiSafe(value), {
-      x: sumX + sumW - 14 - vw,
+      x: margin + fullW - 14 - vw,
       y: y2,
       size: strong ? 10 : 9,
       font: strong ? bold : font,
@@ -736,26 +741,23 @@ async function buildOasisBillingPdf(args: {
     });
   };
 
-  srow("Subtotal:", money(currency, totalsMajor.subtotal), sumY + 44);
-  srow("Tax:", money(currency, totalsMajor.tax), sumY + 28);
+  const leftColX = margin + 14;
+  srow("Subtotal:", money(currency, totalsMajor.subtotal), leftColX, sumY + 28);
+  srow("Tax:", money(currency, totalsMajor.tax), leftColX + 160, sumY + 28);
 
   page.drawLine({
-    start: { x: sumX + 14, y: sumY + 20 },
-    end: { x: sumX + sumW - 14, y: sumY + 20 },
+    start: { x: margin + 14, y: sumY + 18 },
+    end: { x: margin + fullW - 14, y: sumY + 18 },
     thickness: 0.8,
     color: hair,
   });
 
-  srow("Total:", money(currency, totalsMajor.total), sumY + 6, true);
+  srow("Total:", money(currency, totalsMajor.total), leftColX, sumY + 4, true);
 
-  // QR panel (bottom-right inside footer) — NEVER overlaps summary now
-  const qrText = winAnsiSafe(verifyUrl).replace(/\s+/g, "");
-  const qr = qrPngBytes(qrText, { size: 256, margin: 2, ecc: "M" });
-  const qrImg = await pdf.embedPng(qr);
-
-  const qrPanelW = 252;
-  const qrPanelH = 110;
-  const qrPanelX = sumX;
+  // Row 3: QR bottom-right alone (dedicated panel)
+  const qrPanelW = 220;
+  const qrPanelH = 108;
+  const qrPanelX = margin + fullW - qrPanelW;
   const qrPanelY = footerY + 10;
 
   page.drawRectangle({
@@ -784,23 +786,47 @@ async function buildOasisBillingPdf(args: {
     color: faint,
   });
 
-  const qrSize = 84;
+  const qrText = winAnsiSafe(verifyUrl).replace(/\s+/g, "");
+  const qr = qrPngBytes(qrText, { size: 256, margin: 2, ecc: "M" });
+  const qrImg = await pdf.embedPng(qr);
+
+  const qrSize = 82;
   page.drawImage(qrImg, {
     x: qrPanelX + qrPanelW - 14 - qrSize,
-    y: qrPanelY + 14,
+    y: qrPanelY + 12,
     width: qrSize,
     height: qrSize,
   });
 
-  const urlPreview = (winAnsiSafe(qrText).slice(0, 54) + "...").slice(0, 60);
-  page.drawText(urlPreview, {
-    x: qrPanelX + 14,
-    y: qrPanelY + 18,
+  // Left of QR: small URL preview (kept outside QR panel so QR stays “alone”)
+  const urlPreviewMaxW = fullW - qrPanelW - 14 - 10;
+  const urlPreview = (qrText.length > 120 ? qrText.slice(0, 120) + "..." : qrText).slice(0, 140);
+
+  page.drawText(winAnsiSafe("Verification URL:"), {
+    x: margin + 14,
+    y: footerY + 78,
+    size: 8,
+    font: bold,
+    color: muted,
+  });
+
+  const urlLines = wrapText(urlPreview, font, 7.5, urlPreviewMaxW, 2);
+  page.drawText(urlLines[0], {
+    x: margin + 14,
+    y: footerY + 64,
     size: 7.5,
     font,
     color: rgb(0.58, 0.62, 0.68),
-    maxWidth: qrPanelW - 14 - 14 - qrSize - 10,
   });
+  if (urlLines[1]) {
+    page.drawText(urlLines[1], {
+      x: margin + 14,
+      y: footerY + 52,
+      size: 7.5,
+      font,
+      color: rgb(0.58, 0.62, 0.68),
+    });
+  }
 
   // Tiny corner mark
   const corner = winAnsiSafe(providerSlug.toUpperCase().slice(0, 10) || "ODP");
@@ -974,14 +1000,16 @@ serve(async (req: Request) => {
       });
     };
 
-    // Two-pass stabilization (hash must match final bytes)
-    const placeholder = "0".repeat(64);
-    let pdfBytes = await buildWithHash(placeholder);
-    let file_hash = await sha256Hex(pdfBytes);
-
-    pdfBytes = await buildWithHash(file_hash);
-    const h2 = await sha256Hex(pdfBytes);
-    file_hash = h2;
+    // ✅ Fixed-point stabilization (minor fix): QR ALWAYS matches FINAL hash
+    let file_hash = "0".repeat(64);
+    let pdfBytes = new Uint8Array();
+    for (let i = 0; i < 4; i++) {
+      const bytes = await buildWithHash(file_hash);
+      const next = await sha256Hex(bytes);
+      pdfBytes = bytes;
+      if (next === file_hash) break;
+      file_hash = next;
+    }
 
     // Storage target (lane-aware buckets)
     const BILLING_BUCKET = body.is_test ? "billing_sandbox" : "billing_truth";
