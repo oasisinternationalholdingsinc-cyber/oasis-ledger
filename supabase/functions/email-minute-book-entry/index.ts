@@ -21,7 +21,7 @@ import { PNG } from "npm:pngjs@7.0.0";
  * ✅ Adds “Certified ✓” micro-shimmer (safe CSS; ignored by strict clients)
  * ✅ Tightens micro-spacing + badge hierarchy
  * ✅ Download button clearly secondary
- * ✅ QR integrated (hash-first): QR encodes verify_url (NOT reinvented)
+ * ✅ QR (hash-first) placed bottom-right (stable 2-col table)
  *
  * Requires env:
  * - SUPABASE_URL
@@ -31,21 +31,16 @@ import { PNG } from "npm:pngjs@7.0.0";
  */
 
 type ReqBody = {
-  // identifiers
   entry_id?: string | null;
-  hash?: string | null; // preferred if already known (certified hash)
-
-  // lane hint (UI-provided)
+  hash?: string | null;
   is_test?: boolean | null;
 
-  // email
   to_email?: string | null;
   to_name?: string | null;
   message?: string | null;
 
-  // optional links
   include_download?: boolean | null;
-  expires_in?: number | null; // seconds for signed url (default 600)
+  expires_in?: number | null; // seconds (default 600)
 };
 
 type Resp =
@@ -55,7 +50,6 @@ type Resp =
       to_email: string;
       verify_url: string;
       download_url?: string | null;
-      qr_data_url?: string | null;
     }
   | { ok: false; request_id: string; error: string; details?: unknown };
 
@@ -135,60 +129,130 @@ async function sendViaResend(args: {
   return j;
 }
 
-/**
- * Generate a tiny PNG QR for a URL and return as data:image/png;base64,...
- * ✅ Hash-first: QR encodes verify_url (which encodes the hash)
- * ✅ Edge-safe: qrcode-generator + pngjs
- */
-function qrPngDataUrl(payload: string, opts?: { scale?: number; margin?: number }) {
-  const scale = Math.max(2, Math.min(8, opts?.scale ?? 3)); // email-friendly
-  const margin = Math.max(0, Math.min(4, opts?.margin ?? 1));
+// ---------------- QR helpers (verify_url -> PNG data URI) ----------------
 
-  const qr = QRGen(0, "M"); // auto type, medium EC
-  qr.addData(payload);
+function qrToPngDataUri(input: string, sizePx = 160): string {
+  // qrcode-generator gives modules; we render to PNG w/ pngjs (Edge-safe)
+  const qr = QRGen(0, "M"); // auto version, medium ECC
+  qr.addData(input);
   qr.make();
 
   const count = qr.getModuleCount();
-  const size = (count + margin * 2) * scale;
+  const quiet = 4; // quiet zone modules
+  const modules = count + quiet * 2;
 
-  const png = new PNG({ width: size, height: size });
+  // pick integer scale so we hit roughly sizePx
+  const scale = Math.max(3, Math.floor(sizePx / modules));
+  const outSize = modules * scale;
 
-  // white background
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const i = (png.width * y + x) << 2;
-      png.data[i] = 255;
-      png.data[i + 1] = 255;
-      png.data[i + 2] = 255;
-      png.data[i + 3] = 255;
+  const png = new PNG({ width: outSize, height: outSize });
+
+  // fill white
+  for (let y = 0; y < outSize; y++) {
+    for (let x = 0; x < outSize; x++) {
+      const idx = (outSize * y + x) << 2;
+      png.data[idx] = 255;
+      png.data[idx + 1] = 255;
+      png.data[idx + 2] = 255;
+      png.data[idx + 3] = 255;
     }
   }
 
+  // draw modules in black
   for (let r = 0; r < count; r++) {
     for (let c = 0; c < count; c++) {
       const dark = qr.isDark(r, c);
-      const px0 = (c + margin) * scale;
-      const py0 = (r + margin) * scale;
+      if (!dark) continue;
 
-      for (let dy = 0; dy < scale; dy++) {
-        for (let dx = 0; dx < scale; dx++) {
-          const x = px0 + dx;
-          const y = py0 + dy;
-          const i = (png.width * y + x) << 2;
+      const x0 = (c + quiet) * scale;
+      const y0 = (r + quiet) * scale;
 
-          const v = dark ? 0 : 255;
-          png.data[i] = v;
-          png.data[i + 1] = v;
-          png.data[i + 2] = v;
-          png.data[i + 3] = 255;
+      for (let yy = 0; yy < scale; yy++) {
+        for (let xx = 0; xx < scale; xx++) {
+          const x = x0 + xx;
+          const y = y0 + yy;
+          const idx = (outSize * y + x) << 2;
+          png.data[idx] = 0;
+          png.data[idx + 1] = 0;
+          png.data[idx + 2] = 0;
+          png.data[idx + 3] = 255;
         }
       }
     }
   }
 
-  const buf = PNG.sync.write(png);
-  const b64 = btoa(String.fromCharCode(...buf));
+  const bytes = PNG.sync.write(png);
+  const b64 = btoa(String.fromCharCode(...bytes));
   return `data:image/png;base64,${b64}`;
+}
+
+// ---------------- Email UI helpers (Outlook-safe buttons) ----------------
+
+const gold = "#FFD680";
+const ink = "#0B0F17";
+const bg0 = "#05070C";
+const card = "#0B0F17"; // more solid (prevents "faded" look)
+const panel = "#0F172A"; // deep slate
+const stroke = "#1E293B"; // solid stroke
+const textHi = "#FFFFFF";
+const textMd = "#CBD5E1";
+const textLo = "#94A3B8";
+
+function bulletproofGoldButton(href: string, label: string, widthPx = 190) {
+  const safeHref = esc(href);
+  const safeLabel = esc(label);
+  return `
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline-block;border-collapse:separate;">
+  <tr>
+    <td bgcolor="${gold}" style="background-color:${gold};border-radius:999px;">
+      <!--[if mso]>
+      <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="${safeHref}"
+        style="height:40px;v-text-anchor:middle;width:${widthPx}px;" arcsize="60%" strokecolor="${gold}" fillcolor="${gold}">
+        <w:anchorlock/>
+        <center style="color:${ink};font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:bold;letter-spacing:.02em;">
+          ${safeLabel}
+        </center>
+      </v:roundrect>
+      <![endif]-->
+      <!--[if !mso]><!-- -->
+      <a href="${safeHref}"
+        style="display:inline-block;padding:12px 18px;border-radius:999px;background-color:${gold};color:${ink};
+               font-weight:900;text-decoration:none;font-size:12px;letter-spacing:.02em;">
+        ${safeLabel}
+      </a>
+      <!--<![endif]-->
+    </td>
+  </tr>
+</table>`.trim();
+}
+
+function bulletproofSecondaryButton(href: string, label: string, widthPx = 240) {
+  const safeHref = esc(href);
+  const safeLabel = esc(label);
+  const fill = "#111827";
+  return `
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline-block;border-collapse:separate;">
+  <tr>
+    <td bgcolor="${fill}" style="background-color:${fill};border-radius:999px;border:1px solid ${stroke};">
+      <!--[if mso]>
+      <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="${safeHref}"
+        style="height:40px;v-text-anchor:middle;width:${widthPx}px;" arcsize="60%" strokecolor="#2A3448" fillcolor="${fill}">
+        <w:anchorlock/>
+        <center style="color:#E5E7EB;font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:bold;letter-spacing:.01em;">
+          ${safeLabel}
+        </center>
+      </v:roundrect>
+      <![endif]-->
+      <!--[if !mso]><!-- -->
+      <a href="${safeHref}"
+        style="display:inline-block;padding:12px 18px;border-radius:999px;background-color:${fill};color:#E5E7EB;
+               font-weight:800;text-decoration:none;font-size:12px;letter-spacing:.01em;border:1px solid ${stroke};">
+        ${safeLabel}
+      </a>
+      <!--<![endif]-->
+    </td>
+  </tr>
+</table>`.trim();
 }
 
 serve(async (req) => {
@@ -266,7 +330,6 @@ serve(async (req) => {
     file_hash = hinted_hash!;
   }
 
-  // Prefer using entry_id to fetch pointers
   if (entry_id) {
     const { data, error } = await sb
       .from("verified_documents")
@@ -285,7 +348,6 @@ serve(async (req) => {
     }
   }
 
-  // If we still don't have a hash, fail (hash-first invariant)
   if (!file_hash || !isHex64(file_hash)) {
     return json(
       {
@@ -306,10 +368,8 @@ serve(async (req) => {
 
   if (include_download) {
     if (!storage_bucket || !storage_path) {
-      // We can still send verify-only if pointers missing
       download_url = null;
     } else {
-      // lane hint boundary check (best-effort)
       if (typeof hinted_is_test === "boolean") {
         if (storage_bucket === "governance_sandbox" && hinted_is_test === false) {
           return json({ ok: false, request_id, error: "LANE_MISMATCH" }, 403);
@@ -323,12 +383,8 @@ serve(async (req) => {
         .from(storage_bucket)
         .createSignedUrl(storage_path, expires_in);
 
-      if (!signErr && signed?.signedUrl) {
-        download_url = signed.signedUrl;
-      } else {
-        // Don't hard-fail email if signing fails; keep verify-only
-        download_url = null;
-      }
+      if (!signErr && signed?.signedUrl) download_url = signed.signedUrl;
+      else download_url = null;
     }
   }
 
@@ -353,138 +409,28 @@ serve(async (req) => {
 
   const msgBlock = message
     ? `
-      <tr>
-        <td style="padding:0 0 14px 0">
-          <div style="font-size:13px; line-height:1.55; color:rgba(255,255,255,.74)">
-            ${esc(message)}
-          </div>
-        </td>
-      </tr>
-    `
+<tr>
+  <td style="padding:0 0 14px 0;">
+    <div style="font-size:13px;line-height:1.55;color:${textMd};">
+      ${esc(message)}
+    </div>
+  </td>
+</tr>`
     : "";
 
-  // Optional tiny shimmer on “Certified ✓” (ignored by strict clients; harmless)
   const shimmerKeyframes = `
-    @keyframes odpShimmer {
-      0% { opacity: .55; }
-      45% { opacity: 1; }
-      100% { opacity: .70; }
-    }
-  `;
+@keyframes odpShimmer {
+  0% { opacity:.62; }
+  45% { opacity:1; }
+  100% { opacity:.78; }
+}`;
 
-  const gold = "#FFD680";
-  const ink = "#0B0F17";
-  const bg0 = "#05070C";
-  const glass = "rgba(14,22,36,.58)";
-  const stroke = "rgba(255,255,255,.08)";
+  // QR is NOT reinvented — it encodes the canonical verify_url (hash-first).
+  const qrPng = qrToPngDataUri(verify_url, 168);
 
-  // Bulletproof button helpers (Outlook-safe)
-  function bulletproofGoldButton(href: string, label: string, widthPx = 170) {
-    const safeHref = esc(href);
-    const safeLabel = esc(label);
-    return `
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline-block; border-collapse:separate;">
-        <tr>
-          <td bgcolor="${gold}" style="background-color:${gold}; border-radius:999px;">
-            <!--[if mso]>
-            <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="${safeHref}"
-              style="height:38px;v-text-anchor:middle;width:${widthPx}px;" arcsize="60%" strokecolor="${gold}" fillcolor="${gold}">
-              <w:anchorlock/>
-              <center style="color:${ink};font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:bold;letter-spacing:.02em;">
-                ${safeLabel}
-              </center>
-            </v:roundrect>
-            <![endif]-->
-            <!--[if !mso]><!-- -->
-            <a href="${safeHref}"
-              style="display:inline-block;padding:11px 16px;border-radius:999px;background-color:${gold};color:${ink};
-                     font-weight:900;text-decoration:none;font-size:12px;letter-spacing:.02em;">
-              ${safeLabel}
-            </a>
-            <!--<![endif]-->
-          </td>
-        </tr>
-      </table>
-    `.trim();
-  }
-
-  function bulletproofSecondaryButton(href: string, label: string, widthPx = 220) {
-    const safeHref = esc(href);
-    const safeLabel = esc(label);
-    // Secondary uses dark fill + light stroke; VML for Outlook
-    const fill = "#101827";
-    const strokeCol = "rgba(255,255,255,.18)";
-    const text = "rgba(255,255,255,.86)";
-    return `
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline-block; border-collapse:separate;">
-        <tr>
-          <td bgcolor="${fill}" style="background-color:${fill}; border-radius:999px; border:1px solid ${strokeCol};">
-            <!--[if mso]>
-            <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="${safeHref}"
-              style="height:38px;v-text-anchor:middle;width:${widthPx}px;" arcsize="60%" strokecolor="#2A3448" fillcolor="${fill}">
-              <w:anchorlock/>
-              <center style="color:#E5E7EB;font-family:Segoe UI,Arial,sans-serif;font-size:12px;font-weight:bold;letter-spacing:.01em;">
-                ${safeLabel}
-              </center>
-            </v:roundrect>
-            <![endif]-->
-            <!--[if !mso]><!-- -->
-            <a href="${safeHref}"
-              style="display:inline-block;padding:11px 16px;border-radius:999px;background-color:${fill};color:${text};
-                     font-weight:800;text-decoration:none;font-size:12px;letter-spacing:.01em;border:1px solid ${strokeCol};">
-              ${safeLabel}
-            </a>
-            <!--<![endif]-->
-          </td>
-        </tr>
-      </table>
-    `.trim();
-  }
-
-  const verifyBtn = bulletproofGoldButton(verify_url, "Verify (Hash-first)", 180);
+  const verifyBtn = bulletproofGoldButton(verify_url, "Verify (Hash-first)", 190);
   const downloadBtn = download_url
-    ? bulletproofSecondaryButton(download_url, "Download PDF (time-limited)", 230)
-    : "";
-
-  // ✅ QR encodes verify_url (hash-first) — no reinvention
-  let qr_data_url: string | null = null;
-  try {
-    qr_data_url = qrPngDataUrl(verify_url, { scale: 3, margin: 1 });
-  } catch {
-    qr_data_url = null; // never fail email on QR generation
-  }
-
-  const qrBlock = qr_data_url
-    ? `
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
-        <tr>
-          <td style="padding:14px 0 0 0;">
-            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;">
-              <tr>
-                <td valign="top" style="padding:0 12px 0 0;">
-                  <div style="font-size:11px; letter-spacing:.22em; text-transform:uppercase; color:rgba(255,255,255,.58);">
-                    QR Verification
-                  </div>
-                  <div style="height:6px; line-height:6px; font-size:6px;">&nbsp;</div>
-                  <div style="font-size:12px; line-height:1.5; color:rgba(255,255,255,.70); max-width:420px;">
-                    Scan to open the official verification terminal (hash-first).
-                  </div>
-                </td>
-                <td valign="top" style="
-                  padding:10px;
-                  border-radius:14px;
-                  background: rgba(255,255,255,.06);
-                  border:1px solid rgba(255,255,255,.10);
-                ">
-                  <img src="${esc(qr_data_url)}" width="116" height="116" alt="QR Verification"
-                    style="display:block; border:0; width:116px; height:116px; border-radius:10px;" />
-                </td>
-              </tr>
-            </table>
-          </td>
-        </tr>
-      </table>
-    `
+    ? bulletproofSecondaryButton(download_url, "Download PDF (time-limited)", 250)
     : "";
 
   const html = `
@@ -504,59 +450,47 @@ serve(async (req) => {
       </o:OfficeDocumentSettings>
     </xml>
     <![endif]-->
-    <style>
-      ${shimmerKeyframes}
-    </style>
+    <style>${shimmerKeyframes}</style>
   </head>
-  <body style="margin:0; padding:0; background:${bg0}; background-color:${bg0};">
-    <!-- Preheader (hidden) -->
-    <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">
-      Certified Minute Book entry. Verify instantly using the hash-first terminal.
-    </div>
-
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="${bg0}" style="background:${bg0}; background-color:${bg0}; padding:24px 10px;">
+  <body style="margin:0;padding:0;background:${bg0};background-color:${bg0};">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="${bg0}"
+      style="background:${bg0};background-color:${bg0};padding:24px 10px;">
       <tr>
         <td align="center" style="padding:0;">
 
-          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="720" style="width:100%; max-width:720px; border-collapse:separate;">
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="720"
+            style="width:100%;max-width:720px;border-collapse:separate;">
             <tr>
-              <td bgcolor="${bg0}" style="
-                background:${bg0};
-                background-color:${bg0};
+              <td bgcolor="${card}" style="
+                background:${card};
+                background-color:${card};
                 border:1px solid ${stroke};
                 border-radius:18px;
                 overflow:hidden;
-                box-shadow: 0 18px 60px rgba(0,0,0,.55);
+                box-shadow:0 18px 60px rgba(0,0,0,.55);
               ">
-
-                <!-- Authority bar (bulletproof gold signal) -->
-                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-                  <tr>
-                    <td style="height:2px; line-height:2px; background:${gold}; font-size:0;">&nbsp;</td>
-                  </tr>
-                </table>
 
                 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
                   <tr>
                     <td style="padding:22px 22px 18px 22px;">
 
-                      <div style="letter-spacing:.34em; text-transform:uppercase; font-size:11px; color:rgba(255,255,255,.60);">
+                      <div style="letter-spacing:.34em;text-transform:uppercase;font-size:11px;color:${textLo};">
                         OASIS DIGITAL PARLIAMENT
                       </div>
 
-                      <div style="height:10px; line-height:10px; font-size:10px;">&nbsp;</div>
+                      <div style="height:10px;line-height:10px;font-size:10px;">&nbsp;</div>
 
-                      <div style="font-size:20px; font-weight:800; color:#ffffff; margin:0; padding:0;">
+                      <div style="font-size:20px;font-weight:800;color:${textHi};margin:0;padding:0;">
                         Minute Book Entry — Verified Copy
                       </div>
 
-                      <div style="height:10px; line-height:10px; font-size:10px;">&nbsp;</div>
+                      <div style="height:10px;line-height:10px;font-size:10px;">&nbsp;</div>
 
-                      <div style="font-size:13px; line-height:1.5; color:rgba(255,255,255,.70);">
+                      <div style="font-size:13px;line-height:1.5;color:${textMd};">
                         ${introName}
                       </div>
 
-                      <div style="height:14px; line-height:14px; font-size:14px;">&nbsp;</div>
+                      <div style="height:14px;line-height:14px;font-size:14px;">&nbsp;</div>
 
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
                         ${msgBlock}
@@ -565,75 +499,101 @@ serve(async (req) => {
                       <!-- Certified badge -->
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
                         <tr>
-                          <td style="padding:0 0 10px 0;">
+                          <td style="padding:0 0 12px 0;">
                             <span style="
                               display:inline-block;
                               padding:6px 10px;
                               border-radius:999px;
-                              border:1px solid rgba(255,214,128,.30);
-                              background: rgba(255,214,128,.10);
-                              color: rgba(255,214,128,.95);
+                              border:1px solid rgba(255,214,128,.40);
+                              background:rgba(255,214,128,.12);
+                              color:${gold};
                               font-weight:900;
                               font-size:11px;
                               letter-spacing:.10em;
                               text-transform:uppercase;
-                              animation: odpShimmer 2.6s ease-in-out infinite;
+                              animation:odpShimmer 2.6s ease-in-out infinite;
                             ">Certified ✓</span>
                           </td>
                         </tr>
                       </table>
 
-                      <!-- Hash card -->
+                      <!-- 2-col: Left = Hash + copy, Right = QR bottom-right -->
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
                         <tr>
-                          <td style="
-                            padding:14px 14px;
-                            border-radius:16px;
-                            border:1px solid rgba(255,255,255,.10);
-                            background:${glass};
-                            background-color:${glass};
-                          ">
-                            <div style="font-size:11px; letter-spacing:.22em; text-transform:uppercase; color:rgba(255,255,255,.58);">
-                              Verification Hash
-                            </div>
-                            <div style="height:8px; line-height:8px; font-size:8px;">&nbsp;</div>
-                            <div style="
-                              font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-                              font-size:12px;
-                              color:#ffffff;
-                              word-break:break-all;
-                            ">${esc(file_hash)}</div>
+                          <!-- LEFT -->
+                          <td valign="top" style="padding:0 14px 0 0;">
+                            <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
+                              <tr>
+                                <td style="
+                                  padding:14px 14px;
+                                  border-radius:16px;
+                                  border:1px solid rgba(255,255,255,.10);
+                                  background:${panel};
+                                  background-color:${panel};
+                                ">
+                                  <div style="font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:${textLo};">
+                                    Verification Hash
+                                  </div>
+                                  <div style="height:8px;line-height:8px;font-size:8px;">&nbsp;</div>
+                                  <div style="
+                                    font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+                                    font-size:12px;
+                                    color:${textHi};
+                                    word-break:break-all;
+                                  ">${esc(file_hash)}</div>
+
+                                  <div style="height:10px;line-height:10px;font-size:10px;">&nbsp;</div>
+                                  <div style="font-size:11px;line-height:1.45;color:${textLo};">
+                                    QR opens the official verification terminal (hash-first).
+                                  </div>
+                                </td>
+                              </tr>
+                            </table>
+                          </td>
+
+                          <!-- RIGHT (QR pinned bottom-right) -->
+                          <td valign="bottom" align="right" style="padding:0;">
+                            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;">
+                              <tr>
+                                <td style="
+                                  padding:10px;
+                                  border-radius:16px;
+                                  border:1px solid rgba(255,255,255,.10);
+                                  background:${panel};
+                                  background-color:${panel};
+                                " align="right" valign="bottom">
+                                  <img src="${qrPng}" width="168" height="168" alt="Verification QR"
+                                       style="display:block;border-radius:10px;border:1px solid rgba(255,255,255,.10);" />
+                                  <div style="height:8px;line-height:8px;font-size:8px;">&nbsp;</div>
+                                  <div style="font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:${textLo};text-align:right;">
+                                    QR Verification
+                                  </div>
+                                </td>
+                              </tr>
+                            </table>
                           </td>
                         </tr>
                       </table>
 
-                      ${qrBlock}
+                      <div style="height:16px;line-height:16px;font-size:16px;">&nbsp;</div>
 
-                      <div style="height:16px; line-height:16px; font-size:16px;">&nbsp;</div>
-
-                      <!-- Buttons row (bulletproof, Outlook-safe) -->
+                      <!-- Buttons row -->
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;">
                         <tr>
-                          <td style="padding:0 10px 0 0;">
-                            ${verifyBtn}
-                          </td>
-                          ${
-                            downloadBtn
-                              ? `<td style="padding:0;">${downloadBtn}</td>`
-                              : ""
-                          }
+                          <td style="padding:0 10px 0 0;">${verifyBtn}</td>
+                          ${downloadBtn ? `<td style="padding:0;">${downloadBtn}</td>` : ``}
                         </tr>
                       </table>
 
-                      <div style="height:16px; line-height:16px; font-size:16px;">&nbsp;</div>
+                      <div style="height:16px;line-height:16px;font-size:16px;">&nbsp;</div>
 
-                      <div style="font-size:11px; line-height:1.55; color:rgba(255,255,255,.56);">
+                      <div style="font-size:11px;line-height:1.55;color:${textLo};">
                         This email contains a hash-first verification link. The public verification terminal is authoritative.
                       </div>
 
-                      <div style="height:12px; line-height:12px; font-size:12px;">&nbsp;</div>
+                      <div style="height:12px;line-height:12px;font-size:12px;">&nbsp;</div>
 
-                      <div style="font-size:11px; line-height:1.55; color:rgba(255,255,255,.42);">
+                      <div style="font-size:11px;line-height:1.55;color:rgba(148,163,184,.72);">
                         If you did not request this message, you may ignore it.
                       </div>
 
@@ -642,9 +602,9 @@ serve(async (req) => {
 
                   <tr>
                     <td style="padding:0 22px 18px 22px;">
-                      <div style="height:1px; background:rgba(255,255,255,.08);"></div>
-                      <div style="height:12px; line-height:12px; font-size:12px;">&nbsp;</div>
-                      <div style="font-size:10px; letter-spacing:.26em; text-transform:uppercase; color:rgba(255,255,255,.38);">
+                      <div style="height:1px;background:rgba(255,255,255,.08);"></div>
+                      <div style="height:12px;line-height:12px;font-size:12px;">&nbsp;</div>
+                      <div style="font-size:10px;letter-spacing:.26em;text-transform:uppercase;color:rgba(148,163,184,.68);">
                         ODP.AI • Verification
                       </div>
                     </td>
@@ -680,19 +640,9 @@ serve(async (req) => {
       text,
     });
 
-    return json({
-      ok: true,
-      request_id,
-      to_email,
-      verify_url,
-      download_url,
-      qr_data_url,
-    });
+    return json({ ok: true, request_id, to_email, verify_url, download_url });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Email send failed.";
-    return json(
-      { ok: false, request_id, error: "SEND_FAILED", details: msg },
-      500,
-    );
+    return json({ ok: false, request_id, error: "SEND_FAILED", details: msg }, 500);
   }
 });
