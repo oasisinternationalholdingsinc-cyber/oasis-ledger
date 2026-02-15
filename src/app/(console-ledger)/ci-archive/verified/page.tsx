@@ -18,6 +18,7 @@ import {
   Download,
   Copy,
   Loader2,
+  Mail,
 } from "lucide-react";
 
 type VerifiedRow = {
@@ -164,6 +165,22 @@ export default function VerifiedRegistryPage() {
   const [readerLoading, setReaderLoading] = useState(false);
   const [copied, setCopied] = useState(false);
 
+  // ✅ Email Verified Copy (Minute Book only)
+  const [emailOpen, setEmailOpen] = useState(false);
+  const [emailTo, setEmailTo] = useState("");
+  const [emailName, setEmailName] = useState("");
+  const [emailMsg, setEmailMsg] = useState("");
+  const [emailIncludeDownload, setEmailIncludeDownload] = useState(true);
+
+  const [emailSending, setEmailSending] = useState(false);
+  const [emailOk, setEmailOk] = useState<string | null>(null);
+  const [emailErr, setEmailErr] = useState<string | null>(null);
+
+  const canEmailMinuteBook =
+    !!readerDoc &&
+    String(readerDoc.source_table || "").trim() === "minute_book_entries" &&
+    !!readerDoc.source_record_id;
+
   function closeReader() {
     setReaderOpen(false);
     setReaderDoc(null);
@@ -171,6 +188,50 @@ export default function VerifiedRegistryPage() {
     setReaderDownloadUrl(null);
     setReaderLoading(false);
     setCopied(false);
+
+    // ✅ also close/clear email modal state (no regression to existing reader behavior)
+    setEmailOpen(false);
+    setEmailSending(false);
+    setEmailOk(null);
+    setEmailErr(null);
+  }
+
+  async function sendVerifiedCopyEmail() {
+    if (!canEmailMinuteBook || !readerDoc) return;
+
+    const to = emailTo.trim();
+    if (!to || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+      setEmailErr("Enter a valid recipient email.");
+      return;
+    }
+
+    setEmailErr(null);
+    setEmailOk(null);
+    setEmailSending(true);
+
+    try {
+      const { data, error } = await supabase.functions.invoke("email-minute-book-entry", {
+        body: {
+          entry_id: readerDoc.source_record_id,
+          is_test: laneIsTest, // ✅ lane hint for mismatch guard
+          to_email: to,
+          to_name: emailName.trim() || null,
+          message: emailMsg.trim() || null,
+          include_download: !!emailIncludeDownload,
+          // expires_in optional (defaults to 10 min in Edge Function)
+        },
+      });
+
+      if (error) throw error;
+      if (!data?.ok) throw new Error(data?.error || "SEND_FAILED");
+
+      setEmailOk(`Sent to ${to}`);
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : "Failed to send email.";
+      setEmailErr(msg);
+    } finally {
+      setEmailSending(false);
+    }
   }
 
   // Resolve entity UUID from entities table using slug (NO CHANGE)
@@ -329,6 +390,12 @@ export default function VerifiedRegistryPage() {
       setReaderLoading(true);
       setReaderUrl(null);
       setReaderDownloadUrl(null);
+
+      // ✅ reset email modal state per-open (no surprises)
+      setEmailOpen(false);
+      setEmailSending(false);
+      setEmailOk(null);
+      setEmailErr(null);
 
       // ✅ preview URL (NO download hint) => iframe renders
       const previewUrl = await signedUrlForVerified(bucket, path, null);
@@ -662,7 +729,7 @@ export default function VerifiedRegistryPage() {
         <div className="fixed inset-0 z-[80]">
           <div className="absolute inset-0 bg-black/60 backdrop-blur-md" onClick={closeReader} aria-hidden="true" />
           <div className="absolute inset-0 p-0 sm:p-6 flex items-end sm:items-center justify-center">
-            <div className="w-full sm:max-w-[980px] h-[92vh] sm:h-[88vh] rounded-none sm:rounded-3xl border border-white/10 bg-black/30 shadow-[0_28px_120px_rgba(0,0,0,0.65)] overflow-hidden">
+            <div className="w-full sm:max-w-[980px] h-[92vh] sm:h-[88vh] rounded-none sm:rounded-3xl border border-white/10 bg-black/30 shadow-[0_28px_120px_rgba(0,0,0,0.65)] overflow-hidden relative">
               <div className="flex items-center justify-between gap-3 px-4 sm:px-5 py-3 border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent">
                 <div className="min-w-0">
                   <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Verified • Reader</div>
@@ -725,6 +792,33 @@ export default function VerifiedRegistryPage() {
                     Download
                   </button>
 
+                  {/* ✅ Email (Minute Book verified records only) */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEmailOpen(true);
+                      setEmailOk(null);
+                      setEmailErr(null);
+                      setEmailTo("");
+                      setEmailName("");
+                      setEmailMsg("");
+                      setEmailIncludeDownload(true);
+                    }}
+                    disabled={!canEmailMinuteBook}
+                    className={cx(
+                      "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase inline-flex items-center gap-2 transition",
+                      !canEmailMinuteBook
+                        ? "border-white/10 bg-white/5 text-slate-500 cursor-not-allowed"
+                        : "border-white/10 bg-white/5 text-slate-200 hover:bg-white/7"
+                    )}
+                    title={
+                      canEmailMinuteBook ? "Email verified copy" : "Email is available for Minute Book verified records only"
+                    }
+                  >
+                    <Mail className="h-4 w-4" />
+                    Email
+                  </button>
+
                   <button
                     type="button"
                     onClick={closeReader}
@@ -755,6 +849,117 @@ export default function VerifiedRegistryPage() {
                   </div>
                 )}
               </div>
+
+              {/* ✅ Email Modal (inside Reader, UI-only) */}
+              {emailOpen ? (
+                <div className="absolute inset-0 z-[90]">
+                  <div
+                    className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                    onClick={() => setEmailOpen(false)}
+                    aria-hidden="true"
+                  />
+                  <div className="absolute inset-0 p-4 sm:p-6 flex items-end sm:items-center justify-center">
+                    <div className="w-full sm:max-w-[720px] rounded-3xl border border-white/10 bg-black/40 shadow-[0_28px_120px_rgba(0,0,0,0.65)] overflow-hidden">
+                      <div className="px-4 sm:px-5 py-4 border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent">
+                        <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Email • Verified Copy</div>
+                        <div className="mt-1 text-sm sm:text-base font-semibold text-slate-100 truncate">
+                          {readerDoc?.title ?? "Document"}
+                        </div>
+                        <div className="mt-1 text-[11px] text-slate-400">
+                          Sends hash-first verification link (+ optional time-limited download)
+                        </div>
+                      </div>
+
+                      <div className="p-4 sm:p-5 space-y-3">
+                        {emailErr ? (
+                          <div className="rounded-2xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
+                            {emailErr}
+                          </div>
+                        ) : null}
+                        {emailOk ? (
+                          <div className="rounded-2xl border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-200">
+                            {emailOk}
+                          </div>
+                        ) : null}
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <div>
+                            <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">To Email</div>
+                            <input
+                              value={emailTo}
+                              onChange={(e) => setEmailTo(e.target.value)}
+                              placeholder="recipient@domain.com"
+                              className="mt-2 w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-200 outline-none placeholder:text-slate-500 focus:border-amber-400/30"
+                            />
+                          </div>
+
+                          <div>
+                            <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Recipient Name</div>
+                            <input
+                              value={emailName}
+                              onChange={(e) => setEmailName(e.target.value)}
+                              placeholder="Optional"
+                              className="mt-2 w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-200 outline-none placeholder:text-slate-500 focus:border-amber-400/30"
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Message</div>
+                          <textarea
+                            value={emailMsg}
+                            onChange={(e) => setEmailMsg(e.target.value)}
+                            placeholder="Optional note to include above the hash + QR…"
+                            rows={4}
+                            className="mt-2 w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-200 outline-none placeholder:text-slate-500 focus:border-amber-400/30 resize-none"
+                          />
+                        </div>
+
+                        <label className="flex items-center gap-2 text-sm text-slate-300">
+                          <input
+                            type="checkbox"
+                            checked={emailIncludeDownload}
+                            onChange={(e) => setEmailIncludeDownload(e.target.checked)}
+                            className="h-4 w-4"
+                          />
+                          <span>Include time-limited download link</span>
+                        </label>
+
+                        <div className="pt-1 flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setEmailOpen(false)}
+                            className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+                          >
+                            Cancel
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={sendVerifiedCopyEmail}
+                            disabled={emailSending || !canEmailMinuteBook}
+                            className={cx(
+                              "rounded-full border px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase inline-flex items-center gap-2 transition",
+                              emailSending || !canEmailMinuteBook
+                                ? "border-white/10 bg-white/5 text-slate-500 cursor-not-allowed"
+                                : "border-amber-400/20 bg-amber-400/10 text-amber-100 hover:bg-amber-400/15"
+                            )}
+                          >
+                            {emailSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
+                            {emailSending ? "Sending…" : "Send"}
+                          </button>
+                        </div>
+
+                        {!canEmailMinuteBook ? (
+                          <div className="text-[11px] text-slate-500">
+                            Email is enabled for promoted Minute Book verified records only.
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
             </div>
           </div>
         </div>
