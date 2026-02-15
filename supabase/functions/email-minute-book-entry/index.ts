@@ -16,13 +16,9 @@ import { PNG } from "npm:pngjs@7.0.0";
  * ✅ Lane-safe: validates storage_bucket vs is_test hint (best-effort)
  *
  * ENHANCEMENTS (NO REWIRING / NO REGRESSION):
- * ✅ Restores “authority” look: subtle gold accents, depth, and hierarchy
- * ✅ Outlook/Gmail-safe (table-based layout + bulletproof buttons + VML)
- * ✅ Adds “Certified ✓” micro-shimmer (safe CSS; ignored by strict clients)
- * ✅ Tightens micro-spacing + badge hierarchy
- * ✅ Download button clearly secondary
- * ✅ QR (hash-first) placed bottom-right (Apple OS: buttons row left, QR row right)
- * ✅ Footer upgraded into a clean institutional “seal” (single hairline + 2–3 lines)
+ * ✅ Adds optional `context` for UI copy/subject (Verified Registry vs Minute Book)
+ * ✅ Allows passing storage_bucket/storage_path for hash-only registry sends (optional)
+ * ✅ Default behavior remains identical for Minute Book entry sends
  *
  * Requires env:
  * - SUPABASE_URL
@@ -31,17 +27,37 @@ import { PNG } from "npm:pngjs@7.0.0";
  * - EMAIL_FROM
  */
 
+type EmailContext = "minute_book" | "verified_registry";
+
 type ReqBody = {
+  // Legacy / Minute Book
   entry_id?: string | null;
+
+  // Hash-first (works for BOTH Minute Book + Verified Registry)
   hash?: string | null;
+
+  // Lane hint (optional)
   is_test?: boolean | null;
 
+  // Recipient
   to_email?: string | null;
   to_name?: string | null;
   message?: string | null;
 
+  // Download controls
   include_download?: boolean | null;
   expires_in?: number | null; // seconds (default 600)
+
+  // ✅ NEW (UI-only): controls subject + copy (NO backend contract break)
+  context?: EmailContext | null;
+
+  // ✅ Optional: lets Verified Registry send include_download even without entry_id
+  // (NO schema change; just a request override)
+  storage_bucket?: string | null;
+  storage_path?: string | null;
+
+  // ✅ Optional: title shown in email (defaults by context)
+  title?: string | null;
 };
 
 type Resp =
@@ -57,8 +73,7 @@ type Resp =
 const cors: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST,OPTIONS",
-  "Access-Control-Allow-Headers":
-    "authorization, apikey, content-type, x-client-info",
+  "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
 };
 
 function json(data: Resp, status = 200) {
@@ -258,32 +273,20 @@ serve(async (req) => {
   const request_id = rid();
 
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-  if (req.method !== "POST") {
-    return json({ ok: false, request_id, error: "METHOD_NOT_ALLOWED" }, 405);
-  }
+  if (req.method !== "POST") return json({ ok: false, request_id, error: "METHOD_NOT_ALLOWED" }, 405);
 
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "";
   const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
   if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
     return json(
-      {
-        ok: false,
-        request_id,
-        error: "SERVER_MISCONFIGURED",
-        details: "Missing SUPABASE_URL/SERVICE_ROLE.",
-      },
+      { ok: false, request_id, error: "SERVER_MISCONFIGURED", details: "Missing SUPABASE_URL/SERVICE_ROLE." },
       500,
     );
   }
 
   const authHeader = req.headers.get("authorization") || "";
-  const jwt = authHeader.toLowerCase().startsWith("bearer ")
-    ? authHeader.slice(7).trim()
-    : "";
-
-  if (!jwt) {
-    return json({ ok: false, request_id, error: "NOT_AUTHENTICATED" }, 401);
-  }
+  const jwt = authHeader.toLowerCase().startsWith("bearer ") ? authHeader.slice(7).trim() : "";
+  if (!jwt) return json({ ok: false, request_id, error: "NOT_AUTHENTICATED" }, 401);
 
   const sb = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     global: { headers: { Authorization: `Bearer ${jwt}` } },
@@ -291,9 +294,7 @@ serve(async (req) => {
 
   // Validate user session (operator auth gate)
   const { data: userData, error: userErr } = await sb.auth.getUser();
-  if (userErr || !userData?.user) {
-    return json({ ok: false, request_id, error: "INVALID_SESSION" }, 401);
-  }
+  if (userErr || !userData?.user) return json({ ok: false, request_id, error: "INVALID_SESSION" }, 401);
 
   let body: ReqBody | null = null;
   try {
@@ -304,8 +305,8 @@ serve(async (req) => {
 
   const entry_id = (body?.entry_id || "").toString().trim() || null;
   const hinted_hash = (body?.hash || "").toString().trim() || null;
-  const hinted_is_test =
-    typeof body?.is_test === "boolean" ? body?.is_test : null;
+
+  const hinted_is_test = typeof body?.is_test === "boolean" ? body?.is_test : null;
 
   const to_email = cleanEmail(body?.to_email);
   const to_name = (body?.to_name || "").toString().trim() || "";
@@ -316,19 +317,32 @@ serve(async (req) => {
     ? Math.max(60, Math.min(60 * 60, Number(body?.expires_in))) // clamp 1m..1h
     : 60 * 10; // default 10 min
 
+  // ✅ context (defaults to minute_book to preserve legacy behavior)
+  const rawCtx = (body?.context || "").toString().trim() as EmailContext;
+  const ctx: EmailContext =
+    rawCtx === "verified_registry" || rawCtx === "minute_book" ? rawCtx : "minute_book";
+
+  // If caller provided hash-only and no entry_id, infer registry context (safe UX upgrade)
+  const inferredCtx: EmailContext =
+    !entry_id && isHex64(hinted_hash) ? "verified_registry" : ctx;
+
+  const providedTitle = (body?.title || "").toString().trim() || "";
+
+  // Optional storage pointers from UI (helps Verified Registry include_download when hash-only)
+  let storage_bucket: string | null = (body?.storage_bucket || "").toString().trim() || null;
+  let storage_path: string | null = (body?.storage_path || "").toString().trim() || null;
+
   if (!to_email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to_email)) {
     return json({ ok: false, request_id, error: "MISSING_TO_EMAIL" }, 400);
   }
 
-  // 1) Resolve verified doc for minute_book_entries
+  // 1) Resolve hash + pointers
   let file_hash: string | null = null;
-  let storage_bucket: string | null = null;
-  let storage_path: string | null = null;
 
-  if (isHex64(hinted_hash)) {
-    file_hash = hinted_hash!;
-  }
+  if (isHex64(hinted_hash)) file_hash = hinted_hash!;
 
+  // If entry_id is provided, load the verified row for this minute_book_entries record
+  // (Preserves old behavior exactly.)
   if (entry_id) {
     const { data, error } = await sb
       .from("verified_documents")
@@ -340,10 +354,12 @@ serve(async (req) => {
 
     if (!error && data?.length) {
       const row: any = data[0];
-      storage_bucket = (row.storage_bucket || "").toString().trim() || null;
-      storage_path = (row.storage_path || "").toString().trim() || null;
       const fh = (row.file_hash || "").toString().trim() || null;
       if (!file_hash && isHex64(fh)) file_hash = fh;
+
+      // Only override pointers if UI didn't provide them
+      if (!storage_bucket) storage_bucket = (row.storage_bucket || "").toString().trim() || null;
+      if (!storage_path) storage_path = (row.storage_path || "").toString().trim() || null;
     }
   }
 
@@ -354,7 +370,9 @@ serve(async (req) => {
         request_id,
         error: "NOT_REGISTERED",
         details:
-          "No verified_documents.file_hash found for this Minute Book entry (must be certified/verified first).",
+          inferredCtx === "verified_registry"
+            ? "No certified file_hash provided/found. Verified Registry emails require a 64-hex hash."
+            : "No verified_documents.file_hash found for this Minute Book entry (must be certified/verified first).",
       },
       404,
     );
@@ -367,6 +385,7 @@ serve(async (req) => {
 
   if (include_download) {
     if (!storage_bucket || !storage_path) {
+      // hash-only registry emails can still be sent; download link is optional
       download_url = null;
     } else {
       if (typeof hinted_is_test === "boolean") {
@@ -378,10 +397,7 @@ serve(async (req) => {
         }
       }
 
-      const { data: signed, error: signErr } = await sb.storage
-        .from(storage_bucket)
-        .createSignedUrl(storage_path, expires_in);
-
+      const { data: signed, error: signErr } = await sb.storage.from(storage_bucket).createSignedUrl(storage_path, expires_in);
       if (!signErr && signed?.signedUrl) download_url = signed.signedUrl;
       else download_url = null;
     }
@@ -403,7 +419,15 @@ serve(async (req) => {
     );
   }
 
-  const subject = "Minute Book Entry — Verified Copy";
+  // ✅ Subject + headline are now context-aware (no more “Minute Book …” when sent from Verified Registry)
+  const defaultTitle =
+    inferredCtx === "verified_registry" ? "Verified Registry — Certified Copy" : "Minute Book Entry — Verified Copy";
+
+  const subject =
+    inferredCtx === "verified_registry" ? "Verified Registry — Certified Copy" : "Minute Book Entry — Verified Copy";
+
+  const headline = providedTitle ? providedTitle : defaultTitle;
+
   const introName = to_name ? `Hello ${esc(to_name)},` : "Hello,";
 
   const msgBlock = message
@@ -424,15 +448,12 @@ serve(async (req) => {
   100% { opacity:.78; }
 }`;
 
-  // QR is NOT reinvented — it encodes the canonical verify_url (hash-first).
+  // QR encodes canonical verify_url (hash-first)
   const qrPng = qrToPngDataUri(verify_url, 168);
 
   const verifyBtn = bulletproofGoldButton(verify_url, "Verify (Hash-first)", 190);
-  const downloadBtn = download_url
-    ? bulletproofSecondaryButton(download_url, "Download PDF (time-limited)", 250)
-    : "";
+  const downloadBtn = download_url ? bulletproofSecondaryButton(download_url, "Download PDF (time-limited)", 250) : "";
 
-  // Footer seal (polished, not “100 lines”)
   const footerTitle = `OASIS DIGITAL PARLIAMENT`;
   const footerSub = `VERIFICATION TERMINAL`;
   const footerProtocol = `Certified via Hash-First Verification Protocol`;
@@ -478,7 +499,6 @@ serve(async (req) => {
                   <tr>
                     <td style="padding:22px 22px 18px 22px;">
 
-                      <!-- Top title (slightly brighter so it doesn’t disappear) -->
                       <div style="letter-spacing:.34em;text-transform:uppercase;font-size:11px;color:rgba(203,213,225,.74);">
                         OASIS DIGITAL PARLIAMENT
                       </div>
@@ -486,7 +506,7 @@ serve(async (req) => {
                       <div style="height:10px;line-height:10px;font-size:10px;">&nbsp;</div>
 
                       <div style="font-size:20px;font-weight:800;color:${textHi};margin:0;padding:0;">
-                        Minute Book Entry — Verified Copy
+                        ${esc(headline)}
                       </div>
 
                       <div style="height:10px;line-height:10px;font-size:10px;">&nbsp;</div>
@@ -501,7 +521,6 @@ serve(async (req) => {
                         ${msgBlock}
                       </table>
 
-                      <!-- Certified badge -->
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
                         <tr>
                           <td style="padding:0 0 12px 0;">
@@ -522,7 +541,6 @@ serve(async (req) => {
                         </tr>
                       </table>
 
-                      <!-- Full-width hash card (Apple: primary) -->
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
                         <tr>
                           <td style="
@@ -553,7 +571,6 @@ serve(async (req) => {
 
                       <div style="height:16px;line-height:16px;font-size:16px;">&nbsp;</div>
 
-                      <!-- Bottom row: buttons left, QR right (Apple OS anchor) -->
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
                         <tr>
                           <td valign="bottom" align="left" style="padding:0 14px 0 0;">
@@ -567,7 +584,7 @@ serve(async (req) => {
                             <div style="height:14px;line-height:14px;font-size:14px;">&nbsp;</div>
 
                             <div style="font-size:11px;line-height:1.55;color:${textLo};max-width:420px;">
-                              This email contains a hash-first verification link. The public verification terminal is authoritative.
+                              This message contains a hash-first verification link. The public verification terminal is authoritative.
                             </div>
 
                             <div style="height:10px;line-height:10px;font-size:10px;">&nbsp;</div>
@@ -603,7 +620,6 @@ serve(async (req) => {
                     </td>
                   </tr>
 
-                  <!-- Footer seal (single clean band, not “100 lines”) -->
                   <tr>
                     <td style="padding:0 22px 18px 22px;">
                       <div style="height:1px;background:rgba(255,214,128,.18);"></div>
@@ -645,7 +661,7 @@ serve(async (req) => {
   `.trim();
 
   const text =
-    `Minute Book Entry — Verified Copy\n\n` +
+    `${subject}\n\n` +
     (message ? `${message}\n\n` : "") +
     `Verification Hash:\n${file_hash}\n\n` +
     `Verify (hash-first): ${verify_url}\n` +
