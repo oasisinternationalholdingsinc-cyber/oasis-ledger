@@ -22,6 +22,7 @@ import { PNG } from "npm:pngjs@7.0.0";
  * ✅ Tightens micro-spacing + badge hierarchy
  * ✅ Download button clearly secondary
  * ✅ QR (hash-first) placed bottom-right (stable 2-col table)
+ * ✅ Footer upgraded into an institutional “seal” (gold hairline + two-line authority)
  *
  * Requires env:
  * - SUPABASE_URL
@@ -433,6 +434,12 @@ serve(async (req) => {
     ? bulletproofSecondaryButton(download_url, "Download PDF (time-limited)", 250)
     : "";
 
+  // --- Footer "seal" (institutional) ---
+  const footerHairline = `background: rgba(255,214,128,.18);`;
+  const footerTitle = `OASIS DIGITAL PARLIAMENT`;
+  const footerSub = `VERIFICATION TERMINAL`;
+  const footerProtocol = `Certified via Hash-First Verification Protocol`;
+
   const html = `
 <!doctype html>
 <html>
@@ -517,7 +524,7 @@ serve(async (req) => {
                         </tr>
                       </table>
 
-                      <!-- 2-col: Left = Hash + copy, Right = QR bottom-right -->
+                      <!-- 2-col: Left = Hash, Right = QR bottom-right -->
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
                         <tr>
                           <!-- LEFT -->
@@ -563,7 +570,7 @@ serve(async (req) => {
                                   background-color:${panel};
                                 " align="right" valign="bottom">
                                   <img src="${qrPng}" width="168" height="168" alt="Verification QR"
-                                       style="display:block;border-radius:10px;border:1px solid rgba(255,255,255,.10);" />
+                                       style="display:block;border-radius:12px;border:1px solid rgba(255,255,255,.10);" />
                                   <div style="height:8px;line-height:8px;font-size:8px;">&nbsp;</div>
                                   <div style="font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:${textLo};text-align:right;">
                                     QR Verification
@@ -600,12 +607,24 @@ serve(async (req) => {
                     </td>
                   </tr>
 
+                  <!-- Footer seal -->
                   <tr>
                     <td style="padding:0 22px 18px 22px;">
-                      <div style="height:1px;background:rgba(255,255,255,.08);"></div>
-                      <div style="height:12px;line-height:12px;font-size:12px;">&nbsp;</div>
-                      <div style="font-size:10px;letter-spacing:.26em;text-transform:uppercase;color:rgba(148,163,184,.68);">
-                        ODP.AI • Verification
+                      <div style="height:1px;${footerHairline}"></div>
+                      <div style="height:14px;line-height:14px;font-size:14px;">&nbsp;</div>
+
+                      <div style="font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:rgba(203,213,225,.62);">
+                        ${footerTitle}
+                      </div>
+                      <div style="height:6px;line-height:6px;font-size:6px;">&nbsp;</div>
+                      <div style="font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:rgba(148,163,184,.58);">
+                        ${footerSub}
+                      </div>
+
+                      <div style="height:10px;line-height:10px;font-size:10px;">&nbsp;</div>
+
+                      <div style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:10px;line-height:1.45;color:rgba(148,163,184,.52);">
+                        ${footerProtocol}
                       </div>
                     </td>
                   </tr>
