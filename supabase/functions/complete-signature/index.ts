@@ -97,6 +97,14 @@ function safeUpper(v: unknown, fallback = "N/A") {
   return t ? t.toUpperCase() : fallback;
 }
 
+function normStatus(v: unknown): string {
+  return String(v ?? "").toLowerCase().trim();
+}
+
+function isCompletedStatus(v: unknown): boolean {
+  return normStatus(v) === "completed";
+}
+
 // ---------------------------------------------------------------------------
 // QR RENDERING (EDGE-SAFE): draw QR as vector modules directly in PDF
 // ---------------------------------------------------------------------------
@@ -179,7 +187,7 @@ async function resolveBasePdfPath(recordId: string): Promise<string | null> {
       .eq("name", name)
       .limit(1);
 
-    if (!error && data && data.length > 0) return String(data[0].name);
+    if (!error && data && data.length > 0) return String((data as any)[0].name);
   }
 
   const { data: rows, error: scanErr } = await supabase
@@ -213,16 +221,54 @@ async function resolveBasePdfPath(recordId: string): Promise<string | null> {
   return null;
 }
 
-async function mustUpdateEnvelope(envelope_id: string, patch: Record<string, unknown>) {
-  const { error } = await supabase
+// ---------------------------------------------------------------------------
+// IDEMPOTENT ENVELOPE UPDATE HELPERS (NO REGRESSION; prevents 500 on double-click)
+// ---------------------------------------------------------------------------
+async function readEnvelope(envelope_id: string) {
+  const { data, error } = await supabase
+    .from("signature_envelopes")
+    .select(
+      "id, status, title, entity_id, record_id, supporting_document_path, storage_path, metadata, is_test",
+    )
+    .eq("id", envelope_id)
+    .single();
+
+  if (error || !data) return { envelope: null as any, error };
+  return { envelope: data as any, error: null };
+}
+
+/**
+ * Update envelope ONLY if it is NOT completed.
+ * If it is completed (or becomes completed concurrently), this becomes a NO-OP and returns the latest envelope.
+ *
+ * This is the core fix: the DB correctly blocks mutations to completed envelopes;
+ * we must treat "already completed" as success, not a 500.
+ */
+async function updateEnvelopeIfNotCompleted(
+  envelope_id: string,
+  patch: Record<string, unknown>,
+) {
+  const { data, error } = await supabase
     .from("signature_envelopes")
     .update(patch)
-    .eq("id", envelope_id);
+    .eq("id", envelope_id)
+    .neq("status", "completed")
+    .select("id, status, metadata, entity_id, record_id, supporting_document_path, storage_path, title, is_test");
 
   if (error) {
     console.error("signature_envelopes update failed", error, patch);
     throw new Error(`ENVELOPE_UPDATE_FAILED: ${error.message}`);
   }
+
+  // If 0 rows updated, envelope is completed (or became completed).
+  if (!data || (Array.isArray(data) && data.length === 0)) {
+    const { envelope } = await readEnvelope(envelope_id);
+    return envelope;
+  }
+
+  // Supabase returns array for update+select.
+  const row = Array.isArray(data) ? (data[0] as any) : (data as any);
+  return row;
 }
 
 async function mustInsertEvent(row: Record<string, unknown>) {
@@ -272,8 +318,7 @@ async function resolveRegistrySnapshot(args: {
     });
 
     if (error || !data) return fallback;
-
-    if (!data.ok) return fallback;
+    if (!(data as any).ok) return fallback;
 
     const verified = (data as any).verified ?? null;
 
@@ -346,17 +391,43 @@ serve(async (req) => {
     const signedAt = new Date().toISOString();
 
     // 1) Load envelope
-    const { data: envelope, error: envErr } = await supabase
-      .from("signature_envelopes")
-      .select(
-        "id, status, title, entity_id, record_id, supporting_document_path, storage_path, metadata, is_test",
-      )
-      .eq("id", envelope_id)
-      .single();
-
+    const { envelope, error: envErr } = await readEnvelope(envelope_id);
     if (envErr || !envelope) {
       console.error("Envelope fetch error", envErr);
       return json({ ok: false, error: "Envelope not found", details: envErr }, 404);
+    }
+
+    // ✅ IDEMPOTENT EARLY RETURN (prevents 500 on double-click / retry)
+    // If already completed and caller is not explicitly forcing regen,
+    // treat as success and return the existing certificate/paths.
+    if (isCompletedStatus(envelope.status) && !force_regen) {
+      const meta = (envelope as any)?.metadata ?? {};
+      const cert = meta?.certificate ?? null;
+      const verifyUrl =
+        safeText(cert?.verify_url) ??
+        safeText(meta?.verify_url) ??
+        `https://sign.oasisintlholdings.com/verify.html?envelope_id=${envelope_id}`;
+
+      return json({
+        ok: true,
+        envelope_id,
+        status: "completed",
+        idempotent: true,
+        certificate: cert,
+        base_document_path: safeText(cert?.base_document_path) ?? null,
+        signed_document_path:
+          safeText(cert?.signed_document_path) ?? safeText(meta?.signed_document_path) ?? null,
+        signed_document_path_canonical:
+          safeText(cert?.signed_document_path_canonical) ??
+          safeText(meta?.signed_document_path_canonical) ??
+          null,
+        pdf_hash: safeText(cert?.pdf_hash) ?? safeText(meta?.pdf_hash) ?? null,
+        verify_url: verifyUrl,
+        wet_signature_mode: safeText(cert?.wet_signature_mode) ?? "click",
+        wet_signature_path: safeText(cert?.wet_signature_path) ?? null,
+        force_regen: false,
+        registry_attestation: cert?.registry_attestation ?? meta?.registry_attestation ?? null,
+      });
     }
 
     // 2) Load party (include party_token)
@@ -373,15 +444,15 @@ serve(async (req) => {
     }
 
     // 2.1) Capability token enforcement (NO REGRESSION)
-    if (party.party_token) {
-      const expected = String(party.party_token);
+    if ((party as any).party_token) {
+      const expected = String((party as any).party_token);
       const provided = String(providedToken ?? "");
 
       if (!provided) return json({ ok: false, error: "SIGNING_TOKEN_REQUIRED" }, 401);
       if (provided !== expected) return json({ ok: false, error: "SIGNING_TOKEN_INVALID" }, 403);
     }
 
-    const partyStatus = String(party.status ?? "").toLowerCase();
+    const partyStatus = String((party as any).status ?? "").toLowerCase();
     const alreadySigned = partyStatus === "signed";
     const wantRegen = !!force_regen;
 
@@ -449,13 +520,13 @@ serve(async (req) => {
     const { data: entity } = await supabase
       .from("entities")
       .select("id, slug, name")
-      .eq("id", envelope.entity_id)
+      .eq("id", (envelope as any).entity_id)
       .single();
 
     const { data: record } = await supabase
       .from("governance_ledger")
       .select("id, title, description, created_at")
-      .eq("id", envelope.record_id)
+      .eq("id", (envelope as any).record_id)
       .single();
 
     // 5.5) Verify URL (public terminal; registry confers authority)
@@ -483,7 +554,7 @@ serve(async (req) => {
         null;
 
       if (!basePath) {
-        basePath = await resolveBasePdfPath(String(envelope.record_id));
+        basePath = await resolveBasePdfPath(String((envelope as any).record_id));
       }
 
       if (!basePath) {
@@ -502,7 +573,7 @@ serve(async (req) => {
           // Resolver snapshot (metadata/UI/debug only; PDF must not assert registry)
           const registrySnapshot = await resolveRegistrySnapshot({
             envelope_id,
-            ledger_id: String(envelope.record_id),
+            ledger_id: String((envelope as any).record_id),
           });
 
           // Add certificate page (new final page; original pages untouched)
@@ -567,16 +638,19 @@ serve(async (req) => {
           let y = height - headerHeight - 34;
 
           // Declarative (certificate voice, not receipt voice)
-          certPage.drawText("This certificate confirms the electronic execution of the following record:", {
-            x: margin,
-            y,
-            size: 10,
-            font,
-            color: textMuted,
-          });
+          certPage.drawText(
+            "This certificate confirms the electronic execution of the following record:",
+            {
+              x: margin,
+              y,
+              size: 10,
+              font,
+              color: textMuted,
+            },
+          );
 
           y -= 26;
-          const title = record?.title ?? (envelope as any)?.title ?? "Corporate Record";
+          const title = (record as any)?.title ?? (envelope as any)?.title ?? "Corporate Record";
           certPage.drawText(title, {
             x: margin,
             y,
@@ -586,7 +660,7 @@ serve(async (req) => {
           });
 
           y -= 20;
-          const entityLine = entity?.name ?? "Entity";
+          const entityLine = (entity as any)?.name ?? "Entity";
           certPage.drawText(entityLine, {
             x: margin,
             y,
@@ -609,21 +683,21 @@ serve(async (req) => {
           const rightValueX = rightLabelX + labelW + valuePad;
 
           const leftLines: Array<[string, unknown]> = [
-            ["Certificate ID", envelope.id],
+            ["Certificate ID", (envelope as any).id],
             ["Entity", entityLine],
-            ["Record ID", String(envelope.record_id)],
+            ["Record ID", String((envelope as any).record_id)],
             ["Record Title", title],
             ["Executed At (UTC)", signedAt], // ✅ better language
             ["Envelope Status", nextStatus],
           ];
 
           const rightLines: Array<[string, unknown]> = [
-            ["Signer Name", party.display_name],
-            ["Signer Email", party.email ?? "N/A"],
-            ["Signer Role", party.role ?? "signer"],
-            ["Entity ID", String(envelope.entity_id)],
-            ["Entity Slug", entity?.slug ?? "n/a"],
-            ["Created At", record?.created_at ?? "N/A"],
+            ["Signer Name", (party as any).display_name],
+            ["Signer Email", (party as any).email ?? "N/A"],
+            ["Signer Role", (party as any).role ?? "signer"],
+            ["Entity ID", String((envelope as any).entity_id)],
+            ["Entity Slug", (entity as any)?.slug ?? "n/a"],
+            ["Created At", (record as any)?.created_at ?? "N/A"],
           ];
 
           let leftY = y;
@@ -895,16 +969,16 @@ serve(async (req) => {
             certificate_kind: "execution", // additive, no consumer required
 
             envelope_id,
-            record_id: envelope.record_id,
-            entity_id: envelope.entity_id,
-            entity_name: entity?.name ?? null,
-            record_title: record?.title ?? envelope.title ?? null,
+            record_id: (envelope as any).record_id,
+            entity_id: (envelope as any).entity_id,
+            entity_name: (entity as any)?.name ?? null,
+            record_title: (record as any)?.title ?? (envelope as any).title ?? null,
 
             signer: {
-              party_id: party.id,
-              name: party.display_name,
-              email: party.email,
-              role: party.role ?? "signer",
+              party_id: (party as any).id,
+              name: (party as any).display_name,
+              email: (party as any).email,
+              role: (party as any).role ?? "signer",
             },
 
             signed_at: signedAt,
@@ -918,7 +992,7 @@ serve(async (req) => {
             pdf_hash: pdfHash,
 
             bucket: BUCKET,
-            base_document_path: basePath ?? envSupport ?? envStorage ?? null,
+            base_document_path: basePath ?? safeText((envelope as any)?.supporting_document_path) ?? safeText((envelope as any)?.storage_path) ?? null,
             signed_document_path: signedPath,
             signed_document_path_canonical: signedPathCanonical,
 
@@ -951,7 +1025,7 @@ serve(async (req) => {
 
             // Mirror resolver snapshot at top-level (additive; no consumer required)
             registry_attestation:
-              certificate.registry_attestation ?? existingMeta.registry_attestation ?? null,
+              (certificate as any).registry_attestation ?? existingMeta.registry_attestation ?? null,
 
             wet_signature_mode:
               String(wet_signature_mode ?? "").toLowerCase() ||
@@ -960,7 +1034,11 @@ serve(async (req) => {
           };
 
           // IMPORTANT: do NOT set completed here; we set it after metadata is written.
-          await mustUpdateEnvelope(envelope_id, {
+          // ✅ Idempotent: if envelope becomes completed concurrently, this becomes a no-op (no 500).
+          const envSupport = safeText((envelope as any)?.supporting_document_path);
+          const envStorage = safeText((envelope as any)?.storage_path);
+
+          await updateEnvelopeIfNotCompleted(envelope_id, {
             status: "partial",
             metadata: newMetadata,
             supporting_document_path: envSupport ?? basePath ?? null,
@@ -986,8 +1064,9 @@ serve(async (req) => {
     }
 
     // 7) FINALIZE ENVELOPE STATUS (AFTER METADATA WRITE)
-    if (String(envelope.status ?? "").toLowerCase() !== nextStatus) {
-      await mustUpdateEnvelope(envelope_id, { status: nextStatus });
+    // ✅ Idempotent: update only if NOT completed; if already completed, treat as ok.
+    if (!isCompletedStatus((envelope as any).status) && normStatus((envelope as any).status) !== normStatus(nextStatus)) {
+      await updateEnvelopeIfNotCompleted(envelope_id, { status: nextStatus });
     }
 
     // 8) Downstream calls (NO REGRESSION)
@@ -998,7 +1077,7 @@ serve(async (req) => {
       try {
         const { data: env2 } = await supabase
           .from("signature_envelopes")
-          .select("metadata, entity_id, record_id")
+          .select("metadata, entity_id, record_id, status")
           .eq("id", envelope_id)
           .single();
         finalMeta = (env2 as any)?.metadata ?? null;
@@ -1011,20 +1090,20 @@ serve(async (req) => {
 
       if (signed_document_path) {
         try {
-          const entitySlug = entity?.slug ?? null;
-          const resolutionTitle = record?.title ?? envelope.title ?? "Signed Corporate Record";
+          const entitySlug = (entity as any)?.slug ?? null;
+          const resolutionTitle = (record as any)?.title ?? (envelope as any).title ?? "Signed Corporate Record";
 
           if (entitySlug) {
             const ingestBody = {
               entity_slug: entitySlug,
-              entity_id: envelope.entity_id,
+              entity_id: (envelope as any).entity_id,
               document_class: "resolution",
               section_name: "Resolutions",
               source_bucket: BUCKET,
               source_path: signed_document_path,
               title: resolutionTitle,
               source_table: "governance_ledger",
-              source_record_id: envelope.record_id,
+              source_record_id: (envelope as any).record_id,
               envelope_id,
               pdf_hash,
             };
@@ -1070,19 +1149,19 @@ serve(async (req) => {
     }
 
     // Final read
-    const { data: finalEnv } = await supabase
-      .from("signature_envelopes")
-      .select("metadata")
-      .eq("id", envelope_id)
-      .single();
-
+    const { envelope: finalEnv } = await readEnvelope(envelope_id);
     const meta = (finalEnv as any)?.metadata ?? {};
     const cert = meta?.certificate ?? null;
+
+    const finalVerifyUrl =
+      safeText(cert?.verify_url) ?? safeText(meta?.verify_url) ?? verifyUrl;
+
+    const finalStatus = isCompletedStatus((finalEnv as any)?.status) ? "completed" : nextStatus;
 
     return json({
       ok: true,
       envelope_id,
-      status: nextStatus,
+      status: finalStatus,
       certificate: cert,
       base_document_path: safeText(cert?.base_document_path) ?? null,
       signed_document_path:
@@ -1092,7 +1171,7 @@ serve(async (req) => {
         safeText(meta?.signed_document_path_canonical) ??
         null,
       pdf_hash: safeText(cert?.pdf_hash) ?? safeText(meta?.pdf_hash) ?? null,
-      verify_url: safeText(cert?.verify_url) ?? safeText(meta?.verify_url) ?? verifyUrl,
+      verify_url: finalVerifyUrl,
       wet_signature_mode: String(wet_signature_mode ?? "").toLowerCase() || "click",
       wet_signature_path: safeText(cert?.wet_signature_path) ?? null,
       force_regen: !!force_regen,
