@@ -3,6 +3,10 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
+// ✅ Edge-safe QR (NO canvas / NO wasm)
+import QRGen from "npm:qrcode-generator@1.4.4";
+import { PNG } from "npm:pngjs@7.0.0";
+
 /**
  * email-minute-book-entry (PRODUCTION — LOCKED)
  * ✅ Operator-auth required (JWT)
@@ -17,12 +21,13 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
  * ✅ Adds “Certified ✓” micro-shimmer (safe CSS; ignored by strict clients)
  * ✅ Tightens micro-spacing + badge hierarchy
  * ✅ Download button clearly secondary
+ * ✅ QR integrated (hash-first): QR encodes verify_url (NOT reinvented)
  *
  * Requires env:
  * - SUPABASE_URL
  * - SUPABASE_SERVICE_ROLE_KEY
- * - RESEND_API_KEY  (recommended)
- * - EMAIL_FROM      (e.g., "Oasis Digital Parliament <no-reply@yourdomain>")
+ * - RESEND_API_KEY
+ * - EMAIL_FROM
  */
 
 type ReqBody = {
@@ -50,6 +55,7 @@ type Resp =
       to_email: string;
       verify_url: string;
       download_url?: string | null;
+      qr_data_url?: string | null;
     }
   | { ok: false; request_id: string; error: string; details?: unknown };
 
@@ -127,6 +133,62 @@ async function sendViaResend(args: {
 
   const j = await res.json().catch(() => ({}));
   return j;
+}
+
+/**
+ * Generate a tiny PNG QR for a URL and return as data:image/png;base64,...
+ * ✅ Hash-first: QR encodes verify_url (which encodes the hash)
+ * ✅ Edge-safe: qrcode-generator + pngjs
+ */
+function qrPngDataUrl(payload: string, opts?: { scale?: number; margin?: number }) {
+  const scale = Math.max(2, Math.min(8, opts?.scale ?? 3)); // email-friendly
+  const margin = Math.max(0, Math.min(4, opts?.margin ?? 1));
+
+  const qr = QRGen(0, "M"); // auto type, medium EC
+  qr.addData(payload);
+  qr.make();
+
+  const count = qr.getModuleCount();
+  const size = (count + margin * 2) * scale;
+
+  const png = new PNG({ width: size, height: size });
+
+  // white background
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = (png.width * y + x) << 2;
+      png.data[i] = 255;
+      png.data[i + 1] = 255;
+      png.data[i + 2] = 255;
+      png.data[i + 3] = 255;
+    }
+  }
+
+  for (let r = 0; r < count; r++) {
+    for (let c = 0; c < count; c++) {
+      const dark = qr.isDark(r, c);
+      const px0 = (c + margin) * scale;
+      const py0 = (r + margin) * scale;
+
+      for (let dy = 0; dy < scale; dy++) {
+        for (let dx = 0; dx < scale; dx++) {
+          const x = px0 + dx;
+          const y = py0 + dy;
+          const i = (png.width * y + x) << 2;
+
+          const v = dark ? 0 : 255;
+          png.data[i] = v;
+          png.data[i + 1] = v;
+          png.data[i + 2] = v;
+          png.data[i + 3] = 255;
+        }
+      }
+    }
+  }
+
+  const buf = PNG.sync.write(png);
+  const b64 = btoa(String.fromCharCode(...buf));
+  return `data:image/png;base64,${b64}`;
 }
 
 serve(async (req) => {
@@ -384,6 +446,47 @@ serve(async (req) => {
     ? bulletproofSecondaryButton(download_url, "Download PDF (time-limited)", 230)
     : "";
 
+  // ✅ QR encodes verify_url (hash-first) — no reinvention
+  let qr_data_url: string | null = null;
+  try {
+    qr_data_url = qrPngDataUrl(verify_url, { scale: 3, margin: 1 });
+  } catch {
+    qr_data_url = null; // never fail email on QR generation
+  }
+
+  const qrBlock = qr_data_url
+    ? `
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
+        <tr>
+          <td style="padding:14px 0 0 0;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;">
+              <tr>
+                <td valign="top" style="padding:0 12px 0 0;">
+                  <div style="font-size:11px; letter-spacing:.22em; text-transform:uppercase; color:rgba(255,255,255,.58);">
+                    QR Verification
+                  </div>
+                  <div style="height:6px; line-height:6px; font-size:6px;">&nbsp;</div>
+                  <div style="font-size:12px; line-height:1.5; color:rgba(255,255,255,.70); max-width:420px;">
+                    Scan to open the official verification terminal (hash-first).
+                  </div>
+                </td>
+                <td valign="top" style="
+                  padding:10px;
+                  border-radius:14px;
+                  background: rgba(255,255,255,.06);
+                  border:1px solid rgba(255,255,255,.10);
+                ">
+                  <img src="${esc(qr_data_url)}" width="116" height="116" alt="QR Verification"
+                    style="display:block; border:0; width:116px; height:116px; border-radius:10px;" />
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    `
+    : "";
+
   const html = `
 <!doctype html>
 <html>
@@ -403,10 +506,14 @@ serve(async (req) => {
     <![endif]-->
     <style>
       ${shimmerKeyframes}
-      /* Some clients strip <style>; we keep everything important inline too. */
     </style>
   </head>
   <body style="margin:0; padding:0; background:${bg0}; background-color:${bg0};">
+    <!-- Preheader (hidden) -->
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">
+      Certified Minute Book entry. Verify instantly using the hash-first terminal.
+    </div>
+
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="${bg0}" style="background:${bg0}; background-color:${bg0}; padding:24px 10px;">
       <tr>
         <td align="center" style="padding:0;">
@@ -422,10 +529,12 @@ serve(async (req) => {
                 box-shadow: 0 18px 60px rgba(0,0,0,.55);
               ">
 
-                <!-- Gradient “authority” wash (safe even if stripped; bg stays solid) -->
-                <div style="display:none; max-height:0; overflow:hidden;">
-                  Oasis Digital Parliament Verification
-                </div>
+                <!-- Authority bar (bulletproof gold signal) -->
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                  <tr>
+                    <td style="height:2px; line-height:2px; background:${gold}; font-size:0;">&nbsp;</td>
+                  </tr>
+                </table>
 
                 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
                   <tr>
@@ -498,6 +607,8 @@ serve(async (req) => {
                         </tr>
                       </table>
 
+                      ${qrBlock}
+
                       <div style="height:16px; line-height:16px; font-size:16px;">&nbsp;</div>
 
                       <!-- Buttons row (bulletproof, Outlook-safe) -->
@@ -569,7 +680,14 @@ serve(async (req) => {
       text,
     });
 
-    return json({ ok: true, request_id, to_email, verify_url, download_url });
+    return json({
+      ok: true,
+      request_id,
+      to_email,
+      verify_url,
+      download_url,
+      qr_data_url,
+    });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Email send failed.";
     return json(
