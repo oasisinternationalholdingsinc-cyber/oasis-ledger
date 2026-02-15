@@ -21,8 +21,8 @@ import { PNG } from "npm:pngjs@7.0.0";
  * ✅ Adds “Certified ✓” micro-shimmer (safe CSS; ignored by strict clients)
  * ✅ Tightens micro-spacing + badge hierarchy
  * ✅ Download button clearly secondary
- * ✅ QR (hash-first) placed bottom-right (stable 2-col table)
- * ✅ Footer upgraded into an institutional “seal” (gold hairline + two-line authority)
+ * ✅ QR (hash-first) placed bottom-right (Apple OS: buttons row left, QR row right)
+ * ✅ Footer upgraded into a clean institutional “seal” (single hairline + 2–3 lines)
  *
  * Requires env:
  * - SUPABASE_URL
@@ -133,7 +133,6 @@ async function sendViaResend(args: {
 // ---------------- QR helpers (verify_url -> PNG data URI) ----------------
 
 function qrToPngDataUri(input: string, sizePx = 160): string {
-  // qrcode-generator gives modules; we render to PNG w/ pngjs (Edge-safe)
   const qr = QRGen(0, "M"); // auto version, medium ECC
   qr.addData(input);
   qr.make();
@@ -142,7 +141,6 @@ function qrToPngDataUri(input: string, sizePx = 160): string {
   const quiet = 4; // quiet zone modules
   const modules = count + quiet * 2;
 
-  // pick integer scale so we hit roughly sizePx
   const scale = Math.max(3, Math.floor(sizePx / modules));
   const outSize = modules * scale;
 
@@ -192,9 +190,9 @@ function qrToPngDataUri(input: string, sizePx = 160): string {
 const gold = "#FFD680";
 const ink = "#0B0F17";
 const bg0 = "#05070C";
-const card = "#0B0F17"; // more solid (prevents "faded" look)
-const panel = "#0F172A"; // deep slate
-const stroke = "#1E293B"; // solid stroke
+const card = "#0B0F17"; // solid (prevents "faded" look)
+const panel = "#0F172A";
+const stroke = "#1E293B";
 const textHi = "#FFFFFF";
 const textMd = "#CBD5E1";
 const textLo = "#94A3B8";
@@ -434,8 +432,7 @@ serve(async (req) => {
     ? bulletproofSecondaryButton(download_url, "Download PDF (time-limited)", 250)
     : "";
 
-  // --- Footer "seal" (institutional) ---
-  const footerHairline = `background: rgba(255,214,128,.18);`;
+  // Footer seal (polished, not “100 lines”)
   const footerTitle = `OASIS DIGITAL PARLIAMENT`;
   const footerSub = `VERIFICATION TERMINAL`;
   const footerProtocol = `Certified via Hash-First Verification Protocol`;
@@ -481,7 +478,8 @@ serve(async (req) => {
                   <tr>
                     <td style="padding:22px 22px 18px 22px;">
 
-                      <div style="letter-spacing:.34em;text-transform:uppercase;font-size:11px;color:${textLo};">
+                      <!-- Top title (slightly brighter so it doesn’t disappear) -->
+                      <div style="letter-spacing:.34em;text-transform:uppercase;font-size:11px;color:rgba(203,213,225,.74);">
                         OASIS DIGITAL PARLIAMENT
                       </div>
 
@@ -524,41 +522,61 @@ serve(async (req) => {
                         </tr>
                       </table>
 
-                      <!-- 2-col: Left = Hash, Right = QR bottom-right -->
+                      <!-- Full-width hash card (Apple: primary) -->
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
                         <tr>
-                          <!-- LEFT -->
-                          <td valign="top" style="padding:0 14px 0 0;">
-                            <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
-                              <tr>
-                                <td style="
-                                  padding:14px 14px;
-                                  border-radius:16px;
-                                  border:1px solid rgba(255,255,255,.10);
-                                  background:${panel};
-                                  background-color:${panel};
-                                ">
-                                  <div style="font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:${textLo};">
-                                    Verification Hash
-                                  </div>
-                                  <div style="height:8px;line-height:8px;font-size:8px;">&nbsp;</div>
-                                  <div style="
-                                    font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
-                                    font-size:12px;
-                                    color:${textHi};
-                                    word-break:break-all;
-                                  ">${esc(file_hash)}</div>
+                          <td style="
+                            padding:14px 14px;
+                            border-radius:16px;
+                            border:1px solid rgba(255,255,255,.10);
+                            background:${panel};
+                            background-color:${panel};
+                          ">
+                            <div style="font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:${textLo};">
+                              Verification Hash
+                            </div>
+                            <div style="height:8px;line-height:8px;font-size:8px;">&nbsp;</div>
+                            <div style="
+                              font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+                              font-size:12px;
+                              color:${textHi};
+                              word-break:break-all;
+                            ">${esc(file_hash)}</div>
 
-                                  <div style="height:10px;line-height:10px;font-size:10px;">&nbsp;</div>
-                                  <div style="font-size:11px;line-height:1.45;color:${textLo};">
-                                    QR opens the official verification terminal (hash-first).
-                                  </div>
-                                </td>
+                            <div style="height:10px;line-height:10px;font-size:10px;">&nbsp;</div>
+                            <div style="font-size:11px;line-height:1.45;color:${textLo};">
+                              QR opens the official verification terminal (hash-first).
+                            </div>
+                          </td>
+                        </tr>
+                      </table>
+
+                      <div style="height:16px;line-height:16px;font-size:16px;">&nbsp;</div>
+
+                      <!-- Bottom row: buttons left, QR right (Apple OS anchor) -->
+                      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
+                        <tr>
+                          <td valign="bottom" align="left" style="padding:0 14px 0 0;">
+                            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;">
+                              <tr>
+                                <td style="padding:0 10px 0 0;">${verifyBtn}</td>
+                                ${downloadBtn ? `<td style="padding:0;">${downloadBtn}</td>` : ``}
                               </tr>
                             </table>
+
+                            <div style="height:14px;line-height:14px;font-size:14px;">&nbsp;</div>
+
+                            <div style="font-size:11px;line-height:1.55;color:${textLo};max-width:420px;">
+                              This email contains a hash-first verification link. The public verification terminal is authoritative.
+                            </div>
+
+                            <div style="height:10px;line-height:10px;font-size:10px;">&nbsp;</div>
+
+                            <div style="font-size:11px;line-height:1.55;color:rgba(148,163,184,.72);max-width:420px;">
+                              If you did not request this message, you may ignore it.
+                            </div>
                           </td>
 
-                          <!-- RIGHT (QR pinned bottom-right) -->
                           <td valign="bottom" align="right" style="padding:0;">
                             <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;">
                               <tr>
@@ -582,50 +600,34 @@ serve(async (req) => {
                         </tr>
                       </table>
 
-                      <div style="height:16px;line-height:16px;font-size:16px;">&nbsp;</div>
-
-                      <!-- Buttons row -->
-                      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;">
-                        <tr>
-                          <td style="padding:0 10px 0 0;">${verifyBtn}</td>
-                          ${downloadBtn ? `<td style="padding:0;">${downloadBtn}</td>` : ``}
-                        </tr>
-                      </table>
-
-                      <div style="height:16px;line-height:16px;font-size:16px;">&nbsp;</div>
-
-                      <div style="font-size:11px;line-height:1.55;color:${textLo};">
-                        This email contains a hash-first verification link. The public verification terminal is authoritative.
-                      </div>
-
-                      <div style="height:12px;line-height:12px;font-size:12px;">&nbsp;</div>
-
-                      <div style="font-size:11px;line-height:1.55;color:rgba(148,163,184,.72);">
-                        If you did not request this message, you may ignore it.
-                      </div>
-
                     </td>
                   </tr>
 
-                  <!-- Footer seal -->
+                  <!-- Footer seal (single clean band, not “100 lines”) -->
                   <tr>
                     <td style="padding:0 22px 18px 22px;">
-                      <div style="height:1px;${footerHairline}"></div>
-                      <div style="height:14px;line-height:14px;font-size:14px;">&nbsp;</div>
+                      <div style="height:1px;background:rgba(255,214,128,.18);"></div>
+                      <div style="height:12px;line-height:12px;font-size:12px;">&nbsp;</div>
 
-                      <div style="font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:rgba(203,213,225,.62);">
-                        ${footerTitle}
-                      </div>
-                      <div style="height:6px;line-height:6px;font-size:6px;">&nbsp;</div>
-                      <div style="font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:rgba(148,163,184,.58);">
-                        ${footerSub}
-                      </div>
+                      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;">
+                        <tr>
+                          <td align="left" valign="top" style="padding:0;">
+                            <div style="font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:rgba(203,213,225,.62);">
+                              ${footerTitle}
+                            </div>
+                            <div style="height:6px;line-height:6px;font-size:6px;">&nbsp;</div>
+                            <div style="font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:rgba(148,163,184,.56);">
+                              ${footerSub}
+                            </div>
+                          </td>
+                          <td align="right" valign="top" style="padding:0;">
+                            <div style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:10px;line-height:1.45;color:rgba(148,163,184,.50);text-align:right;">
+                              ${footerProtocol}
+                            </div>
+                          </td>
+                        </tr>
+                      </table>
 
-                      <div style="height:10px;line-height:10px;font-size:10px;">&nbsp;</div>
-
-                      <div style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:10px;line-height:1.45;color:rgba(148,163,184,.52);">
-                        ${footerProtocol}
-                      </div>
                     </td>
                   </tr>
 
