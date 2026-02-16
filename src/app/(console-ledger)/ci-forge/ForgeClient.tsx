@@ -1,3 +1,4 @@
+// src/app/(console-ledger)/ci-forge/ForgeClient.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -7,7 +8,7 @@ import Link from "next/link";
 import { supabaseBrowser as supabase } from "@/lib/supabaseClient";
 import { useEntity } from "@/components/OsEntityContext";
 import { useOsEnv } from "@/components/OsEnvContext";
-import { ArrowLeft, ExternalLink, Copy, RefreshCw } from "lucide-react";
+import { ArrowLeft, ExternalLink, Copy, RefreshCw, Plus, Trash2 } from "lucide-react";
 
 /**
  * CI — Forge (Execution Console)
@@ -26,11 +27,10 @@ import { ArrowLeft, ExternalLink, Copy, RefreshCw } from "lucide-react";
  * 6) ✅ Portal cleanup (PRODUCTION): ONLY public terminal exposed is VERIFY.
  *    - Removed Portal tab + removed Viewer/Certificate links + removed "Open Signer" portal affordance.
  *    - Signing remains via Forge actions (Start Envelope + Send Invite) — no portal-signer UI.
- *
- * ✅ NEW (UI polish — no wiring changes):
- * 7) Micro-spacing + badge hierarchy cleanup (Verified + Lane + Copy feedback).
- * 8) Tiny “Certified ✓” shimmer when Verified hash exists (pure UI).
- * 9) Subtle success pulse after Archive / Re-seal / Invite / Start actions (pure UI).
+ * 7) ✅ Multi-signer support (UI + payload, backward compatible):
+ *    - Supports multiple signers with role + required flag.
+ *    - Sends `signers[]` payload when supported by backend; falls back to legacy single-signer payload if rejected.
+ *    - Does NOT change Start Envelope, Archive, Reseal, Verified registry, or lane/entity scoping.
  */
 
 type ForgeQueueItem = {
@@ -165,6 +165,16 @@ type IntentArtifactRow = {
   created_at: string | null;
 };
 
+/* ---------------- Multi-signer types ---------------- */
+
+type SignerRow = {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+  required: boolean;
+};
+
 function fmt(iso: string | null | undefined) {
   if (!iso) return "—";
   try {
@@ -220,12 +230,10 @@ function MiniPill({
   label,
   tone = "slate",
   title,
-  shimmer,
 }: {
   label: string;
   tone?: "slate" | "amber" | "emerald" | "cyan" | "rose";
   title?: string;
-  shimmer?: boolean;
 }) {
   const cls =
     tone === "emerald"
@@ -242,41 +250,11 @@ function MiniPill({
     <span
       title={title}
       className={cx(
-        "relative inline-flex items-center gap-2 rounded-full border px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase",
-        cls,
-        shimmer ? "overflow-hidden" : ""
+        "inline-flex items-center gap-2 rounded-full border px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase",
+        cls
       )}
     >
       {label}
-      {shimmer ? (
-        <span
-          aria-hidden="true"
-          className={cx(
-            "pointer-events-none absolute inset-0",
-            "after:absolute after:inset-y-0 after:left-[-40%] after:w-[40%]",
-            "after:bg-gradient-to-r after:from-transparent after:via-white/15 after:to-transparent",
-            "after:animate-[forgeShimmer_1.35s_ease-in-out_infinite]"
-          )}
-          style={{
-            // tailwind-safe custom keyframes (inline)
-            // eslint-disable-next-line react/no-unknown-property
-            ["--forgeShimmer" as any]: "1",
-          }}
-        />
-      ) : null}
-      <style jsx>{`
-        @keyframes forgeShimmer {
-          0% {
-            transform: translateX(-20%);
-          }
-          100% {
-            transform: translateX(220%);
-          }
-        }
-        .after\\:animate-\\[forgeShimmer_1\\.35s_ease-in-out_infinite\\]::after {
-          animation: forgeShimmer 1.35s ease-in-out infinite;
-        }
-      `}</style>
     </span>
   );
 }
@@ -405,9 +383,45 @@ export default function ForgeClient() {
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
+  // Legacy single-signer fields (kept for backward-compatible fallback — NO REGRESSION)
   const [primarySignerName, setPrimarySignerName] = useState("");
   const [primarySignerEmail, setPrimarySignerEmail] = useState("");
   const [ccEmails, setCcEmails] = useState("");
+
+  // ✅ Multi-signer state (preferred path)
+  const [signers, setSigners] = useState<SignerRow[]>([
+    { id: typeof crypto !== "undefined" ? crypto.randomUUID() : "s1", name: "", email: "", role: "Director", required: true },
+  ]);
+
+  function updateSigner(id: string, field: keyof SignerRow, value: any) {
+    setSigners((prev) => prev.map((s) => (s.id === id ? { ...s, [field]: value } : s)));
+  }
+
+  function addSigner() {
+    setSigners((prev) => [
+      ...prev,
+      {
+        id: typeof crypto !== "undefined" ? crypto.randomUUID() : String(Date.now()),
+        name: "",
+        email: "",
+        role: "Director",
+        required: true,
+      },
+    ]);
+  }
+
+  function removeSigner(id: string) {
+    setSigners((prev) => prev.filter((s) => s.id !== id));
+  }
+
+  // Keep legacy single-signer inputs synced to signer[0] so fallback path stays correct
+  useEffect(() => {
+    const first = signers[0];
+    if (!first) return;
+    setPrimarySignerName(first.name ?? "");
+    setPrimarySignerEmail(first.email ?? "");
+    // role/required live only in multi-signer path (no regression to legacy)
+  }, [signers]);
 
   const [isStarting, setIsStarting] = useState(false);
   const [isSendingInvite, setIsSendingInvite] = useState(false);
@@ -472,10 +486,6 @@ export default function ForgeClient() {
   // ✅ enhancements: local copy flash
   const [copied, setCopied] = useState<string | null>(null);
 
-  // ✅ NEW: subtle success pulse + certified shimmer nudge (UI-only)
-  const [successPulse, setSuccessPulse] = useState(false);
-  const [certifiedPulse, setCertifiedPulse] = useState(false);
-
   useEffect(() => {
     if (!copied) return;
     const t = setTimeout(() => setCopied(null), 1800);
@@ -521,10 +531,6 @@ export default function ForgeClient() {
   function flashInfo(msg: string) {
     setInfo(msg);
     setTimeout(() => setInfo(null), 5200);
-
-    // ✅ subtle UI pulse on success events
-    setSuccessPulse(true);
-    setTimeout(() => setSuccessPulse(false), 750);
   }
 
   function flashAxiomError(msg: string) {
@@ -536,9 +542,6 @@ export default function ForgeClient() {
   function flashAxiomInfo(msg: string) {
     setAxiomInfo(msg);
     setTimeout(() => setAxiomInfo(null), 5000);
-
-    setSuccessPulse(true);
-    setTimeout(() => setSuccessPulse(false), 750);
   }
 
   function flashIntentError(msg: string) {
@@ -550,9 +553,6 @@ export default function ForgeClient() {
   function flashIntentInfo(msg: string) {
     setIntentInfo(msg);
     setTimeout(() => setIntentInfo(null), 5200);
-
-    setSuccessPulse(true);
-    setTimeout(() => setSuccessPulse(false), 750);
   }
 
   const envPill = () => (
@@ -566,16 +566,6 @@ export default function ForgeClient() {
       {isTest ? "SANDBOX" : "RoT"}
     </span>
   );
-
-  const certifiedHash = evidence.verified_document?.file_hash ?? null;
-  const isCertified = !!certifiedHash;
-
-  useEffect(() => {
-    if (!isCertified) return;
-    setCertifiedPulse(true);
-    const t = setTimeout(() => setCertifiedPulse(false), 1600);
-    return () => clearTimeout(t);
-  }, [isCertified]);
 
   const computeRiskLevel = (item: ForgeQueueItem): RiskLevel => {
     const days = item.days_since_last_signature ?? null;
@@ -753,6 +743,23 @@ export default function ForgeClient() {
     setIntentArtifacts([]);
     setIntentError(null);
     setIntentInfo(null);
+  }, [selected?.ledger_id]);
+
+  // Reset signers when selection changes (safe default; no regression)
+  useEffect(() => {
+    setSigners((prev) => {
+      const first = prev?.[0] ?? null;
+      return [
+        {
+          id: typeof crypto !== "undefined" ? crypto.randomUUID() : "s1",
+          name: first?.name ?? "",
+          email: first?.email ?? "",
+          role: first?.role ?? "Director",
+          required: true,
+        },
+      ];
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.ledger_id]);
 
   // --------------------------
@@ -1250,7 +1257,7 @@ export default function ForgeClient() {
   }
 
   // --------------------------
-  // Send Invite
+  // Send Invite (Multi-signer, backward compatible)
   // --------------------------
   async function onSendInvite() {
     setError(null);
@@ -1262,18 +1269,49 @@ export default function ForgeClient() {
       return;
     }
 
-    const name = primarySignerName.trim();
-    const email = primarySignerEmail.trim();
+    const cleanedSigners = (signers || [])
+      .map((s) => ({
+        name: (s.name || "").trim() || null,
+        email: (s.email || "").trim(),
+        role: (s.role || "").trim() || null,
+        required: !!s.required,
+      }))
+      .filter((s) => !!s.email && s.email.includes("@"));
 
-    if (!email || !email.includes("@")) {
-      flashError("Signer email is required.");
+    // At least one signer is required for either path
+    if (cleanedSigners.length === 0) {
+      flashError("At least one valid signer email is required.");
       return;
     }
 
     setIsSendingInvite(true);
     try {
-      const { data, error } = await supabase.functions.invoke("send-signature-invite", {
-        body: {
+      // Preferred: multi-signer payload
+      const bodyMulti = {
+        envelope_id: selected.envelope_id,
+        signers: cleanedSigners,
+        cc_emails: ccEmails
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .slice(0, 10),
+        is_test: isTest,
+        entity_slug: activeEntity,
+      };
+
+      const r1 = await supabase.functions.invoke("send-signature-invite", { body: bodyMulti });
+
+      if (r1.error) {
+        // Fallback: legacy single-signer payload (NO REGRESSION)
+        const email = primarySignerEmail.trim() || cleanedSigners[0]?.email;
+        const name = primarySignerName.trim() || (cleanedSigners[0]?.name ?? "");
+
+        if (!email || !email.includes("@")) {
+          const msg = await extractFnError(r1.error);
+          throw new Error(msg || "Invite failed.");
+        }
+
+        const bodyLegacy = {
           envelope_id: selected.envelope_id,
           signer_name: name || null,
           signer_email: email,
@@ -1284,21 +1322,33 @@ export default function ForgeClient() {
             .slice(0, 10),
           is_test: isTest,
           entity_slug: activeEntity,
-        },
-      });
+        };
 
-      if (error) {
-        const msg = await extractFnError(error);
-        throw new Error(msg);
+        const r2 = await supabase.functions.invoke("send-signature-invite", { body: bodyLegacy });
+
+        if (r2.error) {
+          const msg = await extractFnError(r2.error);
+          throw new Error(msg);
+        }
+
+        const res2 = r2.data as SendInviteResponse;
+        if (!res2?.ok) {
+          flashError(res2?.error ?? "Invite failed.");
+          return;
+        }
+
+        flashInfo(res2?.message ?? "Invite sent (legacy).");
+        await refreshQueuesKeepSelection(selected.ledger_id);
+        return;
       }
 
-      const res = data as SendInviteResponse;
+      const res = r1.data as SendInviteResponse;
       if (!res?.ok) {
         flashError(res?.error ?? "Invite failed.");
         return;
       }
 
-      flashInfo(res?.message ?? "Invite sent.");
+      flashInfo(res?.message ?? "Invites sent.");
       await refreshQueuesKeepSelection(selected.ledger_id);
     } catch (e: any) {
       console.error("onSendInvite error", e);
@@ -1670,8 +1720,7 @@ export default function ForgeClient() {
         className={cx(
           "w-full rounded-2xl px-4 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase transition",
           tone === "emerald" || tone === "slate" ? cls : cx("border", cls),
-          disabled ? "opacity-70 cursor-not-allowed border-white/10 bg-white/[0.04] text-slate-400" : "",
-          !disabled && successPulse ? "ring-1 ring-emerald-500/30" : ""
+          disabled ? "opacity-70 cursor-not-allowed border-white/10 bg-white/[0.04] text-slate-400" : ""
         )}
       >
         {label}
@@ -1722,10 +1771,6 @@ export default function ForgeClient() {
           onClick={async () => {
             const ok = await safeCopy(value);
             setCopied(ok ? label : "Copy failed");
-            if (ok) {
-              setSuccessPulse(true);
-              setTimeout(() => setSuccessPulse(false), 650);
-            }
           }}
         >
           <Copy className="h-4 w-4" />
@@ -1754,22 +1799,11 @@ export default function ForgeClient() {
               <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">
                 CI — Forge <span className="mx-2 text-slate-700">•</span> Execution Console
               </div>
-
-              <div className="mt-1 flex flex-wrap items-center gap-2">
+              <div className="mt-1 flex items-center gap-2">
                 <div className="text-base font-semibold text-slate-100">Sign → Verify → Archive</div>
                 {envPill()}
-                {isCertified ? (
-                  <MiniPill
-                    label="Certified ✓"
-                    tone="emerald"
-                    shimmer={certifiedPulse}
-                    title="Verified registry hash exists for this record."
-                  />
-                ) : null}
                 {copied ? <MiniPill label={copied} tone={copied === "Copy failed" ? "rose" : "emerald"} /> : null}
-                {successPulse ? <MiniPill label="Success" tone="emerald" /> : null}
               </div>
-
               <div className="mt-1 text-[12px] text-slate-400">
                 Entity-scoped via OS Global Bar • Lane-safe via <span className="font-mono">is_test</span> • No shortcuts
               </div>
@@ -1912,7 +1946,7 @@ export default function ForgeClient() {
             {!selected ? (
               <EmptyState title="Select a record to view details." />
             ) : (
-              <div className={cx("rounded-3xl border border-white/10 bg-black/20 overflow-hidden", successPulse ? "ring-1 ring-emerald-500/20" : "")}>
+              <div className="rounded-3xl border border-white/10 bg-black/20 overflow-hidden">
                 <div className="px-4 sm:px-5 py-4 border-b border-white/10 bg-white/[0.03]">
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
@@ -1927,7 +1961,9 @@ export default function ForgeClient() {
                       <div className="mt-3 space-y-2">
                         <CopyRow label="Ledger ID" value={selected.ledger_id} />
                         {selected.envelope_id ? <CopyRow label="Envelope ID" value={selected.envelope_id} /> : null}
-                        {certifiedHash ? <CopyRow label="Verified Hash" value={certifiedHash} /> : null}
+                        {evidence.verified_document?.file_hash ? (
+                          <CopyRow label="Verified Hash" value={evidence.verified_document.file_hash} />
+                        ) : null}
                       </div>
                     </div>
 
@@ -1964,31 +2000,105 @@ export default function ForgeClient() {
                 <div className="px-4 sm:px-5 py-5">
                   <div className="grid grid-cols-12 gap-4">
                     <div className="col-span-12">
-                      <SectionTitle label="Signature" hint="Create envelope, invite signer, monitor status." />
+                      <SectionTitle label="Signature" hint="Create envelope, invite signers, monitor status." />
                     </div>
 
                     <div className="col-span-12">
                       <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
                         <div className="grid grid-cols-12 gap-3">
-                          <div className="col-span-12 md:col-span-6">
-                            <label className="block text-[11px] uppercase tracking-[0.22em] text-slate-500">Signer name</label>
-                            <input
-                              value={primarySignerName}
-                              onChange={(e) => setPrimarySignerName(e.target.value)}
-                              className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-[13px] text-slate-100 outline-none focus:border-white/20"
-                              placeholder="Primary signer (optional)"
-                            />
-                          </div>
-                          <div className="col-span-12 md:col-span-6">
-                            <label className="block text-[11px] uppercase tracking-[0.22em] text-slate-500">Signer email</label>
-                            <input
-                              value={primarySignerEmail}
-                              onChange={(e) => setPrimarySignerEmail(e.target.value)}
-                              className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-[13px] text-slate-100 outline-none focus:border-white/20"
-                              placeholder="name@email.com"
-                            />
+                          {/* MULTI SIGNERS */}
+                          <div className="col-span-12">
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <label className="block text-[11px] uppercase tracking-[0.22em] text-slate-500">
+                                  Signers (parallel)
+                                </label>
+                                <div className="mt-1 text-[11px] text-slate-500">
+                                  Roles + required flags are snapshotted by the envelope service when supported. UI is backward compatible.
+                                </div>
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={addSigner}
+                                className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:border-white/20 hover:bg-white/5 transition"
+                              >
+                                <Plus className="h-4 w-4" /> Add
+                              </button>
+                            </div>
+
+                            <div className="mt-3 space-y-3">
+                              {signers.map((s, idx) => (
+                                <div
+                                  key={s.id}
+                                  className="rounded-2xl border border-white/10 bg-black/20 p-3 grid grid-cols-12 gap-3"
+                                >
+                                  <div className="col-span-12 md:col-span-3">
+                                    <label className="block text-[10px] uppercase tracking-[0.22em] text-slate-500">
+                                      Name
+                                    </label>
+                                    <input
+                                      value={s.name}
+                                      onChange={(e) => updateSigner(s.id, "name", e.target.value)}
+                                      className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-[13px] text-slate-100 outline-none focus:border-white/20"
+                                      placeholder={idx === 0 ? "Primary signer" : "Signer name"}
+                                    />
+                                  </div>
+
+                                  <div className="col-span-12 md:col-span-4">
+                                    <label className="block text-[10px] uppercase tracking-[0.22em] text-slate-500">
+                                      Email
+                                    </label>
+                                    <input
+                                      value={s.email}
+                                      onChange={(e) => updateSigner(s.id, "email", e.target.value)}
+                                      className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-[13px] text-slate-100 outline-none focus:border-white/20"
+                                      placeholder="name@email.com"
+                                    />
+                                  </div>
+
+                                  <div className="col-span-12 md:col-span-3">
+                                    <label className="block text-[10px] uppercase tracking-[0.22em] text-slate-500">
+                                      Role
+                                    </label>
+                                    <input
+                                      value={s.role}
+                                      onChange={(e) => updateSigner(s.id, "role", e.target.value)}
+                                      className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-[13px] text-slate-100 outline-none focus:border-white/20"
+                                      placeholder="Director / CFO / Secretary"
+                                    />
+                                  </div>
+
+                                  <div className="col-span-8 md:col-span-1 flex items-center">
+                                    <label className="flex items-center gap-2 text-[12px] text-slate-200 mt-6 md:mt-0">
+                                      <input
+                                        type="checkbox"
+                                        checked={s.required}
+                                        onChange={(e) => updateSigner(s.id, "required", e.target.checked)}
+                                        className="h-4 w-4 accent-amber-400"
+                                      />
+                                      Req
+                                    </label>
+                                  </div>
+
+                                  <div className="col-span-4 md:col-span-1 flex items-center justify-end">
+                                    {signers.length > 1 ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => removeSigner(s.id)}
+                                        className="mt-6 md:mt-0 inline-flex items-center justify-center rounded-xl border border-rose-500/20 bg-rose-500/10 p-2 text-rose-200 hover:bg-rose-500/15 transition"
+                                        title="Remove signer"
+                                      >
+                                        <Trash2 className="h-4 w-4" />
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
                           </div>
 
+                          {/* CC */}
                           <div className="col-span-12">
                             <label className="block text-[11px] uppercase tracking-[0.22em] text-slate-500">
                               CC emails (comma-separated)
@@ -1999,22 +2109,18 @@ export default function ForgeClient() {
                               className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-[13px] text-slate-100 outline-none focus:border-white/20"
                               placeholder="optional@cc.com, another@cc.com"
                             />
+                            <div className="mt-2 text-[11px] text-slate-500">CC never blocks completion.</div>
                           </div>
 
                           <div className="col-span-12 md:col-span-6">
                             <ActionButton
                               label="Send Invite"
                               tone="amber"
-                              disabled={
-                                isSendingInvite ||
-                                !selected.envelope_id ||
-                                !primarySignerEmail.trim().includes("@") ||
-                                selected.envelope_status === "completed"
-                              }
+                              disabled={isSendingInvite || !selected.envelope_id || selected.envelope_status === "completed"}
                               onClick={() => setInviteModalOpen(true)}
                             />
                             <div className="mt-2 text-[11px] text-slate-500">
-                              Requires an envelope. Invite sends to signer + optional CC.
+                              Sends to all valid signer emails above. Falls back to legacy if backend rejects multi-signer payload.
                             </div>
                           </div>
 
@@ -2045,12 +2151,7 @@ export default function ForgeClient() {
                               <ActionButton
                                 label={archiveLocked ? "Archive Signed (Already)" : "Archive Signed (Direct)"}
                                 tone="amber"
-                                disabled={
-                                  isArchivingSigned ||
-                                  selected.envelope_status !== "completed" ||
-                                  !selected.envelope_id ||
-                                  archiveLocked
-                                }
+                                disabled={isArchivingSigned || selected.envelope_status !== "completed" || !selected.envelope_id || archiveLocked}
                                 onClick={() => setArchiveSignedModalOpen(true)}
                               />
                               <div className="mt-2 text-[11px] text-slate-500">
@@ -2212,11 +2313,7 @@ export default function ForgeClient() {
                           </div>
 
                           <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Verified Registry</div>
-                              {isCertified ? <MiniPill label="Certified ✓" tone="emerald" shimmer={certifiedPulse} /> : null}
-                            </div>
-
+                            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Verified Registry</div>
                             <div className="mt-2 text-[12px] text-slate-200">
                               {evidence.verified_document?.id ? (
                                 <>
@@ -2424,7 +2521,7 @@ export default function ForgeClient() {
       <Modal
         open={inviteModalOpen}
         title="Send signature invite"
-        description="Sends the signing invitation to the primary signer (and optional CC)."
+        description="Sends invitations to all valid signer emails (parallel). Backward compatible fallback is supported."
         confirmLabel={isSendingInvite ? "Sending…" : "Send"}
         confirmTone="amber"
         confirmDisabled={isSendingInvite}
