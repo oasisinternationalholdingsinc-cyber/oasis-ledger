@@ -1,4 +1,5 @@
 // supabase/functions/scribe/index.ts
+
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -163,6 +164,38 @@ function detectJurisdictionAuthority(instructionsRaw: string): {
   }
 
   return { jurisdiction: null, authority_basis: null };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Draft Cleanup (prevents audit notes leaking into final)                    */
+/* -------------------------------------------------------------------------- */
+
+function stripAuditNotes(text: string): string {
+  const s = String(text ?? "").trim();
+  if (!s) return s;
+
+  // Common patterns the model appends after a separator.
+  // We remove anything starting from these headings to end-of-document.
+  const patterns: RegExp[] = [
+    /(?:^|\n)\s*---\s*\n[\s\S]*$/g, // separator then anything
+    /(?:^|\n)\s*\*\*\s*structural audit notes\s*\*\*[\s\S]*$/gi,
+    /(?:^|\n)\s*\*\*\s*notes on structural audit\s*\*\*[\s\S]*$/gi,
+    /(?:^|\n)\s*structural audit notes\s*:\s*[\s\S]*$/gi,
+    /(?:^|\n)\s*notes on structural audit\s*:\s*[\s\S]*$/gi,
+    /(?:^|\n)\s*audit notes\s*:\s*[\s\S]*$/gi,
+    /(?:^|\n)\s*notes\s+on\s+structural\s+audit\s*[\s\S]*$/gi,
+  ];
+
+  let out = s;
+  for (const re of patterns) out = out.replace(re, "").trim();
+
+  // Also strip trailing “The document is structurally sound …” style lines if they slipped through
+  out = out.replace(
+    /(?:^|\n)\s*the document is structurally sound[\s\S]*$/gi,
+    "",
+  ).trim();
+
+  return out;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -333,7 +366,7 @@ serve(async (req) => {
     const recordType = normalizeType(type);
 
     /* ---------------------------------------------------------------------- */
-    /* ENTERPRISE DOCTRINE (NEW — NO REWIRING)                                */
+    /* ENTERPRISE DOCTRINE (NO REWIRING)                                      */
     /* ---------------------------------------------------------------------- */
 
     const { jurisdiction, authority_basis } =
@@ -346,18 +379,20 @@ Non-negotiables:
 - Produce a board-ready ${recordType} document appropriate for a corporate minute book.
 - Be litigation-grade: precise language, clean structure, no fluff.
 - Avoid overstatement: do NOT claim registry certification unless explicitly instructed.
-- Use clear modal verbs: "shall" for obligations, "may" for permissions.
-- Avoid redundancy; each WHEREAS or RESOLVED clause must add unique meaning.
-- Include an effective timing clause when applicable (e.g., "effective as of").
-- Avoid signature blocks (no signature lines, no director names line items).
+- Execution and certification are distinct unless explicitly merged by instructions.
+- Use clear modal verbs: "shall" for obligations, "may" for permissions (avoid ambiguity).
+- Avoid redundancy; each WHEREAS and RESOLVED clause must add unique meaning.
+- Include an effective timing clause when applicable ("effective as of" / last signer / adoption date).
+- Avoid signature blocks (no signature lines, no director name lines).
 - Use neutral, professional tone (not combative, not defensive).
 - If sandbox/testing is stated, keep it to ONE tight clause that limits effect.
+- Never output audit commentary, notes, or meta-analysis inside the document.
 
 Jurisdiction / authority basis rule (STRICT):
 - ONLY if the user explicitly mentions a jurisdiction or statute in the Instructions, you may add ONE short authority reference.
 - Do NOT invent statutes, sections, or legal citations.
 - If a statute name is available (e.g., "OBCA", "CBCA", "DGCL"), you may expand it to its plain name.
-- Keep it to a single clause like: "pursuant to the Corporation's constating documents and applicable corporate statute" or name the statute if provided.
+- Keep it to a single clause like: "pursuant to the Corporation's constating documents and [Statute Name]" (no sections unless user provided).
 
 Output format:
 - Header line(s)
@@ -367,8 +402,7 @@ Output format:
 - Adoption line with blank date line (no signatures)
 `.trim();
 
-    // ✅ This remains the single "prompt" string for hashing & traceability (no regression)
-    // ✅ NEW (conditional): jurisdiction hint only when instructions explicitly include it.
+    // ✅ Conditional: only when instructions explicitly include it.
     const jurisdictionHintBlock =
       jurisdiction || authority_basis
         ? `
@@ -382,6 +416,7 @@ Jurisdiction Hint (use ONLY because it was explicitly mentioned in Instructions)
 `.trim()
         : "";
 
+    // ✅ This remains the single "prompt" string for hashing & traceability (no regression)
     const prompt = `
 You are Oasis Scribe, governance drafting AI.
 
@@ -400,6 +435,7 @@ Draft a legally clean, board-ready document.
 Include WHEREAS clauses if suitable.
 Include clear RESOLVED THAT section.
 Do not include signature blocks.
+Do not include audit notes or commentary.
 `.trim();
 
     const model = "gpt-4.1-mini";
@@ -426,6 +462,7 @@ Do not include signature blocks.
     }
 
     let draftText = gen1.text?.trim() || "No draft returned.";
+    draftText = stripAuditNotes(draftText); // ✅ ensure no meta leaks even in pass 1
 
     const descriptionPreview =
       draftText.length > 240 ? draftText.slice(0, 240) + "…" : draftText;
@@ -435,7 +472,11 @@ Do not include signature blocks.
     /* ---------------------------------------------------------------------- */
     try {
       const auditUser = `
-Perform a structural audit ONLY (do not add new ideas):
+Perform a structural audit ONLY (do not add new ideas).
+
+Hard rules:
+- Output the revised full document ONLY.
+- Do NOT output notes, bullets, headings, commentary, or audit summaries.
 
 Check:
 - Redundancy / duplicated clauses
@@ -443,7 +484,7 @@ Check:
 - Missing effective timing clause (if relevant)
 - Overstatement of registry authority
 - Missing clarity about sandbox/testing limitation (if stated)
-- Jurisdiction/authority rule: do NOT add a statute unless explicitly present in the document/instructions; if present, keep it to ONE brief clause with no sections unless provided.
+- Jurisdiction/authority rule: do NOT add a statute unless explicitly present in the instructions/doc; if present, keep it to ONE brief clause with no sections unless provided.
 
 If improvements are needed, return the revised full document.
 If already strong, return the original unchanged.
@@ -455,12 +496,12 @@ ${draftText}
       const gen2 = await openaiChat({
         model,
         temperature: 0.15,
-        system: "You are a governance document auditor. Structural corrections only.",
+        system: "You are a governance document auditor. Structural corrections only. Output document only.",
         user: auditUser,
       });
 
       if (gen2.ok && gen2.text && gen2.text.trim().length > 50) {
-        draftText = gen2.text.trim();
+        draftText = stripAuditNotes(gen2.text.trim());
       }
     } catch {
       // fail-soft
