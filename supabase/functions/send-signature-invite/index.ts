@@ -1,4 +1,3 @@
-// supabase/functions/send-signature-invite/index.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { Resend } from "npm:resend@4.0.0";
@@ -181,7 +180,7 @@ function buildAuthorityEmailHtml(args: {
           <tr>
             <td>
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
-                style="background: radial-gradient(120% 140% at 50% 0%, #0B1626 0%, #070C14 45%, #060910 100%);
+                style="background: radial-gradient(120% 140% at 50% 0%, #0B1626 0%, #070C14 45%, #060910 100%); 
                        border:1px solid rgba(255,255,255,0.08);
                        border-radius:18px;
                        overflow:hidden;

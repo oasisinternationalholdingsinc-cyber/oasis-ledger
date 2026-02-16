@@ -1,4 +1,3 @@
-// supabase/functions/start-signature-envelope/index.ts
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -63,7 +62,7 @@ type ReqBody = {
   repair?: boolean;
 
   // legacy / optional:
-  parties?: PartyInput[];
+  parties?: PartyInput[]; // Include signer details here
   signer_name?: string | null;
   signer_email?: string | null;
 };
@@ -295,7 +294,7 @@ async function maybeCreateParties(args: {
 
   const rows = parties
     .filter(
-      (p) => p.email && !existingEmails.has(String(p.email).toLowerCase()),
+      (p) => p.email && !existingEmails.has(String(p.email).toLowerCase())
     )
     .map((p, idx) => ({
       envelope_id,
@@ -327,7 +326,6 @@ async function ensurePdfForEnvelope(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        // ✅ consistent header keys
         apikey: SERVICE_ROLE_KEY!,
         Authorization: `Bearer ${SERVICE_ROLE_KEY!}`,
         "x-client-info": "odp/start-signature-envelope:ensure-pdf",
