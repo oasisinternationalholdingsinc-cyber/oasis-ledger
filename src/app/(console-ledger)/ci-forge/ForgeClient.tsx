@@ -26,6 +26,11 @@ import { ArrowLeft, ExternalLink, Copy, RefreshCw } from "lucide-react";
  * 6) ✅ Portal cleanup (PRODUCTION): ONLY public terminal exposed is VERIFY.
  *    - Removed Portal tab + removed Viewer/Certificate links + removed "Open Signer" portal affordance.
  *    - Signing remains via Forge actions (Start Envelope + Send Invite) — no portal-signer UI.
+ *
+ * ✅ NEW (UI polish — no wiring changes):
+ * 7) Micro-spacing + badge hierarchy cleanup (Verified + Lane + Copy feedback).
+ * 8) Tiny “Certified ✓” shimmer when Verified hash exists (pure UI).
+ * 9) Subtle success pulse after Archive / Re-seal / Invite / Start actions (pure UI).
  */
 
 type ForgeQueueItem = {
@@ -215,10 +220,12 @@ function MiniPill({
   label,
   tone = "slate",
   title,
+  shimmer,
 }: {
   label: string;
   tone?: "slate" | "amber" | "emerald" | "cyan" | "rose";
   title?: string;
+  shimmer?: boolean;
 }) {
   const cls =
     tone === "emerald"
@@ -235,11 +242,41 @@ function MiniPill({
     <span
       title={title}
       className={cx(
-        "inline-flex items-center gap-2 rounded-full border px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase",
-        cls
+        "relative inline-flex items-center gap-2 rounded-full border px-2 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase",
+        cls,
+        shimmer ? "overflow-hidden" : ""
       )}
     >
       {label}
+      {shimmer ? (
+        <span
+          aria-hidden="true"
+          className={cx(
+            "pointer-events-none absolute inset-0",
+            "after:absolute after:inset-y-0 after:left-[-40%] after:w-[40%]",
+            "after:bg-gradient-to-r after:from-transparent after:via-white/15 after:to-transparent",
+            "after:animate-[forgeShimmer_1.35s_ease-in-out_infinite]"
+          )}
+          style={{
+            // tailwind-safe custom keyframes (inline)
+            // eslint-disable-next-line react/no-unknown-property
+            ["--forgeShimmer" as any]: "1",
+          }}
+        />
+      ) : null}
+      <style jsx>{`
+        @keyframes forgeShimmer {
+          0% {
+            transform: translateX(-20%);
+          }
+          100% {
+            transform: translateX(220%);
+          }
+        }
+        .after\\:animate-\\[forgeShimmer_1\\.35s_ease-in-out_infinite\\]::after {
+          animation: forgeShimmer 1.35s ease-in-out infinite;
+        }
+      `}</style>
     </span>
   );
 }
@@ -435,6 +472,10 @@ export default function ForgeClient() {
   // ✅ enhancements: local copy flash
   const [copied, setCopied] = useState<string | null>(null);
 
+  // ✅ NEW: subtle success pulse + certified shimmer nudge (UI-only)
+  const [successPulse, setSuccessPulse] = useState(false);
+  const [certifiedPulse, setCertifiedPulse] = useState(false);
+
   useEffect(() => {
     if (!copied) return;
     const t = setTimeout(() => setCopied(null), 1800);
@@ -480,6 +521,10 @@ export default function ForgeClient() {
   function flashInfo(msg: string) {
     setInfo(msg);
     setTimeout(() => setInfo(null), 5200);
+
+    // ✅ subtle UI pulse on success events
+    setSuccessPulse(true);
+    setTimeout(() => setSuccessPulse(false), 750);
   }
 
   function flashAxiomError(msg: string) {
@@ -491,6 +536,9 @@ export default function ForgeClient() {
   function flashAxiomInfo(msg: string) {
     setAxiomInfo(msg);
     setTimeout(() => setAxiomInfo(null), 5000);
+
+    setSuccessPulse(true);
+    setTimeout(() => setSuccessPulse(false), 750);
   }
 
   function flashIntentError(msg: string) {
@@ -502,6 +550,9 @@ export default function ForgeClient() {
   function flashIntentInfo(msg: string) {
     setIntentInfo(msg);
     setTimeout(() => setIntentInfo(null), 5200);
+
+    setSuccessPulse(true);
+    setTimeout(() => setSuccessPulse(false), 750);
   }
 
   const envPill = () => (
@@ -515,6 +566,16 @@ export default function ForgeClient() {
       {isTest ? "SANDBOX" : "RoT"}
     </span>
   );
+
+  const certifiedHash = evidence.verified_document?.file_hash ?? null;
+  const isCertified = !!certifiedHash;
+
+  useEffect(() => {
+    if (!isCertified) return;
+    setCertifiedPulse(true);
+    const t = setTimeout(() => setCertifiedPulse(false), 1600);
+    return () => clearTimeout(t);
+  }, [isCertified]);
 
   const computeRiskLevel = (item: ForgeQueueItem): RiskLevel => {
     const days = item.days_since_last_signature ?? null;
@@ -1609,7 +1670,8 @@ export default function ForgeClient() {
         className={cx(
           "w-full rounded-2xl px-4 py-3 text-[12px] font-semibold tracking-[0.18em] uppercase transition",
           tone === "emerald" || tone === "slate" ? cls : cx("border", cls),
-          disabled ? "opacity-70 cursor-not-allowed border-white/10 bg-white/[0.04] text-slate-400" : ""
+          disabled ? "opacity-70 cursor-not-allowed border-white/10 bg-white/[0.04] text-slate-400" : "",
+          !disabled && successPulse ? "ring-1 ring-emerald-500/30" : ""
         )}
       >
         {label}
@@ -1660,6 +1722,10 @@ export default function ForgeClient() {
           onClick={async () => {
             const ok = await safeCopy(value);
             setCopied(ok ? label : "Copy failed");
+            if (ok) {
+              setSuccessPulse(true);
+              setTimeout(() => setSuccessPulse(false), 650);
+            }
           }}
         >
           <Copy className="h-4 w-4" />
@@ -1688,11 +1754,22 @@ export default function ForgeClient() {
               <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">
                 CI — Forge <span className="mx-2 text-slate-700">•</span> Execution Console
               </div>
-              <div className="mt-1 flex items-center gap-2">
+
+              <div className="mt-1 flex flex-wrap items-center gap-2">
                 <div className="text-base font-semibold text-slate-100">Sign → Verify → Archive</div>
                 {envPill()}
+                {isCertified ? (
+                  <MiniPill
+                    label="Certified ✓"
+                    tone="emerald"
+                    shimmer={certifiedPulse}
+                    title="Verified registry hash exists for this record."
+                  />
+                ) : null}
                 {copied ? <MiniPill label={copied} tone={copied === "Copy failed" ? "rose" : "emerald"} /> : null}
+                {successPulse ? <MiniPill label="Success" tone="emerald" /> : null}
               </div>
+
               <div className="mt-1 text-[12px] text-slate-400">
                 Entity-scoped via OS Global Bar • Lane-safe via <span className="font-mono">is_test</span> • No shortcuts
               </div>
@@ -1835,7 +1912,7 @@ export default function ForgeClient() {
             {!selected ? (
               <EmptyState title="Select a record to view details." />
             ) : (
-              <div className="rounded-3xl border border-white/10 bg-black/20 overflow-hidden">
+              <div className={cx("rounded-3xl border border-white/10 bg-black/20 overflow-hidden", successPulse ? "ring-1 ring-emerald-500/20" : "")}>
                 <div className="px-4 sm:px-5 py-4 border-b border-white/10 bg-white/[0.03]">
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
@@ -1850,14 +1927,11 @@ export default function ForgeClient() {
                       <div className="mt-3 space-y-2">
                         <CopyRow label="Ledger ID" value={selected.ledger_id} />
                         {selected.envelope_id ? <CopyRow label="Envelope ID" value={selected.envelope_id} /> : null}
-                        {evidence.verified_document?.file_hash ? (
-                          <CopyRow label="Verified Hash" value={evidence.verified_document.file_hash} />
-                        ) : null}
+                        {certifiedHash ? <CopyRow label="Verified Hash" value={certifiedHash} /> : null}
                       </div>
                     </div>
 
                     <div className="shrink-0 flex flex-col gap-2 w-[180px]">
-                      {/* ✅ No portal-signer UI: operator action is "Start / Reopen Envelope" (idempotent) */}
                       <ActionButton
                         label={selected.envelope_id ? "Reopen Envelope" : "Start Signature"}
                         tone="amber"
@@ -1872,7 +1946,6 @@ export default function ForgeClient() {
                         onClick={() => onViewArchivePdf()}
                       />
 
-                      {/* ✅ Only public terminal that belongs in Forge */}
                       {portal.verify_url ? (
                         <button
                           type="button"
@@ -1968,7 +2041,6 @@ export default function ForgeClient() {
                               Archive writes Minute Book primary pointer + Verified registry (certified source).
                             </div>
 
-                            {/* Explicit Archive Signed (Direct) button */}
                             <div className="mt-3">
                               <ActionButton
                                 label={archiveLocked ? "Archive Signed (Already)" : "Archive Signed (Direct)"}
@@ -2001,7 +2073,6 @@ export default function ForgeClient() {
 
                     <div className="col-span-12">
                       <div className="grid grid-cols-12 gap-3">
-                        {/* ✅ VERIFY ONLY (replaces old Portal card) */}
                         <div className="col-span-12 md:col-span-6 rounded-2xl border border-white/10 bg-black/25 p-4">
                           <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Verify</div>
                           {portalError ? <div className="mt-2 text-[12px] text-rose-200">{portalError}</div> : null}
@@ -2141,7 +2212,11 @@ export default function ForgeClient() {
                           </div>
 
                           <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Verified Registry</div>
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Verified Registry</div>
+                              {isCertified ? <MiniPill label="Certified ✓" tone="emerald" shimmer={certifiedPulse} /> : null}
+                            </div>
+
                             <div className="mt-2 text-[12px] text-slate-200">
                               {evidence.verified_document?.id ? (
                                 <>
@@ -2185,7 +2260,6 @@ export default function ForgeClient() {
 
                           <ActionButton label="Open Best PDF" tone="slate" disabled={isOpeningArchive} onClick={() => onViewArchivePdf()} />
 
-                          {/* ✅ Verify quick-access (optional): only link, no portal tab */}
                           {portal.verify_url ? (
                             <button
                               type="button"
