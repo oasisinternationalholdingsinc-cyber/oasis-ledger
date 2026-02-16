@@ -70,7 +70,8 @@ async function resolveActor(req: Request): Promise<{
 }> {
   try {
     const authHeader = req.headers.get("Authorization");
-    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return { actor_id: null, actor_email: null };
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY)
+      return { actor_id: null, actor_email: null };
     if (!authHeader) return { actor_id: null, actor_email: null };
 
     const authed = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
@@ -97,7 +98,8 @@ async function insertDraftEventFailSoft(row: Record<string, unknown>) {
   try {
     if (!supabase) return;
     const { error } = await supabase.from("governance_draft_events").insert(row);
-    if (error) console.error("governance_draft_events insert failed (non-fatal)", error);
+    if (error)
+      console.error("governance_draft_events insert failed (non-fatal)", error);
   } catch (e) {
     console.error("governance_draft_events insert threw (non-fatal)", e);
   }
@@ -144,7 +146,11 @@ function detectJurisdictionAuthority(instructionsRaw: string): {
   }
 
   // UK
-  if (/\bcompanies act\b/.test(s) || /\buk\b/.test(s) || /\bunited kingdom\b/.test(s)) {
+  if (
+    /\bcompanies act\b/.test(s) ||
+    /\buk\b/.test(s) ||
+    /\bunited kingdom\b/.test(s)
+  ) {
     return {
       jurisdiction: "United Kingdom",
       authority_basis: "Companies Act 2006",
@@ -330,7 +336,8 @@ serve(async (req) => {
     /* ENTERPRISE DOCTRINE (NEW — NO REWIRING)                                */
     /* ---------------------------------------------------------------------- */
 
-    const { jurisdiction, authority_basis } = detectJurisdictionAuthority(trimmedInstructions);
+    const { jurisdiction, authority_basis } =
+      detectJurisdictionAuthority(trimmedInstructions);
 
     const systemDoctrine = `
 You are Oasis Scribe — enterprise governance drafting AI.
@@ -367,12 +374,17 @@ Output format:
         ? `
 Jurisdiction Hint (use ONLY because it was explicitly mentioned in Instructions):
 - Jurisdiction: ${jurisdiction ?? "as specified"}
-- Authority basis: ${authority_basis ?? "do not name a statute; use generic 'applicable corporate statute'"}
+- Authority basis: ${
+            authority_basis ??
+            "do not name a statute; use generic 'applicable corporate statute'"
+          }
 - Rule: include at most ONE brief authority clause; do NOT cite sections unless the user provided them.
 `.trim()
         : "";
 
     const prompt = `
+You are Oasis Scribe, governance drafting AI.
+
 Entity: ${resolvedEntityName}
 Slug: ${resolvedEntitySlug}
 Title: ${trimmedTitle ?? existingDraft?.title}
