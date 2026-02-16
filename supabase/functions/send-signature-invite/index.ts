@@ -110,7 +110,12 @@ type SignaturePartyRow = {
   party_token: string | null;
 };
 
-type EnvelopeRow = { id: string; record_id: string | null; is_test: boolean | null };
+type EnvelopeRow = {
+  id: string;
+  record_id: string | null;
+  is_test: boolean | null;
+  status?: string | null; // optional — only used if present
+};
 
 type QueueRow = {
   id: string;
@@ -261,9 +266,10 @@ function buildAuthorityEmailHtml(args: {
 // DB HELPERS (aligned to your schema)
 // ---------------------------------------------------------------------------
 async function getEnvelope(envelopeId: string): Promise<EnvelopeRow> {
+  // NOTE: we also select status if present, but we do not require it (no regression).
   const r = await supabase
     .from("signature_envelopes")
-    .select("id, record_id, is_test")
+    .select("id, record_id, is_test, status")
     .eq("id", envelopeId)
     .maybeSingle();
 
@@ -272,7 +278,11 @@ async function getEnvelope(envelopeId: string): Promise<EnvelopeRow> {
   return r.data as EnvelopeRow;
 }
 
-async function upsertParty(envelopeId: string, email: string, displayName: string | null) {
+async function upsertParty(
+  envelopeId: string,
+  email: string,
+  displayName: string | null,
+) {
   const existing = await supabase
     .from("signature_parties")
     .select("id, envelope_id, email, display_name, status, party_token")
@@ -290,17 +300,15 @@ async function upsertParty(envelopeId: string, email: string, displayName: strin
 
     if (!token) {
       token = generatePartyToken();
-      // best-effort backfill
+      // best-effort backfill (do not block invite)
       const u = await supabase
         .from("signature_parties")
         .update({ party_token: token })
         .eq("id", row.id)
         .eq("envelope_id", envelopeId)
         .is("party_token", null);
-      if (u.error) {
-        // do not block invite; token can still be null
-        token = null;
-      }
+
+      if (u.error) token = null;
     }
 
     // best-effort: update display name if provided and missing
@@ -365,19 +373,62 @@ async function createQueueRow(args: {
   return r.data.id as string;
 }
 
+/**
+ * ✅ ENTERPRISE WORKER PICKER — NO REGRESSION
+ * Only returns jobs that are truly eligible to send:
+ * - queue.status = pending
+ * - party.status = pending
+ * - envelope.status != completed   (if your schema has status)
+ *
+ * This prevents duplicate emails after a signer has already executed.
+ */
 async function pickOldestPendingJob(): Promise<QueueRow | null> {
   const r = await supabase
     .from("signature_email_queue")
     .select(
-      "id,envelope_id,party_id,to_email,to_name,subject,body,template_key,payload,status,error_message,attempts,created_at,sent_at,document_title",
+      `
+      id,
+      envelope_id,
+      party_id,
+      to_email,
+      to_name,
+      subject,
+      body,
+      template_key,
+      payload,
+      status,
+      error_message,
+      attempts,
+      created_at,
+      sent_at,
+      document_title,
+      signature_parties!inner (
+        id,
+        status
+      ),
+      signature_envelopes!inner (
+        id,
+        status
+      )
+    `,
     )
     .eq("status", "pending")
+    .eq("signature_parties.status", "pending")
+    .neq("signature_envelopes.status", "completed")
     .order("created_at", { ascending: true })
     .limit(1);
 
   if (r.error) throw r.error;
-  const rows = (r.data ?? []) as unknown as QueueRow[];
-  return rows[0] ?? null;
+
+  const rows = (r.data ?? []) as any[];
+  if (!rows.length) return null;
+
+  // Strip join payload so caller gets the same QueueRow shape (no regression)
+  const row = rows[0];
+  delete row.signature_parties;
+  delete row.signature_envelopes;
+
+  return row as QueueRow;
 }
 
 async function markQueueSent(queueId: string, attempts: number | null) {
@@ -394,7 +445,11 @@ async function markQueueSent(queueId: string, attempts: number | null) {
   if (r.error) throw r.error;
 }
 
-async function markQueueFailed(queueId: string, attempts: number | null, msg: string) {
+async function markQueueFailed(
+  queueId: string,
+  attempts: number | null,
+  msg: string,
+) {
   const r = await supabase
     .from("signature_email_queue")
     .update({
@@ -482,8 +537,9 @@ serve(async (req) => {
       const sendNow = inv.send_now !== false; // default true
 
       if (!envelopeId) return json({ ok: false, error: "ENVELOPE_REQUIRED" }, 400);
-      if (!signerEmail || !signerEmail.includes("@"))
+      if (!signerEmail || !signerEmail.includes("@")) {
         return json({ ok: false, error: "SIGNER_EMAIL_REQUIRED" }, 400);
+      }
 
       const env = await getEnvelope(envelopeId);
       const lane = laneLabel(env.is_test) as "SANDBOX" | "RoT";
@@ -547,7 +603,9 @@ serve(async (req) => {
 
       return json({
         ok: true,
-        message: sendNow ? "Signature invitation email sent." : "Signature invitation queued.",
+        message: sendNow
+          ? "Signature invitation email sent."
+          : "Signature invitation queued.",
         envelope_id: envelopeId,
         party_id: partyId,
         queue_id: queueId,
@@ -577,13 +635,27 @@ serve(async (req) => {
     // Ensure token exists (best-effort), then build signing url.
     const party = await supabase
       .from("signature_parties")
-      .select("id, party_token, display_name, email")
+      .select("id, party_token, display_name, email, status")
       .eq("id", job.party_id)
       .eq("envelope_id", job.envelope_id)
       .maybeSingle();
 
     if (party.error || !party.data) {
       throw new Error("PARTY_NOT_FOUND");
+    }
+
+    // Extra guard (no regression): if party already signed, do not send.
+    const partyStatus = String((party.data as any).status ?? "").toLowerCase();
+    if (partyStatus && partyStatus !== "pending") {
+      // Mark as failed (or you can mark as sent). We choose failed to retain audit clarity.
+      await markQueueFailed(job.id, job.attempts ?? 0, "PARTY_NOT_PENDING");
+      return json({
+        ok: true,
+        message: "Skipped: party is not pending (already executed or cancelled).",
+        job_id: job.id,
+        party_status: partyStatus,
+        lane,
+      });
     }
 
     let partyToken = (party.data as any).party_token
@@ -608,7 +680,10 @@ serve(async (req) => {
       partyToken,
     });
 
-    if (!subject) subject = `Oasis Digital Parliament — Signature Required — ${docTitle}`;
+    if (!subject) {
+      subject = `Oasis Digital Parliament — Signature Required — ${docTitle}`;
+    }
+
     if (!html) {
       html = buildAuthorityEmailHtml({
         toName: job.to_name ?? null,
@@ -644,13 +719,13 @@ serve(async (req) => {
         has_party_token: Boolean(partyToken),
       });
     } catch (e) {
-      await markQueueFailed(job.id, job.attempts ?? 0, String(e?.message ?? e));
+      await markQueueFailed(job.id, job.attempts ?? 0, String((e as any)?.message ?? e));
       throw e;
     }
   } catch (e) {
     console.error("send-signature-invite error", e);
     return json(
-      { ok: false, error: "Unexpected server error", details: String(e?.message ?? e) },
+      { ok: false, error: "Unexpected server error", details: String((e as any)?.message ?? e) },
       500,
     );
   }
