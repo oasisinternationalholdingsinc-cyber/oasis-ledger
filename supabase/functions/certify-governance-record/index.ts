@@ -19,15 +19,13 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
  * ✅ Uses mime_type (not content_type)
  * ✅ On conflict: (source_table, source_record_id)
  *
- * IMPORTANT:
- * - We DO NOT add pages. We DO NOT re-layout. We only:
- *   - download the existing PDF
- *   - (optionally) overlay a tiny QR in a reserved corner ONLY IF requested later
- *   - upload back to the SAME storage pointer
- *   - compute + store file_hash in verified_documents
+ * NEW (enterprise enhancement — no contract drift):
+ * ✅ Calls axiom-extract-resolution-facts AFTER successful verified_documents upsert
+ *    - best-effort (never blocks certification)
+ *    - idempotent (force=false) so it never double-writes
  *
- * If you want ZERO PDF changes at all (hash-only), this already does that:
- * - It re-uploads identical bytes only if you want; we still upsert verified_documents either way.
+ * Court-grade boundary:
+ * ✅ Requires governance_ledger.status='ARCHIVED' before certifying
  */
 
 type ReqBody = {
@@ -59,6 +57,14 @@ type Resp = {
 
   verified_document_id?: string;
   reused?: boolean;
+
+  // best-effort add-on (never blocks)
+  extraction?: {
+    ok: boolean;
+    status?: number;
+    code?: string;
+    details?: unknown;
+  };
 
   error?: string;
   details?: unknown;
@@ -147,7 +153,9 @@ async function resolveMinuteBookPath(
     .maybeSingle();
 
   const mbePath = safeText((mbe.data as any)?.storage_path);
-  if (mbePath) return { path: mbePath, source: "minute_book_entries.storage_path" };
+  if (mbePath) {
+    return { path: mbePath, source: "minute_book_entries.storage_path" };
+  }
 
   // 2) signature_envelopes fallbacks
   const env = await supabaseAdmin
@@ -166,6 +174,52 @@ async function resolveMinuteBookPath(
   if (envPath) return { path: envPath, source: "signature_envelopes.*_path" };
 
   return { path: null, source: "none" };
+}
+
+/**
+ * ✅ Best-effort, idempotent extraction call.
+ * - force=false => never overwrites / never double-writes
+ * - does not block certify if AXIOM is down
+ */
+async function invokeAxiomExtractFactsBestEffort(ledgerId: string) {
+  const url = `${SUPABASE_URL}/functions/v1/axiom-extract-resolution-facts`;
+
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        apikey: SERVICE_ROLE_KEY,
+        authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+      },
+      body: JSON.stringify({
+        ledger_id: ledgerId,
+        force: false,
+      }),
+    });
+
+    const payload = await res.json().catch(() => null);
+
+    // normalize “code” if present
+    const code =
+      safeText((payload as any)?.code) ??
+      safeText((payload as any)?.error) ??
+      (res.ok ? "OK" : "FAILED");
+
+    return {
+      ok: res.ok,
+      status: res.status,
+      code,
+      details: payload,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      status: 0,
+      code: "FACTS_INVOKE_THROW",
+      details: String((e as any)?.message ?? e),
+    };
+  }
 }
 
 serve(async (req) => {
@@ -200,21 +254,47 @@ serve(async (req) => {
 
     const force = !!body.force;
 
-    // ✅ Load ledger (NO entity_slug column)
+    // ✅ Load ledger (NO entity_slug column) + require ARCHIVED for court-grade
     const gl = await supabaseAdmin
       .from("governance_ledger")
-      .select("id, title, entity_id, is_test")
+      .select("id, title, entity_id, is_test, status")
       .eq("id", ledgerId)
       .maybeSingle();
 
     if (gl.error) {
       return json<Resp>(
-        { ok: false, error: "LEDGER_LOAD_FAILED", details: gl.error, request_id: reqId },
+        {
+          ok: false,
+          error: "LEDGER_LOAD_FAILED",
+          details: gl.error,
+          request_id: reqId,
+        },
         500,
       );
     }
     if (!gl.data?.id) {
-      return json<Resp>({ ok: false, error: "LEDGER_NOT_FOUND", request_id: reqId }, 404);
+      return json<Resp>(
+        { ok: false, error: "LEDGER_NOT_FOUND", request_id: reqId },
+        404,
+      );
+    }
+
+    const status = safeText((gl.data as any)?.status);
+    if (status !== "ARCHIVED") {
+      return json<Resp>(
+        {
+          ok: false,
+          error: "NOT_ARCHIVED",
+          details: {
+            message:
+              "Certify requires governance_ledger.status='ARCHIVED' (court-grade boundary).",
+            ledger_id: ledgerId,
+            status,
+          },
+          request_id: reqId,
+        },
+        409,
+      );
     }
 
     // ✅ Resolve entity_slug from entities table (canonical)
@@ -230,7 +310,9 @@ serve(async (req) => {
         500,
       );
     }
-    const entity_slug = safeText((ent.data as any)?.slug) ?? "holdings";
+
+    // ✅ contamination-safe fallback (never corp-specific)
+    const entity_slug = safeText((ent.data as any)?.slug) ?? "entity";
 
     const base =
       safeText(body.verify_base_url) ??
@@ -259,6 +341,9 @@ serve(async (req) => {
       existingBucket &&
       existingPath
     ) {
+      // ✅ Best-effort extraction even on reuse (safe + idempotent)
+      const extraction = await invokeAxiomExtractFactsBestEffort(ledgerId);
+
       return json<Resp>({
         ok: true,
         reused: true,
@@ -269,6 +354,7 @@ serve(async (req) => {
         file_hash: existingHash,
         verify_url: `${base}?hash=${existingHash}`,
         verified_document_id: String((existing.data as any).id),
+        extraction,
         request_id: reqId,
       });
     }
@@ -315,20 +401,16 @@ serve(async (req) => {
     const sourceBytes = new Uint8Array(await dl.data.arrayBuffer());
 
     /**
-     * ✅ NO EXTRA PAGE:
+     * ✅ NO EXTRA PAGE / NO MUTATION:
      * We do NOT modify the PDF bytes at all.
      * We certify by:
      *   - hashing the existing bytes
      *   - writing verified_documents pointers + file_hash
-     *
-     * (If you later want a tiny QR overlay *without adding a page*,
-     * we can do last-page stamping, but you explicitly said take out last page.)
      */
     const finalBytes = sourceBytes;
     const file_hash = await sha256Hex(finalBytes);
 
-    // OPTIONAL: If you want to ensure metadata consistency (same bytes) you can skip re-upload.
-    // But keeping "upload upsert" is safe and keeps behavior consistent (no wiring changes).
+    // Keep upload upsert for consistent behavior (no wiring changes)
     const up = await supabaseAdmin.storage.from(bucket).upload(path, finalBytes, {
       contentType: "application/pdf",
       upsert: true,
@@ -353,7 +435,7 @@ serve(async (req) => {
       source_record_id: ledgerId,
       storage_bucket: bucket,
       storage_path: path,
-      file_hash, // ✅ REQUIRED for certified
+      file_hash, // ✅ REQUIRED
       mime_type: "application/pdf",
       verification_level: "certified",
       is_archived: true,
@@ -369,10 +451,18 @@ serve(async (req) => {
 
     if (vd.error) {
       return json<Resp>(
-        { ok: false, error: "VERIFIED_DOC_UPSERT_FAILED", details: vd.error, request_id: reqId },
+        {
+          ok: false,
+          error: "VERIFIED_DOC_UPSERT_FAILED",
+          details: vd.error,
+          request_id: reqId,
+        },
         500,
       );
     }
+
+    // ✅ NEW: Best-effort AXIOM extraction (idempotent, never blocks)
+    const extraction = await invokeAxiomExtractFactsBestEffort(ledgerId);
 
     return json<Resp>({
       ok: true,
@@ -381,8 +471,9 @@ serve(async (req) => {
       storage_bucket: bucket,
       storage_path: path,
       file_hash,
-      verify_url: `${base}?hash=${file_hash}`, // hash-first for copy/share
+      verify_url: `${base}?hash=${file_hash}`, // hash-first
       verified_document_id: vd.data?.id ? String((vd.data as any).id) : undefined,
+      extraction,
       request_id: reqId,
     });
   } catch (e) {
