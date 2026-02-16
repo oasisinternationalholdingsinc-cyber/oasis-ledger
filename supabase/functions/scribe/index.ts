@@ -103,6 +103,102 @@ async function insertDraftEventFailSoft(row: Record<string, unknown>) {
   }
 }
 
+function normalizeType(type: unknown): "meeting" | "decision" | "resolution" {
+  const t = String(type ?? "").toLowerCase().trim();
+  if (t === "meeting_minutes" || t === "meeting") return "meeting";
+  if (t === "decision" || t === "decision_memo") return "decision";
+  return "resolution";
+}
+
+/* -------------------------------------------------------------------------- */
+/* Jurisdiction / Authority Hint (ACTIVATES ONLY WHEN EXPLICITLY MENTIONED)   */
+/* -------------------------------------------------------------------------- */
+
+function detectJurisdictionAuthority(instructionsRaw: string): {
+  jurisdiction: string | null;
+  authority_basis: string | null; // short authority name only
+} {
+  const s = String(instructionsRaw ?? "").toLowerCase();
+
+  // Canada / Ontario
+  if (/\bobca\b/.test(s) || /\bontario\b/.test(s)) {
+    return {
+      jurisdiction: "Ontario, Canada",
+      authority_basis: "Business Corporations Act (Ontario)",
+    };
+  }
+
+  if (/\bcbca\b/.test(s) || /\bcanada\b/.test(s)) {
+    return {
+      jurisdiction: "Canada",
+      authority_basis: "Canada Business Corporations Act",
+    };
+  }
+
+  // USA / Delaware
+  if (/\bdgcl\b/.test(s) || /\bdelaware\b/.test(s)) {
+    return {
+      jurisdiction: "Delaware, USA",
+      authority_basis: "Delaware General Corporation Law",
+    };
+  }
+
+  // UK
+  if (/\bcompanies act\b/.test(s) || /\buk\b/.test(s) || /\bunited kingdom\b/.test(s)) {
+    return {
+      jurisdiction: "United Kingdom",
+      authority_basis: "Companies Act 2006",
+    };
+  }
+
+  // If user explicitly says "jurisdiction:" / "governing law:" but we can't confidently map, we do NOT invent.
+  if (/\bjurisdiction\s*:\b/.test(s) || /\bgoverning law\s*:\b/.test(s)) {
+    return { jurisdiction: "As specified in instructions", authority_basis: null };
+  }
+
+  return { jurisdiction: null, authority_basis: null };
+}
+
+/* -------------------------------------------------------------------------- */
+/* OpenAI Helpers (NO WIRING CHANGE)                                          */
+/* -------------------------------------------------------------------------- */
+
+async function openaiChat(args: {
+  model: string;
+  temperature: number;
+  system: string;
+  user: string;
+}): Promise<{ ok: boolean; text: string; error?: any }> {
+  try {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: args.model,
+        temperature: args.temperature,
+        messages: [
+          { role: "system", content: args.system },
+          { role: "user", content: args.user },
+        ],
+      }),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => null);
+      return { ok: false, text: "", error: { status: res.status, body: txt } };
+    }
+
+    const data = await res.json();
+    const text = data?.choices?.[0]?.message?.content?.trim() ?? "";
+    return { ok: true, text };
+  } catch (e) {
+    return { ok: false, text: "", error: String(e) };
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /* Handler                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -157,7 +253,7 @@ serve(async (req) => {
       });
     }
 
-    // ✅ NEW: actor attribution (fail-soft, no regression)
+    // ✅ actor attribution (fail-soft, no regression)
     const { actor_id, actor_email } = await resolveActor(req);
 
     /* ---------------------------------------------------------------------- */
@@ -225,31 +321,58 @@ serve(async (req) => {
     }
 
     /* ---------------------------------------------------------------------- */
-    /* RECORD TYPE MAPPING                                                    */
+    /* RECORD TYPE                                                            */
     /* ---------------------------------------------------------------------- */
 
-    let recordType: string;
-    switch (type) {
-      case "meeting_minutes":
-      case "meeting":
-        recordType = "meeting";
-        break;
-      case "decision":
-      case "decision_memo":
-        recordType = "decision";
-        break;
-      default:
-        recordType = "resolution";
-        break;
-    }
+    const recordType = normalizeType(type);
 
     /* ---------------------------------------------------------------------- */
-    /* OPENAI GENERATION                                                      */
+    /* ENTERPRISE DOCTRINE (NEW — NO REWIRING)                                */
     /* ---------------------------------------------------------------------- */
+
+    const { jurisdiction, authority_basis } = detectJurisdictionAuthority(trimmedInstructions);
+
+    const systemDoctrine = `
+You are Oasis Scribe — enterprise governance drafting AI.
+
+Non-negotiables:
+- Produce a board-ready ${recordType} document appropriate for a corporate minute book.
+- Be litigation-grade: precise language, clean structure, no fluff.
+- Avoid overstatement: do NOT claim registry certification unless explicitly instructed.
+- Use clear modal verbs: "shall" for obligations, "may" for permissions.
+- Avoid redundancy; each WHEREAS or RESOLVED clause must add unique meaning.
+- Include an effective timing clause when applicable (e.g., "effective as of").
+- Avoid signature blocks (no signature lines, no director names line items).
+- Use neutral, professional tone (not combative, not defensive).
+- If sandbox/testing is stated, keep it to ONE tight clause that limits effect.
+
+Jurisdiction / authority basis rule (STRICT):
+- ONLY if the user explicitly mentions a jurisdiction or statute in the Instructions, you may add ONE short authority reference.
+- Do NOT invent statutes, sections, or legal citations.
+- If a statute name is available (e.g., "OBCA", "CBCA", "DGCL"), you may expand it to its plain name.
+- Keep it to a single clause like: "pursuant to the Corporation's constating documents and applicable corporate statute" or name the statute if provided.
+
+Output format:
+- Header line(s)
+- WHEREAS clauses (when suitable)
+- NOW, THEREFORE, BE IT RESOLVED THAT:
+- Numbered resolutions
+- Adoption line with blank date line (no signatures)
+`.trim();
+
+    // ✅ This remains the single "prompt" string for hashing & traceability (no regression)
+    // ✅ NEW (conditional): jurisdiction hint only when instructions explicitly include it.
+    const jurisdictionHintBlock =
+      jurisdiction || authority_basis
+        ? `
+Jurisdiction Hint (use ONLY because it was explicitly mentioned in Instructions):
+- Jurisdiction: ${jurisdiction ?? "as specified"}
+- Authority basis: ${authority_basis ?? "do not name a statute; use generic 'applicable corporate statute'"}
+- Rule: include at most ONE brief authority clause; do NOT cite sections unless the user provided them.
+`.trim()
+        : "";
 
     const prompt = `
-You are Oasis Scribe, governance drafting AI.
-
 Entity: ${resolvedEntityName}
 Slug: ${resolvedEntitySlug}
 Title: ${trimmedTitle ?? existingDraft?.title}
@@ -259,6 +382,7 @@ Language: ${language}
 
 Instructions:
 "${trimmedInstructions}"
+${jurisdictionHintBlock ? `\n\n${jurisdictionHintBlock}\n` : ""}
 
 Draft a legally clean, board-ready document.
 Include WHEREAS clauses if suitable.
@@ -269,51 +393,76 @@ Do not include signature blocks.
     const model = "gpt-4.1-mini";
     const temperature = 0.25;
 
-    const oaRes = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        temperature,
-        messages: [
-          {
-            role: "system",
-            content: "You draft precise corporate governance resolutions for digital minute books.",
-          },
-          { role: "user", content: prompt },
-        ],
-      }),
+    /* ---------------------------------------------------------------------- */
+    /* OPENAI GENERATION (PASS 1)                                             */
+    /* ---------------------------------------------------------------------- */
+
+    const gen1 = await openaiChat({
+      model,
+      temperature,
+      system: systemDoctrine,
+      user: prompt,
     });
 
-    if (!oaRes.ok) {
-      const txt = await oaRes.text().catch(() => null);
+    if (!gen1.ok) {
       return json({
         ok: false,
         stage: "openai_http",
-        status: oaRes.status,
-        body: txt,
+        status: gen1.error?.status ?? 500,
+        body: gen1.error?.body ?? String(gen1.error ?? "OpenAI error"),
       });
     }
 
-    const oaData = await oaRes.json();
-    const draftText =
-      oaData?.choices?.[0]?.message?.content?.trim() ?? "No draft returned.";
+    let draftText = gen1.text?.trim() || "No draft returned.";
 
     const descriptionPreview =
       draftText.length > 240 ? draftText.slice(0, 240) + "…" : draftText;
 
     /* ---------------------------------------------------------------------- */
-    /* TRACEABILITY (NEW, NO REGRESSION)                                      */
+    /* OPTIONAL STRUCTURAL AUDIT (PASS 2) — FAIL-SOFT, NO REGRESSION           */
+    /* ---------------------------------------------------------------------- */
+    try {
+      const auditUser = `
+Perform a structural audit ONLY (do not add new ideas):
+
+Check:
+- Redundancy / duplicated clauses
+- Modal ambiguity ("may" vs "shall")
+- Missing effective timing clause (if relevant)
+- Overstatement of registry authority
+- Missing clarity about sandbox/testing limitation (if stated)
+- Jurisdiction/authority rule: do NOT add a statute unless explicitly present in the document/instructions; if present, keep it to ONE brief clause with no sections unless provided.
+
+If improvements are needed, return the revised full document.
+If already strong, return the original unchanged.
+
+Document:
+${draftText}
+`.trim();
+
+      const gen2 = await openaiChat({
+        model,
+        temperature: 0.15,
+        system: "You are a governance document auditor. Structural corrections only.",
+        user: auditUser,
+      });
+
+      if (gen2.ok && gen2.text && gen2.text.trim().length > 50) {
+        draftText = gen2.text.trim();
+      }
+    } catch {
+      // fail-soft
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* TRACEABILITY (NO REGRESSION)                                           */
     /* ---------------------------------------------------------------------- */
 
     const prompt_hash = await sha256Hex(prompt);
     const instructions_hash = await sha256Hex(trimmedInstructions);
 
     /* ---------------------------------------------------------------------- */
-    /* UPDATE OR INSERT (LANE SAFE)                                           */
+    /* UPDATE OR INSERT (LANE SAFE — NO REWIRING)                             */
     /* ---------------------------------------------------------------------- */
 
     let draftRow: any;
@@ -323,15 +472,13 @@ Do not include signature blocks.
         .from("governance_drafts")
         .update({
           draft_text: draftText,
-
-          // keep prior behavior (no regression)
           updated_at: new Date().toISOString(),
-
-          // ✅ NEW: attribution
           updated_by: actor_id ?? null,
         })
         .eq("id", draft_id)
-        .select("id, status, updated_at, entity_id, entity_slug, entity_name, title, record_type, is_test")
+        .select(
+          "id, status, updated_at, entity_id, entity_slug, entity_name, title, record_type, is_test",
+        )
         .single();
 
       if (error || !data) {
@@ -344,7 +491,6 @@ Do not include signature blocks.
 
       draftRow = data;
 
-      // ✅ NEW: append event (fail-soft, no regression)
       await insertDraftEventFailSoft({
         draft_id: draftRow.id,
         actor_id: actor_id ?? null,
@@ -372,17 +518,17 @@ Do not include signature blocks.
           record_type: recordType,
           draft_text: draftText,
           status: "draft",
-          is_test: !!is_test, // 🔒 explicit lane stamp
+          is_test: !!is_test,
 
-          // ✅ NEW: attribution
           created_by: actor_id ?? null,
           updated_by: actor_id ?? null,
 
-          // keep prior behavior (no regression)
           created_at: now,
           updated_at: now,
         })
-        .select("id, status, created_at, entity_id, entity_slug, entity_name, title, record_type, is_test")
+        .select(
+          "id, status, created_at, entity_id, entity_slug, entity_name, title, record_type, is_test",
+        )
         .single();
 
       if (error || !data) {
@@ -395,7 +541,6 @@ Do not include signature blocks.
 
       draftRow = data;
 
-      // ✅ NEW: append event (fail-soft, no regression)
       await insertDraftEventFailSoft({
         draft_id: draftRow.id,
         actor_id: actor_id ?? null,
@@ -413,7 +558,7 @@ Do not include signature blocks.
     }
 
     /* ---------------------------------------------------------------------- */
-    /* SUCCESS                                                                */
+    /* SUCCESS (NO RESPONSE SHAPE REGRESSION)                                 */
     /* ---------------------------------------------------------------------- */
 
     return json({
@@ -422,7 +567,6 @@ Do not include signature blocks.
       role: "scribe",
       engine: model,
 
-      // ✅ NEW: traceability surfaced (read-only)
       actor_id,
       actor_email,
       prompt_hash,
