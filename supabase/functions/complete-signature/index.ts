@@ -105,6 +105,12 @@ function isCompletedStatus(v: unknown): boolean {
   return normStatus(v) === "completed";
 }
 
+function splitHash64(h: string): [string, string] {
+  const t = String(h ?? "").replace(/\s+/g, "").trim();
+  if (t.length <= 32) return [t, ""];
+  return [t.slice(0, 32), t.slice(32)];
+}
+
 // ---------------------------------------------------------------------------
 // QR RENDERING (EDGE-SAFE): draw QR as vector modules directly in PDF
 // ---------------------------------------------------------------------------
@@ -253,7 +259,9 @@ async function updateEnvelopeIfNotCompleted(
     .update(patch)
     .eq("id", envelope_id)
     .neq("status", "completed")
-    .select("id, status, metadata, entity_id, record_id, supporting_document_path, storage_path, title, is_test");
+    .select(
+      "id, status, metadata, entity_id, record_id, supporting_document_path, storage_path, title, is_test",
+    );
 
   if (error) {
     console.error("signature_envelopes update failed", error, patch);
@@ -416,7 +424,9 @@ serve(async (req) => {
         certificate: cert,
         base_document_path: safeText(cert?.base_document_path) ?? null,
         signed_document_path:
-          safeText(cert?.signed_document_path) ?? safeText(meta?.signed_document_path) ?? null,
+          safeText(cert?.signed_document_path) ??
+          safeText(meta?.signed_document_path) ??
+          null,
         signed_document_path_canonical:
           safeText(cert?.signed_document_path_canonical) ??
           safeText(meta?.signed_document_path_canonical) ??
@@ -426,7 +436,8 @@ serve(async (req) => {
         wet_signature_mode: safeText(cert?.wet_signature_mode) ?? "click",
         wet_signature_path: safeText(cert?.wet_signature_path) ?? null,
         force_regen: false,
-        registry_attestation: cert?.registry_attestation ?? meta?.registry_attestation ?? null,
+        registry_attestation:
+          cert?.registry_attestation ?? meta?.registry_attestation ?? null,
       });
     }
 
@@ -440,7 +451,10 @@ serve(async (req) => {
 
     if (partyErr || !party) {
       console.error("Party fetch error", partyErr);
-      return json({ ok: false, error: "Signature party not found", details: partyErr }, 404);
+      return json(
+        { ok: false, error: "Signature party not found", details: partyErr },
+        404,
+      );
     }
 
     // 2.1) Capability token enforcement (NO REGRESSION)
@@ -466,7 +480,10 @@ serve(async (req) => {
 
       if (partyUpdateErr) {
         console.error("Party update error", partyUpdateErr);
-        return json({ ok: false, error: "Failed to update party", details: partyUpdateErr }, 500);
+        return json(
+          { ok: false, error: "Failed to update party", details: partyUpdateErr },
+          500,
+        );
       }
     }
 
@@ -507,7 +524,10 @@ serve(async (req) => {
 
     if (allPartiesErr || !allParties) {
       console.error("All parties fetch error", allPartiesErr);
-      return json({ ok: false, error: "Failed to check parties", details: allPartiesErr }, 500);
+      return json(
+        { ok: false, error: "Failed to check parties", details: allPartiesErr },
+        500,
+      );
     }
 
     const allSigned =
@@ -568,6 +588,13 @@ serve(async (req) => {
           console.error("Error downloading base PDF:", dlErr);
         } else {
           const originalBytes = await originalFile.arrayBuffer();
+
+          // ✅ Enterprise, no regression:
+          // Compute a stable digest over the executed record content bytes (the base PDF we loaded),
+          // and print THAT digest on the certificate page.
+          // This avoids self-referential hashing (printing a hash changes bytes).
+          const recordDigest = await sha256Hex(originalBytes);
+
           const pdfDoc = await PDFDocument.load(originalBytes);
 
           // Resolver snapshot (metadata/UI/debug only; PDF must not assert registry)
@@ -650,7 +677,8 @@ serve(async (req) => {
           );
 
           y -= 26;
-          const title = (record as any)?.title ?? (envelope as any)?.title ?? "Corporate Record";
+          const title =
+            (record as any)?.title ?? (envelope as any)?.title ?? "Corporate Record";
           certPage.drawText(title, {
             x: margin,
             y,
@@ -781,7 +809,8 @@ serve(async (req) => {
 
           // ✅ Registry doctrine applied:
           // - Execution Certificate must NOT claim registry hash or registry timing.
-          // - It may only point to verification terminal (QR + URL).
+          // - It may point to verification terminal (QR + URL) and may include a stable record digest
+          //   of the executed record content (excluding this certificate page).
           if (canWriteAt(techY)) {
             techY -= 6;
 
@@ -822,7 +851,127 @@ serve(async (req) => {
                   color: textMuted,
                 },
               );
+              techY -= 14;
+            }
+
+            // ✅ NEW (enterprise hardening): stable digest line(s)
+            // This is NOT the registry hash. It is a digest over the executed record content bytes
+            // (excluding this certificate page), which is cross-exam safe.
+            if (canWriteAt(techY)) {
+              certPage.drawText("Record Digest (SHA-256)", {
+                x: margin,
+                y: techY,
+                size: 8.5,
+                font: fontBold,
+                color: textDark,
+              });
+              techY -= 12;
+            }
+
+            if (canWriteAt(techY)) {
+              const [h1, h2] = splitHash64(recordDigest);
+              certPage.drawText(h1, {
+                x: margin,
+                y: techY,
+                size: 7.2,
+                font,
+                color: textMuted,
+              });
               techY -= 10;
+
+              if (h2 && canWriteAt(techY)) {
+                certPage.drawText(h2, {
+                  x: margin,
+                  y: techY,
+                  size: 7.2,
+                  font,
+                  color: textMuted,
+                });
+                techY -= 12;
+              } else {
+                techY -= 2;
+              }
+
+              if (canWriteAt(techY)) {
+                certPage.drawText(
+                  "Digest scope: executed record content (excluding this certificate page).",
+                  {
+                    x: margin,
+                    y: techY,
+                    size: 7,
+                    font,
+                    color: textMuted,
+                  },
+                );
+                techY -= 12;
+              }
+            }
+
+            // ✅ Optional (safe): show registry hash if already present (no claims, no timing assertions)
+            if (canWriteAt(techY)) {
+              const hasRegistryHash =
+                !!registrySnapshot?.file_hash &&
+                (registrySnapshot.verification_level === "verified" ||
+                  registrySnapshot.verification_level === "certified");
+
+              certPage.drawText("Registry Hash (when certified)", {
+                x: margin,
+                y: techY,
+                size: 8.5,
+                font: fontBold,
+                color: textDark,
+              });
+              techY -= 12;
+
+              if (hasRegistryHash && canWriteAt(techY)) {
+                const [r1, r2] = splitHash64(String(registrySnapshot.file_hash));
+                certPage.drawText(r1, {
+                  x: margin,
+                  y: techY,
+                  size: 7.2,
+                  font,
+                  color: textMuted,
+                });
+                techY -= 10;
+
+                if (r2 && canWriteAt(techY)) {
+                  certPage.drawText(r2, {
+                    x: margin,
+                    y: techY,
+                    size: 7.2,
+                    font,
+                    color: textMuted,
+                  });
+                  techY -= 10;
+                }
+
+                if (registrySnapshot.verification_level && canWriteAt(techY)) {
+                  certPage.drawText(
+                    `Registry level: ${safeUpper(registrySnapshot.verification_level)}`,
+                    {
+                      x: margin,
+                      y: techY,
+                      size: 7,
+                      font,
+                      color: textMuted,
+                    },
+                  );
+                  techY -= 10;
+                }
+              } else if (canWriteAt(techY)) {
+                certPage.drawText(
+                  "Pending at execution time — use the verification terminal (QR) as canonical authority.",
+                  {
+                    x: margin,
+                    y: techY,
+                    size: 7,
+                    font,
+                    color: textMuted,
+                    maxWidth: width - margin * 2,
+                  },
+                );
+                techY -= 10;
+              }
             }
           }
 
@@ -938,11 +1087,9 @@ serve(async (req) => {
           try {
             const { error: upCanonErr } = await supabase.storage
               .from(BUCKET)
-              .upload(
-                signedPathCanonical,
-                new Blob([pdfBytes], { type: "application/pdf" }),
-                { upsert: true },
-              );
+              .upload(signedPathCanonical, new Blob([pdfBytes], { type: "application/pdf" }), {
+                upsert: true,
+              });
             if (upCanonErr) console.error("Error uploading canonical signed PDF:", upCanonErr);
           } catch (e) {
             console.error("Canonical signed upload threw (non-fatal)", e);
@@ -951,11 +1098,9 @@ serve(async (req) => {
           // Upload legacy path (continuity)
           const { error: uploadErr } = await supabase.storage
             .from(BUCKET)
-            .upload(
-              signedPath,
-              new Blob([pdfBytes], { type: "application/pdf" }),
-              { upsert: true },
-            );
+            .upload(signedPath, new Blob([pdfBytes], { type: "application/pdf" }), {
+              upsert: true,
+            });
 
           if (uploadErr) {
             console.error("Error uploading legacy signed PDF:", uploadErr);
@@ -991,8 +1136,15 @@ serve(async (req) => {
             // Internal render digest (NOT canonical registry truth)
             pdf_hash: pdfHash,
 
+            // ✅ New: stable digest of executed record content bytes (excluding certificate page)
+            record_digest_sha256: recordDigest,
+
             bucket: BUCKET,
-            base_document_path: basePath ?? safeText((envelope as any)?.supporting_document_path) ?? safeText((envelope as any)?.storage_path) ?? null,
+            base_document_path:
+              basePath ??
+              safeText((envelope as any)?.supporting_document_path) ??
+              safeText((envelope as any)?.storage_path) ??
+              null,
             signed_document_path: signedPath,
             signed_document_path_canonical: signedPathCanonical,
 
@@ -1023,9 +1175,17 @@ serve(async (req) => {
             // Keep internal digest for continuity (do not treat as registry authority)
             pdf_hash: pdfHash ?? existingMeta.pdf_hash ?? null,
 
+            // Add stable record digest (additive; no consumer required)
+            record_digest_sha256:
+              (certificate as any).record_digest_sha256 ??
+              existingMeta.record_digest_sha256 ??
+              null,
+
             // Mirror resolver snapshot at top-level (additive; no consumer required)
             registry_attestation:
-              (certificate as any).registry_attestation ?? existingMeta.registry_attestation ?? null,
+              (certificate as any).registry_attestation ??
+              existingMeta.registry_attestation ??
+              null,
 
             wet_signature_mode:
               String(wet_signature_mode ?? "").toLowerCase() ||
@@ -1035,14 +1195,14 @@ serve(async (req) => {
 
           // IMPORTANT: do NOT set completed here; we set it after metadata is written.
           // ✅ Idempotent: if envelope becomes completed concurrently, this becomes a no-op (no 500).
-          const envSupport = safeText((envelope as any)?.supporting_document_path);
-          const envStorage = safeText((envelope as any)?.storage_path);
+          const envSupport2 = safeText((envelope as any)?.supporting_document_path);
+          const envStorage2 = safeText((envelope as any)?.storage_path);
 
           await updateEnvelopeIfNotCompleted(envelope_id, {
             status: "partial",
             metadata: newMetadata,
-            supporting_document_path: envSupport ?? basePath ?? null,
-            storage_path: envStorage ?? basePath ?? null,
+            supporting_document_path: envSupport2 ?? basePath ?? null,
+            storage_path: envStorage2 ?? basePath ?? null,
           });
 
           await mustInsertEvent({
@@ -1065,7 +1225,10 @@ serve(async (req) => {
 
     // 7) FINALIZE ENVELOPE STATUS (AFTER METADATA WRITE)
     // ✅ Idempotent: update only if NOT completed; if already completed, treat as ok.
-    if (!isCompletedStatus((envelope as any).status) && normStatus((envelope as any).status) !== normStatus(nextStatus)) {
+    if (
+      !isCompletedStatus((envelope as any).status) &&
+      normStatus((envelope as any).status) !== normStatus(nextStatus)
+    ) {
       await updateEnvelopeIfNotCompleted(envelope_id, { status: nextStatus });
     }
 
@@ -1091,7 +1254,10 @@ serve(async (req) => {
       if (signed_document_path) {
         try {
           const entitySlug = (entity as any)?.slug ?? null;
-          const resolutionTitle = (record as any)?.title ?? (envelope as any).title ?? "Signed Corporate Record";
+          const resolutionTitle =
+            (record as any)?.title ??
+            (envelope as any).title ??
+            "Signed Corporate Record";
 
           if (entitySlug) {
             const ingestBody = {
@@ -1156,7 +1322,9 @@ serve(async (req) => {
     const finalVerifyUrl =
       safeText(cert?.verify_url) ?? safeText(meta?.verify_url) ?? verifyUrl;
 
-    const finalStatus = isCompletedStatus((finalEnv as any)?.status) ? "completed" : nextStatus;
+    const finalStatus = isCompletedStatus((finalEnv as any)?.status)
+      ? "completed"
+      : nextStatus;
 
     return json({
       ok: true,
