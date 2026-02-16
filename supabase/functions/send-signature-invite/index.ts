@@ -158,7 +158,7 @@ type EnvelopePartyRow = {
   is_test: boolean | null;
   name: string | null;
   email: string;
-  role: string | null;
+  role: string; // ✅ FIX: NOT NULL in your table
   party_type: string; // 'signer' | 'cc'
   required: boolean;
   is_primary: boolean;
@@ -348,18 +348,25 @@ function buildAuthorityEmailHtml(args: {
 // ---------------------------------------------------------------------------
 // AUTH (Fixes your 401)
 // ---------------------------------------------------------------------------
-async function requireOperatorOrInternal(req: Request): Promise<{
-  ok: true;
-  mode: "operator" | "internal";
-  operator_user_id: string | null;
-} | {
-  ok: false;
-  status: number;
-  error: string;
-  detail?: string;
-}> {
+async function requireOperatorOrInternal(req: Request): Promise<
+  | {
+      ok: true;
+      mode: "operator" | "internal";
+      operator_user_id: string | null;
+    }
+  | {
+      ok: false;
+      status: number;
+      error: string;
+      detail?: string;
+    }
+> {
   const internalHeader = safeStr(req.headers.get("x-internal-key") ?? "");
-  if (INTERNAL_EDGE_KEY && internalHeader && internalHeader === INTERNAL_EDGE_KEY) {
+  if (
+    INTERNAL_EDGE_KEY &&
+    internalHeader &&
+    internalHeader === INTERNAL_EDGE_KEY
+  ) {
     return { ok: true, mode: "internal", operator_user_id: null };
   }
 
@@ -369,7 +376,8 @@ async function requireOperatorOrInternal(req: Request): Promise<{
       ok: false,
       status: 401,
       error: "INVALID_SESSION",
-      detail: "Missing Authorization Bearer token (call via supabase.functions.invoke from UI).",
+      detail:
+        "Missing Authorization Bearer token (call via supabase.functions.invoke from UI).",
     };
   }
   if (!SUPABASE_ANON_KEY) {
@@ -482,7 +490,7 @@ async function upsertCapabilityParty(
  * Upserts canonical UI party row (Forge reads this).
  * Table: public.signature_envelope_parties
  *
- * NOTE: we DO NOT invent statuses; keep status = 'pending' unless already set.
+ * ✅ FIX: signature_envelope_parties.role is NOT NULL → enforce defaults
  */
 async function upsertEnvelopeParty(args: {
   envelope: EnvelopeRow;
@@ -495,6 +503,11 @@ async function upsertEnvelopeParty(args: {
   signing_order: number | null;
 }) {
   const envelopeId = args.envelope.id;
+
+  // ✅ FIX: enforce non-null role for canonical table
+  const role =
+    safeStr(args.role ?? "") ||
+    (args.party_type === "cc" ? "CC" : "Director");
 
   // Find existing by envelope_id + email + party_type (idempotent)
   const existing = await supabaseService
@@ -520,7 +533,7 @@ async function upsertEnvelopeParty(args: {
       .from("signature_envelope_parties")
       .update({
         name: args.name,
-        role: args.role,
+        role, // ✅ always non-null
         required: args.required,
         is_primary: args.is_primary,
         signing_order: args.signing_order,
@@ -545,7 +558,7 @@ async function upsertEnvelopeParty(args: {
       is_test: args.envelope.is_test,
       name: args.name,
       email: args.email,
-      role: args.role,
+      role, // ✅ FIX: NOT NULL
       party_type: args.party_type,
       required: args.required,
       is_primary: args.is_primary,
@@ -559,7 +572,10 @@ async function upsertEnvelopeParty(args: {
   return ins.data as EnvelopePartyRow;
 }
 
-async function markEnvelopePartyInvited(envelopePartyId: string, envelopeId: string) {
+async function markEnvelopePartyInvited(
+  envelopePartyId: string,
+  envelopeId: string,
+) {
   // Keep status within allowed values; invited_at is the audit truth.
   const r = await supabaseService
     .from("signature_envelope_parties")
@@ -716,13 +732,24 @@ function normalizeInvite(body: InviteBody) {
   const ccRaw = body.cc ?? null;
   const ccList = Array.isArray(ccRaw) ? ccRaw.flatMap(splitEmails) : splitEmails(ccRaw);
 
-  // Safety: normalize + unique
+  // Safety: normalize + unique + ✅ FIX: default role for canonical table
   const normSigners = signers
-    .map((s) => ({
-      ...s,
-      email: normEmail(s.email),
-      party_type: (safeStr(s.party_type ?? "") || "signer") as any,
-    }))
+    .map((s) => {
+      const partyTypeRaw = safeStr(s.party_type ?? "") || "signer";
+      const partyType =
+        partyTypeRaw.toLowerCase() === "cc" ? "cc" : "signer";
+
+      const role =
+        safeStr(s.role ?? "") ||
+        (partyType === "cc" ? "CC" : "Director"); // ✅ FIX
+
+      return {
+        ...s,
+        email: normEmail(s.email),
+        party_type: partyType as any,
+        role, // ✅ role always non-empty string now
+      };
+    })
     .filter((s) => s.email && s.email.includes("@"));
 
   const normCC = uniq(ccList.map((e) => normEmail(e))).filter((e) => e && e.includes("@"));
@@ -778,7 +805,14 @@ serve(async (req) => {
   try {
     envelope = await getEnvelope(inv.envelope_id);
   } catch (e) {
-    return json({ ok: false, error: "ENVELOPE_NOT_FOUND", detail: String((e as any)?.message ?? e) }, 404);
+    return json(
+      {
+        ok: false,
+        error: "ENVELOPE_NOT_FOUND",
+        detail: String((e as any)?.message ?? e),
+      },
+      404,
+    );
   }
 
   const lane = laneLabel(envelope.is_test) as "SANDBOX" | "RoT";
@@ -786,12 +820,15 @@ serve(async (req) => {
   // Safety: do not mutate parties after completion
   const envStatus = safeStr(envelope.status ?? "").toLowerCase();
   if (envStatus === "completed") {
-    return json({
-      ok: false,
-      error: "ENVELOPE_COMPLETED",
-      detail: "Envelope is completed; signer set is immutable.",
-      envelope_id: envelope.id,
-    }, 409);
+    return json(
+      {
+        ok: false,
+        error: "ENVELOPE_COMPLETED",
+        detail: "Envelope is completed; signer set is immutable.",
+        envelope_id: envelope.id,
+      },
+      409,
+    );
   }
 
   // If caller provided no signers and no CC, we still allow "re-invite existing signers"
@@ -837,7 +874,7 @@ serve(async (req) => {
         envelope,
         name: s.name ?? null,
         email: s.email,
-        role: s.role ?? null,
+        role: safeStr(s.role ?? "") || "Director", // ✅ FIX: never null
         party_type: "signer",
         required: s.required !== false,
         is_primary: Boolean(s.is_primary),
@@ -862,7 +899,7 @@ serve(async (req) => {
         envelope,
         name: null,
         email: ccEmail,
-        role: "CC",
+        role: "CC", // ✅ FIX: enforce non-null role
         party_type: "cc",
         required: false,
         is_primary: false,
@@ -933,7 +970,10 @@ serve(async (req) => {
       .order("created_at", { ascending: true });
 
     if (existing.error) {
-      return json({ ok: false, error: "DB_ERROR", detail: existing.error.message }, 500);
+      return json(
+        { ok: false, error: "DB_ERROR", detail: existing.error.message },
+        500,
+      );
     }
 
     for (const p of (existing.data ?? []) as any[]) {
@@ -981,13 +1021,16 @@ serve(async (req) => {
 
   // If there are still no required signers, fail loudly (enterprise)
   if (!inviteTargets.length) {
-    return json({
-      ok: false,
-      error: "NO_REQUIRED_SIGNERS",
-      detail:
-        "No required signer parties found to invite. Provide signers[] or create signature_envelope_parties first.",
-      envelope_id: envelope.id,
-    }, 400);
+    return json(
+      {
+        ok: false,
+        error: "NO_REQUIRED_SIGNERS",
+        detail:
+          "No required signer parties found to invite. Provide signers[] or create signature_envelope_parties first.",
+        envelope_id: envelope.id,
+      },
+      400,
+    );
   }
 
   // -----------------------------------------------------------------------
