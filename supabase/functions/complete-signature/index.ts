@@ -1,4 +1,3 @@
-// supabase/functions/complete-signature/index.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { PDFDocument, StandardFonts, rgb } from "https://esm.sh/pdf-lib@1.17.1";
@@ -114,9 +113,6 @@ function splitHash64(h: string): [string, string] {
 // ---------------------------------------------------------------------------
 // QR RENDERING (EDGE-SAFE): draw QR as vector modules directly in PDF
 // ---------------------------------------------------------------------------
-// qrcode@1.5.3 can generate module matrix without canvas via `create`.
-// We then draw filled rectangles for "dark" modules.
-// This is deterministic, fast, and cannot regress due to runtime DOM APIs.
 function drawQrToPdf(opts: {
   page: any;
   url: string;
@@ -201,8 +197,6 @@ async function resolveBasePdfPath(recordId: string): Promise<string | null> {
     .select("name, created_at")
     .eq("bucket_id", BUCKET)
     .or([`name.ilike.%/resolutions/%`, `name.ilike.%/Resolutions/%`].join(","))
-    .order("created_at", { ascending: false })
-    .limit(400);
 
   if (scanErr || !rows) {
     console.error("resolveBasePdfPath storage.objects scan failed", scanErr);
@@ -318,7 +312,6 @@ async function resolveRegistrySnapshot(args: {
   };
 
   try {
-    // Canonical SQL: public.resolve_verified_record(p_hash, p_envelope_id, p_ledger_id)
     const { data, error } = await supabase.rpc("resolve_verified_record", {
       p_hash: null,
       p_envelope_id: args.envelope_id,
@@ -338,7 +331,6 @@ async function resolveRegistrySnapshot(args: {
       verified_at: safeText(verified?.created_at) ?? null,
     };
 
-    // If resolver says ok but no verified yet, treat as provisional
     if (!snap.file_hash || !snap.verified_document_id) {
       return {
         ...snap,
@@ -376,7 +368,6 @@ serve(async (req) => {
     envelope_id,
     party_id,
 
-    // capability token (accept BOTH names; legacy-safe)
     token,
     party_token,
 
@@ -385,7 +376,6 @@ serve(async (req) => {
     wet_signature_mode,
     wet_signature_png,
 
-    // allow regen even if already signed/completed
     force_regen,
   } = body ?? {};
 
@@ -398,23 +388,17 @@ serve(async (req) => {
   try {
     const signedAt = new Date().toISOString();
 
-    // 1) Load envelope
     const { envelope, error: envErr } = await readEnvelope(envelope_id);
     if (envErr || !envelope) {
       console.error("Envelope fetch error", envErr);
       return json({ ok: false, error: "Envelope not found", details: envErr }, 404);
     }
 
-    // ✅ IDEMPOTENT EARLY RETURN (prevents 500 on double-click / retry)
-    // If already completed and caller is not explicitly forcing regen,
-    // treat as success and return the existing certificate/paths.
     if (isCompletedStatus(envelope.status) && !force_regen) {
       const meta = (envelope as any)?.metadata ?? {};
       const cert = meta?.certificate ?? null;
       const verifyUrl =
-        safeText(cert?.verify_url) ??
-        safeText(meta?.verify_url) ??
-        `https://sign.oasisintlholdings.com/verify.html?envelope_id=${envelope_id}`;
+        safeText(cert?.verify_url) ?? safeText(meta?.verify_url) ?? `https://sign.oasisintlholdings.com/verify.html?envelope_id=${envelope_id}`;
 
       return json({
         ok: true,
@@ -424,13 +408,9 @@ serve(async (req) => {
         certificate: cert,
         base_document_path: safeText(cert?.base_document_path) ?? null,
         signed_document_path:
-          safeText(cert?.signed_document_path) ??
-          safeText(meta?.signed_document_path) ??
-          null,
+          safeText(cert?.signed_document_path) ?? safeText(meta?.signed_document_path) ?? null,
         signed_document_path_canonical:
-          safeText(cert?.signed_document_path_canonical) ??
-          safeText(meta?.signed_document_path_canonical) ??
-          null,
+          safeText(cert?.signed_document_path_canonical) ?? safeText(meta?.signed_document_path_canonical) ?? null,
         pdf_hash: safeText(cert?.pdf_hash) ?? safeText(meta?.pdf_hash) ?? null,
         verify_url: verifyUrl,
         wet_signature_mode: safeText(cert?.wet_signature_mode) ?? "click",
@@ -441,7 +421,6 @@ serve(async (req) => {
       });
     }
 
-    // 2) Load party (include party_token)
     const { data: party, error: partyErr } = await supabase
       .from("signature_parties")
       .select("id, envelope_id, email, display_name, role, status, party_token")
@@ -457,7 +436,6 @@ serve(async (req) => {
       );
     }
 
-    // 2.1) Capability token enforcement (NO REGRESSION)
     if ((party as any).party_token) {
       const expected = String((party as any).party_token);
       const provided = String(providedToken ?? "");
@@ -470,7 +448,6 @@ serve(async (req) => {
     const alreadySigned = partyStatus === "signed";
     const wantRegen = !!force_regen;
 
-    // 3) Mark party signed (only if not already)
     if (!alreadySigned) {
       const { error: partyUpdateErr } = await supabase
         .from("signature_parties")
@@ -487,7 +464,6 @@ serve(async (req) => {
       }
     }
 
-    // 3.1) OPTIONAL: capture wet-ink PNG (fail-soft)
     let wetSignaturePath: string | null = null;
     try {
       const mode = String(wet_signature_mode ?? "").toLowerCase();
@@ -516,7 +492,6 @@ serve(async (req) => {
       wetSignaturePath = null;
     }
 
-    // 4) Check if all parties signed
     const { data: allParties, error: allPartiesErr } = await supabase
       .from("signature_parties")
       .select("status")
@@ -536,7 +511,6 @@ serve(async (req) => {
 
     const nextStatus = allSigned ? "completed" : "partial";
 
-    // 5) Load entity + record for certificate text
     const { data: entity } = await supabase
       .from("entities")
       .select("id, slug, name")
@@ -549,29 +523,22 @@ serve(async (req) => {
       .eq("id", (envelope as any).record_id)
       .single();
 
-    // 5.5) Verify URL (public terminal; registry confers authority)
     const verifyUrl =
-      (envelope as any)?.metadata?.verify_url ??
+      (envelope as any)?.metadata?.verify_url ?? 
       `https://sign.oasisintlholdings.com/verify.html?envelope_id=${envelope_id}`;
 
     let basePath: string | null = null;
-    let signedPath: string | null = null; // legacy path (NO REGRESSION)
-    let signedPathCanonical: string | null = null; // additive twin
+    let signedPath: string | null = null;
+    let signedPathCanonical: string | null = null;
     let pdfHash: string | null = null;
 
-    // -----------------------------------------------------------------------
-    // 6) Generate signed PDF with EXECUTION CERTIFICATE page (no registry claims)
-    // -----------------------------------------------------------------------
     if (allSigned && (!alreadySigned || wantRegen)) {
       const metaPath = safeText((envelope as any)?.metadata?.storage_path);
       const envSupport = safeText((envelope as any)?.supporting_document_path);
       const envStorage = safeText((envelope as any)?.storage_path);
 
       basePath =
-        envSupport ??
-        envStorage ??
-        metaPath?.replace(/^minute_book\//, "") ??
-        null;
+        envSupport ?? envStorage ?? metaPath?.replace(/^minute_book\//, "") ?? null;
 
       if (!basePath) {
         basePath = await resolveBasePdfPath(String((envelope as any).record_id));
@@ -589,21 +556,15 @@ serve(async (req) => {
         } else {
           const originalBytes = await originalFile.arrayBuffer();
 
-          // ✅ Enterprise, no regression:
-          // Compute a stable digest over the executed record content bytes (the base PDF we loaded),
-          // and print THAT digest on the certificate page.
-          // This avoids self-referential hashing (printing a hash changes bytes).
           const recordDigest = await sha256Hex(originalBytes);
 
           const pdfDoc = await PDFDocument.load(originalBytes);
 
-          // Resolver snapshot (metadata/UI/debug only; PDF must not assert registry)
           const registrySnapshot = await resolveRegistrySnapshot({
             envelope_id,
             ledger_id: String((envelope as any).record_id),
           });
 
-          // Add certificate page (new final page; original pages untouched)
           const certPage = pdfDoc.addPage();
           const width = certPage.getWidth();
           const height = certPage.getHeight();
@@ -611,14 +572,11 @@ serve(async (req) => {
           const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
           const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
 
-          // Palette (kept neutral/enterprise)
           const margin = 54;
           const accent = rgb(0.11, 0.77, 0.55);
           const textDark = rgb(0.16, 0.18, 0.22);
           const textMuted = rgb(0.45, 0.48, 0.55);
 
-          // ---- Layout guards (ZERO OVERLAP) ----
-          // Reserve a bottom band for QR + (optional) wet ink, so text never runs into it.
           const bandPad = 38;
           const qrSize = 98;
           const qrPlateH = qrSize + 22;
@@ -643,7 +601,6 @@ serve(async (req) => {
             color: accent,
           });
 
-          // ✅ Renamed (per final doctrine): Execution Certificate (not receipt-y)
           certPage.drawText("Execution Certificate", {
             x: margin,
             y: height - headerHeight + 18,
@@ -664,7 +621,6 @@ serve(async (req) => {
 
           let y = height - headerHeight - 34;
 
-          // Declarative (certificate voice, not receipt voice)
           certPage.drawText(
             "This certificate confirms the electronic execution of the following record:",
             {
@@ -699,9 +655,8 @@ serve(async (req) => {
 
           y -= 28;
 
-          // Two-column grid with stricter spacing (prevents overlap)
-          const colGap = 270; // widened to eliminate mid-column collision
-          const labelW = 104; // fixed label lane
+          const colGap = 270; 
+          const labelW = 104;
           const valuePad = 8;
 
           const leftLabelX = margin;
@@ -715,7 +670,7 @@ serve(async (req) => {
             ["Entity", entityLine],
             ["Record ID", String((envelope as any).record_id)],
             ["Record Title", title],
-            ["Executed At (UTC)", signedAt], // ✅ better language
+            ["Executed At (UTC)", signedAt],
             ["Envelope Status", nextStatus],
           ];
 
@@ -743,7 +698,7 @@ serve(async (req) => {
               size: 9,
               font,
               color: textMuted,
-              maxWidth: (rightLabelX - 18) - leftValueX, // hard bound prevents collision
+              maxWidth: (rightLabelX - 18) - leftValueX, 
             });
             leftY -= 16;
           }
@@ -768,7 +723,6 @@ serve(async (req) => {
             rightY -= 16;
           }
 
-          // Technical footprint (bounded so it never overlaps bottom band)
           let techY = Math.min(leftY, rightY) - 18;
           const minTextY = bottomBandTopY + 16;
 
@@ -807,10 +761,6 @@ serve(async (req) => {
             }
           }
 
-          // ✅ Registry doctrine applied:
-          // - Execution Certificate must NOT claim registry hash or registry timing.
-          // - It may point to verification terminal (QR + URL) and may include a stable record digest
-          //   of the executed record content (excluding this certificate page).
           if (canWriteAt(techY)) {
             techY -= 6;
 
@@ -854,9 +804,6 @@ serve(async (req) => {
               techY -= 14;
             }
 
-            // ✅ NEW (enterprise hardening): stable digest line(s)
-            // This is NOT the registry hash. It is a digest over the executed record content bytes
-            // (excluding this certificate page), which is cross-exam safe.
             if (canWriteAt(techY)) {
               certPage.drawText("Record Digest (SHA-256)", {
                 x: margin,
@@ -907,7 +854,6 @@ serve(async (req) => {
               }
             }
 
-            // ✅ Optional (safe): show registry hash if already present (no claims, no timing assertions)
             if (canWriteAt(techY)) {
               const hasRegistryHash =
                 !!registrySnapshot?.file_hash &&
@@ -1141,10 +1087,7 @@ serve(async (req) => {
 
             bucket: BUCKET,
             base_document_path:
-              basePath ??
-              safeText((envelope as any)?.supporting_document_path) ??
-              safeText((envelope as any)?.storage_path) ??
-              null,
+              basePath ?? safeText((envelope as any)?.supporting_document_path) ?? safeText((envelope as any)?.storage_path) ?? null,
             signed_document_path: signedPath,
             signed_document_path_canonical: signedPathCanonical,
 
@@ -1177,15 +1120,11 @@ serve(async (req) => {
 
             // Add stable record digest (additive; no consumer required)
             record_digest_sha256:
-              (certificate as any).record_digest_sha256 ??
-              existingMeta.record_digest_sha256 ??
-              null,
+              (certificate as any).record_digest_sha256 ?? existingMeta.record_digest_sha256 ?? null,
 
             // Mirror resolver snapshot at top-level (additive; no consumer required)
             registry_attestation:
-              (certificate as any).registry_attestation ??
-              existingMeta.registry_attestation ??
-              null,
+              (certificate as any).registry_attestation ?? existingMeta.registry_attestation ?? null,
 
             wet_signature_mode:
               String(wet_signature_mode ?? "").toLowerCase() ||
@@ -1193,16 +1132,11 @@ serve(async (req) => {
             wet_signature_path: wetSignaturePath ?? existingMeta.wet_signature_path ?? null,
           };
 
-          // IMPORTANT: do NOT set completed here; we set it after metadata is written.
-          // ✅ Idempotent: if envelope becomes completed concurrently, this becomes a no-op (no 500).
-          const envSupport2 = safeText((envelope as any)?.supporting_document_path);
-          const envStorage2 = safeText((envelope as any)?.storage_path);
-
           await updateEnvelopeIfNotCompleted(envelope_id, {
             status: "partial",
             metadata: newMetadata,
-            supporting_document_path: envSupport2 ?? basePath ?? null,
-            storage_path: envStorage2 ?? basePath ?? null,
+            supporting_document_path: safeText((envelope as any)?.supporting_document_path) ?? basePath ?? null,
+            storage_path: safeText((envelope as any)?.storage_path) ?? basePath ?? null,
           });
 
           await mustInsertEvent({
@@ -1255,9 +1189,7 @@ serve(async (req) => {
         try {
           const entitySlug = (entity as any)?.slug ?? null;
           const resolutionTitle =
-            (record as any)?.title ??
-            (envelope as any).title ??
-            "Signed Corporate Record";
+            (record as any)?.title ?? (envelope as any).title ?? "Signed Corporate Record";
 
           if (entitySlug) {
             const ingestBody = {
@@ -1335,9 +1267,7 @@ serve(async (req) => {
       signed_document_path:
         safeText(cert?.signed_document_path) ?? safeText(meta?.signed_document_path) ?? null,
       signed_document_path_canonical:
-        safeText(cert?.signed_document_path_canonical) ??
-        safeText(meta?.signed_document_path_canonical) ??
-        null,
+        safeText(cert?.signed_document_path_canonical) ?? safeText(meta?.signed_document_path_canonical) ?? null,
       pdf_hash: safeText(cert?.pdf_hash) ?? safeText(meta?.pdf_hash) ?? null,
       verify_url: finalVerifyUrl,
       wet_signature_mode: String(wet_signature_mode ?? "").toLowerCase() || "click",
