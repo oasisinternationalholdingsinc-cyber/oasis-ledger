@@ -83,6 +83,8 @@ type ResolutionFactsRow = {
   facts_json: any;
   model: string | null;
   extracted_at: string | null;
+  applied_at?: string | null;
+  applied_by?: string | null;
 };
 
 type AxiomListItem = {
@@ -200,10 +202,12 @@ function coerceArray(v: any) {
   return Array.isArray(v) ? v : [];
 }
 
-function summarizeFacts(factsJson: any): { bullets: string[]; meta: string[] } {
+function summarizeFacts(factsJson: any): { bullets: string[]; meta: string[]; counts: { g: number; r: number; m: number } } {
   const bullets: string[] = [];
   const meta: string[] = [];
-  if (!factsJson || typeof factsJson !== "object") return { bullets, meta };
+  const counts = { g: 0, r: 0, m: 0 };
+
+  if (!factsJson || typeof factsJson !== "object") return { bullets, meta, counts };
 
   const root: any = factsJson;
 
@@ -211,6 +215,10 @@ function summarizeFacts(factsJson: any): { bullets: string[]; meta: string[] } {
   const revokes = coerceArray(root.revokes ?? root.revoked ?? root.authority_revokes);
   const modifies = coerceArray(root.modifies ?? root.modified ?? root.authority_modifies);
   const conditions = coerceArray(root.conditions ?? root.constraints ?? root.limits ?? root.limitations);
+
+  counts.g = grants.length;
+  counts.r = revokes.length;
+  counts.m = modifies.length;
 
   if (grants.length) bullets.push(`Grants detected: ${grants.length}`);
   if (revokes.length) bullets.push(`Revocations detected: ${revokes.length}`);
@@ -235,7 +243,7 @@ function summarizeFacts(factsJson: any): { bullets: string[]; meta: string[] } {
 
   if (effective) meta.push(`Effective: ${String(effective)}`);
 
-  return { bullets, meta };
+  return { bullets, meta, counts };
 }
 
 function summarizeConflicts(conflictsJson: any): { bullets: string[] } {
@@ -286,6 +294,15 @@ async function getInvokeHeaders() {
   return headers;
 }
 
+type PerRowIntel = {
+  facts?: ResolutionFactsRow | null;
+  factsCounts?: { g: number; r: number; m: number };
+  applied?: boolean;
+  draft_id?: string | null;
+  conflictSeverity?: string | null;
+  conflictCount?: number;
+};
+
 export default function ArchiveLedgerLifecyclePage() {
   const { activeEntity } = useEntity();
   const { env } = useOsEnv();
@@ -315,6 +332,12 @@ export default function ArchiveLedgerLifecyclePage() {
   const [extracting, setExtracting] = useState(false);
   const [extractErr, setExtractErr] = useState<string | null>(null);
   const [extractOk, setExtractOk] = useState<string | null>(null);
+
+  // ✅ Phase 1/2/3 list-surface intel (best-effort; NO wiring changes)
+  const [perRowIntel, setPerRowIntel] = useState<Record<string, PerRowIntel>>({});
+  const [listIntelLoading, setListIntelLoading] = useState(false);
+  const [listIntelErr, setListIntelErr] = useState<string | null>(null);
+  const [activeAuthorityCount, setActiveAuthorityCount] = useState<number | null>(null);
 
   // ✅ PRODUCTION: lock background scroll when any modal is open
   useEffect(() => {
@@ -504,6 +527,190 @@ export default function ArchiveLedgerLifecyclePage() {
     };
   }, [entityId, laneIsTest]);
 
+  // ✅ Phase 1/2/3 list intel loader:
+  // - Phase 1: governance_resolution_facts presence per ledger row
+  // - Phase 2: applied_at/applied_by indicates authority application completed
+  // - Phase 3: draft_authority_conflicts severity + count (via draft link)
+  // - Also: active authority count (authority_registry)
+  useEffect(() => {
+    let alive = true;
+
+    async function loadListIntel() {
+      if (!entityId || !rows?.length) {
+        setPerRowIntel({});
+        setActiveAuthorityCount(null);
+        setListIntelErr(null);
+        return;
+      }
+
+      setListIntelLoading(true);
+      setListIntelErr(null);
+
+      const ledgerIds = rows.map((r) => r.id).filter(Boolean).slice(0, 250);
+
+      try {
+        // 1) Facts (Phase 1/2)
+        let factsByLedger: Record<string, ResolutionFactsRow> = {};
+        try {
+          const { data: factsRows, error: fErr } = await supabase
+            .from("governance_resolution_facts")
+            .select("id,ledger_id,entity_id,is_test,verified_document_id,facts_json,model,extracted_at,applied_at,applied_by")
+            .in("ledger_id", ledgerIds)
+            .eq("entity_id", entityId)
+            .eq("is_test", laneIsTest)
+            .order("extracted_at", { ascending: false })
+            .limit(500);
+
+          if (fErr) {
+            console.warn("list facts read failed", fErr);
+          } else {
+            // keep latest per ledger_id (ordered desc already)
+            const seen = new Set<string>();
+            for (const r of (factsRows ?? []) as any[]) {
+              const lid = String(r.ledger_id || "").trim();
+              if (!lid || seen.has(lid)) continue;
+              factsByLedger[lid] = r as ResolutionFactsRow;
+              seen.add(lid);
+            }
+          }
+        } catch (e) {
+          console.warn("list facts read threw", e);
+        }
+
+        // 2) Draft links + conflicts (Phase 3)
+        let draftIdByLedger: Record<string, string> = {};
+        try {
+          const { data: draftLinks, error: dErr } = await supabase
+            .from("governance_drafts")
+            .select("id,finalized_record_id,entity_id,is_test")
+            .in("finalized_record_id", ledgerIds)
+            .eq("entity_id", entityId)
+            .eq("is_test", laneIsTest)
+            .limit(500);
+
+          if (dErr) {
+            console.warn("list draft links read failed", dErr);
+          } else {
+            for (const d of (draftLinks ?? []) as any[]) {
+              const lid = String(d.finalized_record_id || "").trim();
+              const did = String(d.id || "").trim();
+              if (!lid || !did) continue;
+              // prefer first; there should be 0/1 in canonical flow
+              if (!draftIdByLedger[lid]) draftIdByLedger[lid] = did;
+            }
+          }
+        } catch (e) {
+          console.warn("list draft links read threw", e);
+        }
+
+        let conflictsByDraft: Record<
+          string,
+          { severity: string | null; count: number; compared_at: string | null; id: string | null }
+        > = {};
+
+        const draftIds = Object.values(draftIdByLedger).filter(Boolean);
+        if (draftIds.length) {
+          try {
+            const { data: confRows, error: cErr } = await supabase
+              .from("draft_authority_conflicts")
+              .select("id,draft_id,severity,conflicts_json,compared_at,entity_id,is_test")
+              .in("draft_id", draftIds)
+              .eq("entity_id", entityId)
+              .eq("is_test", laneIsTest)
+              .order("compared_at", { ascending: false })
+              .limit(600);
+
+            if (cErr) {
+              console.warn("list conflicts read failed", cErr);
+            } else {
+              const seenDraft = new Set<string>();
+              for (const c of (confRows ?? []) as any[]) {
+                const did = String(c.draft_id || "").trim();
+                if (!did || seenDraft.has(did)) continue;
+                const cnt = computeConflictsCount(c.conflicts_json);
+                conflictsByDraft[did] = {
+                  severity: (c.severity ?? null) as any,
+                  count: cnt,
+                  compared_at: (c.compared_at ?? null) as any,
+                  id: (c.id ?? null) as any,
+                };
+                seenDraft.add(did);
+              }
+            }
+          } catch (e) {
+            console.warn("list conflicts read threw", e);
+          }
+        }
+
+        // 3) Active authority count (Phase 2 surface)
+        let activeCount: number | null = null;
+        try {
+          const { count, error: aErr } = await supabase
+            .from("authority_registry")
+            .select("id", { count: "exact", head: true })
+            .eq("entity_id", entityId)
+            .eq("is_test", laneIsTest)
+            .eq("active", true);
+
+          if (aErr) {
+            console.warn("authority_registry count blocked/failed", aErr);
+          } else {
+            activeCount = typeof count === "number" ? count : null;
+          }
+        } catch (e) {
+          console.warn("authority_registry count threw", e);
+        }
+
+        if (!alive) return;
+
+        const merged: Record<string, PerRowIntel> = {};
+        for (const lid of ledgerIds) {
+          const facts = factsByLedger[lid] ?? null;
+          const did = draftIdByLedger[lid] ?? null;
+          const conf = did ? conflictsByDraft[did] : undefined;
+
+          const factsSummary = facts?.facts_json ? summarizeFacts(facts.facts_json) : null;
+          const counts = factsSummary?.counts ?? undefined;
+
+          merged[lid] = {
+            facts,
+            factsCounts: counts,
+            applied: !!facts?.applied_at,
+            draft_id: did,
+            conflictSeverity: conf?.severity ?? null,
+            conflictCount: typeof conf?.count === "number" ? conf.count : undefined,
+          };
+        }
+
+        setPerRowIntel(merged);
+        setActiveAuthorityCount(activeCount);
+
+        // Note: we keep this calm. Only show warning if EVERYTHING blocked.
+        const anyFacts = Object.values(merged).some((x) => !!x.facts?.id);
+        const anyDrafts = Object.values(merged).some((x) => !!x.draft_id);
+        if (!anyFacts && !anyDrafts && activeCount === null) {
+          setListIntelErr("Intelligence surfaces may be partially blocked by RLS in browser. Modal still loads per-record best-effort.");
+        } else {
+          setListIntelErr(null);
+        }
+
+        setListIntelLoading(false);
+      } catch (e: any) {
+        if (!alive) return;
+        setPerRowIntel({});
+        setActiveAuthorityCount(null);
+        setListIntelErr(e?.message ? String(e.message) : "Failed to load list intelligence.");
+        setListIntelLoading(false);
+      }
+    }
+
+    loadListIntel();
+
+    return () => {
+      alive = false;
+    };
+  }, [entityId, laneIsTest, rows]);
+
   const filtered = useMemo(() => {
     const qq = q.trim().toLowerCase();
 
@@ -539,13 +746,32 @@ export default function ArchiveLedgerLifecyclePage() {
 
   const topIntel = useMemo(() => {
     const axiomNotesCount = axiomList.length;
+
+    const lids = rows.map((r) => r.id);
+    let factsCount = 0;
+    let appliedCount = 0;
+    let critical = 0;
+    let warning = 0;
+
+    for (const lid of lids) {
+      const pr = perRowIntel[lid];
+      if (pr?.facts?.id) factsCount++;
+      if (pr?.applied) appliedCount++;
+
+      const sev = String(pr?.conflictSeverity || "").toLowerCase().trim();
+      if (sev === "critical") critical++;
+      else if (sev === "warning") warning++;
+    }
+
     return {
       axiomNotesCount,
-      resolutionFactsCount: resolutionFacts?.id ? 1 : 0,
-      critical: draftConflicts?.severity?.toLowerCase() === "critical" ? 1 : 0,
-      warning: draftConflicts?.severity?.toLowerCase() === "warning" ? 1 : 0,
+      resolutionFactsCount: factsCount,
+      phase2AppliedCount: appliedCount,
+      activeAuthority: activeAuthorityCount,
+      critical,
+      warning,
     };
-  }, [axiomList, resolutionFacts, draftConflicts]);
+  }, [axiomList, rows, perRowIntel, activeAuthorityCount]);
 
   async function loadLedgerIntel(ledgerId: string) {
     if (!ledgerId) return;
@@ -602,7 +828,7 @@ export default function ArchiveLedgerLifecyclePage() {
       try {
         const { data: facts, error: fErr } = await supabase
           .from("governance_resolution_facts")
-          .select("id,ledger_id,entity_id,is_test,verified_document_id,facts_json,model,extracted_at")
+          .select("id,ledger_id,entity_id,is_test,verified_document_id,facts_json,model,extracted_at,applied_at,applied_by")
           .eq("ledger_id", ledgerId)
           .eq("entity_id", entityId ?? "")
           .eq("is_test", laneIsTest)
@@ -647,6 +873,10 @@ export default function ArchiveLedgerLifecyclePage() {
 
       setExtractOk(data?.message ? String(data.message) : "Extracted facts successfully.");
       await loadLedgerIntel(selected.id);
+
+      // refresh list intel quickly (best-effort)
+      // (no extra RPC; just re-trigger by setting rows same)
+      setRows((prev) => [...prev]);
     } catch (e: any) {
       const msg = e?.message ? String(e.message) : "AXIOM extract failed.";
       setExtractErr(msg);
@@ -710,15 +940,18 @@ export default function ArchiveLedgerLifecyclePage() {
           </div>
 
           <div className={cx("relative", body)}>
-            {/* Top intelligence strip — production contrast */}
+            {/* Top intelligence strip — PHASE 1/2/3 surfaced (UI-only, no rewiring) */}
             <div className="mb-4 rounded-3xl border border-white/10 bg-black/30 shadow-[0_18px_60px_rgba(0,0,0,0.45)] px-4 py-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Intelligence</div>
+                  <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Governance intelligence</div>
                   <div className="mt-1 text-sm text-slate-200">
-                    {axiomListLoading ? "Loading signals…" : axiomListErr ? "Signals partially available" : "Signals ready"}
+                    {listIntelLoading ? "Loading Phase 1/2/3 signals…" : listIntelErr ? "Signals partially available" : "Signals ready"}
                   </div>
-                  {axiomListErr ? <div className="mt-1 text-[11px] text-amber-200/80">{axiomListErr}</div> : null}
+                  {listIntelErr ? <div className="mt-1 text-[11px] text-amber-200/80">{listIntelErr}</div> : null}
+                  <div className="mt-1 text-[11px] text-slate-500">
+                    Phase 1: extraction • Phase 2: authority state application • Phase 3: draft conflict advisory (all advisory-only).
+                  </div>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2 text-[11px]">
@@ -729,7 +962,17 @@ export default function ArchiveLedgerLifecyclePage() {
 
                   <span className="inline-flex items-center gap-2 rounded-full border border-sky-400/20 bg-sky-400/10 px-3 py-1 text-sky-100">
                     <Zap className="h-4 w-4" />
-                    Resolution facts: <span className="font-semibold">{topIntel.resolutionFactsCount}</span>
+                    Facts (P1): <span className="font-semibold">{topIntel.resolutionFactsCount}</span>
+                  </span>
+
+                  <span className="inline-flex items-center gap-2 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-emerald-100">
+                    <Shield className="h-4 w-4" />
+                    Applied (P2): <span className="font-semibold">{topIntel.phase2AppliedCount}</span>
+                  </span>
+
+                  <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-200/90">
+                    <span className="text-slate-500">Active authority:</span>{" "}
+                    <span className="font-semibold">{typeof topIntel.activeAuthority === "number" ? topIntel.activeAuthority : "—"}</span>
                   </span>
 
                   <span className="inline-flex items-center gap-2 rounded-full border border-rose-400/20 bg-rose-400/10 px-3 py-1 text-rose-100">
@@ -794,7 +1037,7 @@ export default function ArchiveLedgerLifecyclePage() {
                   </div>
 
                   <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-500 leading-relaxed">
-                    Intelligence is <span className="text-slate-200">advisory-only</span>. Indicators come from stored sidecars (no mutation).
+                    Intelligence is <span className="text-slate-200">advisory-only</span>. Phase 2 “Applied” is a stored marker (no auto-mutation).
                   </div>
 
                   <div className="mt-4 rounded-3xl border border-white/10 bg-black/20 p-3">
@@ -876,6 +1119,16 @@ export default function ArchiveLedgerLifecyclePage() {
                         const canGoArchive = s === "SIGNED" || s === "ARCHIVED";
                         const hasAxiom = axiomLedgerSet.has(r.id);
 
+                        const pr = perRowIntel[r.id];
+                        const hasFacts = !!pr?.facts?.id;
+                        const applied = !!pr?.applied;
+                        const g = pr?.factsCounts?.g ?? 0;
+                        const rr = pr?.factsCounts?.r ?? 0;
+                        const m = pr?.factsCounts?.m ?? 0;
+
+                        const sev = String(pr?.conflictSeverity || "").toLowerCase().trim();
+                        const cc = typeof pr?.conflictCount === "number" ? pr!.conflictCount! : 0;
+
                         return (
                           <button
                             key={r.id}
@@ -915,6 +1168,7 @@ export default function ArchiveLedgerLifecyclePage() {
                                     </span>
                                   </span>
 
+                                  {/* Phase surfaces */}
                                   {hasAxiom ? (
                                     <span className="inline-flex items-center gap-2 rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-1 text-amber-100">
                                       <Sparkles className="h-4 w-4" />
@@ -924,6 +1178,76 @@ export default function ArchiveLedgerLifecyclePage() {
                                     <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-400/80">
                                       <Sparkles className="h-4 w-4 text-slate-500" />
                                       No AXIOM
+                                    </span>
+                                  )}
+
+                                  {/* Phase 1: facts */}
+                                  {hasFacts ? (
+                                    <span className="inline-flex items-center gap-2 rounded-full border border-sky-400/20 bg-sky-400/10 px-3 py-1 text-sky-100">
+                                      <Zap className="h-4 w-4" />
+                                      FACTS (P1)
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-400/80">
+                                      <Zap className="h-4 w-4 text-slate-500" />
+                                      No facts
+                                    </span>
+                                  )}
+
+                                  {/* Phase 2: applied */}
+                                  {hasFacts ? (
+                                    applied ? (
+                                      <span className="inline-flex items-center gap-2 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-emerald-100">
+                                        <Shield className="h-4 w-4" />
+                                        AUTH Applied (P2)
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-300/80">
+                                        <Shield className="h-4 w-4 text-slate-400" />
+                                        AUTH not applied
+                                      </span>
+                                    )
+                                  ) : null}
+
+                                  {/* Phase 2 summary counts (G/R/ΔM) */}
+                                  {hasFacts ? (
+                                    <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-200/90">
+                                      <span className="text-slate-500">AUTH</span>
+                                      <span className="font-semibold text-emerald-200">+{g}</span>
+                                      <span className="text-slate-600">/</span>
+                                      <span className="font-semibold text-rose-200">-{rr}</span>
+                                      <span className="text-slate-600">/</span>
+                                      <span className="font-semibold text-amber-200">Δ{m}</span>
+                                    </span>
+                                  ) : null}
+
+                                  {/* Phase 3: conflicts */}
+                                  {pr?.draft_id ? (
+                                    sev === "critical" ? (
+                                      <span className="inline-flex items-center gap-2 rounded-full border border-rose-400/20 bg-rose-400/10 px-3 py-1 text-rose-100">
+                                        <ShieldAlert className="h-4 w-4" />
+                                        CRITICAL · {cc}
+                                      </span>
+                                    ) : sev === "warning" ? (
+                                      <span className="inline-flex items-center gap-2 rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-1 text-amber-100">
+                                        <ShieldAlert className="h-4 w-4" />
+                                        WARNING · {cc}
+                                      </span>
+                                    ) : cc > 0 ? (
+                                      <span className="inline-flex items-center gap-2 rounded-full border border-sky-400/20 bg-sky-400/10 px-3 py-1 text-sky-100">
+                                        <ShieldAlert className="h-4 w-4" />
+                                        INFO · {cc}
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-300/80">
+                                        <ShieldAlert className="h-4 w-4 text-slate-400" />
+                                        No conflicts
+                                      </span>
+                                    )
+                                  ) : (
+                                    <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-500">
+                                      <ShieldAlert className="h-4 w-4 text-slate-600" />
+                                      No snapshot
                                     </span>
                                   )}
                                 </div>
@@ -997,7 +1321,7 @@ export default function ArchiveLedgerLifecyclePage() {
                   </div>
 
                   <div className="mt-4 text-[11px] text-slate-500 leading-relaxed">
-                    This page is a monitor. Actions are performed in Council/Forge/Archive. The record modal attaches intelligence to the record (calm, board-grade view).
+                    This page is a monitor. Actions are performed in Council/Forge/Archive. Intelligence is advisory-only; Phase 2 “Applied” is a stored marker.
                   </div>
                 </div>
               </section>
@@ -1104,7 +1428,6 @@ function RecordModal(props: {
 }) {
   const {
     laneIsTest,
-    entityId,
     selected,
     setSelected,
     setOpen,
@@ -1138,7 +1461,6 @@ function RecordModal(props: {
     return `${humanStatus} • ${lane} • ${hasEnv} • ${ax}`;
   }, [selected, laneIsTest, selectedHasAxiom]);
 
-  // ✅ MODAL FIX: viewport-safe panel + sticky header/footer + scroll body
   const modalShell =
     "w-full max-w-[980px] max-h-[88vh] rounded-3xl border border-white/10 bg-black/80 shadow-[0_50px_170px_rgba(0,0,0,0.78)] overflow-hidden flex flex-col";
   const modalHeader =
@@ -1163,7 +1485,6 @@ function RecordModal(props: {
 
   return (
     <div className="fixed inset-0 z-[80]">
-      {/* Darker backdrop (no washed UI), minimal blur */}
       <div
         className="absolute inset-0 bg-black/80 backdrop-blur-[2px]"
         onClick={() => {
@@ -1172,17 +1493,14 @@ function RecordModal(props: {
         }}
       />
 
-      {/* Centered modal container */}
       <div className="absolute inset-0 flex items-center justify-center p-3 sm:p-6">
         <div className={modalShell} onClick={(e) => e.stopPropagation()}>
-          {/* Production glow accents (inside modal only) */}
           <div className="pointer-events-none absolute inset-0">
             <div className="absolute -top-24 left-12 h-56 w-56 rounded-full bg-amber-400/10 blur-3xl" />
             <div className="absolute -top-24 right-12 h-56 w-56 rounded-full bg-sky-400/10 blur-3xl" />
             <div className="absolute bottom-0 left-1/2 h-72 w-[36rem] -translate-x-1/2 rounded-full bg-emerald-400/6 blur-3xl" />
           </div>
 
-          {/* Header (sticky via layout: shrink-0) */}
           <div className={cx("relative", modalHeader)}>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -1243,10 +1561,8 @@ function RecordModal(props: {
             </div>
           </div>
 
-          {/* Body (the ONLY scroll region) */}
           <div className={cx("relative", modalBody)}>
             <div className="grid grid-cols-12 gap-4">
-              {/* LEFT: IDENTIFIERS */}
               <div className="col-span-12 lg:col-span-5">
                 <div className={card}>
                   <div className="text-sm font-semibold text-slate-200">Identifiers</div>
@@ -1318,7 +1634,6 @@ function RecordModal(props: {
                 </div>
               </div>
 
-              {/* RIGHT: INTELLIGENCE */}
               <div className="col-span-12 lg:col-span-7">
                 <div className={card}>
                   <div className="flex items-start justify-between gap-3">
@@ -1332,7 +1647,6 @@ function RecordModal(props: {
                     </span>
                   </div>
 
-                  {/* Executive summary */}
                   <div className="mt-3 rounded-3xl border border-white/10 bg-[linear-gradient(to_bottom,rgba(255,255,255,0.06),rgba(0,0,0,0.20))] p-4">
                     <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Executive view</div>
                     <div className="mt-2 text-sm text-slate-200 leading-relaxed">
@@ -1352,7 +1666,6 @@ function RecordModal(props: {
                     </div>
                   </div>
 
-                  {/* Resolution facts */}
                   <div className="mt-4 rounded-3xl border border-white/10 bg-black/30 p-4">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
@@ -1362,6 +1675,17 @@ function RecordModal(props: {
                             <>
                               Stored extraction available{" "}
                               {resolutionFacts.extracted_at ? <span className="text-slate-500">· {formatWhen(resolutionFacts.extracted_at)}</span> : null}
+                              {resolutionFacts.applied_at ? (
+                                <span className="ml-2 inline-flex items-center gap-2 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2 py-0.5 text-[11px] text-emerald-100">
+                                  <Shield className="h-4 w-4" />
+                                  Applied (Phase 2)
+                                </span>
+                              ) : (
+                                <span className="ml-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[11px] text-slate-300/80">
+                                  <Shield className="h-4 w-4 text-slate-400" />
+                                  Not applied
+                                </span>
+                              )}
                             </>
                           ) : (
                             <span className="text-slate-500">No stored facts yet (available once the record is ARCHIVED).</span>
@@ -1466,7 +1790,6 @@ function RecordModal(props: {
                     ) : null}
                   </div>
 
-                  {/* Authority conflicts */}
                   <div className="mt-4 rounded-3xl border border-white/10 bg-black/30 p-4">
                     <div className="flex items-start justify-between gap-3">
                       <div>
@@ -1534,7 +1857,6 @@ function RecordModal(props: {
                     ) : null}
                   </div>
 
-                  {/* Draft review (full) */}
                   <div className="mt-4 rounded-3xl border border-white/10 bg-black/30 p-4">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
@@ -1594,7 +1916,6 @@ function RecordModal(props: {
                 </div>
               </div>
 
-              {/* Jump to module */}
               <div className="col-span-12">
                 <div className={card}>
                   <div className="flex items-start justify-between gap-3">
@@ -1648,7 +1969,6 @@ function RecordModal(props: {
             </div>
           </div>
 
-          {/* Footer (sticky via layout: shrink-0) */}
           <div className={cx("relative", modalFooter)}>
             <div className="text-[11px] text-slate-500">Tip: use Forge for signature execution, Archive for sealing, Council for approval gate.</div>
             <button
