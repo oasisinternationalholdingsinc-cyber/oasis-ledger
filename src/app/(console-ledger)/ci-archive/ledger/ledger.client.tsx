@@ -156,12 +156,10 @@ function computeConflictsCount(v: unknown): number {
     if (typeof v === "object") {
       const o: any = v;
 
-      // common shapes
       if (Array.isArray(o.conflicts)) return o.conflicts.length;
       if (Array.isArray(o.items)) return o.items.length;
       if (Array.isArray(o.results)) return o.results.length;
 
-      // if it's a map of arrays
       const vals = Object.values(o);
       const arrays = vals.filter(Array.isArray) as any[][];
       if (arrays.length) return arrays.reduce((acc, a) => acc + a.length, 0);
@@ -227,54 +225,33 @@ export default function ArchiveLedgerLifecyclePage() {
 
   const conflictsCount = useMemo(() => computeConflictsCount(draftConflicts?.conflicts_json), [draftConflicts]);
 
+  // ✅ Entity UUID resolve (LOCKED to entities.slug — NO legacy fallback, NO ts-expect-error)
   useEffect(() => {
     let alive = true;
 
     async function resolveEntity() {
-      if (!activeEntity) {
+      const slug = String(activeEntity || "").trim();
+      if (!slug) {
         if (alive) setEntityId(null);
         return;
       }
 
-      const ae = String(activeEntity);
-      const { data: bySlug, error: slugErr } = await supabase
+      const { data, error } = await supabase
         .from("entities")
         .select("id")
-        .eq("slug", ae)
+        .eq("slug", slug)
         .limit(1)
         .maybeSingle();
 
       if (!alive) return;
 
-      if (!slugErr && bySlug?.id) {
-        setEntityId(bySlug.id ?? null);
+      if (error) {
+        console.error("resolveEntity error", error);
+        setEntityId(null);
         return;
       }
 
-      // legacy fallback (if you ever had key)
-      try {
-        const { data: byKey, error: keyErr } = await supabase
-          // @ts-expect-error legacy field fallback
-          .from("entities")
-          .select("id")
-          // @ts-expect-error legacy field fallback
-          .eq("key", ae)
-          .limit(1)
-          .maybeSingle();
-
-        if (!alive) return;
-
-        if (keyErr) {
-          console.error("resolveEntity key fallback error", keyErr);
-          setEntityId(null);
-          return;
-        }
-
-        setEntityId(byKey?.id ?? null);
-      } catch (e) {
-        console.error("resolveEntity fallback threw", e);
-        setEntityId(null);
-      }
+      setEntityId(data?.id ?? null);
     }
 
     resolveEntity();
@@ -283,6 +260,7 @@ export default function ArchiveLedgerLifecyclePage() {
     };
   }, [activeEntity]);
 
+  // ✅ Ledger list (SECURITY DEFINER RPC)
   useEffect(() => {
     let alive = true;
 
@@ -318,7 +296,7 @@ export default function ArchiveLedgerLifecyclePage() {
     };
   }, [entityId, laneIsTest]);
 
-  // ✅ Sidebar: Latest AXIOM notes (real load, not fake)
+  // ✅ Sidebar: latest AXIOM notes (best-effort; soft-fails on RLS)
   useEffect(() => {
     let alive = true;
 
@@ -332,7 +310,6 @@ export default function ArchiveLedgerLifecyclePage() {
       setAxiomListErr(null);
 
       try {
-        // 1) latest notes (draft-stage)
         const { data: notes, error: nErr } = await supabase
           .from("ai_notes")
           .select("id,created_at,title,content,note_type,scope_type,scope_id")
@@ -361,7 +338,6 @@ export default function ArchiveLedgerLifecyclePage() {
           return;
         }
 
-        // 2) map to finalized ledger ids
         const { data: drafts, error: dErr } = await supabase
           .from("governance_drafts")
           .select("id,title,finalized_record_id,entity_id,is_test")
@@ -380,9 +356,7 @@ export default function ArchiveLedgerLifecyclePage() {
         }
 
         const map = new Map<string, DraftRowForAxiom>();
-        for (const d of (drafts ?? []) as any[]) {
-          map.set(String(d.id), d);
-        }
+        for (const d of (drafts ?? []) as any[]) map.set(String(d.id), d);
 
         const out: AxiomListItem[] = [];
         const seenLedger = new Set<string>();
@@ -459,7 +433,6 @@ export default function ArchiveLedgerLifecyclePage() {
     return c;
   }, [rows]);
 
-  // ✅ top strip: keep it honest (no fake counts)
   const topIntel = useMemo(() => {
     const axiomNotesCount = axiomList.length;
     return {
@@ -476,14 +449,12 @@ export default function ArchiveLedgerLifecyclePage() {
     setIntelLoading(true);
     setIntelErr(null);
 
-    // reset per-open (prevents stale showing)
     setDraftLink(null);
     setAxiomNote(null);
     setDraftConflicts(null);
     setResolutionFacts(null);
 
     try {
-      // 1) Draft link (ledger -> draft)
       const { data: dl, error: dlErr } = await supabase
         .from("governance_drafts")
         .select("id,title,record_type,entity_slug,entity_id,is_test,finalized_record_id")
@@ -491,14 +462,10 @@ export default function ArchiveLedgerLifecyclePage() {
         .limit(1)
         .maybeSingle();
 
-      if (dlErr) {
-        // soft fail (RLS / missing)
-        console.warn("draftLink read failed", dlErr);
-      }
+      if (dlErr) console.warn("draftLink read failed", dlErr);
       const link = (dl ?? null) as DraftLink | null;
       setDraftLink(link);
 
-      // 2) AXIOM note (draft-stage summary)
       if (link?.id) {
         const { data: note, error: noteErr } = await supabase
           .from("ai_notes")
@@ -510,17 +477,12 @@ export default function ArchiveLedgerLifecyclePage() {
           .limit(1)
           .maybeSingle();
 
-        if (noteErr) {
-          console.warn("axiomNote read failed", noteErr);
-        } else {
-          setAxiomNote((note ?? null) as any);
-        }
+        if (noteErr) console.warn("axiomNote read failed", noteErr);
+        else setAxiomNote((note ?? null) as any);
 
-        // 3) Conflicts snapshot (draft authority conflicts)
-        // NOTE: table name can vary; we try the most likely without breaking anything.
+        // best-effort conflicts snapshot (soft fail if table missing / blocked)
         try {
           const { data: conf, error: cErr } = await supabase
-            // if your table name differs, this remains a SAFE no-crash soft fail
             .from("draft_authority_conflicts")
             .select("id,draft_id,entity_id,is_test,severity,conflicts_json,compared_at,compared_by")
             .eq("draft_id", link.id)
@@ -531,12 +493,12 @@ export default function ArchiveLedgerLifecyclePage() {
             .maybeSingle();
 
           if (!cErr && conf) setDraftConflicts(conf as any);
-        } catch (e) {
-          // ignore completely (missing table)
+        } catch {
+          // ignore
         }
       }
 
-      // 4) Archived-only resolution facts
+      // archived-only resolution facts (soft fail if table missing)
       try {
         const { data: facts, error: fErr } = await supabase
           .from("governance_resolution_facts")
@@ -549,8 +511,8 @@ export default function ArchiveLedgerLifecyclePage() {
           .maybeSingle();
 
         if (!fErr && facts) setResolutionFacts(facts as any);
-      } catch (e) {
-        // ignore if table not present yet
+      } catch {
+        // ignore
       }
     } catch (e: any) {
       const msg = e?.message ? String(e.message) : "Failed to load advisory signals.";
@@ -583,14 +545,9 @@ export default function ArchiveLedgerLifecyclePage() {
       });
 
       if (error) throw error;
-
-      if (!data?.ok) {
-        throw new Error(data?.error || "AXIOM extract failed.");
-      }
+      if (!data?.ok) throw new Error(data?.error || "AXIOM extract failed.");
 
       setExtractOk(data?.message ? String(data.message) : "Extracted facts successfully.");
-
-      // reload facts after success
       await loadLedgerIntel(selected.id);
     } catch (e: any) {
       const msg = e?.message ? String(e.message) : "AXIOM extract failed.";
@@ -645,7 +602,6 @@ export default function ArchiveLedgerLifecyclePage() {
           </div>
 
           <div className={body}>
-            {/* ✅ Intelligence strip */}
             <div className="mb-4 rounded-3xl border border-white/10 bg-black/20 px-4 py-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="min-w-0">
@@ -732,7 +688,6 @@ export default function ArchiveLedgerLifecyclePage() {
                     Intelligence is <span className="text-slate-200">advisory-only</span>. Badges below are derived from stored sidecars (no mutation).
                   </div>
 
-                  {/* AXIOM notes */}
                   <div className="mt-4 rounded-3xl border border-white/10 bg-black/20 p-3">
                     <div className="flex items-start justify-between gap-2">
                       <div>
@@ -742,17 +697,6 @@ export default function ArchiveLedgerLifecyclePage() {
                         </div>
                         <div className="text-[11px] text-slate-500">Latest 5 draft reviews</div>
                       </div>
-                      <button
-                        onClick={() => {
-                          // re-run effect by a tiny state nudge without changing wiring
-                          setAxiomListLoading(true);
-                          setTimeout(() => setAxiomListLoading(false), 150);
-                        }}
-                        className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
-                        title="Refresh panel"
-                      >
-                        Refresh
-                      </button>
                     </div>
 
                     {axiomListLoading ? (
@@ -995,7 +939,10 @@ export default function ArchiveLedgerLifecyclePage() {
             }}
           />
           <div className="absolute inset-0 flex items-center justify-center p-4">
-            <div className="w-full max-w-[980px] rounded-3xl border border-white/10 bg-black/60 shadow-[0_40px_140px_rgba(0,0,0,0.65)] overflow-hidden">
+            <div
+              className="w-full max-w-[980px] rounded-3xl border border-white/10 bg-black/60 shadow-[0_40px_140px_rgba(0,0,0,0.65)] overflow-hidden"
+              onClick={(e) => e.stopPropagation()}
+            >
               <div className="border-b border-white/10 bg-gradient-to-b from-white/[0.08] to-transparent px-5 py-4">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -1067,7 +1014,6 @@ export default function ArchiveLedgerLifecyclePage() {
 
               <div className="px-5 py-5">
                 <div className="grid grid-cols-12 gap-4">
-                  {/* LEFT */}
                   <div className="col-span-12 lg:col-span-6">
                     <div className="rounded-3xl border border-white/10 bg-black/30 p-4">
                       <div className="text-sm font-semibold text-slate-200">Identifiers</div>
@@ -1143,7 +1089,6 @@ export default function ArchiveLedgerLifecyclePage() {
                     </div>
                   </div>
 
-                  {/* RIGHT */}
                   <div className="col-span-12 lg:col-span-6">
                     <div className="rounded-3xl border border-white/10 bg-black/30 p-4">
                       <div className="flex items-start justify-between gap-3">
@@ -1154,18 +1099,11 @@ export default function ArchiveLedgerLifecyclePage() {
                           </div>
                         </div>
 
-                        {intelLoading ? (
-                          <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] tracking-[0.18em] uppercase text-slate-200">
-                            loading
-                          </span>
-                        ) : (
-                          <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] tracking-[0.18em] uppercase text-slate-200">
-                            advisory
-                          </span>
-                        )}
+                        <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] tracking-[0.18em] uppercase text-slate-200">
+                          {intelLoading ? "loading" : "advisory"}
+                        </span>
                       </div>
 
-                      {/* Resolution facts */}
                       <div className="mt-3 rounded-3xl border border-white/10 bg-black/20 p-4">
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
@@ -1242,7 +1180,6 @@ export default function ArchiveLedgerLifecyclePage() {
                         )}
                       </div>
 
-                      {/* Conflicts */}
                       <div className="mt-4 rounded-3xl border border-white/10 bg-black/20 p-4">
                         <div className="flex items-start justify-between gap-3">
                           <div>
@@ -1251,12 +1188,7 @@ export default function ArchiveLedgerLifecyclePage() {
                               {draftConflicts?.id ? (
                                 <>
                                   Severity:{" "}
-                                  <span
-                                    className={cx(
-                                      "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] ml-1",
-                                      severityBadge(draftConflicts.severity)
-                                    )}
-                                  >
+                                  <span className={cx("inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] ml-1", severityBadge(draftConflicts.severity))}>
                                     {String(draftConflicts.severity || "info").toUpperCase()}
                                   </span>
                                   <span className="text-slate-500"> · </span>
@@ -1266,11 +1198,6 @@ export default function ArchiveLedgerLifecyclePage() {
                                 <span className="text-slate-500">No snapshot available for this ledger record.</span>
                               )}
                             </div>
-                            {draftConflicts?.compared_at && (
-                              <div className="mt-1 text-[11px] text-slate-500">
-                                Compared at: <span className="text-slate-300">{draftConflicts.compared_at}</span>
-                              </div>
-                            )}
                           </div>
 
                           {draftConflicts?.id && (
@@ -1296,7 +1223,6 @@ export default function ArchiveLedgerLifecyclePage() {
                         )}
                       </div>
 
-                      {/* AXIOM note */}
                       <div className="mt-4 rounded-3xl border border-white/10 bg-black/20 p-4">
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
@@ -1312,17 +1238,6 @@ export default function ArchiveLedgerLifecyclePage() {
                                 <span className="text-slate-500">No AXIOM note found for this record’s draft link.</span>
                               )}
                             </div>
-                            {axiomNote?.model && (
-                              <div className="mt-1 text-[11px] text-slate-500">
-                                Model: <span className="text-slate-300">{axiomNote.model}</span>
-                                {typeof axiomNote.tokens_used === "number" ? (
-                                  <>
-                                    <span className="text-slate-700"> · </span>
-                                    Tokens: <span className="text-slate-300">{axiomNote.tokens_used}</span>
-                                  </>
-                                ) : null}
-                              </div>
-                            )}
                           </div>
 
                           {axiomNote?.content && (
@@ -1349,12 +1264,11 @@ export default function ArchiveLedgerLifecyclePage() {
                       </div>
 
                       <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-3 text-[11px] text-slate-400 leading-relaxed">
-                        <span className="text-slate-200 font-semibold">Contract:</span> advisory only, lane-safe, entity-scoped. No automatic authority mutation. This UI reads existing stored outputs—no new SQL required.
+                        <span className="text-slate-200 font-semibold">Contract:</span> advisory only, lane-safe, entity-scoped. No automatic authority mutation.
                       </div>
                     </div>
                   </div>
 
-                  {/* Jump links */}
                   <div className="col-span-12">
                     <div className="rounded-3xl border border-white/10 bg-black/30 p-4">
                       <div className="flex items-start justify-between gap-3">
