@@ -97,6 +97,12 @@ type AxiomListItem = {
   ledger_id: string;
 };
 
+// ✅ build-safe typing to prevent implicit any in map/filter
+type DraftRowForAxiom = {
+  id: string;
+  finalized_record_id: string | null;
+};
+
 function cx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
@@ -360,7 +366,7 @@ export default function ArchiveLedgerLifecyclePage() {
 
       try {
         // 1) drafts finalized into ledger (scoped)
-        const { data: drafts, error: dErr } = await supabase
+        const { data: draftsRaw, error: dErr } = await supabase
           .from("governance_drafts")
           .select("id, finalized_record_id")
           .eq("entity_id", entityId)
@@ -377,14 +383,21 @@ export default function ArchiveLedgerLifecyclePage() {
           return;
         }
 
-        const draftIds = (drafts ?? []).map((x) => x.id).filter(Boolean);
+        // ✅ FIX: typed to avoid implicit any downstream
+        const drafts = (draftsRaw ?? []) as DraftRowForAxiom[];
+
+        // ✅ FIX: type predicate to keep TS strict happy
+        const draftIds: string[] = drafts
+          .map((x) => x.id)
+          .filter((id): id is string => typeof id === "string" && id.length > 0);
+
         if (!draftIds.length) {
           setAxiomListLoading(false);
           return;
         }
 
         const ledgerByDraft = new Map<string, string>();
-        for (const d of drafts ?? []) {
+        for (const d of drafts) {
           if (d?.id && d?.finalized_record_id) ledgerByDraft.set(d.id, d.finalized_record_id);
         }
 
@@ -538,25 +551,18 @@ export default function ArchiveLedgerLifecyclePage() {
     setExtracting(true);
 
     try {
-      // ✅ aligned to your Edge Function:
-      // - requires Authorization Bearer JWT
-      // - also needs apikey header
-      // - body supports ledger_id / p_ledger_id etc
       const headers = await getInvokeHeaders();
 
-      // Prefer supabase.functions.invoke (keeps routing consistent)
       const { data, error } = await supabase.functions.invoke("axiom-extract-resolution-facts", {
         body: {
           ledger_id: selected.id,
           force: Boolean(opts?.force),
           model: "gpt-4.1-mini",
         },
-        // ✅ critical: pass Authorization + apikey explicitly (fixes “apikey: []” edge logs)
         headers,
       });
 
       if (error) {
-        // supabase-js wraps non-2xx as FunctionsHttpError
         const msg = (error as any)?.message || "Edge Function returned non-2xx";
         setExtractErr(msg);
         setExtracting(false);
@@ -584,12 +590,8 @@ export default function ArchiveLedgerLifecyclePage() {
   // Top strip numbers (no regressions; just surfaces intelligence)
   const topIntel = useMemo(() => {
     const axiomNotesCount = axiomList.length;
-
-    // resolution facts count: we can’t count without a table scan; keep it honest:
-    // show “loaded” as 0/1 based on modal selection state, and keep strip focused on notes + conflicts severity distribution from list (best effort).
     const critical = 0;
     const warning = 0;
-
     return { axiomNotesCount, resolutionFactsCount: 0, critical, warning };
   }, [axiomList]);
 
@@ -937,8 +939,7 @@ export default function ArchiveLedgerLifecyclePage() {
                   </div>
 
                   <div className="mt-4 text-[11px] text-slate-500 leading-relaxed">
-                    This page is a monitor. Actions are performed in Council/Forge/Archive. Details modal includes safe copy, module jumps, and
-                    advisory signals.
+                    This page is a monitor. Actions are performed in Council/Forge/Archive. Details modal includes safe copy, module jumps, and advisory signals.
                   </div>
                 </div>
               </section>
@@ -948,8 +949,7 @@ export default function ArchiveLedgerLifecyclePage() {
             <div className="mt-5 rounded-3xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
               <div className="font-semibold text-slate-200">OS behavior</div>
               <div className="mt-1 leading-relaxed text-slate-400">
-                Drafts &amp; Approvals inherits the OS shell. Lane-safe and entity-scoped. Intelligence is advisory-only and never mutates authority
-                automatically.
+                Drafts &amp; Approvals inherits the OS shell. Lane-safe and entity-scoped. Intelligence is advisory-only and never mutates authority automatically.
               </div>
             </div>
 
