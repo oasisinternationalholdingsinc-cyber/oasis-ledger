@@ -1,4 +1,3 @@
-// src/app/(console-ledger)/ci-archive/ledger/ledger.client.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -30,13 +29,10 @@ type LedgerRow = {
   id: string;
   title: string | null;
   status: string | null;
-
   entity_id: string | null;
   is_test: boolean | null;
-
   envelope_id: string | null;
   created_at: string | null;
-
   approved_by_council?: boolean | null;
   archived?: boolean | null;
 };
@@ -75,7 +71,6 @@ type DraftConflictsRow = {
   compared_by: string | null;
 };
 
-// ✅ aligned to Edge Function contract (NO created_at dependency)
 type ResolutionFactsRow = {
   id: string;
   ledger_id: string;
@@ -87,7 +82,6 @@ type ResolutionFactsRow = {
   extracted_at: string | null;
 };
 
-// ✅ list surface on main page (no SQL required)
 type AxiomListItem = {
   note_id: string;
   created_at: string | null;
@@ -97,7 +91,6 @@ type AxiomListItem = {
   ledger_id: string;
 };
 
-// ✅ build-safe typing to prevent implicit any in map/filter
 type DraftRowForAxiom = {
   id: string;
   finalized_record_id: string | null;
@@ -153,14 +146,11 @@ function tryJsonStringify(v: unknown, limit = 10_000) {
   }
 }
 
-// ✅ Edge Function needs BOTH Authorization + apikey
 async function getInvokeHeaders() {
   const { data } = await supabase.auth.getSession();
   const jwt = data?.session?.access_token || "";
   const apikey =
-    // preferred: NEXT_PUBLIC env
     (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string | undefined) ||
-    // ultra-defensive: try reading from global injected config if present
     ((globalThis as any)?.__SUPABASE_ANON_KEY__ as string | undefined) ||
     "";
 
@@ -172,46 +162,35 @@ async function getInvokeHeaders() {
 }
 
 export default function ArchiveLedgerLifecyclePage() {
-  const { activeEntity } = useEntity(); // slug/key string
+  const { activeEntity } = useEntity();
   const { env } = useOsEnv();
 
-  // ✅ defensive (prevents env casing mismatch from breaking RoT vs SANDBOX)
   const laneIsTest = String(env).toUpperCase() === "SANDBOX";
 
   const [entityId, setEntityId] = useState<string | null>(null);
-
   const [rows, setRows] = useState<LedgerRow[]>([]);
   const [loading, setLoading] = useState(false);
-
   const [tab, setTab] = useState<Tab>("ALL");
   const [q, setQ] = useState("");
 
-  // modal (details)
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<LedgerRow | null>(null);
 
-  // ✅ Ledger-side intelligence (read-only; NO SQL required)
   const [draftLink, setDraftLink] = useState<DraftLink | null>(null);
   const [axiomNote, setAxiomNote] = useState<AxiomNote | null>(null);
   const [draftConflicts, setDraftConflicts] = useState<DraftConflictsRow | null>(null);
-
-  // ✅ archived-only resolution facts (Edge Function writes this)
   const [resolutionFacts, setResolutionFacts] = useState<ResolutionFactsRow | null>(null);
-
   const [intelLoading, setIntelLoading] = useState(false);
   const [intelErr, setIntelErr] = useState<string | null>(null);
 
-  // ✅ main page surface: latest 5 AXIOM notes (no SQL; all in UI)
   const [axiomList, setAxiomList] = useState<AxiomListItem[]>([]);
   const [axiomListLoading, setAxiomListLoading] = useState(false);
   const [axiomListErr, setAxiomListErr] = useState<string | null>(null);
 
-  // ✅ resolution facts extract status
   const [extracting, setExtracting] = useState(false);
   const [extractErr, setExtractErr] = useState<string | null>(null);
   const [extractOk, setExtractOk] = useState<string | null>(null);
 
-  // Resolve entity UUID from entities table using slug (NO hardcoding)
   useEffect(() => {
     let alive = true;
 
@@ -222,8 +201,12 @@ export default function ArchiveLedgerLifecyclePage() {
       }
 
       const ae = String(activeEntity);
-
-      const { data: bySlug, error: slugErr } = await supabase.from("entities").select("id").eq("slug", ae).limit(1).maybeSingle();
+      const { data: bySlug, error: slugErr } = await supabase
+        .from("entities")
+        .select("id")
+        .eq("slug", ae)
+        .limit(1)
+        .maybeSingle();
 
       if (!alive) return;
 
@@ -232,13 +215,11 @@ export default function ArchiveLedgerLifecyclePage() {
         return;
       }
 
-      // fallback: try key if your entities table has it
       try {
         const { data: byKey, error: keyErr } = await supabase
           .from("entities")
           .select("id")
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          .eq("key" as any, ae as any)
+          .eq("key", ae)
           .limit(1)
           .maybeSingle();
 
@@ -263,7 +244,6 @@ export default function ArchiveLedgerLifecyclePage() {
     };
   }, [activeEntity]);
 
-  // ✅ Load ledger lifecycle via SECURITY DEFINER RPC (RLS-safe for browser)
   useEffect(() => {
     let alive = true;
 
@@ -289,7 +269,6 @@ export default function ArchiveLedgerLifecyclePage() {
         return;
       }
 
-      // data already ordered + limited server-side
       setRows((data ?? []) as LedgerRow[]);
       setLoading(false);
     }
@@ -333,261 +312,6 @@ export default function ArchiveLedgerLifecyclePage() {
     return c;
   }, [rows]);
 
-  // OS shell/header/body pattern (MATCH Verified Registry)
-  const shell = "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden";
-  const header = "border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent px-4 sm:px-6 py-4 sm:py-5";
-  const body = "px-4 sm:px-6 py-5 sm:py-6";
-
-  const conflictsCount = useMemo(() => {
-    const v = (draftConflicts as any)?.conflicts_json;
-    if (!v) return 0;
-    if (Array.isArray(v)) return v.length;
-    try {
-      const s = JSON.parse(JSON.stringify(v));
-      return Array.isArray(s) ? s.length : 0;
-    } catch {
-      return 0;
-    }
-  }, [draftConflicts]);
-
-  // ✅ MAIN PAGE: Load latest 5 AXIOM notes (no SQL; shows from ledger page)
-  useEffect(() => {
-    let alive = true;
-
-    async function loadAxiomList() {
-      setAxiomListErr(null);
-      setAxiomListLoading(true);
-      setAxiomList([]);
-
-      if (!entityId) {
-        setAxiomListLoading(false);
-        return;
-      }
-
-      try {
-        // 1) drafts finalized into ledger (scoped)
-        const { data: draftsRaw, error: dErr } = await supabase
-          .from("governance_drafts")
-          .select("id, finalized_record_id")
-          .eq("entity_id", entityId)
-          .eq("is_test", laneIsTest)
-          .not("finalized_record_id", "is", null)
-          .order("created_at", { ascending: false })
-          .limit(80);
-
-        if (!alive) return;
-
-        if (dErr) {
-          setAxiomListErr(dErr.message || "Failed to load drafts");
-          setAxiomListLoading(false);
-          return;
-        }
-
-        // ✅ FIX: typed to avoid implicit any downstream
-        const drafts = (draftsRaw ?? []) as DraftRowForAxiom[];
-
-        // ✅ FIX: type predicate to keep TS strict happy
-        const draftIds: string[] = drafts
-          .map((x) => x.id)
-          .filter((id): id is string => typeof id === "string" && id.length > 0);
-
-        if (!draftIds.length) {
-          setAxiomListLoading(false);
-          return;
-        }
-
-        const ledgerByDraft = new Map<string, string>();
-        for (const d of drafts) {
-          if (d?.id && d?.finalized_record_id) ledgerByDraft.set(d.id, d.finalized_record_id);
-        }
-
-        // 2) notes (latest 5) for those drafts
-        const { data: notes, error: nErr } = await supabase
-          .from("ai_notes")
-          .select("id, created_at, title, content, scope_id")
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          .eq("scope_type" as any, "document" as any)
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          .eq("note_type" as any, "summary" as any)
-          .in("scope_id", draftIds)
-          .order("created_at", { ascending: false })
-          .limit(5);
-
-        if (!alive) return;
-
-        if (nErr) {
-          setAxiomListErr(nErr.message || "Failed to load AXIOM notes");
-          setAxiomListLoading(false);
-          return;
-        }
-
-        const items: AxiomListItem[] = (notes ?? [])
-          .map((n) => {
-            const draft_id = String(n.scope_id || "");
-            return {
-              note_id: n.id,
-              created_at: n.created_at ?? null,
-              title: n.title ?? "AXIOM • Draft review",
-              preview: (n.content || "").slice(0, 220),
-              draft_id,
-              ledger_id: ledgerByDraft.get(draft_id) || "",
-            };
-          })
-          .filter((x) => x.ledger_id);
-
-        setAxiomList(items);
-        setAxiomListLoading(false);
-      } catch (e: any) {
-        if (!alive) return;
-        setAxiomListErr(String(e?.message ?? e));
-        setAxiomListLoading(false);
-      }
-    }
-
-    loadAxiomList();
-    return () => {
-      alive = false;
-    };
-  }, [entityId, laneIsTest]);
-
-  async function loadLedgerIntel(ledgerId: string) {
-    setIntelErr(null);
-    setIntelLoading(true);
-
-    setDraftLink(null);
-    setAxiomNote(null);
-    setDraftConflicts(null);
-    setResolutionFacts(null);
-
-    setExtractErr(null);
-    setExtractOk(null);
-
-    try {
-      // 1) Find the draft that finalized into this ledger record (NO SQL changes; pure read)
-      const { data: d, error: dErr } = await supabase
-        .from("governance_drafts")
-        .select("id, title, record_type, entity_slug, entity_id, is_test, finalized_record_id")
-        .eq("finalized_record_id", ledgerId)
-        .limit(1)
-        .maybeSingle();
-
-      if (dErr) {
-        console.error("loadLedgerIntel draft lookup error", dErr);
-        setIntelErr(dErr.message || "Failed to load draft link");
-        setIntelLoading(false);
-        return;
-      }
-
-      if (d?.id) {
-        setDraftLink(d as DraftLink);
-
-        // 2) Load latest AXIOM draft review note (scope=document, scope_id=draft_id, note_type=summary)
-        const { data: note, error: nErr } = await supabase
-          .from("ai_notes")
-          .select("id, created_at, title, content, model, tokens_used, created_by, scope_type, scope_id, note_type")
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          .eq("scope_type" as any, "document" as any)
-          .eq("scope_id", d.id)
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          .eq("note_type" as any, "summary" as any)
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (nErr) {
-          console.error("loadLedgerIntel ai_notes error", nErr);
-          setIntelErr((prev) => prev ?? nErr.message);
-        } else if (note?.id) {
-          setAxiomNote(note as AxiomNote);
-        }
-
-        // 3) Load latest stored conflicts snapshot for that draft (governance_draft_conflicts)
-        const { data: cRow, error: cErr } = await supabase
-          .from("governance_draft_conflicts")
-          .select("id, draft_id, entity_id, is_test, severity, conflicts_json, compared_at, compared_by")
-          .eq("draft_id", d.id)
-          .order("compared_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (cErr) {
-          console.error("loadLedgerIntel draft_conflicts error", cErr);
-          setIntelErr((prev) => prev ?? cErr.message);
-        } else if (cRow?.id) {
-          setDraftConflicts(cRow as DraftConflictsRow);
-        }
-      }
-
-      // 4) Load archived-only resolution facts (written by Edge Function)
-      // ✅ IMPORTANT: do NOT select created_at (your table doesn’t have it)
-      const { data: rf, error: rfErr } = await supabase
-        .from("governance_resolution_facts")
-        .select("id, ledger_id, entity_id, is_test, verified_document_id, facts_json, model, extracted_at")
-        .eq("ledger_id", ledgerId)
-        .limit(1)
-        .maybeSingle();
-
-      if (rfErr) {
-        // not fatal (table may not exist in some envs / RLS)
-        console.error("loadLedgerIntel governance_resolution_facts error", rfErr);
-        setIntelErr((prev) => prev ?? rfErr.message);
-      } else if (rf?.id) {
-        setResolutionFacts(rf as ResolutionFactsRow);
-      }
-
-      setIntelLoading(false);
-    } catch (e) {
-      console.error("loadLedgerIntel threw", e);
-      setIntelErr(String((e as any)?.message ?? e));
-      setIntelLoading(false);
-    }
-  }
-
-  async function extractResolutionFacts(opts?: { force?: boolean }) {
-    if (!selected?.id) return;
-
-    setExtractErr(null);
-    setExtractOk(null);
-    setExtracting(true);
-
-    try {
-      const headers = await getInvokeHeaders();
-
-      const { data, error } = await supabase.functions.invoke("axiom-extract-resolution-facts", {
-        body: {
-          ledger_id: selected.id,
-          force: Boolean(opts?.force),
-          model: "gpt-4.1-mini",
-        },
-        headers,
-      });
-
-      if (error) {
-        const msg = (error as any)?.message || "Edge Function returned non-2xx";
-        setExtractErr(msg);
-        setExtracting(false);
-        return;
-      }
-
-      if (!data?.ok) {
-        setExtractErr(String(data?.code || "EXTRACT_FAILED"));
-        setExtracting(false);
-        return;
-      }
-
-      setExtractOk(String(data?.code || "EXTRACTED"));
-
-      // refresh facts surface immediately
-      await loadLedgerIntel(selected.id);
-
-      setExtracting(false);
-    } catch (e: any) {
-      setExtractErr(String(e?.message ?? e));
-      setExtracting(false);
-    }
-  }
-
-  // Top strip numbers (no regressions; just surfaces intelligence)
   const topIntel = useMemo(() => {
     const axiomNotesCount = axiomList.length;
     const critical = 0;
@@ -599,7 +323,6 @@ export default function ArchiveLedgerLifecyclePage() {
     <div className="w-full">
       <div className="mx-auto w-full max-w-[1200px] px-4 pb-10 pt-4 sm:pt-6">
         <div className={shell}>
-          {/* OS-aligned header */}
           <div className={header}>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -608,7 +331,6 @@ export default function ArchiveLedgerLifecyclePage() {
                 <p className="mt-1 max-w-3xl text-[11px] sm:text-xs text-slate-400 leading-relaxed">
                   Lifecycle surface for governance_ledger. Read-only monitor. Lane-safe. Entity-scoped. Use Council/Forge/Archive to execute.
                 </p>
-
                 <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
                   <span className="inline-flex items-center gap-2">
                     <Shield className="h-4 w-4 text-emerald-300" />
@@ -946,7 +668,7 @@ export default function ArchiveLedgerLifecyclePage() {
             </div>
 
             {/* OS behavior footnote */}
-            <div className="mt-5 rounded-3xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
+            <div className="mt-5 rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
               <div className="font-semibold text-slate-200">OS behavior</div>
               <div className="mt-1 leading-relaxed text-slate-400">
                 Drafts &amp; Approvals inherits the OS shell. Lane-safe and entity-scoped. Intelligence is advisory-only and never mutates authority automatically.
@@ -1125,7 +847,6 @@ export default function ArchiveLedgerLifecyclePage() {
                           </div>
                         )}
 
-                        {/* Draft link surface (no SQL; pure read) */}
                         {draftLink?.id && (
                           <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                             <div className="flex items-start justify-between gap-3">
