@@ -202,12 +202,21 @@ function coerceArray(v: any) {
   return Array.isArray(v) ? v : [];
 }
 
-function summarizeFacts(factsJson: any): { bullets: string[]; meta: string[]; counts: { g: number; r: number; m: number } } {
+function summarizeFacts(factsJson: any): {
+  bullets: string[];
+  meta: string[];
+  counts: { g: number; r: number; m: number };
+  conditions: string[];
+  effective: string | null;
+} {
   const bullets: string[] = [];
   const meta: string[] = [];
   const counts = { g: 0, r: 0, m: 0 };
+  const conditionsOut: string[] = [];
 
-  if (!factsJson || typeof factsJson !== "object") return { bullets, meta, counts };
+  if (!factsJson || typeof factsJson !== "object") {
+    return { bullets, meta, counts, conditions: conditionsOut, effective: null };
+  }
 
   const root: any = factsJson;
 
@@ -220,13 +229,22 @@ function summarizeFacts(factsJson: any): { bullets: string[]; meta: string[]; co
   counts.r = revokes.length;
   counts.m = modifies.length;
 
-  if (grants.length) bullets.push(`Grants detected: ${grants.length}`);
-  if (revokes.length) bullets.push(`Revocations detected: ${revokes.length}`);
-  if (modifies.length) bullets.push(`Modifications detected: ${modifies.length}`);
-  if (!grants.length && !revokes.length && !modifies.length)
-    bullets.push("No explicit grants/revokes/modifies detected in structured extraction.");
+  // Human-forward bullets (board-grade, not “struct dump”)
+  if (!grants.length && !revokes.length && !modifies.length) {
+    bullets.push("No explicit authority changes detected (grant / revoke / modify).");
+  } else {
+    if (grants.length) bullets.push(`New authority grants detected: ${grants.length}`);
+    if (revokes.length) bullets.push(`Authority revocations detected: ${revokes.length}`);
+    if (modifies.length) bullets.push(`Authority modifications detected: ${modifies.length}`);
+  }
 
-  if (conditions.length) bullets.push(`Conditions / limitations: ${conditions.length}`);
+  if (conditions.length) bullets.push(`Conditions / limitations attached: ${conditions.length}`);
+  if (conditions.length) {
+    for (const c of conditions) {
+      const s = String(c || "").trim();
+      if (s) conditionsOut.push(s);
+    }
+  }
 
   const scope = root.scope ?? root.authority_scope ?? null;
   const effective = root.effective ?? root.effective_at ?? root.effective_date ?? null;
@@ -241,9 +259,10 @@ function summarizeFacts(factsJson: any): { bullets: string[]; meta: string[]; co
     if (limit) meta.push(`Limit: ${String(limit)}`);
   }
 
-  if (effective) meta.push(`Effective: ${String(effective)}`);
+  const eff = effective ? String(effective) : null;
+  if (eff) meta.push(`Effective: ${eff}`);
 
-  return { bullets, meta, counts };
+  return { bullets, meta, counts, conditions: conditionsOut, effective: eff };
 }
 
 function summarizeConflicts(conflictsJson: any): { bullets: string[] } {
@@ -527,7 +546,7 @@ export default function ArchiveLedgerLifecyclePage() {
     };
   }, [entityId, laneIsTest]);
 
-  // ✅ Phase 1/2/3 list intel loader:
+  // ✅ Phase 1/2/3 list intel loader (best-effort, no rewiring):
   // - Phase 1: governance_resolution_facts presence per ledger row
   // - Phase 2: applied_at/applied_by indicates authority application completed
   // - Phase 3: draft_authority_conflicts severity + count (via draft link)
@@ -564,7 +583,6 @@ export default function ArchiveLedgerLifecyclePage() {
           if (fErr) {
             console.warn("list facts read failed", fErr);
           } else {
-            // keep latest per ledger_id (ordered desc already)
             const seen = new Set<string>();
             for (const r of (factsRows ?? []) as any[]) {
               const lid = String(r.ledger_id || "").trim();
@@ -595,7 +613,6 @@ export default function ArchiveLedgerLifecyclePage() {
               const lid = String(d.finalized_record_id || "").trim();
               const did = String(d.id || "").trim();
               if (!lid || !did) continue;
-              // prefer first; there should be 0/1 in canonical flow
               if (!draftIdByLedger[lid]) draftIdByLedger[lid] = did;
             }
           }
@@ -685,11 +702,12 @@ export default function ArchiveLedgerLifecyclePage() {
         setPerRowIntel(merged);
         setActiveAuthorityCount(activeCount);
 
-        // Note: we keep this calm. Only show warning if EVERYTHING blocked.
         const anyFacts = Object.values(merged).some((x) => !!x.facts?.id);
         const anyDrafts = Object.values(merged).some((x) => !!x.draft_id);
         if (!anyFacts && !anyDrafts && activeCount === null) {
-          setListIntelErr("Intelligence surfaces may be partially blocked by RLS in browser. Modal still loads per-record best-effort.");
+          setListIntelErr(
+            "Intelligence surfaces may be partially blocked by RLS in browser. Modal still loads per-record best-effort."
+          );
         } else {
           setListIntelErr(null);
         }
@@ -732,7 +750,10 @@ export default function ArchiveLedgerLifecyclePage() {
   }, [rows, tab, q]);
 
   const counts = useMemo(() => {
-    const c = { ALL: rows.length, PENDING: 0, APPROVED: 0, SIGNING: 0, SIGNED: 0, ARCHIVED: 0 } as Record<Tab, number>;
+    const c = { ALL: rows.length, PENDING: 0, APPROVED: 0, SIGNING: 0, SIGNED: 0, ARCHIVED: 0 } as Record<
+      Tab,
+      number
+    >;
     for (const r of rows) {
       const s = normStatusUpper(r.status);
       if (s === "PENDING") c.PENDING++;
@@ -875,7 +896,6 @@ export default function ArchiveLedgerLifecyclePage() {
       await loadLedgerIntel(selected.id);
 
       // refresh list intel quickly (best-effort)
-      // (no extra RPC; just re-trigger by setting rows same)
       setRows((prev) => [...prev]);
     } catch (e: any) {
       const msg = e?.message ? String(e.message) : "AXIOM extract failed.";
@@ -885,7 +905,10 @@ export default function ArchiveLedgerLifecyclePage() {
     }
   }
 
-  const selectedHasAxiom = useMemo(() => (selected?.id ? axiomLedgerSet.has(selected.id) : false), [selected, axiomLedgerSet]);
+  const selectedHasAxiom = useMemo(
+    () => (selected?.id ? axiomLedgerSet.has(selected.id) : false),
+    [selected, axiomLedgerSet]
+  );
 
   return (
     <div className="w-full">
@@ -1088,6 +1111,12 @@ export default function ArchiveLedgerLifecyclePage() {
                         ))}
                       </div>
                     )}
+
+                    {axiomListErr ? (
+                      <div className="mt-3 rounded-2xl border border-amber-400/20 bg-amber-400/10 p-3 text-xs text-amber-100/90">
+                        {axiomListErr}
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               </section>
@@ -1199,20 +1228,20 @@ export default function ArchiveLedgerLifecyclePage() {
                                     applied ? (
                                       <span className="inline-flex items-center gap-2 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-emerald-100">
                                         <Shield className="h-4 w-4" />
-                                        AUTH Applied (P2)
+                                        Applied (P2)
                                       </span>
                                     ) : (
                                       <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-300/80">
                                         <Shield className="h-4 w-4 text-slate-400" />
-                                        AUTH not applied
+                                        Not applied
                                       </span>
                                     )
                                   ) : null}
 
-                                  {/* Phase 2 summary counts (G/R/ΔM) */}
+                                  {/* Authority delta summary (G / R / ΔM) */}
                                   {hasFacts ? (
                                     <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-200/90">
-                                      <span className="text-slate-500">AUTH</span>
+                                      <span className="text-slate-500">Authority</span>
                                       <span className="font-semibold text-emerald-200">+{g}</span>
                                       <span className="text-slate-600">/</span>
                                       <span className="font-semibold text-rose-200">-{rr}</span>
@@ -1446,6 +1475,7 @@ function RecordModal(props: {
     extractResolutionFacts,
   } = props;
 
+  // ✅ Default RAW panels OFF (board-grade by default)
   const [showRawFacts, setShowRawFacts] = useState(false);
   const [showRawConflicts, setShowRawConflicts] = useState(false);
   const [showRawNote, setShowRawNote] = useState(false);
@@ -1666,6 +1696,7 @@ function RecordModal(props: {
                     </div>
                   </div>
 
+                  {/* Resolution Facts (Board-grade first, structured optional) */}
                   <div className="mt-4 rounded-3xl border border-white/10 bg-black/30 p-4">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
@@ -1693,7 +1724,8 @@ function RecordModal(props: {
                         </div>
 
                         {resolutionFacts?.facts_json ? (
-                          <div className="mt-3 space-y-2 text-sm">
+                          <div className="mt-3 space-y-3">
+                            {/* Meta tags (human readable) */}
                             {factsSummary.meta.length ? (
                               <div className="flex flex-wrap gap-2 text-[11px]">
                                 {factsSummary.meta.slice(0, 4).map((m, i) => (
@@ -1704,7 +1736,8 @@ function RecordModal(props: {
                               </div>
                             ) : null}
 
-                            <ul className="mt-2 space-y-1 text-slate-300">
+                            {/* Board bullets */}
+                            <ul className="space-y-1 text-sm text-slate-300">
                               {factsSummary.bullets.map((b, i) => (
                                 <li key={i} className="flex gap-2">
                                   <span className="mt-1 h-1.5 w-1.5 rounded-full bg-slate-500/80 shrink-0" />
@@ -1712,6 +1745,24 @@ function RecordModal(props: {
                                 </li>
                               ))}
                             </ul>
+
+                            {/* Conditions preview (human first) */}
+                            {factsSummary.conditions.length ? (
+                              <div className="mt-2 rounded-2xl border border-white/10 bg-black/25 p-3">
+                                <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Conditions (preview)</div>
+                                <div className="mt-2 space-y-2 text-sm text-slate-300">
+                                  {factsSummary.conditions.slice(0, 2).map((c, i) => (
+                                    <div key={i} className="flex gap-2">
+                                      <span className="mt-1 h-1.5 w-1.5 rounded-full bg-slate-500/80 shrink-0" />
+                                      <span className="leading-relaxed">{c}</span>
+                                    </div>
+                                  ))}
+                                  {factsSummary.conditions.length > 2 ? (
+                                    <div className="text-xs text-slate-500">…and more.</div>
+                                  ) : null}
+                                </div>
+                              </div>
+                            ) : null}
                           </div>
                         ) : (
                           <div className="mt-3 text-xs text-slate-500">
@@ -1769,13 +1820,13 @@ function RecordModal(props: {
                           className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
                         >
                           {showRawFacts ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                          {showRawFacts ? "Hide raw" : "View raw"}
+                          {showRawFacts ? "Hide structured" : "View structured"}
                         </button>
 
                         <button
                           onClick={() => safeCopy(tryJsonStringify(resolutionFacts.facts_json, 48_000))}
                           className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
-                          title="Copy facts JSON"
+                          title="Copy structured facts JSON"
                         >
                           <Copy className="h-4 w-4" />
                           Copy
@@ -1829,7 +1880,7 @@ function RecordModal(props: {
                             className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
                           >
                             {showRawConflicts ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                            {showRawConflicts ? "Hide raw" : "View raw"}
+                            {showRawConflicts ? "Hide structured" : "View structured"}
                           </button>
 
                           <button
