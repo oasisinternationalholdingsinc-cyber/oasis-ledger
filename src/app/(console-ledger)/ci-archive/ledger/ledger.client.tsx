@@ -178,7 +178,6 @@ function formatWhen(iso: string | null | undefined) {
   if (!s) return "—";
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return s;
-  // Calm, lawyer-friendly display (no seconds).
   return d.toLocaleString(undefined, {
     year: "numeric",
     month: "short",
@@ -191,7 +190,6 @@ function formatWhen(iso: string | null | undefined) {
 function sentenceFromText(t: string | null | undefined) {
   const s = String(t || "").trim();
   if (!s) return "";
-  // return the first “sentence-ish” line
   const firstLine = s.split("\n").map((x) => x.trim()).filter(Boolean)[0] || s;
   const cut = firstLine.length > 220 ? firstLine.slice(0, 220) + "…" : firstLine;
   return cut;
@@ -209,7 +207,6 @@ function summarizeFacts(factsJson: any): { bullets: string[]; meta: string[] } {
 
   const root: any = factsJson;
 
-  // Common shapes we’ve used / might see: grants / revokes / modifies / scope / effective / conditions / limits
   const grants = coerceArray(root.grants ?? root.granted ?? root.authority_grants);
   const revokes = coerceArray(root.revokes ?? root.revoked ?? root.authority_revokes);
   const modifies = coerceArray(root.modifies ?? root.modified ?? root.authority_modifies);
@@ -218,11 +215,11 @@ function summarizeFacts(factsJson: any): { bullets: string[]; meta: string[] } {
   if (grants.length) bullets.push(`Grants detected: ${grants.length}`);
   if (revokes.length) bullets.push(`Revocations detected: ${revokes.length}`);
   if (modifies.length) bullets.push(`Modifications detected: ${modifies.length}`);
-  if (!grants.length && !revokes.length && !modifies.length) bullets.push("No explicit grants/revokes/modifies detected in structured extraction.");
+  if (!grants.length && !revokes.length && !modifies.length)
+    bullets.push("No explicit grants/revokes/modifies detected in structured extraction.");
 
   if (conditions.length) bullets.push(`Conditions / limitations: ${conditions.length}`);
 
-  // Optional scope/effective hints (best-effort)
   const scope = root.scope ?? root.authority_scope ?? null;
   const effective = root.effective ?? root.effective_at ?? root.effective_date ?? null;
 
@@ -253,7 +250,6 @@ function summarizeConflicts(conflictsJson: any): { bullets: string[] } {
 
   bullets.push(`${n} potential conflict(s) detected in stored snapshot.`);
 
-  // Best-effort: if object has top-level messages/items, show a couple titles.
   try {
     const o: any = conflictsJson;
     const arr =
@@ -263,7 +259,10 @@ function summarizeConflicts(conflictsJson: any): { bullets: string[] } {
       null;
 
     if (arr && arr.length) {
-      const top = arr.slice(0, 2).map((x: any) => x?.title || x?.message || x?.summary || null).filter(Boolean);
+      const top = arr
+        .slice(0, 2)
+        .map((x: any) => x?.title || x?.message || x?.summary || null)
+        .filter(Boolean);
       for (const t of top) bullets.push(String(t));
       if (arr.length > 2) bullets.push("…and more.");
     }
@@ -317,15 +316,24 @@ export default function ArchiveLedgerLifecyclePage() {
   const [extractErr, setExtractErr] = useState<string | null>(null);
   const [extractOk, setExtractOk] = useState<string | null>(null);
 
-  // Apple-ish calm: less “pure black”, more layered glass.
+  // ✅ PRODUCTION: lock background scroll when any modal is open
+  useEffect(() => {
+    if (!open) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [open]);
+
+  // ✅ Deeper, less washed OS shell (more contrast + controlled glow)
   const shell =
-    "rounded-3xl border border-white/10 bg-gradient-to-b from-white/[0.05] to-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.50)] overflow-hidden backdrop-blur";
+    "relative rounded-3xl border border-white/10 bg-[radial-gradient(1200px_420px_at_20%_-10%,rgba(251,191,36,0.12),transparent_55%),radial-gradient(900px_360px_at_90%_0%,rgba(56,189,248,0.10),transparent_55%),linear-gradient(to_bottom,rgba(255,255,255,0.05),rgba(0,0,0,0.45))] shadow-[0_34px_140px_rgba(0,0,0,0.70)] overflow-hidden";
   const header =
-    "border-b border-white/10 bg-gradient-to-b from-white/[0.08] via-white/[0.03] to-transparent px-4 sm:px-6 py-4 sm:py-5";
+    "border-b border-white/10 bg-[linear-gradient(to_bottom,rgba(255,255,255,0.08),rgba(255,255,255,0.03),transparent)] px-4 sm:px-6 py-4 sm:py-5";
   const body = "px-4 sm:px-6 py-5 sm:py-6";
 
   const conflictsCount = useMemo(() => computeConflictsCount(draftConflicts?.conflicts_json), [draftConflicts]);
-
   const axiomLedgerSet = useMemo(() => new Set(axiomList.map((x) => x.ledger_id)), [axiomList]);
 
   // ✅ Entity UUID resolve (LOCKED to entities.slug — NO legacy fallback)
@@ -339,12 +347,7 @@ export default function ArchiveLedgerLifecyclePage() {
         return;
       }
 
-      const { data, error } = await supabase
-        .from("entities")
-        .select("id")
-        .eq("slug", slug)
-        .limit(1)
-        .maybeSingle();
+      const { data, error } = await supabase.from("entities").select("id").eq("slug", slug).limit(1).maybeSingle();
 
       if (!alive) return;
 
@@ -431,9 +434,7 @@ export default function ArchiveLedgerLifecyclePage() {
           return;
         }
 
-        const draftIds = (notes ?? [])
-          .map((n: any) => String(n.scope_id || "").trim())
-          .filter(Boolean);
+        const draftIds = (notes ?? []).map((n: any) => String(n.scope_id || "").trim()).filter(Boolean);
 
         if (!draftIds.length) {
           setAxiomList([]);
@@ -583,7 +584,6 @@ export default function ArchiveLedgerLifecyclePage() {
         if (noteErr) console.warn("axiomNote read failed", noteErr);
         else setAxiomNote((note ?? null) as any);
 
-        // best-effort conflicts snapshot (soft fail if table missing / blocked)
         try {
           const { data: conf, error: cErr } = await supabase
             .from("draft_authority_conflicts")
@@ -596,12 +596,9 @@ export default function ArchiveLedgerLifecyclePage() {
             .maybeSingle();
 
           if (!cErr && conf) setDraftConflicts(conf as any);
-        } catch {
-          // ignore
-        }
+        } catch {}
       }
 
-      // archived-only resolution facts (soft fail if table missing)
       try {
         const { data: facts, error: fErr } = await supabase
           .from("governance_resolution_facts")
@@ -614,9 +611,7 @@ export default function ArchiveLedgerLifecyclePage() {
           .maybeSingle();
 
         if (!fErr && facts) setResolutionFacts(facts as any);
-      } catch {
-        // ignore
-      }
+      } catch {}
     } catch (e: any) {
       const msg = e?.message ? String(e.message) : "Failed to load advisory signals.";
       setIntelErr(msg);
@@ -666,7 +661,14 @@ export default function ArchiveLedgerLifecyclePage() {
     <div className="w-full">
       <div className="mx-auto w-full max-w-[1200px] px-4 pb-10 pt-4 sm:pt-6">
         <div className={shell}>
-          <div className={header}>
+          {/* subtle “production” glow mask */}
+          <div className="pointer-events-none absolute inset-0 opacity-[0.55]">
+            <div className="absolute -top-24 left-10 h-56 w-56 rounded-full bg-amber-400/10 blur-3xl" />
+            <div className="absolute -top-24 right-10 h-56 w-56 rounded-full bg-sky-400/10 blur-3xl" />
+            <div className="absolute bottom-0 left-1/2 h-64 w-[32rem] -translate-x-1/2 rounded-full bg-emerald-400/6 blur-3xl" />
+          </div>
+
+          <div className={cx("relative", header)}>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">CI • Archive</div>
@@ -707,9 +709,9 @@ export default function ArchiveLedgerLifecyclePage() {
             </div>
           </div>
 
-          <div className={body}>
-            {/* Top intelligence strip — calmer, less “console” */}
-            <div className="mb-4 rounded-3xl border border-white/10 bg-white/[0.03] px-4 py-3">
+          <div className={cx("relative", body)}>
+            {/* Top intelligence strip — production contrast */}
+            <div className="mb-4 rounded-3xl border border-white/10 bg-black/30 shadow-[0_18px_60px_rgba(0,0,0,0.45)] px-4 py-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Intelligence</div>
@@ -720,20 +722,20 @@ export default function ArchiveLedgerLifecyclePage() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2 text-[11px]">
-                  <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-200">
-                    <Sparkles className="h-4 w-4 text-amber-300" />
+                  <span className="inline-flex items-center gap-2 rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-1 text-amber-100">
+                    <Sparkles className="h-4 w-4" />
                     AXIOM notes: <span className="font-semibold">{topIntel.axiomNotesCount}</span>
                   </span>
 
-                  <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-200">
-                    <Zap className="h-4 w-4 text-sky-300" />
+                  <span className="inline-flex items-center gap-2 rounded-full border border-sky-400/20 bg-sky-400/10 px-3 py-1 text-sky-100">
+                    <Zap className="h-4 w-4" />
                     Resolution facts: <span className="font-semibold">{topIntel.resolutionFactsCount}</span>
                   </span>
 
-                  <span className="inline-flex items-center gap-2 rounded-full border border-rose-400/20 bg-rose-400/5 px-3 py-1 text-rose-100">
+                  <span className="inline-flex items-center gap-2 rounded-full border border-rose-400/20 bg-rose-400/10 px-3 py-1 text-rose-100">
                     Critical: <span className="font-semibold">{topIntel.critical}</span>
                   </span>
-                  <span className="inline-flex items-center gap-2 rounded-full border border-amber-400/20 bg-amber-400/5 px-3 py-1 text-amber-100">
+                  <span className="inline-flex items-center gap-2 rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-1 text-amber-100">
                     Warning: <span className="font-semibold">{topIntel.warning}</span>
                   </span>
                 </div>
@@ -743,7 +745,7 @@ export default function ArchiveLedgerLifecyclePage() {
             <div className="grid grid-cols-12 gap-4">
               {/* LEFT */}
               <section className="col-span-12 lg:col-span-3">
-                <div className="rounded-3xl border border-white/10 bg-white/[0.03] p-4">
+                <div className="rounded-3xl border border-white/10 bg-black/25 p-4 shadow-[0_18px_70px_rgba(0,0,0,0.40)]">
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-sm font-semibold text-slate-200">Filters</div>
@@ -762,7 +764,7 @@ export default function ArchiveLedgerLifecyclePage() {
                         className={cx(
                           "rounded-full border px-3 py-1 text-xs transition",
                           tab === t
-                            ? "border-amber-400/35 bg-amber-400/10 text-amber-100"
+                            ? "border-amber-400/35 bg-amber-400/10 text-amber-100 shadow-[0_0_0_1px_rgba(251,191,36,0.08)]"
                             : "border-white/10 bg-white/5 text-slate-200/80 hover:bg-white/7"
                         )}
                         title={`${t} (${counts[t] ?? 0})`}
@@ -780,22 +782,22 @@ export default function ArchiveLedgerLifecyclePage() {
                         value={q}
                         onChange={(e) => setQ(e.target.value)}
                         placeholder="title, id, status..."
-                        className="w-full rounded-2xl border border-white/10 bg-white/5 pl-10 pr-3 py-2 text-sm text-slate-200 outline-none placeholder:text-slate-500 focus:border-amber-400/30"
+                        className="w-full rounded-2xl border border-white/10 bg-black/30 pl-10 pr-3 py-2 text-sm text-slate-200 outline-none placeholder:text-slate-500 focus:border-amber-400/30"
                       />
                     </div>
                   </div>
 
                   <div className="mt-4 text-xs text-slate-400">{loading ? "Loading…" : `${filtered.length} result(s)`}</div>
 
-                  <div className="mt-3 rounded-2xl border border-white/10 bg-white/[0.03] p-3 text-xs text-slate-400">
+                  <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-400">
                     Lane-safe: fetched server-side via <span className="text-slate-200">ledger_scoped_v3</span> RPC (SECURITY DEFINER).
                   </div>
 
-                  <div className="mt-3 rounded-2xl border border-white/10 bg-white/[0.03] p-3 text-xs text-slate-500 leading-relaxed">
+                  <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-500 leading-relaxed">
                     Intelligence is <span className="text-slate-200">advisory-only</span>. Indicators come from stored sidecars (no mutation).
                   </div>
 
-                  <div className="mt-4 rounded-3xl border border-white/10 bg-white/[0.03] p-3">
+                  <div className="mt-4 rounded-3xl border border-white/10 bg-black/20 p-3">
                     <div className="flex items-start justify-between gap-2">
                       <div>
                         <div className="text-sm font-semibold text-slate-200 inline-flex items-center gap-2">
@@ -807,9 +809,9 @@ export default function ArchiveLedgerLifecyclePage() {
                     </div>
 
                     {axiomListLoading ? (
-                      <div className="mt-3 rounded-2xl border border-white/10 bg-white/[0.03] p-3 text-xs text-slate-400">Loading…</div>
+                      <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-400">Loading…</div>
                     ) : axiomList.length === 0 ? (
-                      <div className="mt-3 rounded-2xl border border-white/10 bg-white/[0.03] p-3 text-xs text-slate-500">
+                      <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-500">
                         No AXIOM notes surfaced for this lane/entity yet.
                       </div>
                     ) : (
@@ -833,7 +835,7 @@ export default function ArchiveLedgerLifecyclePage() {
                               setOpen(true);
                               void loadLedgerIntel(n.ledger_id);
                             }}
-                            className="w-full text-left rounded-2xl border border-white/10 bg-white/[0.03] px-3 py-2 hover:bg-white/[0.05] transition"
+                            className="w-full text-left rounded-2xl border border-white/10 bg-black/20 px-3 py-2 hover:bg-white/[0.05] transition"
                             title="Open linked record"
                           >
                             <div className="text-xs font-semibold text-slate-200 truncate">{n.title || "AXIOM • Draft review"}</div>
@@ -849,7 +851,7 @@ export default function ArchiveLedgerLifecyclePage() {
 
               {/* MIDDLE */}
               <section className="col-span-12 lg:col-span-6">
-                <div className="rounded-3xl border border-white/10 bg-white/[0.03] p-4">
+                <div className="rounded-3xl border border-white/10 bg-black/25 p-4 shadow-[0_18px_70px_rgba(0,0,0,0.40)]">
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-sm font-semibold text-slate-200">Records</div>
@@ -862,7 +864,7 @@ export default function ArchiveLedgerLifecyclePage() {
 
                   <div className="mt-3 space-y-2">
                     {filtered.length === 0 ? (
-                      <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-400">
+                      <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-slate-400">
                         {loading ? "Loading ledger…" : "No records match this view."}
                       </div>
                     ) : (
@@ -882,7 +884,7 @@ export default function ArchiveLedgerLifecyclePage() {
                               setOpen(true);
                               void loadLedgerIntel(r.id);
                             }}
-                            className="w-full text-left rounded-3xl border border-white/10 bg-white/[0.03] p-3 hover:bg-white/[0.05] transition"
+                            className="w-full text-left rounded-3xl border border-white/10 bg-black/20 p-3 hover:bg-white/[0.05] transition shadow-[0_10px_38px_rgba(0,0,0,0.35)]"
                           >
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0">
@@ -968,7 +970,7 @@ export default function ArchiveLedgerLifecyclePage() {
 
               {/* RIGHT */}
               <section className="col-span-12 lg:col-span-3">
-                <div className="rounded-3xl border border-white/10 bg-white/[0.03] p-4">
+                <div className="rounded-3xl border border-white/10 bg-black/25 p-4 shadow-[0_18px_70px_rgba(0,0,0,0.40)]">
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-sm font-semibold text-slate-200">Lifecycle</div>
@@ -980,16 +982,16 @@ export default function ArchiveLedgerLifecyclePage() {
                   </div>
 
                   <div className="mt-3 space-y-3 text-sm text-slate-300">
-                    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                       <span className="text-slate-200">PENDING</span> → review &amp; approve in <span className="text-slate-200">Council</span>
                     </div>
-                    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                       <span className="text-slate-200">APPROVED</span> → execute via <span className="text-slate-200">Forge</span> (signature-only)
                     </div>
-                    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                       <span className="text-slate-200">SIGNED</span> → seal via <span className="text-slate-200">Archive</span> (idempotent)
                     </div>
-                    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
+                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                       <span className="text-slate-200">ARCHIVED</span> → record is sealed; no action required
                     </div>
                   </div>
@@ -1001,7 +1003,7 @@ export default function ArchiveLedgerLifecyclePage() {
               </section>
             </div>
 
-            <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-[11px] text-slate-400">
+            <div className="mt-5 rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
               <div className="font-semibold text-slate-200">OS behavior</div>
               <div className="mt-1 leading-relaxed text-slate-400">
                 Drafts &amp; Approvals inherits the OS shell. Lane-safe and entity-scoped. Intelligence is advisory-only and never mutates authority automatically.
@@ -1102,7 +1104,6 @@ function RecordModal(props: {
 }) {
   const {
     laneIsTest,
-    activeEntity,
     entityId,
     selected,
     setSelected,
@@ -1130,7 +1131,6 @@ function RecordModal(props: {
   const conflictsSummary = useMemo(() => summarizeConflicts(draftConflicts?.conflicts_json), [draftConflicts]);
 
   const recordSubtitle = useMemo(() => {
-    const s = normStatusUpper(selected.status);
     const lane = laneIsTest ? "SANDBOX" : "RoT";
     const hasEnv = selected.envelope_id ? "Envelope linked" : "No envelope";
     const ax = selectedHasAxiom ? "AXIOM present" : "No AXIOM";
@@ -1138,27 +1138,52 @@ function RecordModal(props: {
     return `${humanStatus} • ${lane} • ${hasEnv} • ${ax}`;
   }, [selected, laneIsTest, selectedHasAxiom]);
 
-  // Modal surfaces: calmer glass + readable cards (no console vibes)
+  // ✅ MODAL FIX: viewport-safe panel + sticky header/footer + scroll body
   const modalShell =
-    "w-full max-w-[980px] rounded-3xl border border-white/10 bg-gradient-to-b from-white/[0.06] to-black/30 shadow-[0_40px_140px_rgba(0,0,0,0.60)] overflow-hidden backdrop-blur";
+    "w-full max-w-[980px] max-h-[88vh] rounded-3xl border border-white/10 bg-black/80 shadow-[0_50px_170px_rgba(0,0,0,0.78)] overflow-hidden flex flex-col";
   const modalHeader =
-    "border-b border-white/10 bg-gradient-to-b from-white/[0.09] via-white/[0.04] to-transparent px-5 py-4";
-  const modalBody = "px-5 py-5";
-  const card = "rounded-3xl border border-white/10 bg-white/[0.03] p-4";
-  const subtleCard = "rounded-2xl border border-white/10 bg-white/[0.03] p-3";
+    "shrink-0 border-b border-white/10 bg-[linear-gradient(to_bottom,rgba(255,255,255,0.10),rgba(255,255,255,0.04),transparent)] px-5 py-4";
+  const modalBody = "flex-1 overflow-y-auto px-4 sm:px-5 py-4 sm:py-5";
+  const modalFooter = "shrink-0 border-t border-white/10 bg-black/40 px-5 py-4 flex flex-wrap items-center justify-between gap-2";
+
+  const card = "rounded-3xl border border-white/10 bg-black/35 p-4 shadow-[0_18px_70px_rgba(0,0,0,0.45)]";
+  const subtleCard = "rounded-2xl border border-white/10 bg-black/28 p-3";
+
+  // close on Escape (scroll-safe)
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        setOpen(false);
+        setSelected(null);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [setOpen, setSelected]);
 
   return (
     <div className="fixed inset-0 z-[80]">
+      {/* Darker backdrop (no washed UI), minimal blur */}
       <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+        className="absolute inset-0 bg-black/80 backdrop-blur-[2px]"
         onClick={() => {
           setOpen(false);
           setSelected(null);
         }}
       />
-      <div className="absolute inset-0 flex items-center justify-center p-4">
+
+      {/* Centered modal container */}
+      <div className="absolute inset-0 flex items-center justify-center p-3 sm:p-6">
         <div className={modalShell} onClick={(e) => e.stopPropagation()}>
-          <div className={modalHeader}>
+          {/* Production glow accents (inside modal only) */}
+          <div className="pointer-events-none absolute inset-0">
+            <div className="absolute -top-24 left-12 h-56 w-56 rounded-full bg-amber-400/10 blur-3xl" />
+            <div className="absolute -top-24 right-12 h-56 w-56 rounded-full bg-sky-400/10 blur-3xl" />
+            <div className="absolute bottom-0 left-1/2 h-72 w-[36rem] -translate-x-1/2 rounded-full bg-emerald-400/6 blur-3xl" />
+          </div>
+
+          {/* Header (sticky via layout: shrink-0) */}
+          <div className={cx("relative", modalHeader)}>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Record</div>
@@ -1166,18 +1191,18 @@ function RecordModal(props: {
                 <div className="mt-1 text-xs text-slate-400">{recordSubtitle}</div>
 
                 <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
-                  <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-200">
-                    <Sparkles className="h-4 w-4 text-amber-300" />
+                  <span className="inline-flex items-center gap-2 rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-1 text-amber-100">
+                    <Sparkles className="h-4 w-4" />
                     AXIOM Intelligence
                   </span>
 
                   {draftLink?.id ? (
-                    <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-slate-300">
+                    <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-3 py-1 text-slate-300">
                       <span className="text-slate-500">draft:</span>
                       <span className="font-mono text-slate-200">{draftLink.id.slice(0, 8)}…</span>
                     </span>
                   ) : (
-                    <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-slate-500">
+                    <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-3 py-1 text-slate-500">
                       No Alchemy draft link
                     </span>
                   )}
@@ -1189,7 +1214,7 @@ function RecordModal(props: {
                       <span className="opacity-70">· {conflictsCount} conflict(s)</span>
                     </span>
                   ) : (
-                    <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-slate-500">
+                    <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-3 py-1 text-slate-500">
                       No conflicts snapshot
                     </span>
                   )}
@@ -1218,7 +1243,8 @@ function RecordModal(props: {
             </div>
           </div>
 
-          <div className={modalBody}>
+          {/* Body (the ONLY scroll region) */}
+          <div className={cx("relative", modalBody)}>
             <div className="grid grid-cols-12 gap-4">
               {/* LEFT: IDENTIFIERS */}
               <div className="col-span-12 lg:col-span-5">
@@ -1265,7 +1291,9 @@ function RecordModal(props: {
                           <div className="min-w-0">
                             <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">draft_id</div>
                             <div className="mt-1 font-mono break-all text-[12px] text-slate-200">{draftLink.id}</div>
-                            <div className="mt-2 text-xs text-slate-400">{draftLink.record_type ? `Record type: ${draftLink.record_type}` : "Record type: —"}</div>
+                            <div className="mt-2 text-xs text-slate-400">
+                              {draftLink.record_type ? `Record type: ${draftLink.record_type}` : "Record type: —"}
+                            </div>
                           </div>
                           <button
                             onClick={() => safeCopy(draftLink.id)}
@@ -1281,7 +1309,7 @@ function RecordModal(props: {
                   </div>
 
                   {intelErr && (
-                    <div className="mt-3 rounded-2xl border border-amber-400/20 bg-amber-400/5 p-3 text-xs text-amber-100 leading-relaxed">
+                    <div className="mt-3 rounded-2xl border border-amber-400/20 bg-amber-400/10 p-3 text-xs text-amber-100 leading-relaxed">
                       <div className="font-semibold tracking-[0.18em] uppercase text-[10px]">Advisory read warning</div>
                       <div className="mt-1 opacity-90">{intelErr}</div>
                       <div className="mt-2 text-amber-100/70">If this persists, browser RLS likely blocks reading advisory tables.</div>
@@ -1290,7 +1318,7 @@ function RecordModal(props: {
                 </div>
               </div>
 
-              {/* RIGHT: INTELLIGENCE ATTACHED TO RECORD */}
+              {/* RIGHT: INTELLIGENCE */}
               <div className="col-span-12 lg:col-span-7">
                 <div className={card}>
                   <div className="flex items-start justify-between gap-3">
@@ -1304,8 +1332,8 @@ function RecordModal(props: {
                     </span>
                   </div>
 
-                  {/* Executive summary block */}
-                  <div className="mt-3 rounded-3xl border border-white/10 bg-gradient-to-b from-white/[0.04] to-white/[0.02] p-4">
+                  {/* Executive summary */}
+                  <div className="mt-3 rounded-3xl border border-white/10 bg-[linear-gradient(to_bottom,rgba(255,255,255,0.06),rgba(0,0,0,0.20))] p-4">
                     <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Executive view</div>
                     <div className="mt-2 text-sm text-slate-200 leading-relaxed">
                       {axiomNote?.content ? (
@@ -1325,7 +1353,7 @@ function RecordModal(props: {
                   </div>
 
                   {/* Resolution facts */}
-                  <div className="mt-4 rounded-3xl border border-white/10 bg-white/[0.03] p-4">
+                  <div className="mt-4 rounded-3xl border border-white/10 bg-black/30 p-4">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Resolution facts</div>
@@ -1432,14 +1460,14 @@ function RecordModal(props: {
                     ) : null}
 
                     {showRawFacts && resolutionFacts?.facts_json ? (
-                      <pre className="mt-3 max-h-[240px] overflow-auto rounded-2xl border border-white/10 bg-black/30 p-3 text-[11px] leading-relaxed text-slate-200 whitespace-pre-wrap">
+                      <pre className="mt-3 max-h-[240px] overflow-auto rounded-2xl border border-white/10 bg-black/40 p-3 text-[11px] leading-relaxed text-slate-200 whitespace-pre-wrap">
                         {tryJsonStringify(resolutionFacts.facts_json, 48_000)}
                       </pre>
                     ) : null}
                   </div>
 
                   {/* Authority conflicts */}
-                  <div className="mt-4 rounded-3xl border border-white/10 bg-white/[0.03] p-4">
+                  <div className="mt-4 rounded-3xl border border-white/10 bg-black/30 p-4">
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Authority conflicts</div>
@@ -1452,9 +1480,7 @@ function RecordModal(props: {
                               </span>
                               <span className="text-slate-500"> · </span>
                               <span className="text-slate-300">{conflictsCount} conflict(s)</span>
-                              {draftConflicts.compared_at ? (
-                                <span className="text-slate-500"> · {formatWhen(draftConflicts.compared_at)}</span>
-                              ) : null}
+                              {draftConflicts.compared_at ? <span className="text-slate-500"> · {formatWhen(draftConflicts.compared_at)}</span> : null}
                             </>
                           ) : (
                             <span className="text-slate-500">No snapshot available for this ledger record.</span>
@@ -1496,7 +1522,7 @@ function RecordModal(props: {
                     </div>
 
                     {showRawConflicts && draftConflicts?.id ? (
-                      <pre className="mt-3 max-h-[220px] overflow-auto rounded-2xl border border-white/10 bg-black/30 p-3 text-[11px] leading-relaxed text-slate-300 whitespace-pre-wrap">
+                      <pre className="mt-3 max-h-[220px] overflow-auto rounded-2xl border border-white/10 bg-black/40 p-3 text-[11px] leading-relaxed text-slate-300 whitespace-pre-wrap">
                         {tryJsonStringify(draftConflicts.conflicts_json, 48_000)}
                       </pre>
                     ) : null}
@@ -1509,7 +1535,7 @@ function RecordModal(props: {
                   </div>
 
                   {/* Draft review (full) */}
-                  <div className="mt-4 rounded-3xl border border-white/10 bg-white/[0.03] p-4">
+                  <div className="mt-4 rounded-3xl border border-white/10 bg-black/30 p-4">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Draft review</div>
@@ -1548,7 +1574,7 @@ function RecordModal(props: {
                     </div>
 
                     {showRawNote && axiomNote?.content ? (
-                      <div className="mt-3 rounded-2xl border border-white/10 bg-black/30 p-3 text-[12px] leading-relaxed text-slate-200 whitespace-pre-wrap">
+                      <div className="mt-3 rounded-2xl border border-white/10 bg-black/40 p-3 text-[12px] leading-relaxed text-slate-200 whitespace-pre-wrap">
                         {axiomNote.content}
                       </div>
                     ) : !axiomNote?.content ? (
@@ -1562,7 +1588,7 @@ function RecordModal(props: {
                     )}
                   </div>
 
-                  <div className="mt-4 rounded-2xl border border-white/10 bg-white/[0.03] p-3 text-[11px] text-slate-400 leading-relaxed">
+                  <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-3 text-[11px] text-slate-400 leading-relaxed">
                     <span className="text-slate-200 font-semibold">Contract:</span> advisory only, lane-safe, entity-scoped. No automatic authority mutation.
                   </div>
                 </div>
@@ -1614,7 +1640,7 @@ function RecordModal(props: {
                     </Link>
                   </div>
 
-                  <div className="mt-4 rounded-2xl border border-white/10 bg-white/[0.03] p-3 text-[11px] text-slate-400">
+                  <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-3 text-[11px] text-slate-400">
                     This modal is informational + safe copy only. No deletes, no direct mutations.
                   </div>
                 </div>
@@ -1622,7 +1648,8 @@ function RecordModal(props: {
             </div>
           </div>
 
-          <div className="border-t border-white/10 bg-white/[0.03] px-5 py-4 flex flex-wrap items-center justify-between gap-2">
+          {/* Footer (sticky via layout: shrink-0) */}
+          <div className={cx("relative", modalFooter)}>
             <div className="text-[11px] text-slate-500">Tip: use Forge for signature execution, Archive for sealing, Council for approval gate.</div>
             <button
               onClick={() => {
