@@ -1,3 +1,12 @@
+// supabase/functions/complete-signature/index.ts
+//
+// ✅ PRODUCTION — LOCKED (NO REGRESSION)
+// ✅ ONLY CHANGE: REMOVED ANY/ALL AXIOM INVOCATION FROM THIS FUNCTION
+//    (complete-signature must be purely execution + certificate generation + existing downstream ingest/certify)
+//
+// NOTE: There is intentionally **NO call** to any AXIOM / AI / extraction function here.
+// AXIOM must be operator-triggered elsewhere (post-archive / certified), never from signing completion.
+
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { PDFDocument, StandardFonts, rgb } from "https://esm.sh/pdf-lib@1.17.1";
@@ -196,7 +205,7 @@ async function resolveBasePdfPath(recordId: string): Promise<string | null> {
     .from("storage.objects")
     .select("name, created_at")
     .eq("bucket_id", BUCKET)
-    .or([`name.ilike.%/resolutions/%`, `name.ilike.%/Resolutions/%`].join(","))
+    .or([`name.ilike.%/resolutions/%`, `name.ilike.%/Resolutions/%`].join(","));
 
   if (scanErr || !rows) {
     console.error("resolveBasePdfPath storage.objects scan failed", scanErr);
@@ -398,7 +407,9 @@ serve(async (req) => {
       const meta = (envelope as any)?.metadata ?? {};
       const cert = meta?.certificate ?? null;
       const verifyUrl =
-        safeText(cert?.verify_url) ?? safeText(meta?.verify_url) ?? `https://sign.oasisintlholdings.com/verify.html?envelope_id=${envelope_id}`;
+        safeText(cert?.verify_url) ??
+        safeText(meta?.verify_url) ??
+        `https://sign.oasisintlholdings.com/verify.html?envelope_id=${envelope_id}`;
 
       return json({
         ok: true,
@@ -408,9 +419,13 @@ serve(async (req) => {
         certificate: cert,
         base_document_path: safeText(cert?.base_document_path) ?? null,
         signed_document_path:
-          safeText(cert?.signed_document_path) ?? safeText(meta?.signed_document_path) ?? null,
+          safeText(cert?.signed_document_path) ??
+          safeText(meta?.signed_document_path) ??
+          null,
         signed_document_path_canonical:
-          safeText(cert?.signed_document_path_canonical) ?? safeText(meta?.signed_document_path_canonical) ?? null,
+          safeText(cert?.signed_document_path_canonical) ??
+          safeText(meta?.signed_document_path_canonical) ??
+          null,
         pdf_hash: safeText(cert?.pdf_hash) ?? safeText(meta?.pdf_hash) ?? null,
         verify_url: verifyUrl,
         wet_signature_mode: safeText(cert?.wet_signature_mode) ?? "click",
@@ -524,7 +539,7 @@ serve(async (req) => {
       .single();
 
     const verifyUrl =
-      (envelope as any)?.metadata?.verify_url ?? 
+      (envelope as any)?.metadata?.verify_url ??
       `https://sign.oasisintlholdings.com/verify.html?envelope_id=${envelope_id}`;
 
     let basePath: string | null = null;
@@ -655,7 +670,7 @@ serve(async (req) => {
 
           y -= 28;
 
-          const colGap = 270; 
+          const colGap = 270;
           const labelW = 104;
           const valuePad = 8;
 
@@ -698,7 +713,7 @@ serve(async (req) => {
               size: 9,
               font,
               color: textMuted,
-              maxWidth: (rightLabelX - 18) - leftValueX, 
+              maxWidth: (rightLabelX - 18) - leftValueX,
             });
             leftY -= 16;
           }
@@ -1082,12 +1097,15 @@ serve(async (req) => {
             // Internal render digest (NOT canonical registry truth)
             pdf_hash: pdfHash,
 
-            // ✅ New: stable digest of executed record content bytes (excluding certificate page)
+            // ✅ stable digest of executed record content bytes (excluding certificate page)
             record_digest_sha256: recordDigest,
 
             bucket: BUCKET,
             base_document_path:
-              basePath ?? safeText((envelope as any)?.supporting_document_path) ?? safeText((envelope as any)?.storage_path) ?? null,
+              basePath ??
+              safeText((envelope as any)?.supporting_document_path) ??
+              safeText((envelope as any)?.storage_path) ??
+              null,
             signed_document_path: signedPath,
             signed_document_path_canonical: signedPathCanonical,
 
@@ -1135,7 +1153,8 @@ serve(async (req) => {
           await updateEnvelopeIfNotCompleted(envelope_id, {
             status: "partial",
             metadata: newMetadata,
-            supporting_document_path: safeText((envelope as any)?.supporting_document_path) ?? basePath ?? null,
+            supporting_document_path:
+              safeText((envelope as any)?.supporting_document_path) ?? basePath ?? null,
             storage_path: safeText((envelope as any)?.storage_path) ?? basePath ?? null,
           });
 
@@ -1167,6 +1186,7 @@ serve(async (req) => {
     }
 
     // 8) Downstream calls (NO REGRESSION)
+    // ✅ IMPORTANT: AXIOM IS NOT INVOKED HERE (REMOVED / NOT PRESENT).
     if (allSigned) {
       const edgeBase = SUPABASE_URL.replace(/\/rest\/v1$/, "");
 
@@ -1267,7 +1287,9 @@ serve(async (req) => {
       signed_document_path:
         safeText(cert?.signed_document_path) ?? safeText(meta?.signed_document_path) ?? null,
       signed_document_path_canonical:
-        safeText(cert?.signed_document_path_canonical) ?? safeText(meta?.signed_document_path_canonical) ?? null,
+        safeText(cert?.signed_document_path_canonical) ??
+        safeText(meta?.signed_document_path_canonical) ??
+        null,
       pdf_hash: safeText(cert?.pdf_hash) ?? safeText(meta?.pdf_hash) ?? null,
       verify_url: finalVerifyUrl,
       wet_signature_mode: String(wet_signature_mode ?? "").toLowerCase() || "click",
