@@ -16,6 +16,9 @@ import {
   Copy,
   X,
   ArrowRight,
+  Sparkles,
+  ShieldAlert,
+  RotateCw,
 } from "lucide-react";
 
 type Tab = "ALL" | "PENDING" | "APPROVED" | "SIGNING" | "SIGNED" | "ARCHIVED";
@@ -33,6 +36,40 @@ type LedgerRow = {
 
   approved_by_council?: boolean | null;
   archived?: boolean | null;
+};
+
+type DraftLink = {
+  id: string;
+  title: string | null;
+  record_type: string | null;
+  entity_slug: string | null;
+  entity_id: string | null;
+  is_test: boolean | null;
+  finalized_record_id?: string | null;
+};
+
+type AxiomNote = {
+  id: string;
+  created_at: string | null;
+  title: string | null;
+  content: string | null;
+  model: string | null;
+  tokens_used: number | null;
+  created_by: string | null;
+  note_type?: string | null;
+  scope_type?: string | null;
+  scope_id?: string | null;
+};
+
+type DraftConflictsRow = {
+  id: string;
+  draft_id: string;
+  entity_id: string;
+  is_test: boolean;
+  severity: string;
+  conflicts_json: unknown;
+  compared_at: string | null;
+  compared_by: string | null;
 };
 
 function cx(...xs: Array<string | false | null | undefined>) {
@@ -54,8 +91,7 @@ function badgeForStatus(statusRaw: string | null | undefined) {
 
   if (s === "PENDING") return "border-sky-400/30 bg-sky-400/10 text-sky-100";
   if (s === "APPROVED") return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
-  if (s === "SIGNING" || s === "IN_SIGNING")
-    return "border-amber-400/30 bg-amber-400/10 text-amber-100";
+  if (s === "SIGNING" || s === "IN_SIGNING") return "border-amber-400/30 bg-amber-400/10 text-amber-100";
   if (s === "SIGNED") return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
   if (s === "ARCHIVED") return "border-white/10 bg-white/5 text-slate-300";
 
@@ -66,6 +102,24 @@ function safeCopy(text: string) {
   try {
     navigator.clipboard?.writeText(text);
   } catch {}
+}
+
+function severityBadge(sevRaw: string | null | undefined) {
+  const sev = String(sevRaw || "").toLowerCase().trim();
+  if (sev === "critical") return "border-rose-400/35 bg-rose-400/10 text-rose-100";
+  if (sev === "warning") return "border-amber-400/35 bg-amber-400/10 text-amber-100";
+  if (sev === "info") return "border-sky-400/30 bg-sky-400/10 text-sky-100";
+  return "border-white/10 bg-white/5 text-slate-300";
+}
+
+function tryJsonStringify(v: unknown, limit = 10_000) {
+  try {
+    const s = JSON.stringify(v, null, 2);
+    if (s.length <= limit) return s;
+    return s.slice(0, limit) + "\n…";
+  } catch {
+    return String(v ?? "");
+  }
 }
 
 export default function ArchiveLedgerLifecyclePage() {
@@ -86,6 +140,14 @@ export default function ArchiveLedgerLifecyclePage() {
   // modal (details)
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<LedgerRow | null>(null);
+
+  // ✅ Ledger-side intelligence (read-only; NO SQL required)
+  const [draftLink, setDraftLink] = useState<DraftLink | null>(null);
+  const [axiomNote, setAxiomNote] = useState<AxiomNote | null>(null);
+  const [draftConflicts, setDraftConflicts] = useState<DraftConflictsRow | null>(null);
+
+  const [intelLoading, setIntelLoading] = useState(false);
+  const [intelErr, setIntelErr] = useState<string | null>(null);
 
   // Resolve entity UUID from entities table using slug (NO hardcoding)
   useEffect(() => {
@@ -224,6 +286,97 @@ export default function ArchiveLedgerLifecyclePage() {
     "border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent px-4 sm:px-6 py-4 sm:py-5";
   const body = "px-4 sm:px-6 py-5 sm:py-6";
 
+  async function loadLedgerIntel(ledgerId: string) {
+    setIntelErr(null);
+    setIntelLoading(true);
+    setDraftLink(null);
+    setAxiomNote(null);
+    setDraftConflicts(null);
+
+    try {
+      // 1) Find the draft that finalized into this ledger record (NO SQL changes; pure read)
+      const { data: d, error: dErr } = await supabase
+        .from("governance_drafts")
+        .select("id, title, record_type, entity_slug, entity_id, is_test, finalized_record_id")
+        .eq("finalized_record_id", ledgerId)
+        .limit(1)
+        .maybeSingle();
+
+      if (dErr) {
+        console.error("loadLedgerIntel draft lookup error", dErr);
+        setIntelErr(dErr.message || "Failed to load draft link");
+        setIntelLoading(false);
+        return;
+      }
+
+      if (!d?.id) {
+        // Not an error; some ledger rows may not originate from Alchemy drafts
+        setIntelLoading(false);
+        return;
+      }
+
+      setDraftLink(d as DraftLink);
+
+      // 2) Load latest AXIOM draft review note (scope=document, scope_id=draft_id, note_type=summary)
+      //    Keep filters broad + stable: if you later change model names, this still works.
+      const { data: note, error: nErr } = await supabase
+        .from("ai_notes")
+        .select("id, created_at, title, content, model, tokens_used, created_by, scope_type, scope_id, note_type")
+        // scope_type enum (document) is canonical per your contract
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .eq("scope_type" as any, "document" as any)
+        .eq("scope_id", d.id)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .eq("note_type" as any, "summary" as any)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (nErr) {
+        console.error("loadLedgerIntel ai_notes error", nErr);
+        // not fatal (RLS may deny reads in some deployments)
+        setIntelErr((prev) => prev ?? nErr.message);
+      } else if (note?.id) {
+        setAxiomNote(note as AxiomNote);
+      }
+
+      // 3) Load latest stored conflicts snapshot for that draft (governance_draft_conflicts)
+      const { data: cRow, error: cErr } = await supabase
+        .from("governance_draft_conflicts")
+        .select("id, draft_id, entity_id, is_test, severity, conflicts_json, compared_at, compared_by")
+        .eq("draft_id", d.id)
+        .order("compared_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (cErr) {
+        console.error("loadLedgerIntel draft_conflicts error", cErr);
+        setIntelErr((prev) => prev ?? cErr.message);
+      } else if (cRow?.id) {
+        setDraftConflicts(cRow as DraftConflictsRow);
+      }
+
+      setIntelLoading(false);
+    } catch (e) {
+      console.error("loadLedgerIntel threw", e);
+      setIntelErr(String((e as any)?.message ?? e));
+      setIntelLoading(false);
+    }
+  }
+
+  const conflictsCount = useMemo(() => {
+    const v = (draftConflicts as any)?.conflicts_json;
+    if (!v) return 0;
+    if (Array.isArray(v)) return v.length;
+    // if stored as jsonb array but parsed oddly
+    try {
+      const s = JSON.parse(JSON.stringify(v));
+      return Array.isArray(s) ? s.length : 0;
+    } catch {
+      return 0;
+    }
+  }, [draftConflicts]);
+
   return (
     <div className="w-full">
       <div className="mx-auto w-full max-w-[1200px] px-4 pb-10 pt-4 sm:pt-6">
@@ -323,6 +476,11 @@ export default function ArchiveLedgerLifecyclePage() {
                   <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-400">
                     Lane-safe: fetched server-side via <span className="text-slate-200">ledger_scoped_v3</span> RPC (SECURITY DEFINER).
                   </div>
+
+                  <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-500 leading-relaxed">
+                    Intelligence is <span className="text-slate-200">advisory-only</span>. Draft-stage signals appear here automatically when a
+                    ledger record originated from Alchemy (draft finalized → ledger).
+                  </div>
                 </div>
               </section>
 
@@ -358,6 +516,8 @@ export default function ArchiveLedgerLifecyclePage() {
                             onClick={() => {
                               setSelected(r);
                               setOpen(true);
+                              // ✅ load intelligence when opening (no extra user steps; no SQL)
+                              void loadLedgerIntel(r.id);
                             }}
                             className="w-full text-left rounded-3xl border border-white/10 bg-black/20 p-3 hover:bg-black/25 transition"
                           >
@@ -400,9 +560,7 @@ export default function ArchiveLedgerLifecyclePage() {
                                   <span
                                     className={cx(
                                       "rounded-full border px-2 py-1 text-[10px] tracking-[0.18em] uppercase",
-                                      canGoCouncil
-                                        ? "border-white/10 bg-white/5 text-slate-200"
-                                        : "border-white/10 bg-black/20 text-slate-500"
+                                      canGoCouncil ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-black/20 text-slate-500"
                                     )}
                                   >
                                     Council
@@ -410,9 +568,7 @@ export default function ArchiveLedgerLifecyclePage() {
                                   <span
                                     className={cx(
                                       "rounded-full border px-2 py-1 text-[10px] tracking-[0.18em] uppercase",
-                                      canGoForge
-                                        ? "border-white/10 bg-white/5 text-slate-200"
-                                        : "border-white/10 bg-black/20 text-slate-500"
+                                      canGoForge ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-black/20 text-slate-500"
                                     )}
                                   >
                                     Forge
@@ -420,9 +576,7 @@ export default function ArchiveLedgerLifecyclePage() {
                                   <span
                                     className={cx(
                                       "rounded-full border px-2 py-1 text-[10px] tracking-[0.18em] uppercase",
-                                      canGoArchive
-                                        ? "border-white/10 bg-white/5 text-slate-200"
-                                        : "border-white/10 bg-black/20 text-slate-500"
+                                      canGoArchive ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-black/20 text-slate-500"
                                     )}
                                   >
                                     Archive
@@ -470,7 +624,8 @@ export default function ArchiveLedgerLifecyclePage() {
                   </div>
 
                   <div className="mt-4 text-[11px] text-slate-500 leading-relaxed">
-                    This page is a monitor. Actions are performed in Council/Forge/Archive. Details modal includes safe copy and jump links.
+                    This page is a monitor. Actions are performed in Council/Forge/Archive. Details modal includes safe copy, module jumps,
+                    and advisory signals (if the record originated from Alchemy).
                   </div>
                 </div>
               </section>
@@ -480,7 +635,8 @@ export default function ArchiveLedgerLifecyclePage() {
             <div className="mt-5 rounded-3xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
               <div className="font-semibold text-slate-200">OS behavior</div>
               <div className="mt-1 leading-relaxed text-slate-400">
-                Drafts &amp; Approvals inherits the OS shell. Lane-safe and entity-scoped. No module-owned window frames.
+                Drafts &amp; Approvals inherits the OS shell. Lane-safe and entity-scoped. Intelligence is advisory-only and never mutates
+                authority automatically.
               </div>
             </div>
 
@@ -537,14 +693,12 @@ export default function ArchiveLedgerLifecyclePage() {
             }}
           />
           <div className="absolute inset-0 flex items-center justify-center p-4">
-            <div className="w-full max-w-[860px] rounded-3xl border border-white/10 bg-black/60 shadow-[0_40px_140px_rgba(0,0,0,0.65)] overflow-hidden">
+            <div className="w-full max-w-[980px] rounded-3xl border border-white/10 bg-black/60 shadow-[0_40px_140px_rgba(0,0,0,0.65)] overflow-hidden">
               <div className="border-b border-white/10 bg-gradient-to-b from-white/[0.08] to-transparent px-5 py-4">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Record</div>
-                    <div className="mt-1 text-lg font-semibold text-slate-50 truncate">
-                      {selected.title || "Untitled record"}
-                    </div>
+                    <div className="mt-1 text-lg font-semibold text-slate-50 truncate">{selected.title || "Untitled record"}</div>
                     <div className="mt-1 text-xs text-slate-400">
                       Status: <span className="text-slate-200">{prettyStatus(selected.status)}</span>
                       {" · "}
@@ -554,6 +708,46 @@ export default function ArchiveLedgerLifecyclePage() {
                       </span>
                       {" · "}
                       Entity: <span className="text-emerald-300">{String(activeEntity ?? "—")}</span>
+                    </div>
+
+                    {/* Advisory strip */}
+                    <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
+                      <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-200">
+                        <Sparkles className="h-4 w-4 text-amber-300" />
+                        AXIOM advisory
+                      </span>
+
+                      {draftLink?.id ? (
+                        <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-3 py-1 text-slate-300">
+                          <span className="text-slate-500">draft:</span>
+                          <span className="font-mono text-slate-200">{draftLink.id.slice(0, 8)}…</span>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-3 py-1 text-slate-500">
+                          No Alchemy draft link
+                        </span>
+                      )}
+
+                      {draftConflicts?.id ? (
+                        <span className={cx("inline-flex items-center gap-2 rounded-full border px-3 py-1", severityBadge(draftConflicts.severity))}>
+                          <ShieldAlert className="h-4 w-4" />
+                          <span className="text-slate-200">{String(draftConflicts.severity || "info").toUpperCase()}</span>
+                          <span className="opacity-70">· {conflictsCount} conflict(s)</span>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-3 py-1 text-slate-500">
+                          No conflicts snapshot
+                        </span>
+                      )}
+
+                      <button
+                        onClick={() => void loadLedgerIntel(selected.id)}
+                        className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+                        title="Reload advisory signals"
+                      >
+                        <RotateCw className={cx("h-4 w-4", intelLoading && "animate-spin")} />
+                        Refresh
+                      </button>
                     </div>
                   </div>
 
@@ -572,7 +766,8 @@ export default function ArchiveLedgerLifecyclePage() {
 
               <div className="px-5 py-5">
                 <div className="grid grid-cols-12 gap-4">
-                  <div className="col-span-12 lg:col-span-7">
+                  {/* LEFT: Identifiers */}
+                  <div className="col-span-12 lg:col-span-6">
                     <div className="rounded-3xl border border-white/10 bg-black/30 p-4">
                       <div className="text-sm font-semibold text-slate-200">Identifiers</div>
 
@@ -604,20 +799,183 @@ export default function ArchiveLedgerLifecyclePage() {
                         {selected.envelope_id ? (
                           <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                             <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">envelope_id</div>
-                            <div className="mt-1 font-mono break-all text-[12px] text-slate-200">
-                              {selected.envelope_id}
-                            </div>
+                            <div className="mt-1 font-mono break-all text-[12px] text-slate-200">{selected.envelope_id}</div>
                           </div>
                         ) : (
                           <div className="rounded-2xl border border-white/10 bg-black/20 p-3 text-sm text-slate-400">
                             No envelope linked yet (signature not started).
                           </div>
                         )}
+
+                        {/* Draft link surface (no SQL; pure read) */}
+                        {draftLink?.id && (
+                          <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">draft_id</div>
+                                <div className="mt-1 font-mono break-all text-[12px] text-slate-200">{draftLink.id}</div>
+                                <div className="mt-2 text-xs text-slate-400">
+                                  {draftLink.record_type ? `Record type: ${draftLink.record_type}` : "Record type: —"}
+                                </div>
+                              </div>
+                              <button
+                                onClick={() => safeCopy(draftLink.id)}
+                                className="shrink-0 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                                title="Copy draft_id"
+                              >
+                                <Copy className="h-4 w-4" />
+                                Copy
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {intelErr && (
+                        <div className="mt-3 rounded-2xl border border-amber-400/20 bg-amber-400/5 p-3 text-xs text-amber-100 leading-relaxed">
+                          <div className="font-semibold tracking-[0.18em] uppercase text-[10px]">Advisory read warning</div>
+                          <div className="mt-1 opacity-90">{intelErr}</div>
+                          <div className="mt-2 text-amber-100/70">
+                            If this persists, it usually means browser RLS does not allow reading advisory tables. This UI does not require new SQL,
+                            but your policy may.
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* RIGHT: Advisory */}
+                  <div className="col-span-12 lg:col-span-6">
+                    <div className="rounded-3xl border border-white/10 bg-black/30 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-semibold text-slate-200">AXIOM Advisory</div>
+                          <div className="text-[11px] text-slate-500">Draft-stage review + authority conflict snapshot (advisory-only)</div>
+                        </div>
+
+                        {intelLoading ? (
+                          <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] tracking-[0.18em] uppercase text-slate-200">
+                            loading
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] tracking-[0.18em] uppercase text-slate-200">
+                            advisory
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Authority conflicts summary */}
+                      <div className="mt-3 rounded-3xl border border-white/10 bg-black/20 p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Authority conflicts</div>
+                            <div className="mt-1 text-sm text-slate-200">
+                              {draftConflicts?.id ? (
+                                <>
+                                  Severity:{" "}
+                                  <span className={cx("inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] ml-1", severityBadge(draftConflicts.severity))}>
+                                    {String(draftConflicts.severity || "info").toUpperCase()}
+                                  </span>
+                                  <span className="text-slate-500"> · </span>
+                                  <span className="text-slate-300">{conflictsCount} conflict(s)</span>
+                                </>
+                              ) : (
+                                <span className="text-slate-500">No snapshot available for this ledger record.</span>
+                              )}
+                            </div>
+                            {draftConflicts?.compared_at && (
+                              <div className="mt-1 text-[11px] text-slate-500">
+                                Compared at: <span className="text-slate-300">{draftConflicts.compared_at}</span>
+                              </div>
+                            )}
+                          </div>
+
+                          {draftConflicts?.id && (
+                            <button
+                              onClick={() => safeCopy(tryJsonStringify(draftConflicts.conflicts_json))}
+                              className="shrink-0 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                              title="Copy conflicts JSON"
+                            >
+                              <Copy className="h-4 w-4" />
+                              Copy JSON
+                            </button>
+                          )}
+                        </div>
+
+                        {draftConflicts?.id ? (
+                          <pre className="mt-3 max-h-[220px] overflow-auto rounded-2xl border border-white/10 bg-black/30 p-3 text-[11px] leading-relaxed text-slate-300 whitespace-pre-wrap">
+                            {tryJsonStringify(draftConflicts.conflicts_json, 24_000)}
+                          </pre>
+                        ) : (
+                          <div className="mt-3 rounded-2xl border border-white/10 bg-black/30 p-3 text-xs text-slate-500">
+                            Conflicts are stored when the draft check function runs. If this ledger record wasn’t finalized from an Alchemy draft,
+                            there may be nothing to show here (by design).
+                          </div>
+                        )}
+                      </div>
+
+                      {/* AXIOM note */}
+                      <div className="mt-4 rounded-3xl border border-white/10 bg-black/20 p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">AXIOM draft review</div>
+                            <div className="mt-1 text-sm text-slate-200">
+                              {axiomNote?.id ? (
+                                <>
+                                  <span className="text-slate-200">{axiomNote.title || "AXIOM • Draft review"}</span>
+                                  <span className="text-slate-500"> · </span>
+                                  <span className="text-slate-400">{axiomNote.created_at || "—"}</span>
+                                </>
+                              ) : (
+                                <span className="text-slate-500">No AXIOM note found for this record’s draft link.</span>
+                              )}
+                            </div>
+                            {axiomNote?.model && (
+                              <div className="mt-1 text-[11px] text-slate-500">
+                                Model: <span className="text-slate-300">{axiomNote.model}</span>
+                                {typeof axiomNote.tokens_used === "number" ? (
+                                  <>
+                                    <span className="text-slate-700"> · </span>
+                                    Tokens: <span className="text-slate-300">{axiomNote.tokens_used}</span>
+                                  </>
+                                ) : null}
+                              </div>
+                            )}
+                          </div>
+
+                          {axiomNote?.content && (
+                            <button
+                              onClick={() => safeCopy(axiomNote.content || "")}
+                              className="shrink-0 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                              title="Copy AXIOM note"
+                            >
+                              <Copy className="h-4 w-4" />
+                              Copy Note
+                            </button>
+                          )}
+                        </div>
+
+                        {axiomNote?.content ? (
+                          <pre className="mt-3 max-h-[320px] overflow-auto rounded-2xl border border-white/10 bg-black/30 p-3 text-[11px] leading-relaxed text-slate-200 whitespace-pre-wrap">
+                            {axiomNote.content}
+                          </pre>
+                        ) : (
+                          <div className="mt-3 rounded-2xl border border-white/10 bg-black/30 p-3 text-xs text-slate-500">
+                            If you just ran the draft review, refresh. If it still doesn’t appear, it usually means the record wasn’t finalized from
+                            that draft (or browser RLS blocks reading ai_notes).
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-3 text-[11px] text-slate-400 leading-relaxed">
+                        <span className="text-slate-200 font-semibold">Contract:</span> advisory only, lane-safe, entity-scoped. No automatic authority
+                        mutation. This UI reads existing stored outputs—no new SQL required.
                       </div>
                     </div>
                   </div>
 
-                  <div className="col-span-12 lg:col-span-5">
+                  {/* Jump links row */}
+                  <div className="col-span-12">
                     <div className="rounded-3xl border border-white/10 bg-black/30 p-4">
                       <div className="flex items-start justify-between gap-3">
                         <div>
@@ -629,7 +987,7 @@ export default function ArchiveLedgerLifecyclePage() {
                         </span>
                       </div>
 
-                      <div className="mt-4 space-y-2">
+                      <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-2">
                         <Link
                           href="/ci-council"
                           className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200 hover:bg-white/7 inline-flex items-center justify-between"
