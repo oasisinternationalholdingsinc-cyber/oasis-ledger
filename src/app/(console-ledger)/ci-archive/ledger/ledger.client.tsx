@@ -1155,19 +1155,19 @@ export default function ArchiveLedgerLifecyclePage() {
                   </div>
                 </div>
               </div>
+            </div>
 
-              <div className="border-t border-white/10 bg-black/30 px-5 py-4 flex flex-wrap items-center justify-between gap-2">
-                <div className="text-[11px] text-slate-500">Tip: use Forge for signature execution, Archive for sealing, Council for approval gate.</div>
-                <button
-                  onClick={() => {
-                    setOpen(false);
-                    setSelected(null);
-                  }}
-                  className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
-                >
-                  Close
-                </button>
-              </div>
+            <div className="border-t border-white/10 bg-black/30 px-5 py-4 flex flex-wrap items-center justify-between gap-2">
+              <div className="text-[11px] text-slate-500">Tip: use Forge for signature execution, Archive for sealing, Council for approval gate.</div>
+              <button
+                onClick={() => {
+                  setOpen(false);
+                  setSelected(null);
+                }}
+                className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+              >
+                Close
+              </button>
             </div>
           </div>
         </div>
