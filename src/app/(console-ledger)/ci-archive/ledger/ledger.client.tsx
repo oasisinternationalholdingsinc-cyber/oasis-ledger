@@ -72,6 +72,17 @@ type DraftConflictsRow = {
   compared_by: string | null;
 };
 
+type ResolutionFactsRow = {
+  id: string;
+  ledger_id: string;
+  entity_id: string | null;
+  is_test: boolean | null;
+  verified_document_id: string | null;
+  facts_json: any;
+  model: string | null;
+  extracted_at: string | null;
+};
+
 function cx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
@@ -122,6 +133,14 @@ function tryJsonStringify(v: unknown, limit = 10_000) {
   }
 }
 
+function factsCounts(facts: any) {
+  const grants = Array.isArray(facts?.grants) ? facts.grants.length : 0;
+  const revokes = Array.isArray(facts?.revokes) ? facts.revokes.length : 0;
+  const modifies = Array.isArray(facts?.modifies) ? facts.modifies.length : 0;
+  const conditions = Array.isArray(facts?.conditions) ? facts.conditions.length : 0;
+  return { grants, revokes, modifies, conditions };
+}
+
 export default function ArchiveLedgerLifecyclePage() {
   const { activeEntity } = useEntity(); // slug/key string
   const { env } = useOsEnv();
@@ -146,6 +165,12 @@ export default function ArchiveLedgerLifecyclePage() {
   const [axiomNote, setAxiomNote] = useState<AxiomNote | null>(null);
   const [draftConflicts, setDraftConflicts] = useState<DraftConflictsRow | null>(null);
 
+  // ✅ NEW: archived-resolution facts (AXIOM extract from FINAL sealed record)
+  const [resolutionFacts, setResolutionFacts] = useState<ResolutionFactsRow | null>(null);
+  const [factsLoading, setFactsLoading] = useState(false);
+  const [factsErr, setFactsErr] = useState<string | null>(null);
+  const [factsFlash, setFactsFlash] = useState<string | null>(null);
+
   const [intelLoading, setIntelLoading] = useState(false);
   const [intelErr, setIntelErr] = useState<string | null>(null);
 
@@ -161,12 +186,7 @@ export default function ArchiveLedgerLifecyclePage() {
 
       const ae = String(activeEntity);
 
-      const { data: bySlug, error: slugErr } = await supabase
-        .from("entities")
-        .select("id")
-        .eq("slug", ae)
-        .limit(1)
-        .maybeSingle();
+      const { data: bySlug, error: slugErr } = await supabase.from("entities").select("id").eq("slug", ae).limit(1).maybeSingle();
 
       if (!alive) return;
 
@@ -264,10 +284,7 @@ export default function ArchiveLedgerLifecyclePage() {
   }, [rows, tab, q]);
 
   const counts = useMemo(() => {
-    const c = { ALL: rows.length, PENDING: 0, APPROVED: 0, SIGNING: 0, SIGNED: 0, ARCHIVED: 0 } as Record<
-      Tab,
-      number
-    >;
+    const c = { ALL: rows.length, PENDING: 0, APPROVED: 0, SIGNING: 0, SIGNED: 0, ARCHIVED: 0 } as Record<Tab, number>;
     for (const r of rows) {
       const s = normStatusUpper(r.status);
       if (s === "PENDING") c.PENDING++;
@@ -280,20 +297,95 @@ export default function ArchiveLedgerLifecyclePage() {
   }, [rows]);
 
   // OS shell/header/body pattern (MATCH Verified Registry)
-  const shell =
-    "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden";
-  const header =
-    "border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent px-4 sm:px-6 py-4 sm:py-5";
+  const shell = "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden";
+  const header = "border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent px-4 sm:px-6 py-4 sm:py-5";
   const body = "px-4 sm:px-6 py-5 sm:py-6";
+
+  async function loadResolutionFacts(ledgerId: string) {
+    setFactsErr(null);
+    setFactsLoading(true);
+    setResolutionFacts(null);
+
+    try {
+      const { data, error } = await supabase
+        .from("governance_resolution_facts")
+        .select("id, ledger_id, entity_id, is_test, verified_document_id, facts_json, model, extracted_at")
+        .eq("ledger_id", ledgerId)
+        .order("extracted_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (error) {
+        console.error("loadResolutionFacts error", error);
+        setFactsErr(error.message || "Failed to load resolution facts");
+        setFactsLoading(false);
+        return;
+      }
+
+      if (data?.id) setResolutionFacts(data as ResolutionFactsRow);
+      setFactsLoading(false);
+    } catch (e) {
+      console.error("loadResolutionFacts threw", e);
+      setFactsErr(String((e as any)?.message ?? e));
+      setFactsLoading(false);
+    }
+  }
+
+  async function runExtractResolutionFacts(ledgerId: string) {
+    setFactsErr(null);
+    setFactsFlash(null);
+    setFactsLoading(true);
+
+    try {
+      // ✅ calls the Edge Function directly (operator-auth via JWT; service-role writes)
+      const { data, error } = await supabase.functions.invoke("axiom-extract-resolution-facts", {
+        body: { ledger_id: ledgerId },
+      });
+
+      if (error) {
+        console.error("axiom-extract-resolution-facts invoke error", error);
+        setFactsErr(error.message || "Failed to run extraction");
+        setFactsLoading(false);
+        return;
+      }
+
+      // Best-effort: show success strip even if backend returns already-exists
+      const code = (data as any)?.code || "OK";
+      if (code === "FACTS_ALREADY_EXIST") setFactsFlash("Facts already exist (no changes).");
+      else if (code === "EXTRACTED") setFactsFlash("Extracted ✓ Resolution facts updated.");
+      else setFactsFlash(`AXIOM: ${String(code)}`);
+
+      // Refresh read-model after action
+      await loadResolutionFacts(ledgerId);
+
+      setFactsLoading(false);
+
+      // auto-clear flash
+      setTimeout(() => setFactsFlash(null), 2200);
+    } catch (e) {
+      console.error("runExtractResolutionFacts threw", e);
+      setFactsErr(String((e as any)?.message ?? e));
+      setFactsLoading(false);
+    }
+  }
 
   async function loadLedgerIntel(ledgerId: string) {
     setIntelErr(null);
     setIntelLoading(true);
+
     setDraftLink(null);
     setAxiomNote(null);
     setDraftConflicts(null);
 
+    setFactsErr(null);
+    setFactsFlash(null);
+    setResolutionFacts(null);
+
     try {
+      // 0) Always try load archived-resolution facts (safe read; will be empty pre-ARCHIVED)
+      //    This does NOT mutate anything.
+      await loadResolutionFacts(ledgerId);
+
       // 1) Find the draft that finalized into this ledger record (NO SQL changes; pure read)
       const { data: d, error: dErr } = await supabase
         .from("governance_drafts")
@@ -388,8 +480,7 @@ export default function ArchiveLedgerLifecyclePage() {
                 <div className="text-[10px] sm:text-xs tracking-[0.3em] uppercase text-slate-500">CI • Archive</div>
                 <h1 className="mt-1 text-lg sm:text-xl font-semibold text-slate-50">Drafts &amp; Approvals</h1>
                 <p className="mt-1 max-w-3xl text-[11px] sm:text-xs text-slate-400 leading-relaxed">
-                  Lifecycle surface for governance_ledger. Read-only monitor. Lane-safe. Entity-scoped. Use Council/Forge/Archive
-                  to execute.
+                  Lifecycle surface for governance_ledger. Read-only monitor. Lane-safe. Entity-scoped. Use Council/Forge/Archive to execute.
                 </p>
 
                 <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
@@ -449,7 +540,7 @@ export default function ArchiveLedgerLifecyclePage() {
                           "rounded-full border px-3 py-1 text-xs transition",
                           tab === t
                             ? "border-amber-400/40 bg-amber-400/10 text-amber-100"
-                            : "border-white/10 bg-white/5 text-slate-200/80 hover:bg-white/7"
+                            : "border-white/10 bg-white/5 text-slate-200/80 hover:bg-white/7",
                         )}
                         title={`${t} (${counts[t] ?? 0})`}
                       >
@@ -552,15 +643,13 @@ export default function ArchiveLedgerLifecyclePage() {
                               </div>
 
                               <div className="flex flex-col items-end gap-2 shrink-0">
-                                <span className={cx("rounded-full border px-2 py-1 text-[11px]", statusClass)}>
-                                  {prettyStatus(r.status)}
-                                </span>
+                                <span className={cx("rounded-full border px-2 py-1 text-[11px]", statusClass)}>{prettyStatus(r.status)}</span>
 
                                 <div className="flex items-center gap-2">
                                   <span
                                     className={cx(
                                       "rounded-full border px-2 py-1 text-[10px] tracking-[0.18em] uppercase",
-                                      canGoCouncil ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-black/20 text-slate-500"
+                                      canGoCouncil ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-black/20 text-slate-500",
                                     )}
                                   >
                                     Council
@@ -568,7 +657,7 @@ export default function ArchiveLedgerLifecyclePage() {
                                   <span
                                     className={cx(
                                       "rounded-full border px-2 py-1 text-[10px] tracking-[0.18em] uppercase",
-                                      canGoForge ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-black/20 text-slate-500"
+                                      canGoForge ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-black/20 text-slate-500",
                                     )}
                                   >
                                     Forge
@@ -576,7 +665,7 @@ export default function ArchiveLedgerLifecyclePage() {
                                   <span
                                     className={cx(
                                       "rounded-full border px-2 py-1 text-[10px] tracking-[0.18em] uppercase",
-                                      canGoArchive ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-black/20 text-slate-500"
+                                      canGoArchive ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-black/20 text-slate-500",
                                     )}
                                   >
                                     Archive
@@ -607,16 +696,13 @@ export default function ArchiveLedgerLifecyclePage() {
 
                   <div className="mt-3 space-y-3 text-sm text-slate-300">
                     <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                      <span className="text-slate-200">PENDING</span> → review &amp; approve in{" "}
-                      <span className="text-slate-200">Council</span>
+                      <span className="text-slate-200">PENDING</span> → review &amp; approve in <span className="text-slate-200">Council</span>
                     </div>
                     <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                      <span className="text-slate-200">APPROVED</span> → execute via{" "}
-                      <span className="text-slate-200">Forge</span> (signature-only)
+                      <span className="text-slate-200">APPROVED</span> → execute via <span className="text-slate-200">Forge</span> (signature-only)
                     </div>
                     <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                      <span className="text-slate-200">SIGNED</span> → seal via{" "}
-                      <span className="text-slate-200">Archive</span> (idempotent)
+                      <span className="text-slate-200">SIGNED</span> → seal via <span className="text-slate-200">Archive</span> (idempotent)
                     </div>
                     <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                       <span className="text-slate-200">ARCHIVED</span> → record is sealed; no action required
@@ -624,8 +710,8 @@ export default function ArchiveLedgerLifecyclePage() {
                   </div>
 
                   <div className="mt-4 text-[11px] text-slate-500 leading-relaxed">
-                    This page is a monitor. Actions are performed in Council/Forge/Archive. Details modal includes safe copy, module jumps,
-                    and advisory signals (if the record originated from Alchemy).
+                    This page is a monitor. Actions are performed in Council/Forge/Archive. Details modal includes safe copy, module jumps, and
+                    advisory signals (if the record originated from Alchemy).
                   </div>
                 </div>
               </section>
@@ -635,8 +721,8 @@ export default function ArchiveLedgerLifecyclePage() {
             <div className="mt-5 rounded-3xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
               <div className="font-semibold text-slate-200">OS behavior</div>
               <div className="mt-1 leading-relaxed text-slate-400">
-                Drafts &amp; Approvals inherits the OS shell. Lane-safe and entity-scoped. Intelligence is advisory-only and never mutates
-                authority automatically.
+                Drafts &amp; Approvals inherits the OS shell. Lane-safe and entity-scoped. Intelligence is advisory-only and never mutates authority
+                automatically.
               </div>
             </div>
 
@@ -745,7 +831,7 @@ export default function ArchiveLedgerLifecyclePage() {
                         className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
                         title="Reload advisory signals"
                       >
-                        <RotateCw className={cx("h-4 w-4", intelLoading && "animate-spin")} />
+                        <RotateCw className={cx("h-4 w-4", (intelLoading || factsLoading) && "animate-spin")} />
                         Refresh
                       </button>
                     </div>
@@ -802,9 +888,7 @@ export default function ArchiveLedgerLifecyclePage() {
                             <div className="mt-1 font-mono break-all text-[12px] text-slate-200">{selected.envelope_id}</div>
                           </div>
                         ) : (
-                          <div className="rounded-2xl border border-white/10 bg-black/20 p-3 text-sm text-slate-400">
-                            No envelope linked yet (signature not started).
-                          </div>
+                          <div className="rounded-2xl border border-white/10 bg-black/20 p-3 text-sm text-slate-400">No envelope linked yet (signature not started).</div>
                         )}
 
                         {/* Draft link surface (no SQL; pure read) */}
@@ -814,9 +898,7 @@ export default function ArchiveLedgerLifecyclePage() {
                               <div className="min-w-0">
                                 <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">draft_id</div>
                                 <div className="mt-1 font-mono break-all text-[12px] text-slate-200">{draftLink.id}</div>
-                                <div className="mt-2 text-xs text-slate-400">
-                                  {draftLink.record_type ? `Record type: ${draftLink.record_type}` : "Record type: —"}
-                                </div>
+                                <div className="mt-2 text-xs text-slate-400">{draftLink.record_type ? `Record type: ${draftLink.record_type}` : "Record type: —"}</div>
                               </div>
                               <button
                                 onClick={() => safeCopy(draftLink.id)}
@@ -850,10 +932,12 @@ export default function ArchiveLedgerLifecyclePage() {
                       <div className="flex items-start justify-between gap-3">
                         <div>
                           <div className="text-sm font-semibold text-slate-200">AXIOM Advisory</div>
-                          <div className="text-[11px] text-slate-500">Draft-stage review + authority conflict snapshot (advisory-only)</div>
+                          <div className="text-[11px] text-slate-500">
+                            Draft-stage review + authority conflict snapshot + archived resolution facts (advisory-only)
+                          </div>
                         </div>
 
-                        {intelLoading ? (
+                        {(intelLoading || factsLoading) ? (
                           <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] tracking-[0.18em] uppercase text-slate-200">
                             loading
                           </span>
@@ -864,8 +948,137 @@ export default function ArchiveLedgerLifecyclePage() {
                         )}
                       </div>
 
-                      {/* Authority conflicts summary */}
+                      {/* ✅ NEW: Archived resolution facts (AXIOM extract) */}
                       <div className="mt-3 rounded-3xl border border-white/10 bg-black/20 p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Resolution facts</div>
+                            <div className="mt-1 text-sm text-slate-200">
+                              {resolutionFacts?.id ? (
+                                <>
+                                  Extracted: <span className="text-slate-300">{resolutionFacts.extracted_at ?? "—"}</span>
+                                  {resolutionFacts.model ? (
+                                    <>
+                                      <span className="text-slate-700"> · </span>
+                                      Model: <span className="text-slate-300">{resolutionFacts.model}</span>
+                                    </>
+                                  ) : null}
+                                </>
+                              ) : (
+                                <span className="text-slate-500">
+                                  No resolution facts stored yet. (Only available once the ledger record is <span className="text-slate-200">ARCHIVED</span>.)
+                                </span>
+                              )}
+                            </div>
+
+                            {resolutionFacts?.facts_json ? (
+                              <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                                {(() => {
+                                  const c = factsCounts(resolutionFacts.facts_json);
+                                  return (
+                                    <>
+                                      <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-200">
+                                        <span className="text-slate-500">grants</span>
+                                        <span className="font-semibold">{c.grants}</span>
+                                      </span>
+                                      <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-200">
+                                        <span className="text-slate-500">revokes</span>
+                                        <span className="font-semibold">{c.revokes}</span>
+                                      </span>
+                                      <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-200">
+                                        <span className="text-slate-500">modifies</span>
+                                        <span className="font-semibold">{c.modifies}</span>
+                                      </span>
+                                      <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-200">
+                                        <span className="text-slate-500">conditions</span>
+                                        <span className="font-semibold">{c.conditions}</span>
+                                      </span>
+                                    </>
+                                  );
+                                })()}
+                              </div>
+                            ) : null}
+                          </div>
+
+                          <div className="shrink-0 flex flex-col items-end gap-2">
+                            <button
+                              onClick={() => void loadResolutionFacts(selected.id)}
+                              className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                              title="Reload facts"
+                            >
+                              <RotateCw className={cx("h-4 w-4", factsLoading && "animate-spin")} />
+                              Reload
+                            </button>
+
+                            <button
+                              onClick={() => void runExtractResolutionFacts(selected.id)}
+                              disabled={factsLoading || normStatusUpper(selected.status) !== "ARCHIVED"}
+                              className={cx(
+                                "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase inline-flex items-center gap-2",
+                                factsLoading || normStatusUpper(selected.status) !== "ARCHIVED"
+                                  ? "border-white/10 bg-black/20 text-slate-500"
+                                  : "border-amber-400/30 bg-amber-400/10 text-amber-100 hover:bg-amber-400/15",
+                              )}
+                              title={
+                                normStatusUpper(selected.status) !== "ARCHIVED"
+                                  ? "Only ARCHIVED records can be extracted (contract)"
+                                  : "Run AXIOM fact extraction (advisory-only)"
+                              }
+                            >
+                              <Sparkles className="h-4 w-4" />
+                              Extract
+                            </button>
+                          </div>
+                        </div>
+
+                        {factsFlash && (
+                          <div className="mt-3 rounded-2xl border border-emerald-400/25 bg-emerald-400/10 p-3 text-xs text-emerald-100">
+                            {factsFlash}
+                          </div>
+                        )}
+
+                        {factsErr && (
+                          <div className="mt-3 rounded-2xl border border-rose-400/25 bg-rose-400/10 p-3 text-xs text-rose-100 leading-relaxed">
+                            <div className="font-semibold tracking-[0.18em] uppercase text-[10px]">AXIOM extract error</div>
+                            <div className="mt-1 opacity-90">{factsErr}</div>
+                            <div className="mt-2 text-rose-100/70">
+                              Contract checks: ledger.status must be ARCHIVED, and verified_documents must exist for this ledger_id.
+                            </div>
+                          </div>
+                        )}
+
+                        {resolutionFacts?.facts_json ? (
+                          <>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              <button
+                                onClick={() => safeCopy(tryJsonStringify(resolutionFacts.facts_json, 80_000))}
+                                className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                                title="Copy facts JSON"
+                              >
+                                <Copy className="h-4 w-4" />
+                                Copy JSON
+                              </button>
+                            </div>
+
+                            <pre className="mt-3 max-h-[240px] overflow-auto rounded-2xl border border-white/10 bg-black/30 p-3 text-[11px] leading-relaxed text-slate-300 whitespace-pre-wrap">
+                              {tryJsonStringify(resolutionFacts.facts_json, 60_000)}
+                            </pre>
+
+                            <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-[11px] text-slate-400 leading-relaxed">
+                              <span className="text-slate-200 font-semibold">Invariant:</span> advisory-only. This writes ONLY to{" "}
+                              <span className="text-slate-200">public.governance_resolution_facts</span>. It never mutates authority_registry.
+                            </div>
+                          </>
+                        ) : (
+                          <div className="mt-3 rounded-2xl border border-white/10 bg-black/30 p-3 text-xs text-slate-500 leading-relaxed">
+                            When you click <span className="text-slate-200">Extract</span>, AXIOM parses the final archived resolution and stores structured facts.
+                            Applying those facts to the authority registry remains a separate, explicit operator step (by design).
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Authority conflicts summary */}
+                      <div className="mt-4 rounded-3xl border border-white/10 bg-black/20 p-4">
                         <div className="flex items-start justify-between gap-3">
                           <div>
                             <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Authority conflicts</div>
@@ -873,7 +1086,12 @@ export default function ArchiveLedgerLifecyclePage() {
                               {draftConflicts?.id ? (
                                 <>
                                   Severity:{" "}
-                                  <span className={cx("inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] ml-1", severityBadge(draftConflicts.severity))}>
+                                  <span
+                                    className={cx(
+                                      "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] ml-1",
+                                      severityBadge(draftConflicts.severity),
+                                    )}
+                                  >
                                     {String(draftConflicts.severity || "info").toUpperCase()}
                                   </span>
                                   <span className="text-slate-500"> · </span>
@@ -908,8 +1126,8 @@ export default function ArchiveLedgerLifecyclePage() {
                           </pre>
                         ) : (
                           <div className="mt-3 rounded-2xl border border-white/10 bg-black/30 p-3 text-xs text-slate-500">
-                            Conflicts are stored when the draft check function runs. If this ledger record wasn’t finalized from an Alchemy draft,
-                            there may be nothing to show here (by design).
+                            Conflicts are stored when the draft check function runs. If this ledger record wasn’t finalized from an Alchemy draft, there
+                            may be nothing to show here (by design).
                           </div>
                         )}
                       </div>
@@ -961,15 +1179,15 @@ export default function ArchiveLedgerLifecyclePage() {
                           </pre>
                         ) : (
                           <div className="mt-3 rounded-2xl border border-white/10 bg-black/30 p-3 text-xs text-slate-500">
-                            If you just ran the draft review, refresh. If it still doesn’t appear, it usually means the record wasn’t finalized from
-                            that draft (or browser RLS blocks reading ai_notes).
+                            If you just ran the draft review, refresh. If it still doesn’t appear, it usually means the record wasn’t finalized from that
+                            draft (or browser RLS blocks reading ai_notes).
                           </div>
                         )}
                       </div>
 
                       <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-3 text-[11px] text-slate-400 leading-relaxed">
-                        <span className="text-slate-200 font-semibold">Contract:</span> advisory only, lane-safe, entity-scoped. No automatic authority
-                        mutation. This UI reads existing stored outputs—no new SQL required.
+                        <span className="text-slate-200 font-semibold">Contract:</span> advisory only, lane-safe, entity-scoped. No automatic authority mutation.
+                        This UI reads stored outputs and can trigger archived fact extraction (writes only to governance_resolution_facts).
                       </div>
                     </div>
                   </div>
@@ -982,9 +1200,7 @@ export default function ArchiveLedgerLifecyclePage() {
                           <div className="text-sm font-semibold text-slate-200">Jump to module</div>
                           <div className="text-[11px] text-slate-500">Perform actions in the right place</div>
                         </div>
-                        <span className={cx("rounded-full border px-2 py-1 text-[11px]", badgeForStatus(selected.status))}>
-                          {prettyStatus(selected.status)}
-                        </span>
+                        <span className={cx("rounded-full border px-2 py-1 text-[11px]", badgeForStatus(selected.status))}>{prettyStatus(selected.status)}</span>
                       </div>
 
                       <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-2">
@@ -1031,9 +1247,7 @@ export default function ArchiveLedgerLifecyclePage() {
               </div>
 
               <div className="border-t border-white/10 bg-black/30 px-5 py-4 flex flex-wrap items-center justify-between gap-2">
-                <div className="text-[11px] text-slate-500">
-                  Tip: use Forge for signature execution, Archive for sealing, Council for approval gate.
-                </div>
+                <div className="text-[11px] text-slate-500">Tip: use Forge for signature execution, Archive for sealing, Council for approval gate.</div>
                 <button
                   onClick={() => {
                     setOpen(false);
