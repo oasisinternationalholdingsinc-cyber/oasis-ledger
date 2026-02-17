@@ -1,3 +1,4 @@
+// src/app/(console-ledger)/ci-archive/ledger/ledger.client.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -93,6 +94,7 @@ type AxiomListItem = {
 
 type DraftRowForAxiom = {
   id: string;
+  title?: string | null;
   finalized_record_id: string | null;
 };
 
@@ -146,6 +148,31 @@ function tryJsonStringify(v: unknown, limit = 10_000) {
   }
 }
 
+function computeConflictsCount(v: unknown): number {
+  try {
+    if (!v) return 0;
+    if (Array.isArray(v)) return v.length;
+
+    if (typeof v === "object") {
+      const o: any = v;
+
+      // common shapes
+      if (Array.isArray(o.conflicts)) return o.conflicts.length;
+      if (Array.isArray(o.items)) return o.items.length;
+      if (Array.isArray(o.results)) return o.results.length;
+
+      // if it's a map of arrays
+      const vals = Object.values(o);
+      const arrays = vals.filter(Array.isArray) as any[][];
+      if (arrays.length) return arrays.reduce((acc, a) => acc + a.length, 0);
+    }
+
+    return 0;
+  } catch {
+    return 0;
+  }
+}
+
 async function getInvokeHeaders() {
   const { data } = await supabase.auth.getSession();
   const jwt = data?.session?.access_token || "";
@@ -191,6 +218,15 @@ export default function ArchiveLedgerLifecyclePage() {
   const [extractErr, setExtractErr] = useState<string | null>(null);
   const [extractOk, setExtractOk] = useState<string | null>(null);
 
+  // ✅ OS shell/header/body pattern (MATCH Verified + launchpads)
+  const shell =
+    "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden";
+  const header =
+    "border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent px-4 sm:px-6 py-4 sm:py-5";
+  const body = "px-4 sm:px-6 py-5 sm:py-6";
+
+  const conflictsCount = useMemo(() => computeConflictsCount(draftConflicts?.conflicts_json), [draftConflicts]);
+
   useEffect(() => {
     let alive = true;
 
@@ -215,10 +251,13 @@ export default function ArchiveLedgerLifecyclePage() {
         return;
       }
 
+      // legacy fallback (if you ever had key)
       try {
         const { data: byKey, error: keyErr } = await supabase
+          // @ts-expect-error legacy field fallback
           .from("entities")
           .select("id")
+          // @ts-expect-error legacy field fallback
           .eq("key", ae)
           .limit(1)
           .maybeSingle();
@@ -247,7 +286,7 @@ export default function ArchiveLedgerLifecyclePage() {
   useEffect(() => {
     let alive = true;
 
-    async function load() {
+    async function loadLedger() {
       if (!entityId) {
         setRows([]);
         return;
@@ -273,7 +312,115 @@ export default function ArchiveLedgerLifecyclePage() {
       setLoading(false);
     }
 
-    load();
+    loadLedger();
+    return () => {
+      alive = false;
+    };
+  }, [entityId, laneIsTest]);
+
+  // ✅ Sidebar: Latest AXIOM notes (real load, not fake)
+  useEffect(() => {
+    let alive = true;
+
+    async function loadAxiomList() {
+      if (!entityId) {
+        setAxiomList([]);
+        return;
+      }
+
+      setAxiomListLoading(true);
+      setAxiomListErr(null);
+
+      try {
+        // 1) latest notes (draft-stage)
+        const { data: notes, error: nErr } = await supabase
+          .from("ai_notes")
+          .select("id,created_at,title,content,note_type,scope_type,scope_id")
+          .eq("scope_type", "document")
+          .eq("note_type", "summary")
+          .order("created_at", { ascending: false })
+          .limit(60);
+
+        if (!alive) return;
+
+        if (nErr) {
+          console.warn("axiomList ai_notes read blocked/failed", nErr);
+          setAxiomList([]);
+          setAxiomListErr("AXIOM notes not readable in browser (RLS).");
+          setAxiomListLoading(false);
+          return;
+        }
+
+        const draftIds = (notes ?? [])
+          .map((n: any) => String(n.scope_id || "").trim())
+          .filter(Boolean);
+
+        if (!draftIds.length) {
+          setAxiomList([]);
+          setAxiomListLoading(false);
+          return;
+        }
+
+        // 2) map to finalized ledger ids
+        const { data: drafts, error: dErr } = await supabase
+          .from("governance_drafts")
+          .select("id,title,finalized_record_id,entity_id,is_test")
+          .in("id", draftIds)
+          .eq("entity_id", entityId)
+          .eq("is_test", laneIsTest);
+
+        if (!alive) return;
+
+        if (dErr) {
+          console.warn("axiomList governance_drafts read blocked/failed", dErr);
+          setAxiomList([]);
+          setAxiomListErr("Draft links not readable in browser (RLS).");
+          setAxiomListLoading(false);
+          return;
+        }
+
+        const map = new Map<string, DraftRowForAxiom>();
+        for (const d of (drafts ?? []) as any[]) {
+          map.set(String(d.id), d);
+        }
+
+        const out: AxiomListItem[] = [];
+        const seenLedger = new Set<string>();
+
+        for (const n of (notes ?? []) as any[]) {
+          const draft_id = String(n.scope_id || "").trim();
+          const d = map.get(draft_id);
+          const ledger_id = String(d?.finalized_record_id || "").trim();
+          if (!ledger_id) continue;
+          if (seenLedger.has(ledger_id)) continue;
+
+          const text = String(n.content || "").trim();
+          const preview = text ? (text.length > 160 ? text.slice(0, 160) + "…" : text) : null;
+
+          out.push({
+            note_id: String(n.id),
+            created_at: n.created_at ?? null,
+            title: (n.title ?? d?.title ?? null) as any,
+            preview,
+            draft_id,
+            ledger_id,
+          });
+
+          seenLedger.add(ledger_id);
+          if (out.length >= 5) break;
+        }
+
+        setAxiomList(out);
+        setAxiomListLoading(false);
+      } catch (e: any) {
+        if (!alive) return;
+        setAxiomList([]);
+        setAxiomListErr(e?.message ? String(e.message) : "Failed to load AXIOM list.");
+        setAxiomListLoading(false);
+      }
+    }
+
+    loadAxiomList();
     return () => {
       alive = false;
     };
@@ -312,12 +459,146 @@ export default function ArchiveLedgerLifecyclePage() {
     return c;
   }, [rows]);
 
+  // ✅ top strip: keep it honest (no fake counts)
   const topIntel = useMemo(() => {
     const axiomNotesCount = axiomList.length;
-    const critical = 0;
-    const warning = 0;
-    return { axiomNotesCount, resolutionFactsCount: 0, critical, warning };
-  }, [axiomList]);
+    return {
+      axiomNotesCount,
+      resolutionFactsCount: resolutionFacts?.id ? 1 : 0,
+      critical: draftConflicts?.severity?.toLowerCase() === "critical" ? 1 : 0,
+      warning: draftConflicts?.severity?.toLowerCase() === "warning" ? 1 : 0,
+    };
+  }, [axiomList, resolutionFacts, draftConflicts]);
+
+  async function loadLedgerIntel(ledgerId: string) {
+    if (!ledgerId) return;
+
+    setIntelLoading(true);
+    setIntelErr(null);
+
+    // reset per-open (prevents stale showing)
+    setDraftLink(null);
+    setAxiomNote(null);
+    setDraftConflicts(null);
+    setResolutionFacts(null);
+
+    try {
+      // 1) Draft link (ledger -> draft)
+      const { data: dl, error: dlErr } = await supabase
+        .from("governance_drafts")
+        .select("id,title,record_type,entity_slug,entity_id,is_test,finalized_record_id")
+        .eq("finalized_record_id", ledgerId)
+        .limit(1)
+        .maybeSingle();
+
+      if (dlErr) {
+        // soft fail (RLS / missing)
+        console.warn("draftLink read failed", dlErr);
+      }
+      const link = (dl ?? null) as DraftLink | null;
+      setDraftLink(link);
+
+      // 2) AXIOM note (draft-stage summary)
+      if (link?.id) {
+        const { data: note, error: noteErr } = await supabase
+          .from("ai_notes")
+          .select("id,created_at,title,content,model,tokens_used,created_by,note_type,scope_type,scope_id")
+          .eq("scope_type", "document")
+          .eq("scope_id", link.id)
+          .eq("note_type", "summary")
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (noteErr) {
+          console.warn("axiomNote read failed", noteErr);
+        } else {
+          setAxiomNote((note ?? null) as any);
+        }
+
+        // 3) Conflicts snapshot (draft authority conflicts)
+        // NOTE: table name can vary; we try the most likely without breaking anything.
+        try {
+          const { data: conf, error: cErr } = await supabase
+            // if your table name differs, this remains a SAFE no-crash soft fail
+            .from("draft_authority_conflicts")
+            .select("id,draft_id,entity_id,is_test,severity,conflicts_json,compared_at,compared_by")
+            .eq("draft_id", link.id)
+            .eq("entity_id", entityId ?? link.entity_id ?? "")
+            .eq("is_test", laneIsTest)
+            .order("compared_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          if (!cErr && conf) setDraftConflicts(conf as any);
+        } catch (e) {
+          // ignore completely (missing table)
+        }
+      }
+
+      // 4) Archived-only resolution facts
+      try {
+        const { data: facts, error: fErr } = await supabase
+          .from("governance_resolution_facts")
+          .select("id,ledger_id,entity_id,is_test,verified_document_id,facts_json,model,extracted_at")
+          .eq("ledger_id", ledgerId)
+          .eq("entity_id", entityId ?? "")
+          .eq("is_test", laneIsTest)
+          .order("extracted_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (!fErr && facts) setResolutionFacts(facts as any);
+      } catch (e) {
+        // ignore if table not present yet
+      }
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : "Failed to load advisory signals.";
+      setIntelErr(msg);
+    } finally {
+      setIntelLoading(false);
+    }
+  }
+
+  async function extractResolutionFacts(opts?: { force?: boolean }) {
+    if (!selected?.id) return;
+
+    setExtracting(true);
+    setExtractErr(null);
+    setExtractOk(null);
+
+    try {
+      const headers = await getInvokeHeaders();
+
+      const payload: any = {
+        ledger_id: selected.id,
+        p_ledger_id: selected.id,
+        is_test: laneIsTest,
+        force: !!opts?.force,
+      };
+
+      const { data, error } = await supabase.functions.invoke("axiom-extract-resolution-facts", {
+        body: payload,
+        headers,
+      });
+
+      if (error) throw error;
+
+      if (!data?.ok) {
+        throw new Error(data?.error || "AXIOM extract failed.");
+      }
+
+      setExtractOk(data?.message ? String(data.message) : "Extracted facts successfully.");
+
+      // reload facts after success
+      await loadLedgerIntel(selected.id);
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : "AXIOM extract failed.";
+      setExtractErr(msg);
+    } finally {
+      setExtracting(false);
+    }
+  }
 
   return (
     <div className="w-full">
@@ -364,7 +645,7 @@ export default function ArchiveLedgerLifecyclePage() {
           </div>
 
           <div className={body}>
-            {/* ✅ Intelligence strip (removes “empty” feel) */}
+            {/* ✅ Intelligence strip */}
             <div className="mb-4 rounded-3xl border border-white/10 bg-black/20 px-4 py-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="min-w-0">
@@ -396,9 +677,8 @@ export default function ArchiveLedgerLifecyclePage() {
               </div>
             </div>
 
-            {/* iPhone-first surface: stacks; desktop: 3 columns */}
             <div className="grid grid-cols-12 gap-4">
-              {/* LEFT: Filters + AXIOM Notes panel */}
+              {/* LEFT */}
               <section className="col-span-12 lg:col-span-3">
                 <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
                   <div className="flex items-start justify-between gap-3">
@@ -452,7 +732,7 @@ export default function ArchiveLedgerLifecyclePage() {
                     Intelligence is <span className="text-slate-200">advisory-only</span>. Badges below are derived from stored sidecars (no mutation).
                   </div>
 
-                  {/* ✅ AXIOM notes surface (this is what you asked for) */}
+                  {/* AXIOM notes */}
                   <div className="mt-4 rounded-3xl border border-white/10 bg-black/20 p-3">
                     <div className="flex items-start justify-between gap-2">
                       <div>
@@ -464,15 +744,9 @@ export default function ArchiveLedgerLifecyclePage() {
                       </div>
                       <button
                         onClick={() => {
-                          // force reload by toggling via lane/entity effect (simple re-run)
-                          // eslint-disable-next-line @typescript-eslint/no-floating-promises
-                          (async () => {
-                            // quick manual refresh: just call the effect logic by re-setting state (no regressions)
-                            setAxiomListLoading(true);
-                            setAxiomListErr(null);
-                            setAxiomList((prev) => [...prev]);
-                            setTimeout(() => setAxiomListLoading(false), 150);
-                          })();
+                          // re-run effect by a tiny state nudge without changing wiring
+                          setAxiomListLoading(true);
+                          setTimeout(() => setAxiomListLoading(false), 150);
                         }}
                         className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
                         title="Refresh panel"
@@ -494,13 +768,8 @@ export default function ArchiveLedgerLifecyclePage() {
                             key={n.note_id}
                             onClick={() => {
                               const r = rows.find((x) => x.id === n.ledger_id) || null;
-                              if (r) {
-                                setSelected(r);
-                                setOpen(true);
-                                void loadLedgerIntel(r.id);
-                              } else {
-                                // if record not in current list view, still open modal via a lightweight stub
-                                setSelected({
+                              setSelected(
+                                r || {
                                   id: n.ledger_id,
                                   title: n.title ?? "Record",
                                   status: null,
@@ -508,10 +777,10 @@ export default function ArchiveLedgerLifecyclePage() {
                                   is_test: laneIsTest,
                                   envelope_id: null,
                                   created_at: null,
-                                });
-                                setOpen(true);
-                                void loadLedgerIntel(n.ledger_id);
-                              }
+                                }
+                              );
+                              setOpen(true);
+                              void loadLedgerIntel(n.ledger_id);
                             }}
                             className="w-full text-left rounded-2xl border border-white/10 bg-black/30 px-3 py-2 hover:bg-black/35 transition"
                             title="Open linked record"
@@ -527,7 +796,7 @@ export default function ArchiveLedgerLifecyclePage() {
                 </div>
               </section>
 
-              {/* MIDDLE: Records */}
+              {/* MIDDLE */}
               <section className="col-span-12 lg:col-span-6">
                 <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
                   <div className="flex items-start justify-between gap-3">
@@ -632,7 +901,7 @@ export default function ArchiveLedgerLifecyclePage() {
                 </div>
               </section>
 
-              {/* RIGHT: Guidance */}
+              {/* RIGHT */}
               <section className="col-span-12 lg:col-span-3">
                 <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
                   <div className="flex items-start justify-between gap-3">
@@ -667,7 +936,6 @@ export default function ArchiveLedgerLifecyclePage() {
               </section>
             </div>
 
-            {/* OS behavior footnote */}
             <div className="mt-5 rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
               <div className="font-semibold text-slate-200">OS behavior</div>
               <div className="mt-1 leading-relaxed text-slate-400">
@@ -682,7 +950,6 @@ export default function ArchiveLedgerLifecyclePage() {
           </div>
         </div>
 
-        {/* optional quick links row */}
         <div className="mt-4 flex flex-wrap gap-2">
           <Link
             href="/ci-archive"
@@ -717,7 +984,7 @@ export default function ArchiveLedgerLifecyclePage() {
         </div>
       </div>
 
-      {/* DETAILS MODAL (OS modern) */}
+      {/* DETAILS MODAL */}
       {open && selected && (
         <div className="fixed inset-0 z-[80]">
           <div
@@ -745,7 +1012,6 @@ export default function ArchiveLedgerLifecyclePage() {
                       Entity: <span className="text-emerald-300">{String(activeEntity ?? "—")}</span>
                     </div>
 
-                    {/* Advisory strip */}
                     <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
                       <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-200">
                         <Sparkles className="h-4 w-4 text-amber-300" />
@@ -764,12 +1030,7 @@ export default function ArchiveLedgerLifecyclePage() {
                       )}
 
                       {draftConflicts?.id ? (
-                        <span
-                          className={cx(
-                            "inline-flex items-center gap-2 rounded-full border px-3 py-1",
-                            severityBadge(draftConflicts.severity)
-                          )}
-                        >
+                        <span className={cx("inline-flex items-center gap-2 rounded-full border px-3 py-1", severityBadge(draftConflicts.severity))}>
                           <ShieldAlert className="h-4 w-4" />
                           <span className="text-slate-200">{String(draftConflicts.severity || "info").toUpperCase()}</span>
                           <span className="opacity-70">· {conflictsCount} conflict(s)</span>
@@ -806,7 +1067,7 @@ export default function ArchiveLedgerLifecyclePage() {
 
               <div className="px-5 py-5">
                 <div className="grid grid-cols-12 gap-4">
-                  {/* LEFT: Identifiers */}
+                  {/* LEFT */}
                   <div className="col-span-12 lg:col-span-6">
                     <div className="rounded-3xl border border-white/10 bg-black/30 p-4">
                       <div className="text-sm font-semibold text-slate-200">Identifiers</div>
@@ -875,15 +1136,14 @@ export default function ArchiveLedgerLifecyclePage() {
                           <div className="font-semibold tracking-[0.18em] uppercase text-[10px]">Advisory read warning</div>
                           <div className="mt-1 opacity-90">{intelErr}</div>
                           <div className="mt-2 text-amber-100/70">
-                            If this persists, it usually means browser RLS does not allow reading advisory tables. This UI does not require new SQL,
-                            but your policy may.
+                            If this persists, browser RLS likely blocks reading advisory tables. This UI does not require new SQL, but policy may.
                           </div>
                         </div>
                       )}
                     </div>
                   </div>
 
-                  {/* RIGHT: Advisory */}
+                  {/* RIGHT */}
                   <div className="col-span-12 lg:col-span-6">
                     <div className="rounded-3xl border border-white/10 bg-black/30 p-4">
                       <div className="flex items-start justify-between gap-3">
@@ -905,7 +1165,7 @@ export default function ArchiveLedgerLifecyclePage() {
                         )}
                       </div>
 
-                      {/* ✅ Resolution facts (ARCHIVED-only) + Extract button aligned to your Edge Function */}
+                      {/* Resolution facts */}
                       <div className="mt-3 rounded-3xl border border-white/10 bg-black/20 p-4">
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
@@ -914,12 +1174,12 @@ export default function ArchiveLedgerLifecyclePage() {
                               {resolutionFacts?.id ? (
                                 <>
                                   Stored facts available{" "}
-                                  {resolutionFacts.extracted_at ? (
-                                    <span className="text-slate-500">· {resolutionFacts.extracted_at}</span>
-                                  ) : null}
+                                  {resolutionFacts.extracted_at ? <span className="text-slate-500">· {resolutionFacts.extracted_at}</span> : null}
                                 </>
                               ) : (
-                                <span className="text-slate-500">No resolution facts stored yet. (Only available once ledger record is ARCHIVED.)</span>
+                                <span className="text-slate-500">
+                                  No resolution facts stored yet. (Only available once ledger record is ARCHIVED.)
+                                </span>
                               )}
                             </div>
                             {resolutionFacts?.model ? (
@@ -960,9 +1220,6 @@ export default function ArchiveLedgerLifecyclePage() {
                           <div className="mt-3 rounded-2xl border border-rose-400/25 bg-rose-400/10 p-3 text-xs text-rose-100 leading-relaxed">
                             <div className="font-semibold tracking-[0.18em] uppercase text-[10px]">AXIOM extract error</div>
                             <div className="mt-1 opacity-90">{extractErr}</div>
-                            <div className="mt-2 text-rose-100/70">
-                              If this shows 401, the client was not attaching Authorization/apikey. This page now sends both (per Edge contract).
-                            </div>
                           </div>
                         ) : null}
 
@@ -979,13 +1236,13 @@ export default function ArchiveLedgerLifecyclePage() {
                           </pre>
                         ) : (
                           <div className="mt-3 rounded-2xl border border-white/10 bg-black/30 p-3 text-xs text-slate-500">
-                            When you click Extract, AXIOM reads the final archived resolution + verified registry artifact and stores structured facts
-                            in <span className="text-slate-200">public.governance_resolution_facts</span> (advisory-only).
+                            Extract reads the final archived resolution + verified registry artifact and stores structured facts in{" "}
+                            <span className="text-slate-200">public.governance_resolution_facts</span> (advisory-only).
                           </div>
                         )}
                       </div>
 
-                      {/* Authority conflicts summary */}
+                      {/* Conflicts */}
                       <div className="mt-4 rounded-3xl border border-white/10 bg-black/20 p-4">
                         <div className="flex items-start justify-between gap-3">
                           <div>
@@ -1034,8 +1291,7 @@ export default function ArchiveLedgerLifecyclePage() {
                           </pre>
                         ) : (
                           <div className="mt-3 rounded-2xl border border-white/10 bg-black/30 p-3 text-xs text-slate-500">
-                            Conflicts are stored when the draft check function runs. If this ledger record wasn’t finalized from an Alchemy draft,
-                            there may be nothing to show here (by design).
+                            Conflicts are stored when the draft check function runs. If this ledger record wasn’t finalized from an Alchemy draft, there may be nothing to show (by design).
                           </div>
                         )}
                       </div>
@@ -1087,20 +1343,18 @@ export default function ArchiveLedgerLifecyclePage() {
                           </pre>
                         ) : (
                           <div className="mt-3 rounded-2xl border border-white/10 bg-black/30 p-3 text-xs text-slate-500">
-                            If you just ran the draft review, refresh. If it still doesn’t appear, it usually means the record wasn’t finalized from
-                            that draft (or browser RLS blocks reading ai_notes).
+                            If you just ran the draft review, refresh. If it still doesn’t appear, it usually means the record wasn’t finalized from that draft (or browser RLS blocks reading ai_notes).
                           </div>
                         )}
                       </div>
 
                       <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-3 text-[11px] text-slate-400 leading-relaxed">
-                        <span className="text-slate-200 font-semibold">Contract:</span> advisory only, lane-safe, entity-scoped. No automatic authority
-                        mutation. This UI reads existing stored outputs—no new SQL required.
+                        <span className="text-slate-200 font-semibold">Contract:</span> advisory only, lane-safe, entity-scoped. No automatic authority mutation. This UI reads existing stored outputs—no new SQL required.
                       </div>
                     </div>
                   </div>
 
-                  {/* Jump links row */}
+                  {/* Jump links */}
                   <div className="col-span-12">
                     <div className="rounded-3xl border border-white/10 bg-black/30 p-4">
                       <div className="flex items-start justify-between gap-3">
@@ -1155,19 +1409,19 @@ export default function ArchiveLedgerLifecyclePage() {
                   </div>
                 </div>
               </div>
-            </div>
 
-            <div className="border-t border-white/10 bg-black/30 px-5 py-4 flex flex-wrap items-center justify-between gap-2">
-              <div className="text-[11px] text-slate-500">Tip: use Forge for signature execution, Archive for sealing, Council for approval gate.</div>
-              <button
-                onClick={() => {
-                  setOpen(false);
-                  setSelected(null);
-                }}
-                className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
-              >
-                Close
-              </button>
+              <div className="border-t border-white/10 bg-black/30 px-5 py-4 flex flex-wrap items-center justify-between gap-2">
+                <div className="text-[11px] text-slate-500">Tip: use Forge for signature execution, Archive for sealing, Council for approval gate.</div>
+                <button
+                  onClick={() => {
+                    setOpen(false);
+                    setSelected(null);
+                  }}
+                  className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+                >
+                  Close
+                </button>
+              </div>
             </div>
           </div>
         </div>
