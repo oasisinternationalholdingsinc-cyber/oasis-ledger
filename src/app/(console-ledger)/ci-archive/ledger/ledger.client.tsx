@@ -22,6 +22,8 @@ import {
   RotateCw,
   Zap,
   List,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 
 type Tab = "ALL" | "PENDING" | "APPROVED" | "SIGNING" | "SIGNED" | "ARCHIVED";
@@ -115,13 +117,13 @@ function prettyStatus(s: string | null | undefined) {
 function badgeForStatus(statusRaw: string | null | undefined) {
   const s = normStatusUpper(statusRaw);
 
-  if (s === "PENDING") return "border-sky-400/30 bg-sky-400/10 text-sky-100";
-  if (s === "APPROVED") return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
-  if (s === "SIGNING" || s === "IN_SIGNING") return "border-amber-400/30 bg-amber-400/10 text-amber-100";
-  if (s === "SIGNED") return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
-  if (s === "ARCHIVED") return "border-white/10 bg-white/5 text-slate-300";
+  if (s === "PENDING") return "border-sky-400/25 bg-sky-400/10 text-sky-100";
+  if (s === "APPROVED") return "border-emerald-400/25 bg-emerald-400/10 text-emerald-100";
+  if (s === "SIGNING" || s === "IN_SIGNING") return "border-amber-400/25 bg-amber-400/10 text-amber-100";
+  if (s === "SIGNED") return "border-emerald-400/25 bg-emerald-400/10 text-emerald-100";
+  if (s === "ARCHIVED") return "border-white/10 bg-white/5 text-slate-200/80";
 
-  return "border-white/10 bg-white/5 text-slate-400";
+  return "border-white/10 bg-white/5 text-slate-300/80";
 }
 
 function safeCopy(text: string) {
@@ -132,10 +134,10 @@ function safeCopy(text: string) {
 
 function severityBadge(sevRaw: string | null | undefined) {
   const sev = String(sevRaw || "").toLowerCase().trim();
-  if (sev === "critical") return "border-rose-400/35 bg-rose-400/10 text-rose-100";
-  if (sev === "warning") return "border-amber-400/35 bg-amber-400/10 text-amber-100";
-  if (sev === "info") return "border-sky-400/30 bg-sky-400/10 text-sky-100";
-  return "border-white/10 bg-white/5 text-slate-300";
+  if (sev === "critical") return "border-rose-400/30 bg-rose-400/10 text-rose-100";
+  if (sev === "warning") return "border-amber-400/30 bg-amber-400/10 text-amber-100";
+  if (sev === "info") return "border-sky-400/25 bg-sky-400/10 text-sky-100";
+  return "border-white/10 bg-white/5 text-slate-200/80";
 }
 
 function tryJsonStringify(v: unknown, limit = 10_000) {
@@ -169,6 +171,105 @@ function computeConflictsCount(v: unknown): number {
   } catch {
     return 0;
   }
+}
+
+function formatWhen(iso: string | null | undefined) {
+  const s = String(iso || "").trim();
+  if (!s) return "—";
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return s;
+  // Calm, lawyer-friendly display (no seconds).
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function sentenceFromText(t: string | null | undefined) {
+  const s = String(t || "").trim();
+  if (!s) return "";
+  // return the first “sentence-ish” line
+  const firstLine = s.split("\n").map((x) => x.trim()).filter(Boolean)[0] || s;
+  const cut = firstLine.length > 220 ? firstLine.slice(0, 220) + "…" : firstLine;
+  return cut;
+}
+
+function coerceArray(v: any) {
+  if (!v) return [];
+  return Array.isArray(v) ? v : [];
+}
+
+function summarizeFacts(factsJson: any): { bullets: string[]; meta: string[] } {
+  const bullets: string[] = [];
+  const meta: string[] = [];
+  if (!factsJson || typeof factsJson !== "object") return { bullets, meta };
+
+  const root: any = factsJson;
+
+  // Common shapes we’ve used / might see: grants / revokes / modifies / scope / effective / conditions / limits
+  const grants = coerceArray(root.grants ?? root.granted ?? root.authority_grants);
+  const revokes = coerceArray(root.revokes ?? root.revoked ?? root.authority_revokes);
+  const modifies = coerceArray(root.modifies ?? root.modified ?? root.authority_modifies);
+  const conditions = coerceArray(root.conditions ?? root.constraints ?? root.limits ?? root.limitations);
+
+  if (grants.length) bullets.push(`Grants detected: ${grants.length}`);
+  if (revokes.length) bullets.push(`Revocations detected: ${revokes.length}`);
+  if (modifies.length) bullets.push(`Modifications detected: ${modifies.length}`);
+  if (!grants.length && !revokes.length && !modifies.length) bullets.push("No explicit grants/revokes/modifies detected in structured extraction.");
+
+  if (conditions.length) bullets.push(`Conditions / limitations: ${conditions.length}`);
+
+  // Optional scope/effective hints (best-effort)
+  const scope = root.scope ?? root.authority_scope ?? null;
+  const effective = root.effective ?? root.effective_at ?? root.effective_date ?? null;
+
+  if (scope && typeof scope === "object") {
+    const s: any = scope;
+    const subject = s.subject || s.actor || s.role || s.department;
+    const action = s.action || s.power || s.permission;
+    const limit = s.limit || s.amount || s.cap;
+    if (subject) meta.push(`Subject: ${String(subject)}`);
+    if (action) meta.push(`Action: ${String(action)}`);
+    if (limit) meta.push(`Limit: ${String(limit)}`);
+  }
+
+  if (effective) meta.push(`Effective: ${String(effective)}`);
+
+  return { bullets, meta };
+}
+
+function summarizeConflicts(conflictsJson: any): { bullets: string[] } {
+  const bullets: string[] = [];
+  const n = computeConflictsCount(conflictsJson);
+  if (!conflictsJson) return { bullets };
+
+  if (n === 0) {
+    bullets.push("No conflicts detected in stored snapshot.");
+    return { bullets };
+  }
+
+  bullets.push(`${n} potential conflict(s) detected in stored snapshot.`);
+
+  // Best-effort: if object has top-level messages/items, show a couple titles.
+  try {
+    const o: any = conflictsJson;
+    const arr =
+      (Array.isArray(o?.conflicts) && o.conflicts) ||
+      (Array.isArray(o?.items) && o.items) ||
+      (Array.isArray(o?.results) && o.results) ||
+      null;
+
+    if (arr && arr.length) {
+      const top = arr.slice(0, 2).map((x: any) => x?.title || x?.message || x?.summary || null).filter(Boolean);
+      for (const t of top) bullets.push(String(t));
+      if (arr.length > 2) bullets.push("…and more.");
+    }
+  } catch {}
+
+  return { bullets };
 }
 
 async function getInvokeHeaders() {
@@ -216,16 +317,18 @@ export default function ArchiveLedgerLifecyclePage() {
   const [extractErr, setExtractErr] = useState<string | null>(null);
   const [extractOk, setExtractOk] = useState<string | null>(null);
 
-  // ✅ OS shell/header/body pattern (MATCH Verified + launchpads)
+  // Apple-ish calm: less “pure black”, more layered glass.
   const shell =
-    "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden";
+    "rounded-3xl border border-white/10 bg-gradient-to-b from-white/[0.05] to-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.50)] overflow-hidden backdrop-blur";
   const header =
-    "border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent px-4 sm:px-6 py-4 sm:py-5";
+    "border-b border-white/10 bg-gradient-to-b from-white/[0.08] via-white/[0.03] to-transparent px-4 sm:px-6 py-4 sm:py-5";
   const body = "px-4 sm:px-6 py-5 sm:py-6";
 
   const conflictsCount = useMemo(() => computeConflictsCount(draftConflicts?.conflicts_json), [draftConflicts]);
 
-  // ✅ Entity UUID resolve (LOCKED to entities.slug — NO legacy fallback, NO ts-expect-error)
+  const axiomLedgerSet = useMemo(() => new Set(axiomList.map((x) => x.ledger_id)), [axiomList]);
+
+  // ✅ Entity UUID resolve (LOCKED to entities.slug — NO legacy fallback)
   useEffect(() => {
     let alive = true;
 
@@ -557,6 +660,8 @@ export default function ArchiveLedgerLifecyclePage() {
     }
   }
 
+  const selectedHasAxiom = useMemo(() => (selected?.id ? axiomLedgerSet.has(selected.id) : false), [selected, axiomLedgerSet]);
+
   return (
     <div className="w-full">
       <div className="mx-auto w-full max-w-[1200px] px-4 pb-10 pt-4 sm:pt-6">
@@ -569,6 +674,7 @@ export default function ArchiveLedgerLifecyclePage() {
                 <p className="mt-1 max-w-3xl text-[11px] sm:text-xs text-slate-400 leading-relaxed">
                   Lifecycle surface for governance_ledger. Read-only monitor. Lane-safe. Entity-scoped. Use Council/Forge/Archive to execute.
                 </p>
+
                 <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
                   <span className="inline-flex items-center gap-2">
                     <Shield className="h-4 w-4 text-emerald-300" />
@@ -602,12 +708,13 @@ export default function ArchiveLedgerLifecyclePage() {
           </div>
 
           <div className={body}>
-            <div className="mb-4 rounded-3xl border border-white/10 bg-black/20 px-4 py-3">
+            {/* Top intelligence strip — calmer, less “console” */}
+            <div className="mb-4 rounded-3xl border border-white/10 bg-white/[0.03] px-4 py-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Intelligence</div>
                   <div className="mt-1 text-sm text-slate-200">
-                    {axiomListLoading ? "Loading signals…" : axiomListErr ? "Signals partially available" : "Signals loaded"}
+                    {axiomListLoading ? "Loading signals…" : axiomListErr ? "Signals partially available" : "Signals ready"}
                   </div>
                   {axiomListErr ? <div className="mt-1 text-[11px] text-amber-200/80">{axiomListErr}</div> : null}
                 </div>
@@ -636,7 +743,7 @@ export default function ArchiveLedgerLifecyclePage() {
             <div className="grid grid-cols-12 gap-4">
               {/* LEFT */}
               <section className="col-span-12 lg:col-span-3">
-                <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
+                <div className="rounded-3xl border border-white/10 bg-white/[0.03] p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-sm font-semibold text-slate-200">Filters</div>
@@ -655,7 +762,7 @@ export default function ArchiveLedgerLifecyclePage() {
                         className={cx(
                           "rounded-full border px-3 py-1 text-xs transition",
                           tab === t
-                            ? "border-amber-400/40 bg-amber-400/10 text-amber-100"
+                            ? "border-amber-400/35 bg-amber-400/10 text-amber-100"
                             : "border-white/10 bg-white/5 text-slate-200/80 hover:bg-white/7"
                         )}
                         title={`${t} (${counts[t] ?? 0})`}
@@ -680,15 +787,15 @@ export default function ArchiveLedgerLifecyclePage() {
 
                   <div className="mt-4 text-xs text-slate-400">{loading ? "Loading…" : `${filtered.length} result(s)`}</div>
 
-                  <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-400">
+                  <div className="mt-3 rounded-2xl border border-white/10 bg-white/[0.03] p-3 text-xs text-slate-400">
                     Lane-safe: fetched server-side via <span className="text-slate-200">ledger_scoped_v3</span> RPC (SECURITY DEFINER).
                   </div>
 
-                  <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-slate-500 leading-relaxed">
-                    Intelligence is <span className="text-slate-200">advisory-only</span>. Badges below are derived from stored sidecars (no mutation).
+                  <div className="mt-3 rounded-2xl border border-white/10 bg-white/[0.03] p-3 text-xs text-slate-500 leading-relaxed">
+                    Intelligence is <span className="text-slate-200">advisory-only</span>. Indicators come from stored sidecars (no mutation).
                   </div>
 
-                  <div className="mt-4 rounded-3xl border border-white/10 bg-black/20 p-3">
+                  <div className="mt-4 rounded-3xl border border-white/10 bg-white/[0.03] p-3">
                     <div className="flex items-start justify-between gap-2">
                       <div>
                         <div className="text-sm font-semibold text-slate-200 inline-flex items-center gap-2">
@@ -700,9 +807,9 @@ export default function ArchiveLedgerLifecyclePage() {
                     </div>
 
                     {axiomListLoading ? (
-                      <div className="mt-3 rounded-2xl border border-white/10 bg-black/30 p-3 text-xs text-slate-400">Loading…</div>
+                      <div className="mt-3 rounded-2xl border border-white/10 bg-white/[0.03] p-3 text-xs text-slate-400">Loading…</div>
                     ) : axiomList.length === 0 ? (
-                      <div className="mt-3 rounded-2xl border border-white/10 bg-black/30 p-3 text-xs text-slate-500">
+                      <div className="mt-3 rounded-2xl border border-white/10 bg-white/[0.03] p-3 text-xs text-slate-500">
                         No AXIOM notes surfaced for this lane/entity yet.
                       </div>
                     ) : (
@@ -726,7 +833,7 @@ export default function ArchiveLedgerLifecyclePage() {
                               setOpen(true);
                               void loadLedgerIntel(n.ledger_id);
                             }}
-                            className="w-full text-left rounded-2xl border border-white/10 bg-black/30 px-3 py-2 hover:bg-black/35 transition"
+                            className="w-full text-left rounded-2xl border border-white/10 bg-white/[0.03] px-3 py-2 hover:bg-white/[0.05] transition"
                             title="Open linked record"
                           >
                             <div className="text-xs font-semibold text-slate-200 truncate">{n.title || "AXIOM • Draft review"}</div>
@@ -742,7 +849,7 @@ export default function ArchiveLedgerLifecyclePage() {
 
               {/* MIDDLE */}
               <section className="col-span-12 lg:col-span-6">
-                <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
+                <div className="rounded-3xl border border-white/10 bg-white/[0.03] p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-sm font-semibold text-slate-200">Records</div>
@@ -755,7 +862,7 @@ export default function ArchiveLedgerLifecyclePage() {
 
                   <div className="mt-3 space-y-2">
                     {filtered.length === 0 ? (
-                      <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-slate-400">
+                      <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-400">
                         {loading ? "Loading ledger…" : "No records match this view."}
                       </div>
                     ) : (
@@ -765,6 +872,7 @@ export default function ArchiveLedgerLifecyclePage() {
                         const canGoCouncil = s === "PENDING" || s === "APPROVED";
                         const canGoForge = s === "APPROVED" || s === "SIGNING" || s === "IN_SIGNING" || s === "SIGNED";
                         const canGoArchive = s === "SIGNED" || s === "ARCHIVED";
+                        const hasAxiom = axiomLedgerSet.has(r.id);
 
                         return (
                           <button
@@ -774,7 +882,7 @@ export default function ArchiveLedgerLifecyclePage() {
                               setOpen(true);
                               void loadLedgerIntel(r.id);
                             }}
-                            className="w-full text-left rounded-3xl border border-white/10 bg-black/20 p-3 hover:bg-black/25 transition"
+                            className="w-full text-left rounded-3xl border border-white/10 bg-white/[0.03] p-3 hover:bg-white/[0.05] transition"
                           >
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0">
@@ -782,6 +890,7 @@ export default function ArchiveLedgerLifecyclePage() {
                                 <div className="mt-1 text-xs text-slate-400">
                                   Status: {prettyStatus(r.status)}
                                   {r.envelope_id ? " · Envelope attached" : ""}
+                                  {r.created_at ? ` · ${formatWhen(r.created_at)}` : ""}
                                 </div>
 
                                 <div className="mt-2 font-mono break-all text-[11px] text-slate-500">{r.id}</div>
@@ -803,6 +912,18 @@ export default function ArchiveLedgerLifecyclePage() {
                                       {laneIsTest ? "SANDBOX" : "RoT"}
                                     </span>
                                   </span>
+
+                                  {hasAxiom ? (
+                                    <span className="inline-flex items-center gap-2 rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-1 text-amber-100">
+                                      <Sparkles className="h-4 w-4" />
+                                      AXIOM
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-400/80">
+                                      <Sparkles className="h-4 w-4 text-slate-500" />
+                                      No AXIOM
+                                    </span>
+                                  )}
                                 </div>
                               </div>
 
@@ -813,7 +934,7 @@ export default function ArchiveLedgerLifecyclePage() {
                                   <span
                                     className={cx(
                                       "rounded-full border px-2 py-1 text-[10px] tracking-[0.18em] uppercase",
-                                      canGoCouncil ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-black/20 text-slate-500"
+                                      canGoCouncil ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-white/[0.03] text-slate-500"
                                     )}
                                   >
                                     Council
@@ -821,7 +942,7 @@ export default function ArchiveLedgerLifecyclePage() {
                                   <span
                                     className={cx(
                                       "rounded-full border px-2 py-1 text-[10px] tracking-[0.18em] uppercase",
-                                      canGoForge ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-black/20 text-slate-500"
+                                      canGoForge ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-white/[0.03] text-slate-500"
                                     )}
                                   >
                                     Forge
@@ -829,7 +950,7 @@ export default function ArchiveLedgerLifecyclePage() {
                                   <span
                                     className={cx(
                                       "rounded-full border px-2 py-1 text-[10px] tracking-[0.18em] uppercase",
-                                      canGoArchive ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-black/20 text-slate-500"
+                                      canGoArchive ? "border-white/10 bg-white/5 text-slate-200" : "border-white/10 bg-white/[0.03] text-slate-500"
                                     )}
                                   >
                                     Archive
@@ -847,7 +968,7 @@ export default function ArchiveLedgerLifecyclePage() {
 
               {/* RIGHT */}
               <section className="col-span-12 lg:col-span-3">
-                <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
+                <div className="rounded-3xl border border-white/10 bg-white/[0.03] p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-sm font-semibold text-slate-200">Lifecycle</div>
@@ -859,28 +980,28 @@ export default function ArchiveLedgerLifecyclePage() {
                   </div>
 
                   <div className="mt-3 space-y-3 text-sm text-slate-300">
-                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
                       <span className="text-slate-200">PENDING</span> → review &amp; approve in <span className="text-slate-200">Council</span>
                     </div>
-                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
                       <span className="text-slate-200">APPROVED</span> → execute via <span className="text-slate-200">Forge</span> (signature-only)
                     </div>
-                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
                       <span className="text-slate-200">SIGNED</span> → seal via <span className="text-slate-200">Archive</span> (idempotent)
                     </div>
-                    <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
                       <span className="text-slate-200">ARCHIVED</span> → record is sealed; no action required
                     </div>
                   </div>
 
                   <div className="mt-4 text-[11px] text-slate-500 leading-relaxed">
-                    This page is a monitor. Actions are performed in Council/Forge/Archive. Details modal includes safe copy, module jumps, and advisory signals.
+                    This page is a monitor. Actions are performed in Council/Forge/Archive. The record modal attaches intelligence to the record (calm, board-grade view).
                   </div>
                 </div>
               </section>
             </div>
 
-            <div className="mt-5 rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
+            <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-[11px] text-slate-400">
               <div className="font-semibold text-slate-200">OS behavior</div>
               <div className="mt-1 leading-relaxed text-slate-400">
                 Drafts &amp; Approvals inherits the OS shell. Lane-safe and entity-scoped. Intelligence is advisory-only and never mutates authority automatically.
@@ -930,416 +1051,591 @@ export default function ArchiveLedgerLifecyclePage() {
 
       {/* DETAILS MODAL */}
       {open && selected && (
-        <div className="fixed inset-0 z-[80]">
-          <div
-            className="absolute inset-0 bg-black/70 backdrop-blur-sm"
-            onClick={() => {
-              setOpen(false);
-              setSelected(null);
-            }}
-          />
-          <div className="absolute inset-0 flex items-center justify-center p-4">
-            <div
-              className="w-full max-w-[980px] rounded-3xl border border-white/10 bg-black/60 shadow-[0_40px_140px_rgba(0,0,0,0.65)] overflow-hidden"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="border-b border-white/10 bg-gradient-to-b from-white/[0.08] to-transparent px-5 py-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Record</div>
-                    <div className="mt-1 text-lg font-semibold text-slate-50 truncate">{selected.title || "Untitled record"}</div>
-                    <div className="mt-1 text-xs text-slate-400">
-                      Status: <span className="text-slate-200">{prettyStatus(selected.status)}</span>
-                      {" · "}
-                      Lane:{" "}
-                      <span className={cx("font-semibold", laneIsTest ? "text-amber-300" : "text-sky-300")}>
-                        {laneIsTest ? "SANDBOX" : "RoT"}
-                      </span>
-                      {" · "}
-                      Entity: <span className="text-emerald-300">{String(activeEntity ?? "—")}</span>
-                    </div>
+        <RecordModal
+          laneIsTest={laneIsTest}
+          activeEntity={activeEntity}
+          entityId={entityId}
+          rows={rows}
+          selected={selected}
+          setSelected={setSelected}
+          setOpen={setOpen}
+          loadLedgerIntel={loadLedgerIntel}
+          intelLoading={intelLoading}
+          intelErr={intelErr}
+          draftLink={draftLink}
+          axiomNote={axiomNote}
+          draftConflicts={draftConflicts}
+          resolutionFacts={resolutionFacts}
+          conflictsCount={conflictsCount}
+          selectedHasAxiom={selectedHasAxiom}
+          extracting={extracting}
+          extractErr={extractErr}
+          extractOk={extractOk}
+          extractResolutionFacts={extractResolutionFacts}
+        />
+      )}
+    </div>
+  );
+}
 
-                    <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
-                      <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-200">
-                        <Sparkles className="h-4 w-4 text-amber-300" />
-                        AXIOM advisory
-                      </span>
+function RecordModal(props: {
+  laneIsTest: boolean;
+  activeEntity: any;
+  entityId: string | null;
+  rows: LedgerRow[];
+  selected: LedgerRow;
+  setSelected: (v: LedgerRow | null) => void;
+  setOpen: (v: boolean) => void;
+  loadLedgerIntel: (ledgerId: string) => Promise<void>;
+  intelLoading: boolean;
+  intelErr: string | null;
+  draftLink: DraftLink | null;
+  axiomNote: AxiomNote | null;
+  draftConflicts: DraftConflictsRow | null;
+  resolutionFacts: ResolutionFactsRow | null;
+  conflictsCount: number;
+  selectedHasAxiom: boolean;
+  extracting: boolean;
+  extractErr: string | null;
+  extractOk: string | null;
+  extractResolutionFacts: (opts?: { force?: boolean }) => Promise<void>;
+}) {
+  const {
+    laneIsTest,
+    activeEntity,
+    entityId,
+    selected,
+    setSelected,
+    setOpen,
+    loadLedgerIntel,
+    intelLoading,
+    intelErr,
+    draftLink,
+    axiomNote,
+    draftConflicts,
+    resolutionFacts,
+    conflictsCount,
+    selectedHasAxiom,
+    extracting,
+    extractErr,
+    extractOk,
+    extractResolutionFacts,
+  } = props;
 
-                      {draftLink?.id ? (
-                        <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-3 py-1 text-slate-300">
-                          <span className="text-slate-500">draft:</span>
-                          <span className="font-mono text-slate-200">{draftLink.id.slice(0, 8)}…</span>
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-3 py-1 text-slate-500">
-                          No Alchemy draft link
-                        </span>
-                      )}
+  const [showRawFacts, setShowRawFacts] = useState(false);
+  const [showRawConflicts, setShowRawConflicts] = useState(false);
+  const [showRawNote, setShowRawNote] = useState(false);
 
-                      {draftConflicts?.id ? (
-                        <span className={cx("inline-flex items-center gap-2 rounded-full border px-3 py-1", severityBadge(draftConflicts.severity))}>
-                          <ShieldAlert className="h-4 w-4" />
-                          <span className="text-slate-200">{String(draftConflicts.severity || "info").toUpperCase()}</span>
-                          <span className="opacity-70">· {conflictsCount} conflict(s)</span>
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-3 py-1 text-slate-500">
-                          No conflicts snapshot
-                        </span>
-                      )}
+  const factsSummary = useMemo(() => summarizeFacts(resolutionFacts?.facts_json), [resolutionFacts]);
+  const conflictsSummary = useMemo(() => summarizeConflicts(draftConflicts?.conflicts_json), [draftConflicts]);
 
-                      <button
-                        onClick={() => void loadLedgerIntel(selected.id)}
-                        className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
-                        title="Reload advisory signals"
-                      >
-                        <RotateCw className={cx("h-4 w-4", intelLoading && "animate-spin")} />
-                        Refresh
-                      </button>
-                    </div>
-                  </div>
+  const recordSubtitle = useMemo(() => {
+    const s = normStatusUpper(selected.status);
+    const lane = laneIsTest ? "SANDBOX" : "RoT";
+    const hasEnv = selected.envelope_id ? "Envelope linked" : "No envelope";
+    const ax = selectedHasAxiom ? "AXIOM present" : "No AXIOM";
+    const humanStatus = prettyStatus(selected.status);
+    return `${humanStatus} • ${lane} • ${hasEnv} • ${ax}`;
+  }, [selected, laneIsTest, selectedHasAxiom]);
+
+  // Modal surfaces: calmer glass + readable cards (no console vibes)
+  const modalShell =
+    "w-full max-w-[980px] rounded-3xl border border-white/10 bg-gradient-to-b from-white/[0.06] to-black/30 shadow-[0_40px_140px_rgba(0,0,0,0.60)] overflow-hidden backdrop-blur";
+  const modalHeader =
+    "border-b border-white/10 bg-gradient-to-b from-white/[0.09] via-white/[0.04] to-transparent px-5 py-4";
+  const modalBody = "px-5 py-5";
+  const card = "rounded-3xl border border-white/10 bg-white/[0.03] p-4";
+  const subtleCard = "rounded-2xl border border-white/10 bg-white/[0.03] p-3";
+
+  return (
+    <div className="fixed inset-0 z-[80]">
+      <div
+        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+        onClick={() => {
+          setOpen(false);
+          setSelected(null);
+        }}
+      />
+      <div className="absolute inset-0 flex items-center justify-center p-4">
+        <div className={modalShell} onClick={(e) => e.stopPropagation()}>
+          <div className={modalHeader}>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Record</div>
+                <div className="mt-1 text-lg font-semibold text-slate-50 truncate">{selected.title || "Untitled record"}</div>
+                <div className="mt-1 text-xs text-slate-400">{recordSubtitle}</div>
+
+                <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
+                  <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-200">
+                    <Sparkles className="h-4 w-4 text-amber-300" />
+                    AXIOM Intelligence
+                  </span>
+
+                  {draftLink?.id ? (
+                    <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-slate-300">
+                      <span className="text-slate-500">draft:</span>
+                      <span className="font-mono text-slate-200">{draftLink.id.slice(0, 8)}…</span>
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-slate-500">
+                      No Alchemy draft link
+                    </span>
+                  )}
+
+                  {draftConflicts?.id ? (
+                    <span className={cx("inline-flex items-center gap-2 rounded-full border px-3 py-1", severityBadge(draftConflicts.severity))}>
+                      <ShieldAlert className="h-4 w-4" />
+                      <span className="text-slate-200">{String(draftConflicts.severity || "info").toUpperCase()}</span>
+                      <span className="opacity-70">· {conflictsCount} conflict(s)</span>
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-slate-500">
+                      No conflicts snapshot
+                    </span>
+                  )}
 
                   <button
-                    onClick={() => {
-                      setOpen(false);
-                      setSelected(null);
-                    }}
-                    className="rounded-full border border-white/10 bg-white/5 p-2 hover:bg-white/7"
-                    aria-label="Close"
+                    onClick={() => void loadLedgerIntel(selected.id)}
+                    className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+                    title="Reload advisory signals"
                   >
-                    <X className="h-4 w-4 text-slate-200" />
+                    <RotateCw className={cx("h-4 w-4", intelLoading && "animate-spin")} />
+                    Refresh
                   </button>
                 </div>
               </div>
 
-              <div className="px-5 py-5">
-                <div className="grid grid-cols-12 gap-4">
-                  <div className="col-span-12 lg:col-span-6">
-                    <div className="rounded-3xl border border-white/10 bg-black/30 p-4">
-                      <div className="text-sm font-semibold text-slate-200">Identifiers</div>
+              <button
+                onClick={() => {
+                  setOpen(false);
+                  setSelected(null);
+                }}
+                className="rounded-full border border-white/10 bg-white/5 p-2 hover:bg-white/7"
+                aria-label="Close"
+              >
+                <X className="h-4 w-4 text-slate-200" />
+              </button>
+            </div>
+          </div>
 
-                      <div className="mt-3 space-y-3 text-sm text-slate-300">
-                        <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                          <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">ledger_id</div>
-                          <div className="mt-1 font-mono break-all text-[12px] text-slate-200">{selected.id}</div>
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            <button
-                              onClick={() => safeCopy(selected.id)}
-                              className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
-                            >
-                              <Copy className="h-4 w-4" />
-                              Copy ID
-                            </button>
+          <div className={modalBody}>
+            <div className="grid grid-cols-12 gap-4">
+              {/* LEFT: IDENTIFIERS */}
+              <div className="col-span-12 lg:col-span-5">
+                <div className={card}>
+                  <div className="text-sm font-semibold text-slate-200">Identifiers</div>
 
-                            {selected.envelope_id && (
-                              <button
-                                onClick={() => safeCopy(String(selected.envelope_id))}
-                                className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
-                              >
-                                <Copy className="h-4 w-4" />
-                                Copy Envelope
-                              </button>
-                            )}
-                          </div>
-                        </div>
+                  <div className="mt-3 space-y-3 text-sm text-slate-300">
+                    <div className={subtleCard}>
+                      <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">ledger_id</div>
+                      <div className="mt-1 font-mono break-all text-[12px] text-slate-200">{selected.id}</div>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <button
+                          onClick={() => safeCopy(selected.id)}
+                          className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                        >
+                          <Copy className="h-4 w-4" />
+                          Copy ID
+                        </button>
 
-                        {selected.envelope_id ? (
-                          <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                            <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">envelope_id</div>
-                            <div className="mt-1 font-mono break-all text-[12px] text-slate-200">{selected.envelope_id}</div>
-                          </div>
-                        ) : (
-                          <div className="rounded-2xl border border-white/10 bg-black/20 p-3 text-sm text-slate-400">
-                            No envelope linked yet (signature not started).
-                          </div>
-                        )}
-
-                        {draftLink?.id && (
-                          <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="min-w-0">
-                                <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">draft_id</div>
-                                <div className="mt-1 font-mono break-all text-[12px] text-slate-200">{draftLink.id}</div>
-                                <div className="mt-2 text-xs text-slate-400">
-                                  {draftLink.record_type ? `Record type: ${draftLink.record_type}` : "Record type: —"}
-                                </div>
-                              </div>
-                              <button
-                                onClick={() => safeCopy(draftLink.id)}
-                                className="shrink-0 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
-                                title="Copy draft_id"
-                              >
-                                <Copy className="h-4 w-4" />
-                                Copy
-                              </button>
-                            </div>
-                          </div>
+                        {selected.envelope_id && (
+                          <button
+                            onClick={() => safeCopy(String(selected.envelope_id))}
+                            className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                          >
+                            <Copy className="h-4 w-4" />
+                            Copy Envelope
+                          </button>
                         )}
                       </div>
+                    </div>
 
-                      {intelErr && (
-                        <div className="mt-3 rounded-2xl border border-amber-400/20 bg-amber-400/5 p-3 text-xs text-amber-100 leading-relaxed">
-                          <div className="font-semibold tracking-[0.18em] uppercase text-[10px]">Advisory read warning</div>
-                          <div className="mt-1 opacity-90">{intelErr}</div>
-                          <div className="mt-2 text-amber-100/70">
-                            If this persists, browser RLS likely blocks reading advisory tables. This UI does not require new SQL, but policy may.
+                    {selected.envelope_id ? (
+                      <div className={subtleCard}>
+                        <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">envelope_id</div>
+                        <div className="mt-1 font-mono break-all text-[12px] text-slate-200">{selected.envelope_id}</div>
+                      </div>
+                    ) : (
+                      <div className={subtleCard + " text-slate-400"}>No envelope linked yet (signature not started).</div>
+                    )}
+
+                    {draftLink?.id && (
+                      <div className={subtleCard}>
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">draft_id</div>
+                            <div className="mt-1 font-mono break-all text-[12px] text-slate-200">{draftLink.id}</div>
+                            <div className="mt-2 text-xs text-slate-400">{draftLink.record_type ? `Record type: ${draftLink.record_type}` : "Record type: —"}</div>
                           </div>
+                          <button
+                            onClick={() => safeCopy(draftLink.id)}
+                            className="shrink-0 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                            title="Copy draft_id"
+                          >
+                            <Copy className="h-4 w-4" />
+                            Copy
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {intelErr && (
+                    <div className="mt-3 rounded-2xl border border-amber-400/20 bg-amber-400/5 p-3 text-xs text-amber-100 leading-relaxed">
+                      <div className="font-semibold tracking-[0.18em] uppercase text-[10px]">Advisory read warning</div>
+                      <div className="mt-1 opacity-90">{intelErr}</div>
+                      <div className="mt-2 text-amber-100/70">If this persists, browser RLS likely blocks reading advisory tables.</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* RIGHT: INTELLIGENCE ATTACHED TO RECORD */}
+              <div className="col-span-12 lg:col-span-7">
+                <div className={card}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-200">AXIOM Intelligence</div>
+                      <div className="text-[11px] text-slate-500">Attached to this record. Advisory-only. Calm, board-grade surface.</div>
+                    </div>
+
+                    <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] tracking-[0.18em] uppercase text-slate-200">
+                      {intelLoading ? "loading" : "ready"}
+                    </span>
+                  </div>
+
+                  {/* Executive summary block */}
+                  <div className="mt-3 rounded-3xl border border-white/10 bg-gradient-to-b from-white/[0.04] to-white/[0.02] p-4">
+                    <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Executive view</div>
+                    <div className="mt-2 text-sm text-slate-200 leading-relaxed">
+                      {axiomNote?.content ? (
+                        <>
+                          <div className="font-semibold text-slate-100">{axiomNote.title || "AXIOM review"}</div>
+                          <div className="mt-1 text-slate-300/90">{sentenceFromText(axiomNote.content) || "—"}</div>
+                          <div className="mt-2 text-[11px] text-slate-500">
+                            Reviewed: <span className="text-slate-300">{formatWhen(axiomNote.created_at)}</span>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="text-slate-500">
+                          No AXIOM draft review note found for this record’s draft link. (If you just ran it, refresh.)
                         </div>
                       )}
                     </div>
                   </div>
 
-                  <div className="col-span-12 lg:col-span-6">
-                    <div className="rounded-3xl border border-white/10 bg-black/30 p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="text-sm font-semibold text-slate-200">AXIOM Advisory</div>
-                          <div className="text-[11px] text-slate-500">
-                            Draft-stage review + authority conflict snapshot + archived-only resolution facts (advisory-only)
-                          </div>
+                  {/* Resolution facts */}
+                  <div className="mt-4 rounded-3xl border border-white/10 bg-white/[0.03] p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Resolution facts</div>
+                        <div className="mt-1 text-sm text-slate-200">
+                          {resolutionFacts?.id ? (
+                            <>
+                              Stored extraction available{" "}
+                              {resolutionFacts.extracted_at ? <span className="text-slate-500">· {formatWhen(resolutionFacts.extracted_at)}</span> : null}
+                            </>
+                          ) : (
+                            <span className="text-slate-500">No stored facts yet (available once the record is ARCHIVED).</span>
+                          )}
                         </div>
-
-                        <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] tracking-[0.18em] uppercase text-slate-200">
-                          {intelLoading ? "loading" : "advisory"}
-                        </span>
-                      </div>
-
-                      <div className="mt-3 rounded-3xl border border-white/10 bg-black/20 p-4">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Resolution facts</div>
-                            <div className="mt-1 text-sm text-slate-200">
-                              {resolutionFacts?.id ? (
-                                <>
-                                  Stored facts available{" "}
-                                  {resolutionFacts.extracted_at ? <span className="text-slate-500">· {resolutionFacts.extracted_at}</span> : null}
-                                </>
-                              ) : (
-                                <span className="text-slate-500">
-                                  No resolution facts stored yet. (Only available once ledger record is ARCHIVED.)
-                                </span>
-                              )}
-                            </div>
-                            {resolutionFacts?.model ? (
-                              <div className="mt-1 text-[11px] text-slate-500">
-                                Model: <span className="text-slate-300">{resolutionFacts.model}</span>
-                              </div>
-                            ) : null}
-                          </div>
-
-                          <div className="flex items-center gap-2 shrink-0">
-                            <button
-                              onClick={() => void loadLedgerIntel(selected.id)}
-                              className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
-                              title="Reload facts"
-                            >
-                              <RotateCw className={cx("h-4 w-4", intelLoading && "animate-spin")} />
-                              Reload
-                            </button>
-
-                            <button
-                              onClick={() => void extractResolutionFacts({ force: false })}
-                              disabled={extracting}
-                              className={cx(
-                                "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase inline-flex items-center gap-2",
-                                extracting
-                                  ? "border-white/10 bg-black/30 text-slate-500 cursor-not-allowed"
-                                  : "border-amber-400/35 bg-amber-400/10 text-amber-100 hover:bg-amber-400/15"
-                              )}
-                              title="Extract archived-only facts via Edge Function"
-                            >
-                              <Zap className={cx("h-4 w-4", extracting && "animate-pulse")} />
-                              Extract
-                            </button>
-                          </div>
-                        </div>
-
-                        {extractErr ? (
-                          <div className="mt-3 rounded-2xl border border-rose-400/25 bg-rose-400/10 p-3 text-xs text-rose-100 leading-relaxed">
-                            <div className="font-semibold tracking-[0.18em] uppercase text-[10px]">AXIOM extract error</div>
-                            <div className="mt-1 opacity-90">{extractErr}</div>
-                          </div>
-                        ) : null}
-
-                        {extractOk ? (
-                          <div className="mt-3 rounded-2xl border border-emerald-400/25 bg-emerald-400/10 p-3 text-xs text-emerald-100 leading-relaxed">
-                            <div className="font-semibold tracking-[0.18em] uppercase text-[10px]">AXIOM extract</div>
-                            <div className="mt-1 opacity-90">{extractOk}</div>
-                          </div>
-                        ) : null}
 
                         {resolutionFacts?.facts_json ? (
-                          <pre className="mt-3 max-h-[240px] overflow-auto rounded-2xl border border-white/10 bg-black/30 p-3 text-[11px] leading-relaxed text-slate-200 whitespace-pre-wrap">
-                            {tryJsonStringify(resolutionFacts.facts_json, 24_000)}
-                          </pre>
+                          <div className="mt-3 space-y-2 text-sm">
+                            {factsSummary.meta.length ? (
+                              <div className="flex flex-wrap gap-2 text-[11px]">
+                                {factsSummary.meta.slice(0, 4).map((m, i) => (
+                                  <span key={i} className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-200">
+                                    {m}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : null}
+
+                            <ul className="mt-2 space-y-1 text-slate-300">
+                              {factsSummary.bullets.map((b, i) => (
+                                <li key={i} className="flex gap-2">
+                                  <span className="mt-1 h-1.5 w-1.5 rounded-full bg-slate-500/80 shrink-0" />
+                                  <span>{b}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
                         ) : (
-                          <div className="mt-3 rounded-2xl border border-white/10 bg-black/30 p-3 text-xs text-slate-500">
-                            Extract reads the final archived resolution + verified registry artifact and stores structured facts in{" "}
+                          <div className="mt-3 text-xs text-slate-500">
+                            Extraction reads the archived resolution + verified registry artifact and stores structured facts in{" "}
                             <span className="text-slate-200">public.governance_resolution_facts</span> (advisory-only).
                           </div>
                         )}
                       </div>
 
-                      <div className="mt-4 rounded-3xl border border-white/10 bg-black/20 p-4">
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Authority conflicts</div>
-                            <div className="mt-1 text-sm text-slate-200">
-                              {draftConflicts?.id ? (
-                                <>
-                                  Severity:{" "}
-                                  <span className={cx("inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] ml-1", severityBadge(draftConflicts.severity))}>
-                                    {String(draftConflicts.severity || "info").toUpperCase()}
-                                  </span>
-                                  <span className="text-slate-500"> · </span>
-                                  <span className="text-slate-300">{conflictsCount} conflict(s)</span>
-                                </>
-                              ) : (
-                                <span className="text-slate-500">No snapshot available for this ledger record.</span>
-                              )}
-                            </div>
-                          </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          onClick={() => void loadLedgerIntel(selected.id)}
+                          className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                          title="Reload facts"
+                        >
+                          <RotateCw className={cx("h-4 w-4", intelLoading && "animate-spin")} />
+                          Reload
+                        </button>
 
-                          {draftConflicts?.id && (
-                            <button
-                              onClick={() => safeCopy(tryJsonStringify(draftConflicts.conflicts_json))}
-                              className="shrink-0 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
-                              title="Copy conflicts JSON"
-                            >
-                              <Copy className="h-4 w-4" />
-                              Copy JSON
-                            </button>
+                        <button
+                          onClick={() => void extractResolutionFacts({ force: false })}
+                          disabled={extracting}
+                          className={cx(
+                            "rounded-full border px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase inline-flex items-center gap-2",
+                            extracting
+                              ? "border-white/10 bg-white/[0.03] text-slate-500 cursor-not-allowed"
+                              : "border-amber-400/30 bg-amber-400/10 text-amber-100 hover:bg-amber-400/15"
                           )}
-                        </div>
-
-                        {draftConflicts?.id ? (
-                          <pre className="mt-3 max-h-[220px] overflow-auto rounded-2xl border border-white/10 bg-black/30 p-3 text-[11px] leading-relaxed text-slate-300 whitespace-pre-wrap">
-                            {tryJsonStringify(draftConflicts.conflicts_json, 24_000)}
-                          </pre>
-                        ) : (
-                          <div className="mt-3 rounded-2xl border border-white/10 bg-black/30 p-3 text-xs text-slate-500">
-                            Conflicts are stored when the draft check function runs. If this ledger record wasn’t finalized from an Alchemy draft, there may be nothing to show (by design).
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="mt-4 rounded-3xl border border-white/10 bg-black/20 p-4">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">AXIOM draft review</div>
-                            <div className="mt-1 text-sm text-slate-200">
-                              {axiomNote?.id ? (
-                                <>
-                                  <span className="text-slate-200">{axiomNote.title || "AXIOM • Draft review"}</span>
-                                  <span className="text-slate-500"> · </span>
-                                  <span className="text-slate-400">{axiomNote.created_at || "—"}</span>
-                                </>
-                              ) : (
-                                <span className="text-slate-500">No AXIOM note found for this record’s draft link.</span>
-                              )}
-                            </div>
-                          </div>
-
-                          {axiomNote?.content && (
-                            <button
-                              onClick={() => safeCopy(axiomNote.content || "")}
-                              className="shrink-0 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
-                              title="Copy AXIOM note"
-                            >
-                              <Copy className="h-4 w-4" />
-                              Copy Note
-                            </button>
-                          )}
-                        </div>
-
-                        {axiomNote?.content ? (
-                          <pre className="mt-3 max-h-[320px] overflow-auto rounded-2xl border border-white/10 bg-black/30 p-3 text-[11px] leading-relaxed text-slate-200 whitespace-pre-wrap">
-                            {axiomNote.content}
-                          </pre>
-                        ) : (
-                          <div className="mt-3 rounded-2xl border border-white/10 bg-black/30 p-3 text-xs text-slate-500">
-                            If you just ran the draft review, refresh. If it still doesn’t appear, it usually means the record wasn’t finalized from that draft (or browser RLS blocks reading ai_notes).
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-3 text-[11px] text-slate-400 leading-relaxed">
-                        <span className="text-slate-200 font-semibold">Contract:</span> advisory only, lane-safe, entity-scoped. No automatic authority mutation.
+                          title="Extract archived-only facts via Edge Function"
+                        >
+                          <Zap className={cx("h-4 w-4", extracting && "animate-pulse")} />
+                          Extract
+                        </button>
                       </div>
                     </div>
+
+                    {extractErr ? (
+                      <div className="mt-3 rounded-2xl border border-rose-400/25 bg-rose-400/10 p-3 text-xs text-rose-100 leading-relaxed">
+                        <div className="font-semibold tracking-[0.18em] uppercase text-[10px]">AXIOM extract error</div>
+                        <div className="mt-1 opacity-90">{extractErr}</div>
+                      </div>
+                    ) : null}
+
+                    {extractOk ? (
+                      <div className="mt-3 rounded-2xl border border-emerald-400/25 bg-emerald-400/10 p-3 text-xs text-emerald-100 leading-relaxed">
+                        <div className="font-semibold tracking-[0.18em] uppercase text-[10px]">AXIOM extract</div>
+                        <div className="mt-1 opacity-90">{extractOk}</div>
+                      </div>
+                    ) : null}
+
+                    {resolutionFacts?.facts_json ? (
+                      <div className="mt-3 flex items-center justify-between gap-2">
+                        <button
+                          onClick={() => setShowRawFacts((v) => !v)}
+                          className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                        >
+                          {showRawFacts ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                          {showRawFacts ? "Hide raw" : "View raw"}
+                        </button>
+
+                        <button
+                          onClick={() => safeCopy(tryJsonStringify(resolutionFacts.facts_json, 48_000))}
+                          className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                          title="Copy facts JSON"
+                        >
+                          <Copy className="h-4 w-4" />
+                          Copy
+                        </button>
+                      </div>
+                    ) : null}
+
+                    {showRawFacts && resolutionFacts?.facts_json ? (
+                      <pre className="mt-3 max-h-[240px] overflow-auto rounded-2xl border border-white/10 bg-black/30 p-3 text-[11px] leading-relaxed text-slate-200 whitespace-pre-wrap">
+                        {tryJsonStringify(resolutionFacts.facts_json, 48_000)}
+                      </pre>
+                    ) : null}
                   </div>
 
-                  <div className="col-span-12">
-                    <div className="rounded-3xl border border-white/10 bg-black/30 p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="text-sm font-semibold text-slate-200">Jump to module</div>
-                          <div className="text-[11px] text-slate-500">Perform actions in the right place</div>
+                  {/* Authority conflicts */}
+                  <div className="mt-4 rounded-3xl border border-white/10 bg-white/[0.03] p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Authority conflicts</div>
+                        <div className="mt-1 text-sm text-slate-200">
+                          {draftConflicts?.id ? (
+                            <>
+                              Severity:{" "}
+                              <span className={cx("inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] ml-1", severityBadge(draftConflicts.severity))}>
+                                {String(draftConflicts.severity || "info").toUpperCase()}
+                              </span>
+                              <span className="text-slate-500"> · </span>
+                              <span className="text-slate-300">{conflictsCount} conflict(s)</span>
+                              {draftConflicts.compared_at ? (
+                                <span className="text-slate-500"> · {formatWhen(draftConflicts.compared_at)}</span>
+                              ) : null}
+                            </>
+                          ) : (
+                            <span className="text-slate-500">No snapshot available for this ledger record.</span>
+                          )}
                         </div>
-                        <span className={cx("rounded-full border px-2 py-1 text-[11px]", badgeForStatus(selected.status))}>
-                          {prettyStatus(selected.status)}
-                        </span>
+
+                        {draftConflicts?.conflicts_json ? (
+                          <ul className="mt-3 space-y-1 text-sm text-slate-300">
+                            {conflictsSummary.bullets.map((b, i) => (
+                              <li key={i} className="flex gap-2">
+                                <span className="mt-1 h-1.5 w-1.5 rounded-full bg-slate-500/80 shrink-0" />
+                                <span>{b}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : null}
                       </div>
 
-                      <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-2">
-                        <Link
-                          href="/ci-council"
-                          className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200 hover:bg-white/7 inline-flex items-center justify-between"
-                        >
-                          <span className="inline-flex items-center gap-2">
-                            <Shield className="h-4 w-4 text-sky-300" />
-                            Council
-                          </span>
-                          <ArrowRight className="h-4 w-4" />
-                        </Link>
+                      {draftConflicts?.id ? (
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            onClick={() => setShowRawConflicts((v) => !v)}
+                            className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                          >
+                            {showRawConflicts ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                            {showRawConflicts ? "Hide raw" : "View raw"}
+                          </button>
 
-                        <Link
-                          href="/ci-forge"
-                          className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200 hover:bg-white/7 inline-flex items-center justify-between"
-                        >
-                          <span className="inline-flex items-center gap-2">
-                            <ExternalLink className="h-4 w-4 text-amber-300" />
-                            Forge
-                          </span>
-                          <ArrowRight className="h-4 w-4" />
-                        </Link>
-
-                        <Link
-                          href="/ci-archive/minute-book"
-                          className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200 hover:bg-white/7 inline-flex items-center justify-between"
-                        >
-                          <span className="inline-flex items-center gap-2">
-                            <FileText className="h-4 w-4 text-emerald-300" />
-                            Minute Book
-                          </span>
-                          <ArrowRight className="h-4 w-4" />
-                        </Link>
-                      </div>
-
-                      <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-3 text-[11px] text-slate-400">
-                        This modal is informational + safe copy only. No deletes, no direct mutations.
-                      </div>
+                          <button
+                            onClick={() => safeCopy(tryJsonStringify(draftConflicts.conflicts_json, 48_000))}
+                            className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                            title="Copy conflicts JSON"
+                          >
+                            <Copy className="h-4 w-4" />
+                            Copy
+                          </button>
+                        </div>
+                      ) : null}
                     </div>
+
+                    {showRawConflicts && draftConflicts?.id ? (
+                      <pre className="mt-3 max-h-[220px] overflow-auto rounded-2xl border border-white/10 bg-black/30 p-3 text-[11px] leading-relaxed text-slate-300 whitespace-pre-wrap">
+                        {tryJsonStringify(draftConflicts.conflicts_json, 48_000)}
+                      </pre>
+                    ) : null}
+
+                    {!draftConflicts?.id ? (
+                      <div className="mt-3 text-xs text-slate-500">
+                        Conflicts are stored when the draft check function runs. If this ledger record wasn’t finalized from an Alchemy draft, there may be nothing to show (by design).
+                      </div>
+                    ) : null}
+                  </div>
+
+                  {/* Draft review (full) */}
+                  <div className="mt-4 rounded-3xl border border-white/10 bg-white/[0.03] p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-[10px] tracking-[0.3em] uppercase text-slate-500">Draft review</div>
+                        <div className="mt-1 text-sm text-slate-200">
+                          {axiomNote?.id ? (
+                            <>
+                              <span className="text-slate-200">{axiomNote.title || "AXIOM review"}</span>
+                              <span className="text-slate-500"> · </span>
+                              <span className="text-slate-400">{formatWhen(axiomNote.created_at)}</span>
+                            </>
+                          ) : (
+                            <span className="text-slate-500">No AXIOM note available for this record.</span>
+                          )}
+                        </div>
+                      </div>
+
+                      {axiomNote?.content ? (
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            onClick={() => setShowRawNote((v) => !v)}
+                            className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                          >
+                            {showRawNote ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                            {showRawNote ? "Hide" : "View"}
+                          </button>
+                          <button
+                            onClick={() => safeCopy(axiomNote.content || "")}
+                            className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7 inline-flex items-center gap-2"
+                            title="Copy AXIOM note"
+                          >
+                            <Copy className="h-4 w-4" />
+                            Copy
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    {showRawNote && axiomNote?.content ? (
+                      <div className="mt-3 rounded-2xl border border-white/10 bg-black/30 p-3 text-[12px] leading-relaxed text-slate-200 whitespace-pre-wrap">
+                        {axiomNote.content}
+                      </div>
+                    ) : !axiomNote?.content ? (
+                      <div className="mt-3 text-xs text-slate-500">
+                        If you just ran the draft review, refresh. If it still doesn’t appear, it usually means the record wasn’t finalized from that draft (or browser RLS blocks reading ai_notes).
+                      </div>
+                    ) : (
+                      <div className="mt-3 text-xs text-slate-500">
+                        Hidden by default to keep this record surface calm. Use <span className="text-slate-200">View</span> to open the full text.
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mt-4 rounded-2xl border border-white/10 bg-white/[0.03] p-3 text-[11px] text-slate-400 leading-relaxed">
+                    <span className="text-slate-200 font-semibold">Contract:</span> advisory only, lane-safe, entity-scoped. No automatic authority mutation.
                   </div>
                 </div>
               </div>
 
-              <div className="border-t border-white/10 bg-black/30 px-5 py-4 flex flex-wrap items-center justify-between gap-2">
-                <div className="text-[11px] text-slate-500">Tip: use Forge for signature execution, Archive for sealing, Council for approval gate.</div>
-                <button
-                  onClick={() => {
-                    setOpen(false);
-                    setSelected(null);
-                  }}
-                  className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
-                >
-                  Close
-                </button>
+              {/* Jump to module */}
+              <div className="col-span-12">
+                <div className={card}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-200">Jump to module</div>
+                      <div className="text-[11px] text-slate-500">Perform actions in the right place</div>
+                    </div>
+                    <span className={cx("rounded-full border px-2 py-1 text-[11px]", badgeForStatus(selected.status))}>{prettyStatus(selected.status)}</span>
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <Link
+                      href="/ci-council"
+                      className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200 hover:bg-white/7 inline-flex items-center justify-between"
+                    >
+                      <span className="inline-flex items-center gap-2">
+                        <Shield className="h-4 w-4 text-sky-300" />
+                        Council
+                      </span>
+                      <ArrowRight className="h-4 w-4" />
+                    </Link>
+
+                    <Link
+                      href="/ci-forge"
+                      className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200 hover:bg-white/7 inline-flex items-center justify-between"
+                    >
+                      <span className="inline-flex items-center gap-2">
+                        <ExternalLink className="h-4 w-4 text-amber-300" />
+                        Forge
+                      </span>
+                      <ArrowRight className="h-4 w-4" />
+                    </Link>
+
+                    <Link
+                      href="/ci-archive/minute-book"
+                      className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200 hover:bg-white/7 inline-flex items-center justify-between"
+                    >
+                      <span className="inline-flex items-center gap-2">
+                        <FileText className="h-4 w-4 text-emerald-300" />
+                        Minute Book
+                      </span>
+                      <ArrowRight className="h-4 w-4" />
+                    </Link>
+                  </div>
+
+                  <div className="mt-4 rounded-2xl border border-white/10 bg-white/[0.03] p-3 text-[11px] text-slate-400">
+                    This modal is informational + safe copy only. No deletes, no direct mutations.
+                  </div>
+                </div>
               </div>
             </div>
           </div>
+
+          <div className="border-t border-white/10 bg-white/[0.03] px-5 py-4 flex flex-wrap items-center justify-between gap-2">
+            <div className="text-[11px] text-slate-500">Tip: use Forge for signature execution, Archive for sealing, Council for approval gate.</div>
+            <button
+              onClick={() => {
+                setOpen(false);
+                setSelected(null);
+              }}
+              className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-200 hover:bg-white/7"
+            >
+              Close
+            </button>
+          </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }
