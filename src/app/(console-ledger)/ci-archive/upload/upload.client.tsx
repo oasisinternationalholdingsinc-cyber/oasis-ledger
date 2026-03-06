@@ -15,6 +15,7 @@ import {
 
 import { supabaseBrowser as supabaseBrowserImport } from "@/lib/supabase/browser";
 import { useEntity } from "@/components/OsEntityContext";
+import { useOsEnv } from "@/components/OsEnvContext";
 
 /**
  * CI-Archive → Upload (OS CONSISTENT — NO WIRING CHANGES)
@@ -28,6 +29,14 @@ import { useEntity } from "@/components/OsEntityContext";
  *
  * ✅ No hardcoding:
  *    - entityKey comes ONLY from OsEntityContext
+ *
+ * ✅ NEW (UI + p_source_record_id only; NO backend rewiring):
+ *    - Filing Mode toggle:
+ *        1) Standalone Archive
+ *        2) Linked to Ledger
+ *    - Linked mode loads governance_ledger rows for active entity + active lane only
+ *    - RPC now passes p_source_record_id = selected governance_ledger.id when linked
+ *    - Standalone remains default, preserving current upload behavior
  */
 
 type GovernanceDomain = {
@@ -42,6 +51,16 @@ type EntryTypeDefault = {
   entry_type: string;
   default_section: string | null;
 };
+
+type LedgerOption = {
+  id: string;
+  title: string | null;
+  status: string | null;
+  is_test: boolean | null;
+  created_at: string | null;
+};
+
+type FilingMode = "standalone" | "ledger";
 
 type UploadState =
   | { status: "idle" }
@@ -70,6 +89,21 @@ function safeFilename(name: string) {
     .slice(0, 140);
 }
 
+function shortId(id: string | null | undefined) {
+  const s = String(id || "").trim();
+  if (!s) return "—";
+  if (s.length <= 16) return s;
+  return `${s.slice(0, 8)}…${s.slice(-6)}`;
+}
+
+function prettyLedgerStatus(s: string | null | undefined) {
+  const v = String(s || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[_-]+/g, " ");
+  return v || "—";
+}
+
 async function sha256Hex(file: File): Promise<string> {
   const buf = await file.arrayBuffer();
   const hash = await crypto.subtle.digest("SHA-256", buf);
@@ -90,12 +124,20 @@ function getSupabaseClient() {
 export default function UploadClient() {
   const supabase = useMemo(() => getSupabaseClient(), []);
   const { entityKey } = useEntity();
+  const { env } = useOsEnv();
+
+  const laneIsTest = env === "SANDBOX";
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [domains, setDomains] = useState<GovernanceDomain[]>([]);
   const [entryTypeDefaults, setEntryTypeDefaults] = useState<EntryTypeDefault[]>([]);
   const [loadingMeta, setLoadingMeta] = useState(true);
+
+  const [filingMode, setFilingMode] = useState<FilingMode>("standalone");
+  const [ledgerOptions, setLedgerOptions] = useState<LedgerOption[]>([]);
+  const [loadingLedger, setLoadingLedger] = useState(false);
+  const [sourceRecordId, setSourceRecordId] = useState<string>("");
 
   const [domainKey, setDomainKey] = useState<string>("");
   const [entryType, setEntryType] = useState<string>("filing");
@@ -152,6 +194,63 @@ export default function UploadClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabase]);
 
+  // ✅ Load eligible governance_ledger records for linked mode (entity + lane safe)
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadLedgerOptions() {
+      setLedgerOptions([]);
+      setSourceRecordId("");
+
+      if (!entityKey) return;
+
+      setLoadingLedger(true);
+
+      try {
+        const entityRes = await supabase
+          .from("entities")
+          .select("id")
+          .eq("slug", entityKey)
+          .limit(1)
+          .maybeSingle();
+
+        if (cancelled) return;
+
+        if (entityRes.error || !entityRes.data?.id) {
+          setLedgerOptions([]);
+          setLoadingLedger(false);
+          return;
+        }
+
+        const ledgerRes = await supabase
+          .from("governance_ledger")
+          .select("id,title,status,is_test,created_at")
+          .eq("entity_id", entityRes.data.id)
+          .eq("is_test", laneIsTest)
+          .order("created_at", { ascending: false })
+          .limit(100);
+
+        if (cancelled) return;
+
+        if (ledgerRes.error) {
+          setLedgerOptions([]);
+        } else {
+          setLedgerOptions((ledgerRes.data ?? []) as LedgerOption[]);
+        }
+      } catch {
+        if (!cancelled) setLedgerOptions([]);
+      } finally {
+        if (!cancelled) setLoadingLedger(false);
+      }
+    }
+
+    loadLedgerOptions();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [supabase, entityKey, laneIsTest]);
+
   // Clean blob URL on file change/unmount (NO CHANGE)
   useEffect(() => {
     return () => {
@@ -164,9 +263,14 @@ export default function UploadClient() {
     return d?.label ?? (domainKey || "—");
   }, [domains, domainKey]);
 
+  const selectedLedger = useMemo(() => {
+    return ledgerOptions.find((x) => x.id === sourceRecordId) ?? null;
+  }, [ledgerOptions, sourceRecordId]);
+
   const preview = useMemo(() => {
-    if (!entityKey || !domainKey || !entryType || !entryDate || !title.trim() || !file || !sha)
+    if (!entityKey || !domainKey || !entryType || !entryDate || !title.trim() || !file || !sha) {
       return null;
+    }
 
     const cleanFile = safeFilename(file.name);
     const storage_path = `${entityKey}/${domainKey}/${entryType}/${entryDate}/${sha}-${cleanFile}`;
@@ -183,8 +287,20 @@ export default function UploadClient() {
       mime_type: file.type || "application/pdf",
       sha256: sha,
       storage_path,
+      source_record_id: filingMode === "ledger" ? sourceRecordId.trim() || null : null,
     };
-  }, [entityKey, domainKey, entryType, entryDate, title, notes, file, sha]);
+  }, [
+    entityKey,
+    domainKey,
+    entryType,
+    entryDate,
+    title,
+    notes,
+    file,
+    sha,
+    filingMode,
+    sourceRecordId,
+  ]);
 
   async function onPickFile(f: File | null) {
     setState({ status: "idle" });
@@ -234,6 +350,14 @@ export default function UploadClient() {
       return;
     }
 
+    if (filingMode === "ledger" && !preview.source_record_id) {
+      setState({
+        status: "error",
+        message: "Select a governance ledger record before filing in linked mode.",
+      });
+      return;
+    }
+
     setState({ status: "uploading" });
 
     try {
@@ -252,7 +376,7 @@ export default function UploadClient() {
         throw new Error(msg);
       }
 
-      // 2) Register via canonical RPC (NO CHANGE)
+      // 2) Register via canonical RPC (NO CHANGE except p_source_record_id wiring)
       setState({ status: "registering" });
 
       const supportingPayload = [
@@ -278,7 +402,7 @@ export default function UploadClient() {
         p_pdf_hash: preview.sha256,
         p_file_size: preview.file_size,
         p_mime_type: preview.mime_type,
-	p_source_record_id: null, // or a real governance_ledger.id when known
+        p_source_record_id: preview.source_record_id,
         p_supporting: supportingPayload as any,
       });
 
@@ -295,6 +419,9 @@ export default function UploadClient() {
       setNotes("");
       setFile(null);
       setSha("");
+      setFilingMode("standalone");
+      setSourceRecordId("");
+
       if (blobUrl) {
         URL.revokeObjectURL(blobUrl);
         setBlobUrl(null);
@@ -307,6 +434,7 @@ export default function UploadClient() {
 
   const busy =
     state.status === "hashing" || state.status === "uploading" || state.status === "registering";
+
   const statusLabel =
     state.status === "hashing"
       ? "Hashing…"
@@ -316,14 +444,19 @@ export default function UploadClient() {
       ? "Registering…"
       : "Ready";
 
+  const canSubmit = Boolean(
+    preview &&
+      !busy &&
+      entityKey &&
+      (filingMode === "standalone" || (filingMode === "ledger" && sourceRecordId.trim()))
+  );
+
   // ✅ OS shell/header/body pattern (MATCH CI-ARCHIVE launchpad)
   const shell =
     "rounded-3xl border border-white/10 bg-black/20 shadow-[0_28px_120px_rgba(0,0,0,0.55)] overflow-hidden";
   const header =
     "border-b border-white/10 bg-gradient-to-b from-white/[0.06] to-transparent px-4 sm:px-6 py-4 sm:py-5";
   const body = "px-4 sm:px-6 py-5 sm:py-6";
-
-  const canSubmit = Boolean(preview && !busy && entityKey);
 
   return (
     <div className="w-full">
@@ -384,11 +517,18 @@ export default function UploadClient() {
                 State: <span className="text-slate-200 font-medium">{statusLabel}</span>
               </span>
               <span className="text-slate-700">•</span>
+              <span>
+                Lane:{" "}
+                <span className={cx("font-medium", laneIsTest ? "text-amber-200" : "text-slate-200")}>
+                  {laneIsTest ? "SANDBOX" : "RoT"}
+                </span>
+              </span>
+              <span className="text-slate-700">•</span>
               <span className="text-slate-500">OS module surface</span>
             </div>
           </div>
+
           <div className={body}>
-            {/* Status banner (kept, OS styled) */}
             {(state.status === "error" || state.status === "success") && (
               <div
                 className={cx(
@@ -427,14 +567,12 @@ export default function UploadClient() {
               </div>
             )}
 
-            {/* Entity guard */}
             {!entityKey ? (
               <div className="rounded-3xl border border-white/10 bg-black/20 px-4 py-4 text-sm text-slate-300">
                 Select an entity in the OS bar to file Minute Book records.
               </div>
             ) : (
               <>
-                {/* iPhone-first layout: stacks; desktop: 3 columns */}
                 <div className="grid grid-cols-12 gap-4">
                   {/* Filing Context */}
                   <section className="col-span-12 lg:col-span-3">
@@ -457,6 +595,87 @@ export default function UploadClient() {
                           </div>
                           <div className="mt-1 text-[11px] text-slate-500">Must match entity_key_enum.</div>
                         </div>
+
+                        {/* ✅ NEW: filing mode toggle */}
+                        <div>
+                          <div className="text-xs text-slate-400">Filing Mode</div>
+                          <div className="mt-1 grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setFilingMode("standalone");
+                                setSourceRecordId("");
+                              }}
+                              className={cx(
+                                "rounded-2xl border px-3 py-2 text-sm transition",
+                                filingMode === "standalone"
+                                  ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+                                  : "border-white/10 bg-white/5 text-slate-200 hover:bg-white/7"
+                              )}
+                            >
+                              Standalone Archive
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => setFilingMode("ledger")}
+                              className={cx(
+                                "rounded-2xl border px-3 py-2 text-sm transition",
+                                filingMode === "ledger"
+                                  ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+                                  : "border-white/10 bg-white/5 text-slate-200 hover:bg-white/7"
+                              )}
+                            >
+                              Linked to Ledger
+                            </button>
+                          </div>
+                          <div className="mt-1 text-[11px] text-slate-500">
+                            Standalone remains the default. Linked mode attaches this filing to an existing governance_ledger record.
+                          </div>
+                        </div>
+
+                        {filingMode === "ledger" ? (
+                          <div>
+                            <div className="text-xs text-slate-400">Ledger Record</div>
+                            <select
+                              value={sourceRecordId}
+                              onChange={(e) => setSourceRecordId(e.target.value)}
+                              disabled={loadingLedger}
+                              className="mt-1 w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-200 outline-none focus:border-amber-500/40"
+                            >
+                              <option value="">
+                                {loadingLedger ? "Loading ledger records…" : "Select governance record…"}
+                              </option>
+                              {ledgerOptions.map((r) => (
+                                <option key={r.id} value={r.id}>
+                                  {(r.title || "Untitled record").trim()} • {prettyLedgerStatus(r.status)} • {shortId(r.id)}
+                                </option>
+                              ))}
+                            </select>
+
+                            <div className="mt-1 text-[11px] text-slate-500">
+                              Source: governance_ledger • entity scoped • {laneIsTest ? "SANDBOX" : "RoT"} lane only
+                            </div>
+
+                            {filingMode === "ledger" && !loadingLedger && ledgerOptions.length === 0 ? (
+                              <div className="mt-2 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+                                No eligible governance records found for this entity/lane.
+                              </div>
+                            ) : null}
+
+                            {selectedLedger ? (
+                              <div className="mt-2 rounded-2xl border border-white/10 bg-black/20 p-3">
+                                <div className="text-[11px] text-slate-400 tracking-wider uppercase">Linked Record</div>
+                                <div className="mt-1 text-sm text-slate-200">
+                                  {selectedLedger.title || "Untitled record"}
+                                </div>
+                                <div className="mt-1 text-[11px] text-slate-500">
+                                  {prettyLedgerStatus(selectedLedger.status)} • {shortId(selectedLedger.id)}
+                                </div>
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
 
                         <div>
                           <div className="text-xs text-slate-400">Domain</div>
@@ -516,7 +735,9 @@ export default function UploadClient() {
                           <span>
                             Domain: <span className="text-slate-200">{domainLabel}</span>
                           </span>
-                          <span className="text-slate-600">contract</span>
+                          <span className="text-slate-600">
+                            {filingMode === "ledger" ? "linked" : "standalone"}
+                          </span>
                         </div>
                       </div>
                     </div>
@@ -592,10 +813,16 @@ export default function UploadClient() {
                               minute_book_entries + supporting_documents
                             </span>
                             .
+                            <br />
+                            <span className="text-slate-200">
+                              {filingMode === "ledger"
+                                ? "Linked mode will attach source_record_id to the selected governance record."
+                                : "Standalone mode will file a pristine Minute Book upload with no governance link."}
+                            </span>
                           </div>
                         </div>
 
-                        {/* Mobile-friendly secondary CTA (same action, no wiring change) */}
+                        {/* Mobile-friendly secondary CTA */}
                         <button
                           onClick={uploadAndRegister}
                           disabled={!canSubmit}
@@ -613,6 +840,8 @@ export default function UploadClient() {
                             ? "Registering…"
                             : state.status === "hashing"
                             ? "Hashing…"
+                            : filingMode === "ledger"
+                            ? "File into Minute Book + Link"
                             : "File into Minute Book"}
                         </button>
                       </div>
@@ -647,6 +876,20 @@ export default function UploadClient() {
                         </div>
 
                         <div className="grid grid-cols-1 gap-3">
+                          <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                            <div className="text-[11px] text-slate-400 tracking-wider uppercase">Mode</div>
+                            <div className="mt-1 text-sm text-slate-200">
+                              {filingMode === "ledger" ? "Linked to Ledger" : "Standalone Archive"}
+                            </div>
+                            <div className="mt-1 text-[11px] text-slate-500">
+                              {filingMode === "ledger"
+                                ? selectedLedger
+                                  ? `${selectedLedger.title || "Untitled record"} • ${prettyLedgerStatus(selectedLedger.status)}`
+                                  : "No governance record selected"
+                                : "No source_record_id will be attached"}
+                            </div>
+                          </div>
+
                           <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                             <div className="text-[11px] text-slate-400 tracking-wider uppercase">Domain</div>
                             <div className="mt-1 text-sm text-slate-200">
@@ -696,7 +939,10 @@ export default function UploadClient() {
                           If the Minute Book registry ever says “no storage_path on primary document”, it means{" "}
                           <span className="text-slate-200">supporting_documents</span> didn’t get created for that
                           entry_id.
-                          (Your current RPC payload already fixes this.)
+                          <br />
+                          <span className="text-slate-200">
+                            This upload page now supports both pristine standalone filings and optional ledger-linked filings.
+                          </span>
                         </div>
 
                         <div className="flex items-center justify-between text-[10px] text-slate-500">
@@ -710,18 +956,17 @@ export default function UploadClient() {
                   </section>
                 </div>
 
-                {/* OS behavior footnote (matches launchpads) */}
                 <div className="mt-5 rounded-3xl border border-white/10 bg-black/20 px-4 py-3 text-[11px] text-slate-400">
                   <div className="font-semibold text-slate-200">OS behavior</div>
                   <div className="mt-1 leading-relaxed text-slate-400">
-                    CI-Archive Upload inherits the OS shell. No module-owned window frames. This surface is the sole
-                    write entry point for Minute Book records.
+                    CI-Archive Upload inherits the OS shell. No module-owned window frames. This surface remains the sole
+                    write entry point for Minute Book records. Standalone preserves existing upload behavior; linked mode
+                    only adds an optional governance_ledger bridge via source_record_id.
                   </div>
                 </div>
               </>
             )}
 
-            {/* bottom micro footer (kept subtle) */}
             <div className="mt-5 flex items-center justify-between text-[10px] text-slate-600">
               <span>CI-Archive · Oasis Digital Parliament</span>
               <span>ODP.AI · Governance Firmware</span>
@@ -729,7 +974,6 @@ export default function UploadClient() {
           </div>
         </div>
 
-        {/* quick links row (optional, iPhone-safe) */}
         <div className="mt-4 flex flex-wrap gap-2">
           <Link
             href="/ci-archive"
@@ -754,4 +998,3 @@ export default function UploadClient() {
     </div>
   );
 }
-
