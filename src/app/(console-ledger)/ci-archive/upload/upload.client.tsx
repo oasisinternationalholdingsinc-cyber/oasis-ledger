@@ -278,6 +278,7 @@ export default function UploadClient() {
         p_pdf_hash: preview.sha256,
         p_file_size: preview.file_size,
         p_mime_type: preview.mime_type,
+	p_source_record_id: null, // or a real governance_ledger.id when known
         p_supporting: supportingPayload as any,
       });
 
