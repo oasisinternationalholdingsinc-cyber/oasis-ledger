@@ -1463,107 +1463,102 @@ export default function MinuteBookClient() {
   }
 
   async function runDelete() {
-    if (!selected) return;
+  if (!selected) return;
 
-    setDeleteErr(null);
-    setDeleteBusy(true);
+  setDeleteErr(null);
+  setDeleteBusy(true);
 
-    try {
-      const sb = supabaseBrowser;
+  try {
+    const res = await invokeEdgeJson<DeleteResult>("delete-minute-book-entry", {
+      entry_id: selected.id,
+      reason: deleteReason?.trim() || null,
+    });
 
-      const { data, error } = await sb.rpc("delete_minute_book_entry_and_files", {
-        p_entry_id: selected.id,
-        p_reason: deleteReason?.trim() || null,
+    if (!res?.ok) throw new Error("Delete failed (no ok=true returned).");
+
+    setDeleteOpen(false);
+    setDeleteReason("");
+    setMobileReaderOpen(false);
+    setPreviewUrl(null);
+    setResolvedBucket(null);
+    setResolvedPath(null);
+
+    setExportErr(null);
+    setExportBusy(false);
+
+    setPromoteErr(null);
+    setPromoteBusy(false);
+    setPromoted(null);
+    setOfficial(null);
+
+    setEmailErr(null);
+    setEmailBusy(false);
+    setEmailOpen(false);
+    setEmailTo("");
+    setEmailSubject("");
+    setEmailMessage("");
+
+    setCopiedKey(null);
+
+    pushFlash("success", "Entry deleted.");
+
+    if (entityKey) {
+      const base = await loadEntries(entityKey);
+      const ids = base.map((e: MinuteBookEntry) => e.id);
+      const docs = await loadSupportingDocs(ids);
+      const primary = pickPrimaryDocByEntry(docs);
+
+      const recordIds = uniq(base.map((r) => r.source_record_id).filter(Boolean) as string[]);
+      const laneMap = new Map<string, { is_test: boolean; status: string }>();
+
+      if (recordIds.length) {
+        const { data: gl } = await supabaseBrowser
+          .from("governance_ledger")
+          .select("id,is_test,status")
+          .in("id", recordIds);
+
+        for (const r of gl ?? []) {
+          laneMap.set(String((r as any).id), {
+            is_test: !!(r as any).is_test,
+            status: String((r as any).status ?? ""),
+          });
+        }
+      }
+
+      const merged: EntryWithDoc[] = base.map((e: MinuteBookEntry) => {
+        const doc = primary.get(e.id);
+        const lm = e.source_record_id ? laneMap.get(String(e.source_record_id)) : null;
+
+        return {
+          ...e,
+          document_id: doc?.id ?? null,
+          storage_path: doc?.file_path ?? null,
+          file_name: doc?.file_name ?? null,
+          file_hash: doc?.file_hash ?? null,
+          file_size: doc?.file_size ?? null,
+          mime_type: doc?.mime_type ?? null,
+          lane_is_test: lm?.is_test ?? null,
+          ledger_status: lm?.status ?? null,
+        };
       });
 
-      if (error) throw error;
+      const laneFiltered = merged.filter((r) => {
+        if (r.lane_is_test === null || r.lane_is_test === undefined) return true;
+        return r.lane_is_test === laneIsTest;
+      });
 
-      const res = (data ?? {}) as DeleteResult;
-      if (!res.ok) throw new Error("Delete failed (no ok=true returned).");
-
-      setDeleteOpen(false);
-      setDeleteReason("");
-      setMobileReaderOpen(false);
-      setPreviewUrl(null);
-      setResolvedBucket(null);
-      setResolvedPath(null);
-
-      setExportErr(null);
-      setExportBusy(false);
-
-      setPromoteErr(null);
-      setPromoteBusy(false);
-      setPromoted(null);
-      setOfficial(null);
-
-      setEmailErr(null);
-      setEmailBusy(false);
-      setEmailOpen(false);
-      setEmailTo("");
-      setEmailSubject("");
-      setEmailMessage("");
-
-      setCopiedKey(null);
-
-      pushFlash("success", "Entry deleted.");
-
-      if (entityKey) {
-        const base = await loadEntries(entityKey);
-        const ids = base.map((e: MinuteBookEntry) => e.id);
-        const docs = await loadSupportingDocs(ids);
-        const primary = pickPrimaryDocByEntry(docs);
-
-        const recordIds = uniq(base.map((r) => r.source_record_id).filter(Boolean) as string[]);
-        const laneMap = new Map<string, { is_test: boolean; status: string }>();
-
-        if (recordIds.length) {
-          const { data: gl } = await supabaseBrowser
-            .from("governance_ledger")
-            .select("id,is_test,status")
-            .in("id", recordIds);
-
-          for (const r of gl ?? []) {
-            laneMap.set(String((r as any).id), {
-              is_test: !!(r as any).is_test,
-              status: String((r as any).status ?? ""),
-            });
-          }
-        }
-
-        const merged: EntryWithDoc[] = base.map((e: MinuteBookEntry) => {
-          const doc = primary.get(e.id);
-          const lm = e.source_record_id ? laneMap.get(String(e.source_record_id)) : null;
-
-          return {
-            ...e,
-            document_id: doc?.id ?? null,
-            storage_path: doc?.file_path ?? null,
-            file_name: doc?.file_name ?? null,
-            file_hash: doc?.file_hash ?? null,
-            file_size: doc?.file_size ?? null,
-            mime_type: doc?.mime_type ?? null,
-            lane_is_test: lm?.is_test ?? null,
-            ledger_status: lm?.status ?? null,
-          };
-        });
-
-        const laneFiltered = merged.filter((r) => {
-          if (r.lane_is_test === null || r.lane_is_test === undefined) return true;
-          return r.lane_is_test === laneIsTest;
-        });
-
-        laneFiltered.sort((a, b) => getCreatedAtMs(b.created_at) - getCreatedAtMs(a.created_at));
-        setEntries(laneFiltered);
-        setSelectedId(laneFiltered[0]?.id ?? null);
-      }
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "Delete failed.";
-      setDeleteErr(msg);
-      pushFlash("error", msg);
-    } finally {
-      setDeleteBusy(false);
+      laneFiltered.sort((a, b) => getCreatedAtMs(b.created_at) - getCreatedAtMs(a.created_at));
+      setEntries(laneFiltered);
+      setSelectedId(laneFiltered[0]?.id ?? null);
     }
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : "Delete failed.";
+    setDeleteErr(msg);
+    pushFlash("error", msg);
+  } finally {
+    setDeleteBusy(false);
   }
+}
 
   // ✅ Keyboard shortcuts (UI-only, no wiring)
   useEffect(() => {
